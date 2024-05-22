@@ -10,6 +10,7 @@ import {
   nativeChainIds,
   serialize,
   toChainId,
+  toUniversal,
   universalAddress,
 } from "@wormhole-foundation/sdk-connect";
 import type { EvmChains, EvmPlatformType } from "@wormhole-foundation/sdk-evm";
@@ -163,6 +164,16 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       this.provider,
       this.tokenAddress
     );
+  }
+
+  async getPeer<C extends Chain>(chain: C): Promise<Ntt.Peer<C>> {
+    const peer = await this.manager.getPeer(toChainId(chain));
+    const inboundLimit = await this.manager.getInboundLimitParams(toChainId(chain));
+    return {
+      address: { chain: chain, address: toUniversal(chain, Buffer.from(peer.peerAddress.substring(2), 'hex')) },
+      tokenDecimals: Number(peer.tokenDecimals),
+      inboundLimit: inboundLimit.limit,
+    };
   }
 
   static async fromRpc<N extends Network>(

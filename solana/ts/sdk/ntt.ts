@@ -21,6 +21,7 @@ import {
   Network,
   TokenAddress,
   UnsignedTransaction,
+  toUniversal,
 } from "@wormhole-foundation/sdk-connect";
 import {
   Ntt,
@@ -145,6 +146,19 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
       this.connection,
       config.mint
     );
+  }
+
+  async getPeer<C extends Chain>(chain: C): Promise<Ntt.Peer<C>> {
+    const peer = await this.program.account.nttManagerPeer.fetch(this.pdas.peerAccount(chain));
+    const rl = await this.program.account.inboxRateLimit.fetch(
+      this.pdas.inboxRateLimitAccount(chain)
+    );
+
+    return {
+      address: { chain: chain, address: toUniversal(chain, new Uint8Array(peer.address)) },
+      tokenDecimals: peer.tokenDecimals,
+      inboundLimit: BigInt(rl.rateLimit.limit.toString()),
+    };
   }
 
   async getCustodyAddress(): Promise<string> {

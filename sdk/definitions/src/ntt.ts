@@ -85,6 +85,12 @@ export namespace Ntt {
     payload: Uint8Array;
   };
 
+  export type Peer<C extends Chain> = {
+    address: ChainAddress<C>;
+    tokenDecimals: number;
+    inboundLimit: bigint;
+  };
+
   // TODO: should layoutify this but couldnt immediately figure out how to
   // specify the length of the array as an encoded value
   export function encodeTransceiverInstructions(ixs: TransceiverInstruction[]) {
@@ -181,6 +187,9 @@ export interface Ntt<N extends Network, C extends Chain> {
 
   /** Get the number of decimals associated with the token under management */
   getTokenDecimals(): Promise<number>;
+
+  /** Get the peer information for the given chain */
+  getPeer<C extends Chain>(chain: C): Promise<Ntt.Peer<C>>;
 
   /**
    * getCurrentOutboundCapacity returns the current outbound capacity of the Ntt manager
