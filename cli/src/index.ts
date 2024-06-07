@@ -145,7 +145,15 @@ yargs(hideBin(process.argv))
                 process.exit(1);
             }
             const path = argv["path"];
-            await $`git clone git@github.com:wormhole-foundation/example-native-token-transfers.git ${path} --recurse-submodules`;
+            await $`
+git clone -b deploy-stuff git@github.com:wormholelabs-xyz/example-native-token-transfers.git ${path} --recurse-submodules
+cd ${path}
+git remote remove origin
+git checkout -b main
+git branch -D deploy-stuff
+git commit-tree HEAD^{tree} -m "Initial commit" | xargs git reset --hard
+`;
+
         })
     .command("add-chain <chain>",
         "add a chain to the deployment file",
