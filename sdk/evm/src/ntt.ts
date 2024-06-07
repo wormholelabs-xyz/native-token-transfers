@@ -37,8 +37,7 @@ import {
 } from "./bindings.js";
 
 export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
-  implements NttTransceiver<N, C, WormholeNttTransceiver.VAA>
-{
+  implements NttTransceiver<N, C, WormholeNttTransceiver.VAA> {
   transceiver: NttTransceiverBindings.NttTransceiver;
   constructor(
     readonly manager: EvmNtt<N, C>,
@@ -51,17 +50,36 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
     );
   }
 
+  getAddress(): ChainAddress<C> {
+    return { chain: this.manager.chain, address: toUniversal(this.manager.chain, this.address) };
+  }
+
   encodeFlags(flags: { skipRelay: boolean }): Uint8Array {
     return new Uint8Array([flags.skipRelay ? 1 : 0]);
   }
 
-  async *setPeer(peer: ChainAddress<C>) {
+  async *setPeer<P extends Chain>(peer: ChainAddress<P>): AsyncGenerator<EvmUnsignedTransaction<N, C>> {
     const tx = await this.transceiver.setWormholePeer.populateTransaction(
       toChainId(peer.chain),
       universalAddress(peer)
     );
     yield this.manager.createUnsignedTx(tx, "WormholeTransceiver.registerPeer");
   }
+
+  async getPeer<C extends Chain>(chain: C): Promise<ChainAddress<C> | null> {
+    const peer = await this.transceiver.getWormholePeer(toChainId(chain));
+    const peerAddress = Buffer.from(peer.substring(2), 'hex');
+    const zeroAddress = Buffer.alloc(32);
+    if (peerAddress.equals(zeroAddress)) {
+      return null;
+    }
+
+    return {
+      chain: chain,
+      address: toUniversal(chain, peerAddress),
+    };
+  }
+
   async *receive(attestation: WormholeNttTransceiver.VAA) {
     const tx = await this.transceiver.receiveMessage.populateTransaction(
       serialize(attestation)
@@ -86,8 +104,7 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
 }
 
 export class EvmNtt<N extends Network, C extends EvmChains>
-  implements Ntt<N, C>
-{
+  implements Ntt<N, C> {
   tokenAddress: string;
   readonly chainId: bigint;
   manager: NttManagerBindings.NttManager;
@@ -118,14 +135,50 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       this.provider
     );
 
-    this.xcvrs = [
-      // Enable more Transceivers here
-      new EvmNttWormholeTranceiver(
-        this,
-        contracts.ntt.transceiver.wormhole!,
-        abiBindings!
-      ),
-    ];
+    if (contracts.ntt.transceiver.wormhole != null) {
+      this.xcvrs = [
+        // Enable more Transceivers here
+        new EvmNttWormholeTranceiver(
+          this,
+          contracts.ntt.transceiver.wormhole,
+          abiBindings!
+        ),
+      ];
+    } else {
+      this.xcvrs = [];
+    }
+  }
+
+  async getTransceiver(ix: number): Promise<NttTransceiver<N, C, any> | null> {
+    // TODO: should we make an RPC call here, or just trust that the xcvrs are set up correctly?
+    return this.xcvrs[ix] || null;
+  }
+
+  async getMode(): Promise<Ntt.Mode> {
+    const mode: bigint = await this.manager.getMode();
+    return mode === 0n ? "locking" : "burning";
+  }
+
+  async isPaused(): Promise<boolean> {
+    return await this.manager.isPaused();
+  }
+
+  async *pause() {
+    const tx = await this.manager.pause.populateTransaction()
+    yield this.createUnsignedTx(tx, "Ntt.pause");
+  }
+
+  async *unpause() {
+    const tx = await this.manager.unpause.populateTransaction()
+    yield this.createUnsignedTx(tx, "Ntt.unpause");
+  }
+
+  async getOwner(): Promise<AccountAddress<C>> {
+    return new EvmAddress(await this.manager.owner()) as AccountAddress<C>;
+  }
+
+  async getThreshold(): Promise<number> {
+    return Number(await this.manager.getThreshold());
   }
 
   async isRelayingAvailable(destination: Chain): Promise<boolean> {
@@ -166,13 +219,18 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     );
   }
 
-  async getPeer<C extends Chain>(chain: C): Promise<Ntt.Peer<C>> {
+  async getPeer<C extends Chain>(chain: C): Promise<Ntt.Peer<C> | null> {
     const peer = await this.manager.getPeer(toChainId(chain));
-    const inboundLimit = await this.manager.getInboundLimitParams(toChainId(chain));
+    const peerAddress = Buffer.from(peer.peerAddress.substring(2), 'hex');
+    const zeroAddress = Buffer.alloc(32);
+    if (peerAddress.equals(zeroAddress)) {
+      return null;
+    }
+
     return {
-      address: { chain: chain, address: toUniversal(chain, Buffer.from(peer.peerAddress.substring(2), 'hex')) },
+      address: { chain: chain, address: toUniversal(chain, peerAddress) },
       tokenDecimals: Number(peer.tokenDecimals),
-      inboundLimit: inboundLimit.limit,
+      inboundLimit: await this.getInboundLimit(chain),
     };
   }
 
@@ -328,8 +386,37 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     return await this.manager.getCurrentOutboundCapacity();
   }
 
+  async getOutboundLimit(): Promise<bigint> {
+    const encoded: EncodedTrimmedAmount = (await this.manager.getOutboundLimitParams()).limit;
+    const trimmedAmount: TrimmedAmount = decodeTrimmedAmount(encoded);
+    const tokenDecimals = await this.getTokenDecimals();
+
+    return untrim(trimmedAmount, tokenDecimals);
+  }
+
+  async *setOutboundLimit(limit: bigint) {
+    const tx = await this.manager.setOutboundLimit.populateTransaction(limit);
+    yield this.createUnsignedTx(tx, "Ntt.setOutboundLimit");
+  }
+
   async getCurrentInboundCapacity(fromChain: Chain): Promise<bigint> {
     return await this.manager.getCurrentInboundCapacity(toChainId(fromChain));
+  }
+
+  async getInboundLimit(fromChain: Chain): Promise<bigint> {
+    const encoded: EncodedTrimmedAmount = (await this.manager.getInboundLimitParams(toChainId(fromChain))).limit;
+    const trimmedAmount: TrimmedAmount = decodeTrimmedAmount(encoded);
+    const tokenDecimals = await this.getTokenDecimals();
+
+    return untrim(trimmedAmount, tokenDecimals);
+  }
+
+  async *setInboundLimit(fromChain: Chain, limit: bigint) {
+    const tx = await this.manager.setInboundLimit.populateTransaction(
+      limit,
+      toChainId(fromChain)
+    );
+    yield this.createUnsignedTx(tx, "Ntt.setInboundLimit");
   }
 
   async getRateLimitDuration(): Promise<bigint> {
@@ -367,6 +454,40 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     yield this.createUnsignedTx(tx, "Ntt.completeInboundQueuedTransfer");
   }
 
+  async verifyAddresses(): Promise<Partial<Ntt.Contracts> | null> {
+    const local: Partial<Ntt.Contracts> = {
+      manager: this.managerAddress,
+      token: this.tokenAddress,
+      transceiver: {
+        wormhole: this.xcvrs[0]?.address,
+      },
+      // TODO: what about the quoter?
+    };
+
+    const remote: Partial<Ntt.Contracts> = {
+      manager: this.managerAddress,
+      token: await this.manager.token(),
+      transceiver: {
+        wormhole: (await this.manager.getTransceivers())[0]! // TODO: make this more generic
+      },
+    };
+
+    const deleteMatching = (a: any, b: any) => {
+      for (const k in a) {
+        if (typeof a[k] === "object") {
+          deleteMatching(a[k], b[k]);
+          if (Object.keys(a[k]).length === 0) delete a[k];
+        } else if (a[k] === b[k]) {
+          delete a[k];
+        }
+      }
+    }
+
+    deleteMatching(remote, local);
+
+    return Object.keys(remote).length > 0 ? remote : null;
+  }
+
   createUnsignedTx(
     txReq: TransactionRequest,
     description: string,
@@ -379,5 +500,38 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       description,
       parallelizable
     );
+  }
+}
+
+type EncodedTrimmedAmount = bigint; // uint72
+
+type TrimmedAmount = {
+  amount: bigint;
+  decimals: number;
+};
+
+function decodeTrimmedAmount(encoded: EncodedTrimmedAmount): TrimmedAmount {
+  const decimals = Number(encoded & 0xffn);
+  const amount = encoded >> 8n;
+  return {
+    amount,
+    decimals,
+  };
+}
+
+function untrim(trimmed: TrimmedAmount, toDecimals: number): bigint {
+  const { amount, decimals: fromDecimals } = trimmed;
+  return scale(amount, fromDecimals, toDecimals);
+}
+
+function scale(amount: bigint, fromDecimals: number, toDecimals: number): bigint {
+  if (fromDecimals == toDecimals) {
+    return amount;
+  }
+
+  if (fromDecimals > toDecimals) {
+    return amount / (10n ** BigInt(fromDecimals - toDecimals));
+  } else {
+    return amount * (10n ** BigInt(toDecimals - fromDecimals));
   }
 }

@@ -744,6 +744,25 @@ export namespace NTT {
       .instruction();
   }
 
+  // TODO: untested
+  export async function createSetPausedInstruction(
+    program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
+    args: {
+      owner: PublicKey;
+      paused: boolean;
+    },
+    pdas?: Pdas
+  ) {
+    pdas = pdas ?? NTT.pdas(program.programId);
+    return await program.methods
+      .setPaused(args.paused)
+      .accountsStrict({
+        owner: args.owner,
+        config: pdas.configAccount(),
+      })
+      .instruction();
+  }
+
   export async function setWormholeTransceiverPeer(
     program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
     args: {
@@ -853,11 +872,10 @@ export namespace NTT {
     };
   }
 
-  export async function createSetOuboundLimitInstruction(
+  export async function createSetOutboundLimitInstruction(
     program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
     args: {
       owner: PublicKey;
-      chain: Chain;
       limit: BN;
     },
     pdas?: Pdas
