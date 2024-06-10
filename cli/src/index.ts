@@ -333,13 +333,13 @@ git commit-tree HEAD^{tree} -m "Initial commit" | xargs git reset --hard
                         break;
                     } catch (e) {
                         // @ts-ignore TODO
-                        if (e.toString().includes("limit") || (JSON.stringify(e)).includes("limit")) {
-                            process.stdout.write(` (rate limited, waiting...)`);
-                            await new Promise((resolve) => setTimeout(resolve, 5000));
-                            continue;
-                        } else {
-                            throw e;
-                        }
+                        // if (e.toString().includes("limit") || (JSON.stringify(e)).includes("limit")) {
+                        process.stdout.write(` (rate limited, waiting...)`);
+                        await new Promise((resolve) => setTimeout(resolve, 5000));
+                        continue;
+                        // } else {
+                        //     throw e;
+                        // }
                     }
                 }
                 process.stdout.write(`\r`);
@@ -704,6 +704,7 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
         if (!fs.existsSync(programKeyJson)) {
             console.error(`Program keypair not found: ${programKeyJson}`);
             console.error("Run `solana-keygen` to create a new keypair (either with 'new', or with 'grind'), and pass it to this command with --program-key");
+            console.error("For example: solana-keygen grind --starts-with ntt:1 --ignore-case")
             process.exit(1);
         }
         programKeypairPath = programKeyJson;
@@ -1142,15 +1143,15 @@ async function pullInboundLimits(ntts: Partial<{ [C in Chain]: Ntt<Network, C> }
                     break;
                 } catch (e) {
                     // @ts-ignore TODO
-                    if (e.toString().includes("limit") || (JSON.stringify(e)).includes("limit")) {
-                        if (verbose) {
-                            process.stdout.write(` (rate limited, waiting...)`);
-                        }
-                        await new Promise((resolve) => setTimeout(resolve, 5000));
-                        continue;
-                    } else {
-                        throw e;
+                    // if (e.toString().includes("limit") || (JSON.stringify(e)).includes("limit")) {
+                    if (verbose) {
+                        process.stdout.write(` (rate limited, waiting...)`);
                     }
+                    await new Promise((resolve) => setTimeout(resolve, 5000));
+                    continue;
+                    // } else {
+                    //     throw e;
+                    // }
                 }
             }
             if (verbose) {
