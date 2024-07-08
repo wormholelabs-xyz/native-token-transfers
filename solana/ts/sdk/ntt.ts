@@ -283,9 +283,8 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
     contracts: Contracts & { ntt: Ntt.Contracts },
     sender?: AccountAddress<SolanaChains>
   ): Promise<IdlVersion> {
-    // TODO: what? the try catch doesn't seem to work. it's not catching the error
     try {
-      return NTT.getVersion(
+      return await NTT.getVersion(
         connection,
         new PublicKey(contracts.ntt.manager!),
         sender ? new SolanaAddress(sender).unwrap() : undefined
