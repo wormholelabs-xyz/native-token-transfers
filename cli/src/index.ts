@@ -30,6 +30,7 @@ import type { EvmNtt, EvmNttWormholeTranceiver } from "@wormhole-foundation/sdk-
 import type { EvmChains } from "@wormhole-foundation/sdk-evm";
 import { getAvailableVersions, getGitTagName } from "./tag";
 import * as configuration from "./configuration";
+import path from "path";
 
 // TODO: pauser (evm)
 // TODO: contract upgrades on solana
@@ -315,6 +316,68 @@ yargs(hideBin(process.argv))
             fs.writeFileSync(path, JSON.stringify(deployments, null, 2));
             console.log(`Added ${chain} to ${path}`);
         })
+    .command("build-solana",
+        "Build the Solana program without deploying",
+        (yargs) => yargs
+            .option("network", options.network)
+            .option("program-id", {
+                describe: "Program ID",
+                type: "string",
+                demandOption: true,
+            })
+            .option("binary", {
+                describe: "Path to output the program binary (.so file)",
+                type: "string",
+            }),
+        async (argv) => {
+            ensureNttRoot();
+
+            const network = argv.network as Network;
+            const providedProgramId = argv.programId;
+
+            // Initialize Wormhole SDK
+            const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides);
+            const solanaChain = wh.getChain('Solana') as ChainContext<typeof network, SolanaChains>;
+
+            const wormhole = solanaChain.config.contracts.coreBridge;
+            if (!wormhole) {
+                console.error("Core bridge not found for Solana");
+                process.exit(1);
+            }
+
+            // Build the program
+            console.log("Building Solana program...");
+            checkAnchorVersion();
+            const proc = Bun.spawn(
+                ["anchor",
+                    "build",
+                    "--", "--no-default-features", "--features", cargoNetworkFeature(network)
+                ], {
+                cwd: `./solana`
+            });
+
+            await proc.exited;
+            if (proc.exitCode !== 0) {
+                console.error("Failed to build Solana program");
+                process.exit(proc.exitCode ?? 1);
+            }
+
+            const defaultBinaryPath = `./solana/target/deploy/example_native_token_transfers.so`;
+            const binaryPath = argv.binary || defaultBinaryPath;
+
+            // Verify the binary
+            console.log("Verifying Solana binary...");
+            try {
+                await checkSolanaBinary(binaryPath, wormhole, providedProgramId);
+                console.log("Solana binary verification successful");
+            } catch (error) {
+                console.error("Solana binary verification failed:", error);
+                process.exit(1);
+            }
+
+            console.log(`Solana program built successfully. Binary located at: ${binaryPath}`);
+        }
+    )
     .command("upgrade <chain>",
         "upgrade the contract on a specific chain",
         (yargs) => yargs
@@ -704,6 +767,54 @@ yargs(hideBin(process.argv))
                         const keypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(argv["keypair"]).toString())));
                         console.log(encoding.b58.encode(keypair.secretKey));
                     })
+                .demandCommand()
+        }
+    )
+    .command("evm",
+        "EVM commands",
+        (yargs) => {
+            yargs
+                .command("script <script> <chain>",
+                    "execute a Forge script at a given path against a particular chain",
+                    (yargs) => yargs
+                        .positional("script", {
+                            describe: "Path to the Forge script",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .positional("chain", {
+                            describe: "Target chain",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .option("path", {
+                            alias: "p",
+                            describe: "Path to the deployment configuration file",
+                            type: "string",
+                            default: "deployment.json",
+                        })
+                        .option("signer-type", {
+                            ...options.signerType,
+                            default: "privateKey",
+                        })
+                        .option("dry-run", {
+                            alias: "d",
+                            describe: "Simulate the script execution without broadcasting",
+                            type: "boolean",
+                            default: false,
+                        }),
+                    async (argv) => {
+                        const chain = argv.chain as Chain;
+                        assertChain(chain);
+                        await executeEvmScript(
+                            argv.script,
+                            chain,
+                            argv.path,
+                            argv["signer-type"] as SignerType,
+                            argv["dry-run"]
+                        );
+                    }
+                )
                 .demandCommand()
         }
     )
@@ -1618,4 +1729,76 @@ function retryWithExponentialBackoff<T>(
         }
     };
     return attempt(0);
+}
+
+async function executeEvmScript(
+    scriptPath: string,
+    chain: Chain,
+    configPath: string,
+    signerType: SignerType,
+    dryRun: boolean
+): Promise<void> {
+    ensureNttRoot();
+
+    // Normalize and resolve the script path
+    const fullScriptPath = path.resolve(process.cwd(), scriptPath);
+    const evmDir = path.resolve(process.cwd(), 'evm');
+
+    // Check if the script is within the evm directory
+    if (!fullScriptPath.startsWith(evmDir)) {
+        console.error("Script must be located within the 'evm' directory");
+        process.exit(1);
+    }
+
+    // Get the relative path from the evm directory
+    const relativeScriptPath = path.relative(evmDir, fullScriptPath);
+
+    // Check if the script file exists
+    if (!fs.existsSync(fullScriptPath)) {
+        console.error(`Script file not found: ${fullScriptPath}`);
+        process.exit(1);
+    }
+
+    const deployment = loadConfig(configPath);
+
+    if (!isNetwork(deployment.network)) {
+        console.error(`Invalid network in deployment file: ${deployment.network}`);
+        process.exit(1);
+    }
+
+    const network = deployment.network;
+    const chainConfig = deployment.chains[chain];
+
+    if (!chainConfig) {
+        console.error(`Chain ${chain} not found in deployment configuration`);
+        process.exit(1);
+    }
+
+    const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides);
+    const ch = wh.getChain(chain);
+
+    const signer = await getSigner(ch, signerType);
+    const signerArgs = forgeSignerArgs(signer.source);
+
+    const runType = dryRun ? "Simulating" : "Executing";
+    console.log(`${runType} Forge script for ${chain} on ${network}...`);
+
+    const broadcastFlag = dryRun ? "" : "--broadcast";
+
+    try {
+        execSync(
+            `forge script ${relativeScriptPath} --rpc-url ${ch.config.rpc} ${signerArgs} ${broadcastFlag}`,
+            {
+                stdio: 'inherit',
+                cwd: evmDir,
+                env: {
+                    ...process.env,
+                    NTT_MANAGER_ADDRESS: chainConfig.manager,
+                }
+            }
+        );
+    } catch (error) {
+        console.error(`Failed to ${dryRun ? "simulate" : "execute"} Forge script: ${error}`);
+        process.exit(1);
+    }
 }
