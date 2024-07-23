@@ -15,7 +15,7 @@ import {ERC1967Proxy} from "openzeppelin-contracts/contracts/proxy/ERC1967/ERC19
 contract DeployWormholeNttBase is ParseNttConfig {
     struct DeploymentParams {
         address token;
-        IManagerBase.Mode mode;
+        INttManager.Mode mode;
         uint16 wormholeChainId;
         uint64 rateLimitDuration;
         bool shouldSkipRatelimiter;
@@ -105,9 +105,9 @@ contract DeployWormholeNttBase is ParseNttConfig {
         // Mode.
         uint8 mode = uint8(vm.envUint("RELEASE_MODE"));
         if (mode == 0) {
-            params.mode = IManagerBase.Mode.LOCKING;
+            params.mode = INttManager.Mode.LOCKING;
         } else if (mode == 1) {
-            params.mode = IManagerBase.Mode.BURNING;
+            params.mode = INttManager.Mode.BURNING;
         } else {
             revert("Invalid mode");
         }

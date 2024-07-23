@@ -20,7 +20,7 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
         address wormholeRelayer,
         address specialRelayer,
         uint8 decimals,
-        IManagerBase.Mode mode
+        INttManager.Mode mode
     ) public {
         vm.startBroadcast();
 
