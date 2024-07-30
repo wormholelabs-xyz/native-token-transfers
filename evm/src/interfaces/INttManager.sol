@@ -98,10 +98,6 @@ interface INttManager is IManagerBase {
     /// @dev Selector 0x9c8d2cd2.
     error InvalidRecipient();
 
-    /// @notice Error when the recipient is invalid.
-    /// @dev Selector 0xe2fe2726.
-    error InvalidRefundAddress();
-
     /// @notice Error when the amount burned is different than the balance difference,
     ///         since NTT does not support burn fees.
     /// @dev Selector 0x02156a8f.
@@ -111,17 +107,6 @@ interface INttManager is IManagerBase {
 
     /// @notice The caller is not the deployer.
     error UnexpectedDeployer(address expectedOwner, address owner);
-
-    /// @notice Peer for the chain does not match the configuration.
-    /// @param chainId ChainId of the source chain.
-    /// @param peerAddress Address of the peer nttManager contract.
-    error InvalidPeer(uint16 chainId, bytes32 peerAddress);
-
-    /// @notice Peer chain ID cannot be zero.
-    error InvalidPeerChainIdZero();
-
-    /// @notice Peer cannot be the zero address.
-    error InvalidPeerZeroAddress();
 
     /// @notice Peer cannot have zero decimals.
     error InvalidPeerDecimals();
@@ -139,10 +124,6 @@ interface INttManager is IManagerBase {
     /// @notice An unexpected msg.value was passed with the call
     /// @dev Selector 0xbd28e889.
     error UnexpectedMsgValue();
-
-    /// @notice Peer cannot be on the same chain
-    /// @dev Selector 0x20371f2a.
-    error InvalidPeerSameChainId();
 
     /// @notice Transfer a given amount to a recipient on a given chain. This function is called
     ///         by the user to send the token cross-chain. This function will either lock or burn the

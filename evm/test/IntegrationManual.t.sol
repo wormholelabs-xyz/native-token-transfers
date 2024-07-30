@@ -150,7 +150,7 @@ contract TestRelayerEndToEndManual is IntegrationHelpers, IRateLimiterEvents {
         bytes[] memory a;
         vm.expectRevert(
             abi.encodeWithSelector(
-                INttManager.InvalidPeer.selector, chainId1, address(nttManagerChain1)
+                IManagerBase.InvalidPeer.selector, chainId1, address(nttManagerChain1)
             )
         );
         _receiveWormholeMessage(

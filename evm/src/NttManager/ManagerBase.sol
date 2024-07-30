@@ -34,7 +34,9 @@ abstract contract ManagerBase is
 
     // =============== Setup =================================================================
 
-    constructor(uint16 _chainId) {
+    constructor(
+        uint16 _chainId
+    ) {
         chainId = _chainId;
         evmChainId = block.chainid;
         // save the deployer (check this on initialization)
