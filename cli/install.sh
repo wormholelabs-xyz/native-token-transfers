@@ -31,10 +31,14 @@ function main {
   done
 
   path=""
+  mkdir -p "$HOME/.ntt-cli"
 
   # check if there's a package.json in the parent directory, with "name": "@wormhole-foundation/ntt-cli"
   if [ -f "$(dirname $0)/package.json" ] && grep -q '"name": "@wormhole-foundation/ntt-cli"' "$(dirname $0)/package.json"; then
   path="$(dirname $0)/.."
+  version=$(git rev-parse HEAD)
+  dirty=$(git diff --quiet || echo "-dirty")
+  echo "$version$dirty" > "$HOME/.ntt-cli/version"
   else
     # if branch is set, use it. otherwise use the latest tag of the form "vX.Y.Z+cli" or the 'cli' branch
     if [ -z "$branch" ]; then
@@ -44,7 +48,6 @@ function main {
     # clone to $HOME/.ntt-cli if it doesn't exist, otherwise update it
     echo "Cloning $REPO $branch"
 
-    mkdir -p "$HOME/.ntt-cli"
     path="$HOME/.ntt-cli/.checkout"
 
     if [ ! -d "$path" ]; then
@@ -56,10 +59,23 @@ function main {
       git fetch origin
       # reset hard
       git reset --hard "origin/$branch"
+      version=$(git rev-parse HEAD)
+      dirty=$(git diff --quiet || echo "-dirty")
+      echo "$version$dirty" > "$HOME/.ntt-cli/version"
       popd
     fi
-
   fi
+
+  absolute_path="$(cd $path && pwd)"
+  echo $absolute_path >> "$HOME/.ntt-cli/version"
+
+  # jq would be nicer but it's not portable
+  # here we make the assumption that the file uses 2 spaces for indentation.
+  # this is a bit fragile, but we don't want to catch further nested objects
+  # (there might be a "version" in the scripts section, for example)
+  version=$(cat "$path/cli/package.json" | grep '^  "version":' | cut -d '"' -f 4)
+  echo "Installing ntt CLI version $version"
+  echo "$version" >> "$HOME/.ntt-cli/version"
 
   install_cli "$path"
 }

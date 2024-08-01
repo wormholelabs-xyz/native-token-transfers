@@ -199,6 +199,14 @@ async function withCustomEvmDeployerScript<A>(pwd: string, then: () => Promise<A
 yargs(hideBin(process.argv))
     .wrap(Math.min(process.stdout.columns || 120, 160)) // Use terminal width, but no more than 160 characters
     .scriptName("ntt")
+    .version((() => {
+        const ver = nttVersion();
+        if (!ver) {
+            return "unknown";
+        }
+        const { version, commit, path } = ver;
+        return `ntt v${version} (${commit} ${path})`;
+    })())
     // config group of commands
     .command("config",
         "configuration commands",
@@ -1838,4 +1846,15 @@ function retryWithExponentialBackoff<T>(
         }
     };
     return attempt(0);
+}
+
+function nttVersion(): { version: string, commit: string, path: string } | null {
+    const nttDir = `${process.env.HOME}/.ntt-cli`;
+    try {
+        const versionFile = fs.readFileSync(`${nttDir}/version`).toString().trim();
+        const [commit, installPath, version] = versionFile.split("\n");
+        return { version, commit, path: installPath };
+    } catch {
+        return null;
+    }
 }
