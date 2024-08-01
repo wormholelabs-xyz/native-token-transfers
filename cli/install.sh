@@ -74,9 +74,12 @@ function main {
   # this is a bit fragile, but we don't want to catch further nested objects
   # (there might be a "version" in the scripts section, for example)
   version=$(cat "$path/cli/package.json" | grep '^  "version":' | cut -d '"' -f 4)
-  echo "Installing ntt CLI version $version"
   echo "$version" >> "$HOME/.ntt-cli/version"
 
+  remote_url=$(git -C "$path" remote get-url origin)
+  echo "$remote_url" >> "$HOME/.ntt-cli/version"
+
+  echo "Installing ntt CLI version $version"
   install_cli "$path"
 }
 

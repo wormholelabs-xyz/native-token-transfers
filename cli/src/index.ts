@@ -204,12 +204,13 @@ yargs(hideBin(process.argv))
         if (!ver) {
             return "unknown";
         }
-        const { version, commit, path } = ver;
+        const { version, commit, path, remote } = ver;
         const defaultPath = `${process.env.HOME}/.ntt-cli/.checkout`;
+        const remoteString = remote.includes("wormhole-foundation") ? "" : `${remote}@`;
         if (path === defaultPath) {
-            return `ntt v${version} (${commit})`;
+            return `ntt v${version} (${remoteString}${commit})`;
         } else {
-            return `ntt v${version} (${commit}) from ${path}`;
+            return `ntt v${version} (${remoteString}${commit}) from ${path}`;
         }
     })())
     // config group of commands
@@ -1853,12 +1854,12 @@ function retryWithExponentialBackoff<T>(
     return attempt(0);
 }
 
-function nttVersion(): { version: string, commit: string, path: string } | null {
+function nttVersion(): { version: string, commit: string, path: string, remote: string } | null {
     const nttDir = `${process.env.HOME}/.ntt-cli`;
     try {
         const versionFile = fs.readFileSync(`${nttDir}/version`).toString().trim();
-        const [commit, installPath, version] = versionFile.split("\n");
-        return { version, commit, path: installPath };
+        const [commit, installPath, version, remote] = versionFile.split("\n");
+        return { version, commit, path: installPath, remote };
     } catch {
         return null;
     }
