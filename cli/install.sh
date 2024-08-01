@@ -23,6 +23,11 @@ function main {
         shift
         shift
         ;;
+      -r|--repo)
+        REPO="$2"
+        shift
+        shift
+        ;;
       *)
         echo "Unknown option $key"
         exit 1
