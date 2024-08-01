@@ -61,14 +61,12 @@ export async function getSigner<N extends Network, C extends Chain>(
                             throw new Error("Private key not provided and SOLANA_PRIVATE_KEY env var not set");
                         }
                         privateKey = privateKeySource;
-                    } 
-                    console.log(privateKey);
+                    }
                     signer = await solana.getSigner(
                         await chain.getRpc(),
                         privateKey,
                         { debug: false }
                     );
-                    console.log(signer);
                     break;
                 case "ledger":
                     throw new Error("Ledger not yet supported on Solana");

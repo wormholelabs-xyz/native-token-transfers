@@ -42,7 +42,7 @@ import { ethers } from "ethers";
 const overrides: ConfigOverrides<Network> = (function () {
     // read overrides.json file if exists
     if (fs.existsSync("overrides.json")) {
-        console.log(chalk.yellow("Using overrides.json"));
+        console.error(chalk.yellow("Using overrides.json"));
         return JSON.parse(fs.readFileSync("overrides.json").toString());
     } else {
         return {};
@@ -687,7 +687,11 @@ yargs(hideBin(process.argv))
                         owner: signer.address.address as AccountAddress<SolanaChains>,
                         transceiver: solanaNtt.program.programId
                     })
-                    await signSendWait(ctx, tx, signer.signer)
+                    try {
+                        await signSendWait(ctx, tx, signer.signer)
+                    } catch (e: any) {
+                        console.error(e.logs);
+                    }
                 }
             }
 
@@ -980,7 +984,7 @@ async function deploy<N extends Network, C extends Chain>(
                 process.exit(1);
             }
             const solanaCtx = ch as ChainContext<N, SolanaChains>;
-            return await deploySolana(worktree, mode, solanaCtx, token, solanaPayer, solanaProgramKeyPath, solanaBinaryPath) as ChainAddress<C>;
+            return await deploySolana(worktree, version, mode, solanaCtx, token, solanaPayer, solanaProgramKeyPath, solanaBinaryPath) as ChainAddress<C>;
         default:
             throw new Error("Unsupported platform");
     }
@@ -1091,6 +1095,7 @@ ${simulateArg} \
 
 async function deploySolana<N extends Network, C extends SolanaChains>(
     pwd: string,
+    version: string | null,
     mode: Ntt.Mode,
     ch: ChainContext<N, C>,
     token: string,
@@ -1176,15 +1181,28 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
     const emitter = NTT.pdas(providedProgramId).emitterAccount().toBase58();
     const payerKeypair = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(payer).toString())));
 
-    // can't do this yet.. need to init first.
-    // const {ntt, addresses} = await nttFromManager(ch, providedProgramId);
-    const ntt: SolanaNtt<N, C> = await ch.getProtocol("Ntt", {
+    // this is not super pretty... I want to initialise the 'ntt' object, but
+    // because it's not deployed yet, fetching the version will fail, and thus default to whatever the default version is.
+    // We want to use the correct version (because the sdk's behaviour depends on it), so we first create a dummy ntt instance,
+    // let that fill in all the necessary fields, and then create a new instance with the correct version.
+    // It should be possible to avoid this dummy object and just instantiate 'SolanaNtt' directly, but I wasn't
+    // sure where the various pieces are plugged together and this seemed easier.
+    // TODO: refactor this to avoid the dummy object
+    const dummy: SolanaNtt<N, C> = await ch.getProtocol("Ntt", {
         ntt: {
             manager: providedProgramId,
             token: token,
             transceiver: { wormhole: emitter },
         }
     }) as SolanaNtt<N, C>;
+
+    const ntt: SolanaNtt<N, C> = new SolanaNtt(
+        dummy.network,
+        dummy.chain,
+        dummy.connection,
+        dummy.contracts,
+        version ?? undefined
+    );
 
     // get the mint authority of 'token'
     const tokenMint = new PublicKey(token);
@@ -1224,6 +1242,7 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
             const proc = Bun.spawn(
                 ["anchor",
                     "build",
+                    "-p", "example_native_token_transfers",
                     "--", "--no-default-features", "--features", cargoNetworkFeature(ch.network)
                 ], {
                 cwd: `${pwd}/solana`
@@ -1368,9 +1387,9 @@ async function missingConfigs(
                 }
             }
 
-            if (count > 0) {
-                missingConfigs[fromChain] = missing;
-            }
+        }
+        if (count > 0) {
+            missingConfigs[fromChain] = missing;
         }
     }
     return missingConfigs;
