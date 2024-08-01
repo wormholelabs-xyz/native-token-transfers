@@ -205,7 +205,12 @@ yargs(hideBin(process.argv))
             return "unknown";
         }
         const { version, commit, path } = ver;
-        return `ntt v${version} (${commit} ${path})`;
+        const defaultPath = `${process.env.HOME}/.ntt-cli/.checkout`;
+        if (path === defaultPath) {
+            return `ntt v${version} (${commit})`;
+        } else {
+            return `ntt v${version} (${commit}) from ${path}`;
+        }
     })())
     // config group of commands
     .command("config",
