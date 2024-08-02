@@ -896,7 +896,8 @@ async function upgrade<N extends Network, C extends Chain>(
                 process.exit(1);
             }
             const solanaNtt = ntt as SolanaNtt<N, SolanaChains>;
-            return upgradeSolana(solanaNtt, solanaPayer, solanaProgramKeyPath, solanaBinaryPath);
+            const solanaCtx = ctx as ChainContext<N, SolanaChains>;
+            return upgradeSolana(worktree, toVersion, solanaNtt, solanaCtx, solanaPayer, solanaProgramKeyPath, solanaBinaryPath);
         default:
             throw new Error("Unsupported platform");
     }
@@ -950,12 +951,19 @@ ${verifyArgs} | tee last-run.stdout`, {
 }
 
 async function upgradeSolana<N extends Network, C extends SolanaChains>(
-    _ntt: Ntt<N, C>,
-    _payer: string,
-    _programKeyPath?: string,
-    _binaryPath?: string
+    pwd: string,
+    version: string | null,
+    ntt: SolanaNtt<N, C>,
+    ctx: ChainContext<N, C>,
+    payer: string,
+    programKeyPath?: string,
+    binaryPath?: string
 ): Promise<void> {
-    throw new Error("Not implemented");
+    if (version === null) {
+        throw new Error("Cannot upgrade Solana to local version"); // TODO: this is not hard to enabled
+    }
+    const mint = (await (ntt.getConfig())).mint;
+    await deploySolana(pwd, version, await ntt.getMode(), ctx, mint.toBase58(), payer, false, programKeyPath, binaryPath);
 }
 
 async function deploy<N extends Network, C extends Chain>(
@@ -984,7 +992,7 @@ async function deploy<N extends Network, C extends Chain>(
                 process.exit(1);
             }
             const solanaCtx = ch as ChainContext<N, SolanaChains>;
-            return await deploySolana(worktree, version, mode, solanaCtx, token, solanaPayer, solanaProgramKeyPath, solanaBinaryPath) as ChainAddress<C>;
+            return await deploySolana(worktree, version, mode, solanaCtx, token, solanaPayer, true, solanaProgramKeyPath, solanaBinaryPath) as ChainAddress<C>;
         default:
             throw new Error("Unsupported platform");
     }
@@ -1100,6 +1108,7 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
     ch: ChainContext<N, C>,
     token: string,
     payer: string,
+    initialize: boolean,
     managerKeyPath?: string,
     binaryPath?: string
 ): Promise<ChainAddress<C>> {
@@ -1259,7 +1268,7 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
         }
 
 
-        await checkSolanaBinary(binary, wormhole, providedProgramId)
+        await checkSolanaBinary(binary, wormhole, providedProgramId, version ?? undefined)
 
         // do the actual deployment
         const deployProc = Bun.spawn(
@@ -1283,23 +1292,25 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
         console.log(out);
     }
 
-    // wait 3 seconds
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (initialize) {
+        // wait 3 seconds
+        await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    const tx = ntt.initialize(
-        toUniversal(ch.chain, payerKeypair.publicKey.toBase58()),
-        {
-            mint: new PublicKey(token),
-            mode,
-            outboundLimit: 100000000n,
-        });
+        const tx = ntt.initialize(
+            toUniversal(ch.chain, payerKeypair.publicKey.toBase58()),
+            {
+                mint: new PublicKey(token),
+                mode,
+                outboundLimit: 100000000n,
+            });
 
-    const signer = await getSigner(ch, "privateKey", encoding.b58.encode(payerKeypair.secretKey));
+        const signer = await getSigner(ch, "privateKey", encoding.b58.encode(payerKeypair.secretKey));
 
-    try {
-        await signSendWait(ch, tx, signer.signer);
-    } catch (e: any) {
-        console.error(e.logs);
+        try {
+            await signSendWait(ch, tx, signer.signer);
+        } catch (e: any) {
+            console.error(e.logs);
+        }
     }
 
     return { chain: ch.chain, address: toUniversal(ch.chain, providedProgramId) };
@@ -1758,7 +1769,7 @@ async function pullInboundLimits(ntts: Partial<{ [C in Chain]: Ntt<Network, C> }
     }
 }
 
-async function checkSolanaBinary(binary: string, wormhole: string, providedProgramId: string) {
+async function checkSolanaBinary(binary: string, wormhole: string, providedProgramId: string, version?: string) {
     // ensure binary path exists
     if (!fs.existsSync(binary)) {
         console.error(`.so file not found: ${binary}`);
@@ -1769,6 +1780,7 @@ async function checkSolanaBinary(binary: string, wormhole: string, providedProgr
     // convert wormhole and providedProgramId from base58 to hex
     const wormholeHex = new PublicKey(wormhole).toBuffer().toString("hex");
     const providedProgramIdHex = new PublicKey(providedProgramId).toBuffer().toString("hex");
+    const versionHex = version ? Buffer.from(version).toString("hex") : undefined;
 
     if (!searchHexInBinary(binary, wormholeHex)) {
         console.error(`Wormhole address not found in binary: ${wormhole}`);
@@ -1777,6 +1789,11 @@ async function checkSolanaBinary(binary: string, wormhole: string, providedProgr
     if (!searchHexInBinary(binary, providedProgramIdHex)) {
         console.error(`Provided program ID not found in binary: ${providedProgramId}`);
         process.exit(1);
+    }
+    if (versionHex && !searchHexInBinary(binary, versionHex)) {
+        // TODO: figure out how to search for the version string in the binary
+        // console.error(`Version string not found in binary: ${version}`);
+        // process.exit(1);
     }
 }
 
