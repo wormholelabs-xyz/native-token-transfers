@@ -41,8 +41,8 @@ function main {
   # check if there's a package.json in the parent directory, with "name": "@wormhole-foundation/ntt-cli"
   if [ -f "$(dirname $0)/package.json" ] && grep -q '"name": "@wormhole-foundation/ntt-cli"' "$(dirname $0)/package.json"; then
   path="$(dirname $0)/.."
-  version=$(git rev-parse HEAD)
-  dirty=$(git diff --quiet || echo "-dirty")
+  version=$(git -C "$path" rev-parse HEAD)
+  dirty=$(git -C "$path" diff --quiet || echo "-dirty")
   echo "$version$dirty" > "$HOME/.ntt-cli/version"
   else
     # if branch is set, use it. otherwise use the latest tag of the form "vX.Y.Z+cli" or the 'cli' branch
