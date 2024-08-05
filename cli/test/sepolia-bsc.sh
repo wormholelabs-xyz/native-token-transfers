@@ -80,7 +80,6 @@ jq '.chains.Sepolia.owner == "'$NEW_OWNER'"' deployment.json
 
 export ETH_PRIVATE_KEY=$NEW_OWNER_SECRET
 
-set the deployment to be paused, by setting the 'chains.Bsc.paused' field to true using jq
 jq '.chains.Bsc.paused = true' deployment.json > deployment.json.tmp && mv deployment.json.tmp deployment.json
 
 ntt push --yes
