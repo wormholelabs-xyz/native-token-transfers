@@ -22,7 +22,7 @@ import "@wormhole-foundation/sdk-solana-ntt";
 import "@wormhole-foundation/sdk-definitions-ntt";
 import type { Ntt, NttTransceiver } from "@wormhole-foundation/sdk-definitions-ntt";
 
-import { type SolanaChains } from "@wormhole-foundation/sdk-solana";
+import { type SolanaChains, SolanaAddress } from "@wormhole-foundation/sdk-solana";
 
 import { colorizeDiff, diffObjects } from "./diff";
 import { forgeSignerArgs, getSigner, type SignerType } from "./getSigner";
@@ -693,6 +693,19 @@ yargs(hideBin(process.argv))
                         console.error(e.logs);
                     }
                 }
+                if (missingConfig.solanaUpdateLUT) {
+                    if (chainToPlatform(chain) !== "Solana") {
+                        console.error("Solana update LUT can only be set on Solana chains");
+                        continue;
+                    }
+                    const solanaNtt = ntt as SolanaNtt<Network, SolanaChains>;
+                    const tx = solanaNtt.initializeOrUpdateLUT({ payer: new SolanaAddress(signer.address.address).unwrap() })
+                    try {
+                        await signSendWait(ctx, tx, signer.signer)
+                    } catch (e: any) {
+                        console.error(e.logs);
+                    }
+                }
             }
 
             // pull deps again
@@ -750,7 +763,7 @@ yargs(hideBin(process.argv))
                 }
             }
 
-            if (extraInfo) {
+            if (Object.keys(extraInfo).length > 0) {
                 console.log(chalk.yellow(JSON.stringify(extraInfo, null, 2)));
             }
 
@@ -761,22 +774,25 @@ yargs(hideBin(process.argv))
                 errors++;
             }
 
-            for (const [chain, peers] of Object.entries(missing)) {
-                console.error(`Peer errors for ${chain}:`);
-                for (const manager of peers.managerPeers) {
+            for (const [chain, missingConfig] of Object.entries(missing)) {
+                console.error(`${chain} status:`);
+                for (const manager of missingConfig.managerPeers) {
                     console.error(`  Missing manager peer: ${manager.address.chain}`);
                 }
-                for (const transceiver of peers.transceiverPeers) {
+                for (const transceiver of missingConfig.transceiverPeers) {
                     console.error(`  Missing transceiver peer: ${transceiver.chain}`);
                 }
-                for (const evmChain of peers.evmChains) {
-                    console.error(`  Missing EVM chain: ${evmChain}`);
+                for (const evmChain of missingConfig.evmChains) {
+                    console.error(`  ${evmChain} needs to be configured as an EVM chain`);
                 }
-                for (const relaying of peers.standardRelaying) {
+                for (const relaying of missingConfig.standardRelaying) {
                     console.warn(`  No standard relaying: ${relaying}`);
                 }
-                if (peers.solanaWormholeTransceiver) {
+                if (missingConfig.solanaWormholeTransceiver) {
                     console.error("  Missing Solana wormhole transceiver");
+                }
+                if (missingConfig.solanaUpdateLUT) {
+                    console.error("  Missing or outdated LUT");
                 }
             }
 
@@ -838,6 +854,7 @@ type MissingImplicitConfig = {
     evmChains: Chain[];
     standardRelaying: Chain[];
     solanaWormholeTransceiver: boolean;
+    solanaUpdateLUT: boolean;
 }
 
 function createWorkTree(platform: Platform, version: string): string {
@@ -964,6 +981,7 @@ async function upgradeSolana<N extends Network, C extends SolanaChains>(
     }
     const mint = (await (ntt.getConfig())).mint;
     await deploySolana(pwd, version, await ntt.getMode(), ctx, mint.toBase58(), payer, false, programKeyPath, binaryPath);
+    // TODO: call initializeOrUpdateLUT. currently it's done in the following 'ntt push' step.
 }
 
 async function deploy<N extends Network, C extends Chain>(
@@ -1332,6 +1350,7 @@ async function missingConfigs(
             evmChains: [],
             standardRelaying: [],
             solanaWormholeTransceiver: false,
+            solanaUpdateLUT: false,
         };
 
         if (chainToPlatform(fromChain) === "Solana") {
@@ -1341,6 +1360,17 @@ async function missingConfigs(
             if (registeredSelfTransceiver === null) {
                 count++;
                 missing.solanaWormholeTransceiver = true;
+            }
+
+            // here we just check if the LUT update function returns an instruction.
+            // if it does, it means the LUT is missing or outdated.  notice that
+            // we're not actually updating the LUT here, just checking if it's
+            // missing, so it's ok to use the 0 pubkey as the payer.
+            const updateLUT = solanaNtt.initializeOrUpdateLUT({ payer: new PublicKey(0) });
+            // check if async generator is non-empty
+            if (!(await updateLUT.next()).done) {
+                count++;
+                missing.solanaUpdateLUT = true;
             }
         }
 
