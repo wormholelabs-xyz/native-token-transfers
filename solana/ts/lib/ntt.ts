@@ -1048,6 +1048,10 @@ export namespace NTT {
     if (major < 2) return null;
 
     pdas = pdas ?? NTT.pdas(program.programId);
+    // @ts-ignore
+    // NOTE: lut is 'LUT' in the IDL, but 'lut' in the generated code
+    // It needs to be upper-cased in the IDL to compute the anchor
+    // account discriminator correctly
     const lut = await program.account.lut.fetchNullable(pdas.lutAccount());
     if (!lut) return null;
 
