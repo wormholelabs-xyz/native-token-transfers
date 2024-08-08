@@ -655,6 +655,11 @@ yargs(hideBin(process.argv))
 
             const missing = await missingConfigs(deps, verbose);
 
+            if (checkConfigErrors(deps)) {
+                console.error("There are errors in the config file. Please fix these before continuing.");
+                process.exit(1);
+            }
+
             for (const [chain, missingConfig] of Object.entries(missing)) {
                 assertChain(chain);
                 const ntt = deps[chain]!.ntt;
@@ -733,9 +738,14 @@ yargs(hideBin(process.argv))
 
             let deps: Partial<{ [C in Chain]: Deployment<Chain> }> = await pullDeployments(deployments, network, verbose);
 
-            let errors = 0;
+            let fixable = 0;
 
             const extraInfo: any = {};
+
+            if (checkConfigErrors(deps)) {
+                console.error("There are errors in the config file. Please fix these before continuing.");
+                process.exit(1);
+            }
 
             // diff remote and local configs
             for (const [chain, deployment] of Object.entries(deps)) {
@@ -748,7 +758,7 @@ yargs(hideBin(process.argv))
                 const diff = diffObjects(a, b);
                 if (Object.keys(diff).length !== 0) {
                     console.error(chalk.reset(colorizeDiff(diff)));
-                    errors++;
+                    fixable++;
                 }
 
                 if (verbose) {
@@ -771,7 +781,7 @@ yargs(hideBin(process.argv))
             const missing = await missingConfigs(deps, verbose);
 
             if (Object.keys(missing).length > 0) {
-                errors++;
+                fixable++;
             }
 
             for (const [chain, missingConfig] of Object.entries(missing)) {
@@ -796,7 +806,7 @@ yargs(hideBin(process.argv))
                 }
             }
 
-            if (errors > 0) {
+            if (fixable > 0) {
                 console.error("Run `ntt pull` to pull the remote configuration (overwriting the local one)");
                 console.error("Run `ntt push` to push the local configuration (overwriting the remote one) by executing the necessary transactions");
                 process.exit(1);
@@ -834,6 +844,34 @@ yargs(hideBin(process.argv))
                         const tokenAuthority = NTT.pdas(programId).tokenAuthority();
                         console.log(tokenAuthority.toBase58());
                     })
+                .command("ata <mint> <owner> <tokenProgram>",
+                    "print the token authority address for a given program ID",
+                    (yargs) => yargs
+                        .positional("mint", {
+                            describe: "Mint address",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .positional("owner", {
+                            describe: "Owner address",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .positional("tokenProgram", {
+                            describe: "Token program ID",
+                            type: "string",
+                            choices: ["legacy", "token22"],
+                            demandOption: true,
+                        }),
+                    (argv) => {
+                        const mint = new PublicKey(argv["mint"]);
+                        const owner = new PublicKey(argv["owner"]);
+                        const tokenProgram = argv["tokenProgram"] === "legacy"
+                            ? spl.TOKEN_PROGRAM_ID
+                            : spl.TOKEN_2022_PROGRAM_ID
+                        const ata = spl.getAssociatedTokenAddressSync(mint, owner, true, tokenProgram);
+                        console.log(ata.toBase58());
+                    })
                 .demandCommand()
         }
     )
@@ -855,6 +893,31 @@ type MissingImplicitConfig = {
     standardRelaying: Chain[];
     solanaWormholeTransceiver: boolean;
     solanaUpdateLUT: boolean;
+}
+
+function checkConfigErrors(deps: Partial<{ [C in Chain]: Deployment<Chain> }>): number {
+    let fatal = 0;
+    for (const [chain, deployment] of Object.entries(deps)) {
+        assertChain(chain);
+        const config = deployment.config.local!;
+        if (!checkNumberFormatting(config.limits.outbound, deployment.decimals)) {
+            console.error(`ERROR: ${chain} has an outbound limit (${config.limits.outbound}) with the wrong number of decimals. The number should have ${deployment.decimals} decimals.`);
+            fatal++;
+        }
+        if (config.limits.outbound === formatNumber(0n, deployment.decimals)) {
+            console.warn(chalk.yellow(`${chain} has an outbound limit of 0`));
+        }
+        for (const [c, limit] of Object.entries(config.limits.inbound)) {
+            if (!checkNumberFormatting(limit, deployment.decimals)) {
+                console.error(`ERROR: ${chain} has an inbound limit with the wrong number of decimals for ${c} (${limit}). The number should have ${deployment.decimals} decimals.`);
+                fatal++;
+            }
+            if (limit === formatNumber(0n, deployment.decimals)) {
+                console.warn(chalk.yellow(`${chain} has an inbound limit of 0 from ${c}`));
+            }
+        }
+    }
+    return fatal;
 }
 
 function createWorkTree(platform: Platform, version: string): string {
@@ -1735,6 +1798,18 @@ function formatNumber(num: bigint, decimals: number) {
         return "0" + formatted;
     }
     return formatted;
+}
+
+function checkNumberFormatting(formatted: string, decimals: number): boolean {
+    // check that the string has the correct number of decimals
+    const parts = formatted.split(".");
+    if (parts.length !== 2) {
+        return false;
+    }
+    if (parts[1].length !== decimals) {
+        return false;
+    }
+    return true;
 }
 
 function cargoNetworkFeature(network: Network): string {
