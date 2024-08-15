@@ -318,6 +318,11 @@ yargs(hideBin(process.argv))
                 type: "string",
                 choices: ["locking", "burning"],
             })
+            .option("solana-priority-fee", {
+                describe: "Priority fee for Solana deployment (in microlamports)",
+                type: "number",
+                default: 50000,
+            })
             .option("signer-type", options.signerType)
             .option("skip-verify", options.skipVerify)
             .option("ver", options.version)
@@ -372,7 +377,7 @@ yargs(hideBin(process.argv))
             const ch = wh.getChain(chain);
 
             // TODO: make manager configurable
-            const deployedManager = await deploy(version, mode, ch, token, signerType, !argv["skip-verify"], argv["yes"], argv["payer"], argv["program-key"], argv["binary"]);
+            const deployedManager = await deploy(version, mode, ch, token, signerType, !argv["skip-verify"], argv["yes"], argv["payer"], argv["program-key"], argv["binary"], argv["solana-priority-fee"]);
 
             const [config, _ctx, _ntt, decimals] =
                 await pullChainConfig(network, deployedManager, overrides);
@@ -1058,6 +1063,7 @@ async function deploy<N extends Network, C extends Chain>(
     solanaPayer?: string,
     solanaProgramKeyPath?: string,
     solanaBinaryPath?: string,
+    solanaPriorityFee?: number
 ): Promise<ChainAddress<C>> {
     if (version === null) {
         await warnLocalDeployment(yes);
@@ -1073,7 +1079,7 @@ async function deploy<N extends Network, C extends Chain>(
                 process.exit(1);
             }
             const solanaCtx = ch as ChainContext<N, SolanaChains>;
-            return await deploySolana(worktree, version, mode, solanaCtx, token, solanaPayer, true, solanaProgramKeyPath, solanaBinaryPath) as ChainAddress<C>;
+            return await deploySolana(worktree, version, mode, solanaCtx, token, solanaPayer, true, solanaProgramKeyPath, solanaBinaryPath, solanaPriorityFee) as ChainAddress<C>;
         default:
             throw new Error("Unsupported platform");
     }
@@ -1191,7 +1197,8 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
     payer: string,
     initialize: boolean,
     managerKeyPath?: string,
-    binaryPath?: string
+    binaryPath?: string,
+    priorityFee?: number
 ): Promise<ChainAddress<C>> {
     ensureNttRoot(pwd);
 
@@ -1351,16 +1358,31 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
 
         await checkSolanaBinary(binary, wormhole, providedProgramId, version ?? undefined)
 
-        // do the actual deployment
-        const deployProc = Bun.spawn(
-            ["solana",
-                "program",
-                "deploy",
-                "--program-id", programKeypairPath,
-                binary,
-                "--keypair", payer,
-                "-u", ch.config.rpc
-            ]);
+        // if buffer.json doesn't exist, create it
+        if (!fs.existsSync(`buffer.json`)) {
+            execSync(`solana-keygen new -o buffer.json --no-bip39-passphrase`);
+        } else {
+            console.info("buffer.json already exists.")
+            askForConfirmation("Do you want continue an exiting deployment? If not, delete the buffer.json file and run the command again.");
+        }
+
+        const deployCommand = [
+            "solana",
+            "program",
+            "deploy",
+            "--program-id", programKeypairPath,
+            "--max-sign-attempts", "20",
+            "--buffer", `buffer.json`,
+            binary,
+            "--keypair", payer,
+            "-u", ch.config.rpc
+        ];
+
+        if (priorityFee !== undefined) {
+            deployCommand.push("--with-compute-unit-price", priorityFee.toString());
+        }
+
+        const deployProc = Bun.spawn(deployCommand);
 
         const out = await new Response(deployProc.stdout).text();
 
