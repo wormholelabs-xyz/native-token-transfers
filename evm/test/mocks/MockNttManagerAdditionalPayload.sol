@@ -6,10 +6,11 @@ import "../../src/NttManager/NttManagerNoRateLimiting.sol";
 
 contract MockNttManagerAdditionalPayloadContract is NttManagerNoRateLimiting {
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId
-    ) NttManagerNoRateLimiting(token, mode, chainId) {}
+    ) NttManagerNoRateLimiting(router, token, mode, chainId) {}
 
     event AdditionalPayloadSent(bytes payload);
     event AdditionalPayloadReceived(bytes payload);

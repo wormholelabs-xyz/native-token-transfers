@@ -32,3 +32,15 @@ function countSetBits(
 
     return count;
 }
+
+// @dev Count the number of set bits in a uint128
+function countSetBits128(
+    uint128 x
+) pure returns (uint8 count) {
+    while (x != 0) {
+        x &= x - 1;
+        count++;
+    }
+
+    return count;
+}

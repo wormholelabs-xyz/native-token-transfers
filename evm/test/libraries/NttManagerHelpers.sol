@@ -2,13 +2,13 @@
 
 pragma solidity >=0.8.8 <0.9.0;
 
+import "forge-std/Test.sol";
+
 import "../../src/libraries/TrimmedAmount.sol";
 import "../../src/NttManager/NttManager.sol";
 import "../../src/interfaces/INttManager.sol";
 
 library NttManagerHelpersLib {
-    uint16 constant SENDING_CHAIN_ID = 1;
-
     using TrimmedAmountLib for TrimmedAmount;
 
     function setConfigs(
@@ -26,8 +26,11 @@ library NttManagerHelpersLib {
 
         uint8 tokenDecimals = abi.decode(queriedDecimals, (uint8));
         recipientNttManager.setPeer(
-            SENDING_CHAIN_ID, toWormholeFormat(address(nttManager)), tokenDecimals, type(uint64).max
+            nttManager.chainId(),
+            toWormholeFormat(address(nttManager)),
+            tokenDecimals,
+            type(uint64).max
         );
-        recipientNttManager.setInboundLimit(inboundLimit.untrim(decimals), SENDING_CHAIN_ID);
+        recipientNttManager.setInboundLimit(inboundLimit.untrim(decimals), nttManager.chainId());
     }
 }

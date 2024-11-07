@@ -5,11 +5,8 @@ import {console2} from "forge-std/Script.sol";
 import {ParseNttConfig} from "./ParseNttConfig.sol";
 import "../../src/interfaces/IManagerBase.sol";
 import "../../src/interfaces/INttManager.sol";
-import "../../src/interfaces/IWormholeTransceiver.sol";
 
 import {NttManager} from "../../src/NttManager/NttManager.sol";
-import {WormholeTransceiver} from
-    "../../src/Transceiver/WormholeTransceiver/WormholeTransceiver.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract DeployWormholeNttBase is ParseNttConfig {
@@ -22,6 +19,7 @@ contract DeployWormholeNttBase is ParseNttConfig {
         address wormholeCoreBridge;
         address wormholeRelayerAddr;
         address specialRelayerAddr;
+        address routerAddr;
         uint8 consistencyLevel;
         uint256 gasLimit;
         uint256 outboundLimit;
@@ -36,6 +34,7 @@ contract DeployWormholeNttBase is ParseNttConfig {
     ) internal returns (address) {
         // Deploy the Manager Implementation.
         NttManager implementation = new NttManager(
+            params.routerAddr,
             params.token,
             params.mode,
             params.wormholeChainId,
@@ -52,30 +51,6 @@ contract DeployWormholeNttBase is ParseNttConfig {
         console2.log("NttManager:", address(nttManagerProxy));
 
         return address(nttManagerProxy);
-    }
-
-    function deployWormholeTransceiver(
-        DeploymentParams memory params,
-        address nttManager
-    ) public returns (address) {
-        // Deploy the Wormhole Transceiver.
-        WormholeTransceiver implementation = new WormholeTransceiver(
-            nttManager,
-            params.wormholeCoreBridge,
-            params.wormholeRelayerAddr,
-            params.specialRelayerAddr,
-            params.consistencyLevel,
-            params.gasLimit
-        );
-
-        WormholeTransceiver transceiverProxy =
-            WormholeTransceiver(address(new ERC1967Proxy(address(implementation), "")));
-
-        transceiverProxy.initialize();
-
-        console2.log("WormholeTransceiver:", address(transceiverProxy));
-
-        return address(transceiverProxy);
     }
 
     function configureNttManager(

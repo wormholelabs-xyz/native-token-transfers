@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.8 <0.9.0;
 
+import "example-gmp-router/evm/src/libraries/UniversalAddress.sol";
+
 import "../libraries/TrimmedAmount.sol";
 import "../libraries/TransceiverStructs.sol";
 
@@ -9,7 +11,7 @@ import "./IManagerBase.sol";
 interface INttManager is IManagerBase {
     /// @dev The peer on another chain.
     struct NttManagerPeer {
-        bytes32 peerAddress;
+        bytes32 peerAddress; // TODO: Can we make this UniversalAddress?
         uint8 tokenDecimals;
     }
 
@@ -68,6 +70,19 @@ interface INttManager is IManagerBase {
     /// @param recipient The canceller and recipient of the funds
     /// @param amount The amount of the transfer being cancelled
     event OutboundTransferCancelled(uint256 sequence, address recipient, uint256 amount);
+
+    /// @notice Emitted when a message is submitted to the executor.
+    /// @dev Topic0
+    ///      0x34a042d85c0b260d1be6cd4bf178c0a3f85c6cf64868e6d64ec7a11027449d5a
+    event ExecutionSent(
+        uint16 indexed srcChain,
+        address indexed srcAddr,
+        uint64 indexed nttSeqNo,
+        uint64 routerSeqNo,
+        uint16 dstChain,
+        bytes32 destAddr,
+        bytes payload
+    );
 
     /// @notice The transfer has some dust.
     /// @dev Selector 0x71f0634a
@@ -200,31 +215,20 @@ interface INttManager is IManagerBase {
         bytes32 digest
     ) external;
 
-    /// @notice Called by an Endpoint contract to deliver a verified attestation.
-    /// @dev This function enforces attestation threshold and replay logic for messages. Once all
-    ///      validations are complete, this function calls `executeMsg` to execute the command specified
-    ///      by the message.
-    /// @param sourceChainId The Wormhole chain id of the sender.
-    /// @param sourceNttManagerAddress The address of the sender's NTT Manager contract.
-    /// @param payload The VAA payload.
-    function attestationReceived(
-        uint16 sourceChainId,
-        bytes32 sourceNttManagerAddress,
-        TransceiverStructs.NttManagerMessage memory payload
-    ) external;
-
     /// @notice Called after a message has been sufficiently verified to execute
     ///         the command in the message. This function will decode the payload
     ///         as an NttManagerMessage to extract the sequence, msgType, and other parameters.
     /// @dev This function is exposed as a fallback for when an `Transceiver` is deregistered
     ///      when a message is in flight.
-    /// @param sourceChainId The Wormhole chain id of the sender.
-    /// @param sourceNttManagerAddress The address of the sender's nttManager contract.
-    /// @param message The message to execute.
+    /// @param srcChain The Wormhole chain ID of the sender.
+    /// @param srcAddr The universal address of the peer on the sending chain.
+    /// @param sequence The sequence number of the message (per integrator).
+    /// @param payload The message to execute.
     function executeMsg(
-        uint16 sourceChainId,
-        bytes32 sourceNttManagerAddress,
-        TransceiverStructs.NttManagerMessage memory message
+        uint16 srcChain,
+        UniversalAddress srcAddr,
+        uint64 sequence,
+        bytes memory payload
     ) external;
 
     /// @notice Returns the number of decimals of the token managed by the NttManager.
