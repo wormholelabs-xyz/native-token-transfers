@@ -11,6 +11,7 @@ import "../libraries/RateLimiter.sol";
 
 import "../interfaces/INttManager.sol";
 import "../interfaces/INttToken.sol";
+import "../interfaces/ITransceiver.sol";
 
 import {ManagerBase} from "./ManagerBase.sol";
 
@@ -45,16 +46,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     // =============== Setup =================================================================
 
     constructor(
-        address _router,
         address _token,
         Mode _mode,
         uint16 _chainId,
         uint64 _rateLimitDuration,
         bool _skipRateLimiting
-    )
-        RateLimiter(_rateLimitDuration, _skipRateLimiting)
-        ManagerBase(_router, _token, _mode, _chainId)
-    {}
+    ) RateLimiter(_rateLimitDuration, _skipRateLimiting) ManagerBase(_token, _mode, _chainId) {}
 
     function __NttManager_init() internal onlyInitializing {
         // check if the owner is the deployer of this contract
@@ -67,14 +64,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         __PausedOwnable_init(msg.sender, msg.sender);
         __ReentrancyGuard_init();
         _setOutboundLimit(TrimmedAmountLib.max(tokenDecimals()));
-
-        // TODO: I tried doing this in the constructor of ManagerBase but the proxy stuff seems to make `this` wrong.
-        router.register(address(this));
     }
 
     function _initialize() internal virtual override {
         __NttManager_init();
         _checkThresholdInvariants();
+        _checkTransceiversInvariants();
     }
 
     // =============== Storage ==============================================================
@@ -187,32 +182,55 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     }
 
     /// @inheritdoc INttManager
+    function attestationReceived(
+        uint16 sourceChainId,
+        bytes32 sourceNttManagerAddress,
+        TransceiverStructs.NttManagerMessage memory payload
+    ) external onlyTransceiver whenNotPaused {
+        _verifyPeer(sourceChainId, sourceNttManagerAddress);
+
+        // Compute manager message digest and record transceiver attestation.
+        bytes32 nttManagerMessageHash = _recordTransceiverAttestation(sourceChainId, payload);
+
+        if (isMessageApproved(nttManagerMessageHash)) {
+            executeMsg(sourceChainId, sourceNttManagerAddress, payload);
+        }
+    }
+
+    /// @inheritdoc INttManager
     function executeMsg(
-        uint16 srcChain,
-        UniversalAddress srcAddr,
-        uint64 routerSeq,
-        bytes memory payload
+        uint16 sourceChainId,
+        bytes32 sourceNttManagerAddress,
+        TransceiverStructs.NttManagerMessage memory message
     ) public whenNotPaused {
-        // We should only except messages from a peer.
-        bytes32 peerAddress = _getPeersStorage()[srcChain].peerAddress;
-        if (srcAddr != UniversalAddressLibrary.fromBytes32(peerAddress)) {
-            revert InvalidPeer(srcChain, UniversalAddressLibrary.toBytes32(srcAddr));
+        (bytes32 digest, bool alreadyExecuted) =
+            _isMessageExecuted(sourceChainId, sourceNttManagerAddress, message);
+
+        if (alreadyExecuted) {
+            return;
         }
 
-        // The router uses the payload hash, not the actual payload.
-        bytes32 payloadHash = keccak256(payload);
+        _handleMsg(sourceChainId, sourceNttManagerAddress, message, digest);
+    }
 
-        // The router does replay protection and verifies that there has been at least one attestation.
-        (uint128 enabled, uint128 attested) =
-            router.recvMessage(srcChain, srcAddr, routerSeq, payloadHash);
+    /// @dev Override this function to handle custom NttManager payloads.
+    /// This can also be used to customize transfer logic by using your own
+    /// _handleTransfer implementation.
+    function _handleMsg(
+        uint16 sourceChainId,
+        bytes32 sourceNttManagerAddress,
+        TransceiverStructs.NttManagerMessage memory message,
+        bytes32 digest
+    ) internal virtual {
+        _handleTransfer(sourceChainId, sourceNttManagerAddress, message, digest);
+    }
 
-        // TODO: This should be per-chain thresholding.
-        if (enabled != attested) {
-            revert ThresholdNotMet(enabled, attested);
-        }
-
-        TransceiverStructs.NttManagerMessage memory message =
-            TransceiverStructs.parseNttManagerMessage(payload);
+    function _handleTransfer(
+        uint16 sourceChainId,
+        bytes32 sourceNttManagerAddress,
+        TransceiverStructs.NttManagerMessage memory message,
+        bytes32 digest
+    ) internal {
         TransceiverStructs.NativeTokenTransfer memory nativeTokenTransfer =
             TransceiverStructs.parseNativeTokenTransfer(message.payload);
 
@@ -226,21 +244,35 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         address transferRecipient = fromWormholeFormat(nativeTokenTransfer.to);
 
-        // push it on the stack again to avoid a stack too deep error
-        uint16 sourceChain = srcChain;
-
-        bytes32 digest = TransceiverStructs.nttManagerMessageDigest(sourceChain, message);
-
         bool enqueued = _enqueueOrConsumeInboundRateLimit(
-            digest, sourceChain, nativeTransferAmount, transferRecipient
+            digest, sourceChainId, nativeTransferAmount, transferRecipient
         );
 
         if (enqueued) {
             return;
         }
 
+        _handleAdditionalPayload(
+            sourceChainId, sourceNttManagerAddress, message.id, message.sender, nativeTokenTransfer
+        );
+
         _mintOrUnlockToRecipient(digest, transferRecipient, nativeTransferAmount, false);
     }
+
+    /// @dev Override this function to process an additional payload on the NativeTokenTransfer
+    /// For integrator flexibility, this function is *not* marked pure or view
+    /// @param - The Wormhole chain id of the sender
+    /// @param - The address of the sender's NTT Manager contract.
+    /// @param - The message id from the NttManagerMessage.
+    /// @param - The original message sender address from the NttManagerMessage.
+    /// @param - The parsed NativeTokenTransfer, which includes the additionalPayload field
+    function _handleAdditionalPayload(
+        uint16, // sourceChainId
+        bytes32, // sourceNttManagerAddress
+        bytes32, // id
+        bytes32, // sender
+        TransceiverStructs.NativeTokenTransfer memory // nativeTokenTransfer
+    ) internal virtual {}
 
     function _enqueueOrConsumeInboundRateLimit(
         bytes32 digest,
@@ -313,7 +345,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             queuedTransfer.recipientChain,
             queuedTransfer.recipient,
             queuedTransfer.refundAddress,
-            queuedTransfer.sender
+            queuedTransfer.sender,
+            queuedTransfer.transceiverInstructions
         );
     }
 
@@ -422,8 +455,15 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             return sequence;
         }
 
-        return
-            _transfer(sequence, trimmedAmount, recipientChain, recipient, refundAddress, msg.sender);
+        return _transfer(
+            sequence,
+            trimmedAmount,
+            recipientChain,
+            recipient,
+            refundAddress,
+            msg.sender,
+            transceiverInstructions
+        );
     }
 
     function _enqueueOrConsumeOutboundRateLimit(
@@ -484,25 +524,24 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 recipientChain,
         bytes32 recipient,
         bytes32 refundAddress,
-        address sender
+        address sender,
+        bytes memory transceiverInstructions
     ) internal returns (uint64 msgSequence) {
         // verify chain has not forked
         checkFork(evmChainId);
 
-        // refund user extra excess value from msg.value
-        uint256 totalPriceQuote = quoteDeliveryPrice(recipientChain);
-        uint256 excessValue = msg.value - totalPriceQuote;
-        if (excessValue > 0) {
-            _refundToSender(excessValue);
-        }
+        (
+            address[] memory enabledTransceivers,
+            TransceiverStructs.TransceiverInstruction[] memory instructions,
+            uint256[] memory priceQuotes,
+            uint256 totalPriceQuote
+        ) = _prepareForTransfer(recipientChain, transceiverInstructions);
 
         // push it on the stack again to avoid a stack too deep error
         uint64 seq = sequence;
-        TrimmedAmount amt = amount;
-        bytes32 recip = recipient;
 
-        TransceiverStructs.NativeTokenTransfer memory ntt = TransceiverStructs.NativeTokenTransfer(
-            amt, toWormholeFormat(token), recip, recipientChain
+        TransceiverStructs.NativeTokenTransfer memory ntt = _prepareNativeTokenTransfer(
+            amount, recipient, recipientChain, seq, sender, refundAddress
         );
 
         // construct the NttManagerMessage payload
@@ -514,39 +553,61 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             )
         );
 
-        bytes32 payloadHash = keccak256(encodedNttManagerPayload);
-
         // push onto the stack again to avoid stack too deep error
         uint16 destinationChain = recipientChain;
-        bytes32 refundAddr = refundAddress;
-
-        bytes32 peerAddress = _getPeersStorage()[destinationChain].peerAddress;
 
         // send the message
-        uint64 routerSeqNo = router.sendMessage(
+        _sendMessageToTransceivers(
+            recipientChain,
+            refundAddress,
+            _getPeersStorage()[destinationChain].peerAddress,
+            priceQuotes,
+            instructions,
+            enabledTransceivers,
+            encodedNttManagerPayload
+        );
+
+        // push it on the stack again to avoid a stack too deep error
+        TrimmedAmount amt = amount;
+
+        emit TransferSent(
+            recipient,
+            refundAddress,
+            amt.untrim(tokenDecimals()),
+            totalPriceQuote,
             destinationChain,
-            UniversalAddressLibrary.fromBytes32(peerAddress),
-            payloadHash,
-            UniversalAddressLibrary.toAddress(UniversalAddressLibrary.fromBytes32(refundAddr))
+            seq
         );
 
         emit TransferSent(
-            recip, refundAddr, amt.untrim(tokenDecimals()), totalPriceQuote, destinationChain, seq
-        );
-
-        // This will be replaced by an executor call.
-        emit ExecutionSent(
-            chainId,
-            address(this),
-            seq,
-            routerSeqNo,
-            destinationChain,
-            peerAddress,
-            encodedNttManagerPayload
+            TransceiverStructs._nttManagerMessageDigest(chainId, encodedNttManagerPayload)
         );
 
         // return the sequence number
         return seq;
+    }
+
+    /// @dev Override this function to provide an additional payload on the NativeTokenTransfer
+    /// For integrator flexibility, this function is *not* marked pure or view
+    /// @param amount TrimmedAmount of the transfer
+    /// @param recipient The recipient address
+    /// @param recipientChain The Wormhole chain ID for the destination
+    /// @param - The sequence number for the manager message (unused, provided for overriding integrators)
+    /// @param - The sender of the funds (unused, provided for overriding integrators). If releasing
+    /// @param - The address on the destination chain to which the refund of unused gas will be paid
+    /// queued transfers, when rate limiting is used, then this value could be different from msg.sender.
+    /// @return - The TransceiverStructs.NativeTokenTransfer struct
+    function _prepareNativeTokenTransfer(
+        TrimmedAmount amount,
+        bytes32 recipient,
+        uint16 recipientChain,
+        uint64, // sequence
+        address, // sender
+        bytes32 // refundAddress
+    ) internal virtual returns (TransceiverStructs.NativeTokenTransfer memory) {
+        return TransceiverStructs.NativeTokenTransfer(
+            amount, toWormholeFormat(token), recipient, recipientChain, ""
+        );
     }
 
     function _mintOrUnlockToRecipient(
