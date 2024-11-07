@@ -4,7 +4,6 @@ pragma solidity >=0.8.8 <0.9.0;
 import {Script, console} from "forge-std/Script.sol";
 import {DeployWormholeNttBase} from "./helpers/DeployWormholeNttBase.sol";
 import {INttManager} from "../src/interfaces/INttManager.sol";
-import {IWormholeTransceiver} from "../src/interfaces/IWormholeTransceiver.sol";
 import "../src/interfaces/IManagerBase.sol";
 import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {NttManager} from "../src/NttManager/NttManager.sol";
@@ -15,7 +14,9 @@ interface IWormhole {
 
 contract DeployWormholeNtt is Script, DeployWormholeNttBase {
     function run(
+        address router,
         address wormhole,
+        address transceiver,
         address token,
         address wormholeRelayer,
         address specialRelayer,
@@ -32,9 +33,9 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
             token.staticcall(abi.encodeWithSignature("decimals()"));
 
         if (success) {
-            uint8 queriedDecimals = abi.decode(queriedDecimals, (uint8));
-            if (queriedDecimals != decimals) {
-                console.log("Decimals mismatch: ", queriedDecimals, " != ", decimals);
+            uint8 queriedDec = abi.decode(queriedDecimals, (uint8));
+            if (queriedDec != decimals) {
+                console.log("Decimals mismatch: ", queriedDec, " != ", decimals);
                 vm.stopBroadcast();
                 return;
             }
@@ -64,6 +65,7 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
             decimals > TRIMMED_DECIMALS ? uint256(10 ** (decimals - TRIMMED_DECIMALS)) : 1;
 
         DeploymentParams memory params = DeploymentParams({
+            routerAddr: router,
             token: token,
             mode: mode,
             wormholeChainId: chainId,
@@ -80,9 +82,6 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
 
         // Deploy NttManager.
         address manager = deployNttManager(params);
-
-        // Deploy Wormhole Transceiver.
-        address transceiver = deployWormholeTransceiver(params, manager);
 
         // Configure NttManager.
         configureNttManager(
@@ -105,6 +104,7 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
         bool shouldSkipRatelimiter = rateLimitDuration == 0;
 
         NttManager implementation = new NttManager(
+            address(nttManager.router()),
             nttManager.token(),
             nttManager.mode(),
             nttManager.chainId(),

@@ -16,12 +16,19 @@ library TransceiverHelpersLib {
     uint16 constant SENDING_CHAIN_ID = 1;
 
     function setup_transceivers(
-        NttManager nttManager
+        NttManager nttManager,
+        uint16 peerChainId
     ) internal returns (DummyTransceiver, DummyTransceiver) {
-        DummyTransceiver e1 = new DummyTransceiver(address(nttManager));
-        DummyTransceiver e2 = new DummyTransceiver(address(nttManager));
+        DummyTransceiver e1 =
+            new DummyTransceiver(nttManager.chainId(), address(nttManager.router()));
+        DummyTransceiver e2 =
+            new DummyTransceiver(nttManager.chainId(), address(nttManager.router()));
         nttManager.setTransceiver(address(e1));
+        nttManager.enableSendTransceiver(peerChainId, address(e1));
+        nttManager.enableRecvTransceiver(peerChainId, address(e1));
         nttManager.setTransceiver(address(e2));
+        nttManager.enableSendTransceiver(peerChainId, address(e2));
+        nttManager.enableRecvTransceiver(peerChainId, address(e2));
         nttManager.setThreshold(2);
         return (e1, e2);
     }
@@ -34,36 +41,52 @@ library TransceiverHelpersLib {
         NttManager recipientNttManager,
         TrimmedAmount amount,
         TrimmedAmount inboundLimit,
-        ITransceiverReceiver[] memory transceivers
+        DummyTransceiver[] memory transceivers
     )
         internal
         returns (
-            TransceiverStructs.NttManagerMessage memory,
-            TransceiverStructs.TransceiverMessage memory
+            TransceiverStructs.NttManagerMessage memory m,
+            TransceiverStructs.TransceiverMessage memory em
         )
     {
-        TransceiverStructs.NttManagerMessage memory m =
-            buildNttManagerMessage(to, id, toChain, nttManager, amount);
+        m = buildNttManagerMessage(to, id, toChain, nttManager, amount);
         bytes memory encodedM = TransceiverStructs.encodeNttManagerMessage(m);
 
         prepTokenReceive(nttManager, recipientNttManager, amount, inboundLimit);
 
-        TransceiverStructs.TransceiverMessage memory em;
-        bytes memory encodedEm;
-        (em, encodedEm) = TransceiverStructs.buildAndEncodeTransceiverMessage(
-            TEST_TRANSCEIVER_PAYLOAD_PREFIX,
-            toWormholeFormat(address(nttManager)),
-            toWormholeFormat(address(recipientNttManager)),
-            encodedM,
-            new bytes(0)
-        );
+        // bytes memory encodedEm;
+        // (em, encodedEm) = TransceiverStructs.buildAndEncodeTransceiverMessage(
+        //     TEST_TRANSCEIVER_PAYLOAD_PREFIX,
+        //     toWormholeFormat(address(nttManager)),
+        //     toWormholeFormat(address(recipientNttManager)),
+        //     encodedM,
+        //     new bytes(0)
+        // );
+
+        DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
+            srcChain: nttManager.chainId(),
+            srcAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
+            sequence: 0,
+            dstChain: recipientNttManager.chainId(),
+            dstAddr: UniversalAddressLibrary.fromAddress(address(recipientNttManager)),
+            payloadHash: keccak256(encodedM),
+            refundAddr: address(0)
+        });
 
         for (uint256 i; i < transceivers.length; i++) {
-            ITransceiverReceiver e = transceivers[i];
-            e.receiveMessage(encodedEm);
+            DummyTransceiver e = transceivers[i];
+
+            // Attest the message.
+            e.receiveMessage(rmsg);
         }
 
-        return (m, em);
+        // Execute the message.
+        recipientNttManager.executeMsg(
+            nttManager.chainId(),
+            UniversalAddressLibrary.fromAddress(address(nttManager)),
+            0,
+            encodedM
+        );
     }
 
     function buildNttManagerMessage(

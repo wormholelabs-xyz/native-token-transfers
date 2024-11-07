@@ -7,12 +7,13 @@ import "../../src/NttManager/NttManagerNoRateLimiting.sol";
 
 contract MockNttManagerContract is NttManager {
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId,
         uint64 rateLimitDuration,
         bool skipRateLimiting
-    ) NttManager(token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
+    ) NttManager(router, token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
 
     /// We create a dummy storage variable here with standard solidity slot assignment.
     /// Then we check that its assigned slot is 0, i.e. that the super contract doesn't
@@ -29,10 +30,11 @@ contract MockNttManagerContract is NttManager {
 
 contract MockNttManagerNoRateLimitingContract is NttManagerNoRateLimiting {
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId
-    ) NttManagerNoRateLimiting(token, mode, chainId) {}
+    ) NttManagerNoRateLimiting(router, token, mode, chainId) {}
 
     /// We create a dummy storage variable here with standard solidity slot assignment.
     /// Then we check that its assigned slot is 0, i.e. that the super contract doesn't
@@ -50,16 +52,16 @@ contract MockNttManagerNoRateLimitingContract is NttManagerNoRateLimiting {
 contract MockNttManagerMigrateBasic is NttManager {
     // Call the parents constructor
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId,
         uint64 rateLimitDuration,
         bool skipRateLimiting
-    ) NttManager(token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
+    ) NttManager(router, token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
 
     function _migrate() internal view override {
         _checkThresholdInvariants();
-        _checkTransceiversInvariants();
         revert("Proper migrate called");
     }
 }
@@ -67,23 +69,25 @@ contract MockNttManagerMigrateBasic is NttManager {
 contract MockNttManagerImmutableCheck is NttManager {
     // Call the parents constructor
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId,
         uint64 rateLimitDuration,
         bool skipRateLimiting
-    ) NttManager(token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
+    ) NttManager(router, token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
 }
 
 contract MockNttManagerImmutableRemoveCheck is NttManager {
     // Call the parents constructor
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId,
         uint64 rateLimitDuration,
         bool skipRateLimiting
-    ) NttManager(token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
+    ) NttManager(router, token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
 
     // Turns on the capability to EDIT the immutables
     function _migrate() internal override {
@@ -98,12 +102,13 @@ contract MockNttManagerStorageLayoutChange is NttManager {
 
     // Call the parents constructor
     constructor(
+        address router,
         address token,
         Mode mode,
         uint16 chainId,
         uint64 rateLimitDuration,
         bool skipRateLimiting
-    ) NttManager(token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
+    ) NttManager(router, token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
 
     function setData() public {
         a = address(0x1);

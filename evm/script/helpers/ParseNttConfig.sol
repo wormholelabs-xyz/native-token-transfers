@@ -5,7 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
 import "../../src/interfaces/INttManager.sol";
-import "../../src/interfaces/IWormholeTransceiver.sol";
+import "example-gmp-router/evm/src/interfaces/ITransceiver.sol";
 
 contract ParseNttConfig is Script {
     using stdJson for string;
@@ -50,7 +50,7 @@ contract ParseNttConfig is Script {
         returns (
             ChainConfig[] memory config,
             INttManager nttManager,
-            IWormholeTransceiver wormholeTransceiver
+            ITransceiver wormholeTransceiver
         )
     {
         string memory root = vm.projectRoot();
@@ -84,7 +84,7 @@ contract ParseNttConfig is Script {
             if (config[i].chainId == wormholeChainId) {
                 nttManager = INttManager(fromUniversalAddress(config[i].nttManager));
                 wormholeTransceiver =
-                    IWormholeTransceiver(fromUniversalAddress(config[i].wormholeTransceiver));
+                    ITransceiver(fromUniversalAddress(config[i].wormholeTransceiver));
             }
         }
     }

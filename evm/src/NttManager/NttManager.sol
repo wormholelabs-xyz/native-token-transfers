@@ -11,7 +11,6 @@ import "../libraries/RateLimiter.sol";
 
 import "../interfaces/INttManager.sol";
 import "../interfaces/INttToken.sol";
-import "../interfaces/ITransceiver.sol";
 
 import {ManagerBase} from "./ManagerBase.sol";
 
@@ -46,12 +45,16 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     // =============== Setup =================================================================
 
     constructor(
+        address _router,
         address _token,
         Mode _mode,
         uint16 _chainId,
         uint64 _rateLimitDuration,
         bool _skipRateLimiting
-    ) RateLimiter(_rateLimitDuration, _skipRateLimiting) ManagerBase(_token, _mode, _chainId) {}
+    )
+        RateLimiter(_rateLimitDuration, _skipRateLimiting)
+        ManagerBase(_router, _token, _mode, _chainId)
+    {}
 
     function __NttManager_init() internal onlyInitializing {
         // check if the owner is the deployer of this contract
@@ -64,12 +67,14 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         __PausedOwnable_init(msg.sender, msg.sender);
         __ReentrancyGuard_init();
         _setOutboundLimit(TrimmedAmountLib.max(tokenDecimals()));
+
+        // TODO: I tried doing this in the constructor of ManagerBase but the proxy stuff seems to make `this` wrong.
+        router.register(address(this));
     }
 
     function _initialize() internal virtual override {
         __NttManager_init();
         _checkThresholdInvariants();
-        _checkTransceiversInvariants();
     }
 
     // =============== Storage ==============================================================
@@ -182,34 +187,32 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     }
 
     /// @inheritdoc INttManager
-    function attestationReceived(
-        uint16 sourceChainId,
-        bytes32 sourceNttManagerAddress,
-        TransceiverStructs.NttManagerMessage memory payload
-    ) external onlyTransceiver whenNotPaused {
-        _verifyPeer(sourceChainId, sourceNttManagerAddress);
-
-        // Compute manager message digest and record transceiver attestation.
-        bytes32 nttManagerMessageHash = _recordTransceiverAttestation(sourceChainId, payload);
-
-        if (isMessageApproved(nttManagerMessageHash)) {
-            executeMsg(sourceChainId, sourceNttManagerAddress, payload);
-        }
-    }
-
-    /// @inheritdoc INttManager
     function executeMsg(
-        uint16 sourceChainId,
-        bytes32 sourceNttManagerAddress,
-        TransceiverStructs.NttManagerMessage memory message
+        uint16 srcChain,
+        UniversalAddress srcAddr,
+        uint64 routerSeq,
+        bytes memory payload
     ) public whenNotPaused {
-        (bytes32 digest, bool alreadyExecuted) =
-            _isMessageExecuted(sourceChainId, sourceNttManagerAddress, message);
-
-        if (alreadyExecuted) {
-            return;
+        // We should only except messages from a peer.
+        bytes32 peerAddress = _getPeersStorage()[srcChain].peerAddress;
+        if (srcAddr != UniversalAddressLibrary.fromBytes32(peerAddress)) {
+            revert InvalidPeer(srcChain, UniversalAddressLibrary.toBytes32(srcAddr));
         }
 
+        // The router uses the payload hash, not the actual payload.
+        bytes32 payloadHash = keccak256(payload);
+
+        // The router does replay protection and verifies that there has been at least one attestation.
+        (uint128 enabled, uint128 attested) =
+            router.recvMessage(srcChain, srcAddr, routerSeq, payloadHash);
+
+        // TODO: This should be per-chain thresholding.
+        if (enabled != attested) {
+            revert ThresholdNotMet(enabled, attested);
+        }
+
+        TransceiverStructs.NttManagerMessage memory message =
+            TransceiverStructs.parseNttManagerMessage(payload);
         TransceiverStructs.NativeTokenTransfer memory nativeTokenTransfer =
             TransceiverStructs.parseNativeTokenTransfer(message.payload);
 
@@ -223,8 +226,13 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         address transferRecipient = fromWormholeFormat(nativeTokenTransfer.to);
 
+        // push it on the stack again to avoid a stack too deep error
+        uint16 sourceChain = srcChain;
+
+        bytes32 digest = TransceiverStructs.nttManagerMessageDigest(sourceChain, message);
+
         bool enqueued = _enqueueOrConsumeInboundRateLimit(
-            digest, sourceChainId, nativeTransferAmount, transferRecipient
+            digest, sourceChain, nativeTransferAmount, transferRecipient
         );
 
         if (enqueued) {
@@ -305,8 +313,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             queuedTransfer.recipientChain,
             queuedTransfer.recipient,
             queuedTransfer.refundAddress,
-            queuedTransfer.sender,
-            queuedTransfer.transceiverInstructions
+            queuedTransfer.sender
         );
     }
 
@@ -415,15 +422,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             return sequence;
         }
 
-        return _transfer(
-            sequence,
-            trimmedAmount,
-            recipientChain,
-            recipient,
-            refundAddress,
-            msg.sender,
-            transceiverInstructions
-        );
+        return
+            _transfer(sequence, trimmedAmount, recipientChain, recipient, refundAddress, msg.sender);
     }
 
     function _enqueueOrConsumeOutboundRateLimit(
@@ -484,24 +484,25 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 recipientChain,
         bytes32 recipient,
         bytes32 refundAddress,
-        address sender,
-        bytes memory transceiverInstructions
+        address sender
     ) internal returns (uint64 msgSequence) {
         // verify chain has not forked
         checkFork(evmChainId);
 
-        (
-            address[] memory enabledTransceivers,
-            TransceiverStructs.TransceiverInstruction[] memory instructions,
-            uint256[] memory priceQuotes,
-            uint256 totalPriceQuote
-        ) = _prepareForTransfer(recipientChain, transceiverInstructions);
+        // refund user extra excess value from msg.value
+        uint256 totalPriceQuote = quoteDeliveryPrice(recipientChain);
+        uint256 excessValue = msg.value - totalPriceQuote;
+        if (excessValue > 0) {
+            _refundToSender(excessValue);
+        }
 
         // push it on the stack again to avoid a stack too deep error
         uint64 seq = sequence;
+        TrimmedAmount amt = amount;
+        bytes32 recip = recipient;
 
         TransceiverStructs.NativeTokenTransfer memory ntt = TransceiverStructs.NativeTokenTransfer(
-            amount, toWormholeFormat(token), recipient, recipientChain
+            amt, toWormholeFormat(token), recip, recipientChain
         );
 
         // construct the NttManagerMessage payload
@@ -513,30 +514,35 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             )
         );
 
+        bytes32 payloadHash = keccak256(encodedNttManagerPayload);
+
         // push onto the stack again to avoid stack too deep error
         uint16 destinationChain = recipientChain;
+        bytes32 refundAddr = refundAddress;
+
+        bytes32 peerAddress = _getPeersStorage()[destinationChain].peerAddress;
 
         // send the message
-        _sendMessageToTransceivers(
-            recipientChain,
-            refundAddress,
-            _getPeersStorage()[destinationChain].peerAddress,
-            priceQuotes,
-            instructions,
-            enabledTransceivers,
-            encodedNttManagerPayload
+        uint64 routerSeqNo = router.sendMessage(
+            destinationChain,
+            UniversalAddressLibrary.fromBytes32(peerAddress),
+            payloadHash,
+            UniversalAddressLibrary.toAddress(UniversalAddressLibrary.fromBytes32(refundAddr))
         );
 
-        // push it on the stack again to avoid a stack too deep error
-        TrimmedAmount amt = amount;
-
         emit TransferSent(
-            recipient,
-            refundAddress,
-            amt.untrim(tokenDecimals()),
-            totalPriceQuote,
+            recip, refundAddr, amt.untrim(tokenDecimals()), totalPriceQuote, destinationChain, seq
+        );
+
+        // This will be replaced by an executor call.
+        emit ExecutionSent(
+            chainId,
+            address(this),
+            seq,
+            routerSeqNo,
             destinationChain,
-            seq
+            peerAddress,
+            encodedNttManagerPayload
         );
 
         // return the sequence number

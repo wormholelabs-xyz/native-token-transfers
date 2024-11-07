@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.8 <0.9.0;
 
+import "example-gmp-router/evm/src/libraries/UniversalAddress.sol";
+
 import "../libraries/TransceiverStructs.sol";
 
 interface IManagerBase {
@@ -109,14 +111,14 @@ interface IManagerBase {
     /// @param chainId The target Wormhole chain id
     error PeerNotRegistered(uint16 chainId);
 
+    error ThresholdNotMet(uint128 enabled, uint128 attested); // TODO: Should this go in INttManager?
+
     /// @notice Fetch the delivery price for a given recipient chain transfer.
     /// @param recipientChain The Wormhole chain ID of the transfer destination.
-    /// @param transceiverInstructions The transceiver specific instructions for quoting and sending
     /// @return - The delivery prices associated with each enabled endpoint and the total price.
     function quoteDeliveryPrice(
-        uint16 recipientChain,
-        bytes memory transceiverInstructions
-    ) external view returns (uint256[] memory, uint256);
+        uint16 recipientChain
+    ) external view returns (uint256);
 
     /// @notice Sets the threshold for the number of attestations required for a message
     /// to be considered valid.
@@ -133,26 +135,55 @@ interface IManagerBase {
         address transceiver
     ) external;
 
-    /// @notice Removes the transceiver for the given chain.
-    /// @param transceiver The address of the transceiver.
-    /// @dev This method can only be executed by the `owner`.
-    function removeTransceiver(
-        address transceiver
-    ) external;
+    /// @notice This enables the sending of messages from the given transceiver on the given chain.
+    /// @param transceiver The address of the Transceiver contract.
+    /// @param chain The chain ID of the Transceiver contract.
+    function enableSendTransceiver(uint16 chain, address transceiver) external;
+
+    /// @notice This enables the receiving of messages by the given transceiver on the given chain.
+    /// @param transceiver The address of the Transceiver contract.
+    /// @param chain The chain ID of the Transceiver contract.
+    function enableRecvTransceiver(uint16 chain, address transceiver) external;
+
+    /// @notice This disables the sending of messages from the given transceiver on the given chain.
+    /// @param transceiver The address of the Transceiver contract.
+    /// @param chain The chain ID of the Transceiver contract.
+    function disableSendTransceiver(uint16 chain, address transceiver) external;
+
+    /// @notice This disables the receiving of messages by the given transceiver on the given chain.
+    /// @param transceiver The address of the Transceiver contract.
+    /// @param chain The chain ID of the Transceiver contract.
+    function disableRecvTransceiver(uint16 chain, address transceiver) external;
 
     /// @notice Checks if a message has been approved. The message should have at least
     /// the minimum threshold of attestations from distinct endpoints.
-    /// @param digest The digest of the message.
+    /// @param srcChain The Wormhole chain ID of the sender.
+    /// @param srcAddr The universal address of the message.
+    /// @param sequence The sequence number of the message.
+    /// @param dstAddr The destination address of the message.
+    /// @param payloadHash The keccak256 of payload from the integrator.
     /// @return - Boolean indicating if message has been approved.
     function isMessageApproved(
-        bytes32 digest
+        uint16 srcChain,
+        UniversalAddress srcAddr,
+        uint64 sequence,
+        UniversalAddress dstAddr,
+        bytes32 payloadHash
     ) external view returns (bool);
 
     /// @notice Checks if a message has been executed.
-    /// @param digest The digest of the message.
+    /// @param srcChain The Wormhole chain ID of the sender.
+    /// @param srcAddr The universal address of the message.
+    /// @param sequence The sequence number of the message.
+    /// @param dstAddr The destination address of the message.
+    /// @param payloadHash The keccak256 of payload from the integrator.
     /// @return - Boolean indicating if message has been executed.
     function isMessageExecuted(
-        bytes32 digest
+        uint16 srcChain,
+        UniversalAddress srcAddr,
+        uint64 sequence,
+        UniversalAddress dstAddr,
+        bytes32 payloadHash
     ) external view returns (bool);
 
     /// @notice Returns the next message sequence.
@@ -178,19 +209,35 @@ interface IManagerBase {
     function getThreshold() external view returns (uint8);
 
     /// @notice Returns a boolean indicating if the transceiver has attested to the message.
-    /// @param digest The digest of the message.
+    /// @param srcChain The Wormhole chain ID of the sender.
+    /// @param srcAddr The universal address of the message.
+    /// @param sequence The sequence number of the message.
+    /// @param dstAddr The destination address of the message.
+    /// @param payloadHash The keccak256 of payload from the integrator.
     /// @param index The index of the transceiver
     /// @return - Boolean indicating whether the transceiver at index `index` attested to a message digest
     function transceiverAttestedToMessage(
-        bytes32 digest,
+        uint16 srcChain,
+        UniversalAddress srcAddr,
+        uint64 sequence,
+        UniversalAddress dstAddr,
+        bytes32 payloadHash,
         uint8 index
     ) external view returns (bool);
 
     /// @notice Returns the number of attestations for a given message.
-    /// @param digest The digest of the message.
+    /// @param srcChain The Wormhole chain ID of the sender.
+    /// @param srcAddr The universal address of the message.
+    /// @param sequence The sequence number of the message.
+    /// @param dstAddr The destination address of the message.
+    /// @param payloadHash The keccak256 of payload from the integrator.
     /// @return count The number of attestations received for the given message digest
     function messageAttestations(
-        bytes32 digest
+        uint16 srcChain,
+        UniversalAddress srcAddr,
+        uint64 sequence,
+        UniversalAddress dstAddr,
+        bytes32 payloadHash
     ) external view returns (uint8 count);
 
     /// @notice Returns of the address of the token managed by this contract.

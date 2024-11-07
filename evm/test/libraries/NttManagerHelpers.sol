@@ -2,6 +2,8 @@
 
 pragma solidity >=0.8.8 <0.9.0;
 
+import "forge-std/Test.sol";
+
 import "../../src/libraries/TrimmedAmount.sol";
 import "../../src/NttManager/NttManager.sol";
 import "../../src/interfaces/INttManager.sol";
