@@ -126,61 +126,57 @@ contract TestNttManager is Test, IRateLimiterEvents {
     // === Deployments with rate limiter disabled
 
     function test_disabledRateLimiter() public {
-        // Set things up.
-        DummyToken t = new DummyToken();
-        {
-            NttManager implementation1 = new MockNttManagerContract(
-                address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 0, true
-            );
+        DummyToken token = new DummyToken();
+        uint8 decimals = token.decimals();
 
-            nttManagerZeroRateLimiter =
-                MockNttManagerContract(address(new ERC1967Proxy(address(implementation1), "")));
-            nttManagerZeroRateLimiter.initialize();
+        // Create the first NttManager without rate limiting with two transceivers.
+        NttManager implementation = new MockNttManagerContract(
+            address(router), address(token), IManagerBase.Mode.LOCKING, chainId, 0, true
+        );
+        nttManagerZeroRateLimiter =
+            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
+        nttManagerZeroRateLimiter.initialize();
+        TransceiverHelpersLib.setup_transceivers(nttManagerZeroRateLimiter, chainId2);
 
-            nttManagerZeroRateLimiter.setTransceiver(address(transceiver));
-            nttManagerZeroRateLimiter.enableSendTransceiver(chainId2, address(transceiver));
+        // Create the second NttManager without rate limiting with two transceivers.
+        implementation = new MockNttManagerContract(
+            address(routerOther), address(token), IManagerBase.Mode.LOCKING, chainId2, 0, true
+        );
+        nttManagerZeroRateLimiterOther =
+            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
+        nttManagerZeroRateLimiterOther.initialize();
+        DummyTransceiver[] memory transceiversOther = new DummyTransceiver[](2);
+        (transceiversOther[0], transceiversOther[1]) =
+            TransceiverHelpersLib.setup_transceivers(nttManagerZeroRateLimiterOther, chainId);
 
-            routerOther = new MockRouter(chainId2);
-            NttManager implementation2 = new MockNttManagerContract(
-                address(routerOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 0, true
-            );
+        nttManagerZeroRateLimiter.setPeer(
+            chainId2,
+            toWormholeFormat(address(nttManagerZeroRateLimiterOther)),
+            token.decimals(),
+            type(uint64).max
+        );
 
-            nttManagerZeroRateLimiterOther =
-                MockNttManagerContract(address(new ERC1967Proxy(address(implementation2), "")));
-            nttManagerZeroRateLimiterOther.initialize();
+        nttManagerZeroRateLimiterOther.setPeer(
+            chainId,
+            toWormholeFormat(address(nttManagerZeroRateLimiter)),
+            token.decimals(),
+            type(uint64).max
+        );
 
-            transceiverOther = new DummyTransceiver(chainId2, address(routerOther));
-            nttManagerZeroRateLimiterOther.setTransceiver(address(transceiverOther));
-            nttManagerZeroRateLimiterOther.enableRecvTransceiver(chainId, address(transceiverOther));
-
-            nttManagerZeroRateLimiter.setPeer(
-                chainId2,
-                toWormholeFormat(address(nttManagerZeroRateLimiterOther)),
-                9,
-                type(uint64).max
-            );
-
-            nttManagerZeroRateLimiterOther.setPeer(
-                chainId, toWormholeFormat(address(nttManagerZeroRateLimiter)), 9, type(uint64).max
-            );
-
-            t.mintDummy(address(user_A), 5 * 10 ** t.decimals());
-        }
+        token.mintDummy(address(user_A), 5 * 10 ** decimals);
 
         // Test outgoing transfers complete successfully with rate limit disabled
         vm.startPrank(user_A);
-        t.approve(address(nttManagerZeroRateLimiter), 3 * 10 ** t.decimals());
-
-        vm.recordLogs();
+        token.approve(address(nttManagerZeroRateLimiter), 3 * 10 ** decimals);
 
         uint64 s1 = nttManagerZeroRateLimiter.transfer(
-            1 * 10 ** t.decimals(), chainId2, toWormholeFormat(user_B)
+            1 * 10 ** decimals, chainId2, toWormholeFormat(user_B)
         );
         uint64 s2 = nttManagerZeroRateLimiter.transfer(
-            1 * 10 ** t.decimals(), chainId2, toWormholeFormat(user_B)
+            1 * 10 ** decimals, chainId2, toWormholeFormat(user_B)
         );
         uint64 s3 = nttManagerZeroRateLimiter.transfer(
-            1 * 10 ** t.decimals(), chainId2, toWormholeFormat(user_B)
+            1 * 10 ** decimals, chainId2, toWormholeFormat(user_B)
         );
         vm.stopPrank();
 
@@ -188,116 +184,25 @@ contract TestNttManager is Test, IRateLimiterEvents {
         assertEq(s2, 1);
         assertEq(s3, 2);
 
-        {
-            // Verify we actually sent out three messages.
-            DummyTransceiver.Message[] memory routerMsgs = transceiver.getMessages();
-            assert(3 == routerMsgs.length);
+        // Test incoming transfer completes successfully with rate limit disabled
+        TrimmedAmount amount = packTrimmedAmount(50, 8);
+        token.mintDummy(address(nttManagerZeroRateLimiterOther), amount.untrim(token.decimals()));
 
-            DummyTransceiver.Message memory rmsg0 = routerMsgs[0];
-            DummyTransceiver.Message memory rmsg1 = routerMsgs[1];
-            DummyTransceiver.Message memory rmsg2 = routerMsgs[2];
+        TransceiverStructs.NttManagerMessage memory m = TransceiverHelpersLib.buildNttManagerMessage(
+            user_B, 0, chainId2, nttManagerZeroRateLimiter, amount
+        );
+        bytes memory encodedM = TransceiverStructs.encodeNttManagerMessage(m);
 
-            // Attest all three messages on the other side.
-            transceiverOther.receiveMessage(rmsg0);
-            transceiverOther.receiveMessage(rmsg1);
-            transceiverOther.receiveMessage(rmsg2);
+        // Attest and receive the message on the other manager.
+        DummyTransceiver.Message memory rmsg = TransceiverHelpersLib.attestAndReceiveMsg(
+            nttManagerZeroRateLimiter,
+            nttManagerZeroRateLimiterOther,
+            0,
+            transceiversOther,
+            encodedM
+        );
 
-            // Verify that the messages attested.
-            require(
-                1
-                    == nttManagerZeroRateLimiterOther.messageAttestations(
-                        rmsg0.srcChain, rmsg0.srcAddr, rmsg0.sequence, rmsg0.dstAddr, rmsg0.payloadHash
-                    ),
-                "Message 0 did not attest"
-            );
-            require(
-                1
-                    == nttManagerZeroRateLimiterOther.messageAttestations(
-                        rmsg1.srcChain, rmsg1.srcAddr, rmsg1.sequence, rmsg1.dstAddr, rmsg1.payloadHash
-                    ),
-                "Message 1 did not attest"
-            );
-            require(
-                1
-                    == nttManagerZeroRateLimiterOther.messageAttestations(
-                        rmsg2.srcChain, rmsg2.srcAddr, rmsg2.sequence, rmsg2.dstAddr, rmsg2.payloadHash
-                    ),
-                "Message 2 did not attest"
-            );
-
-            // Verify that the right transceiver attested.
-            require(
-                nttManagerZeroRateLimiterOther.transceiverAttestedToMessage(
-                    rmsg0.srcChain,
-                    rmsg0.srcAddr,
-                    rmsg0.sequence,
-                    rmsg0.dstAddr,
-                    rmsg0.payloadHash,
-                    0
-                ),
-                "Transceiver did not attest to message 0"
-            );
-            require(
-                nttManagerZeroRateLimiterOther.transceiverAttestedToMessage(
-                    rmsg1.srcChain,
-                    rmsg1.srcAddr,
-                    rmsg1.sequence,
-                    rmsg1.dstAddr,
-                    rmsg1.payloadHash,
-                    0
-                ),
-                "Transceiver did not attest to message 1"
-            );
-            require(
-                nttManagerZeroRateLimiterOther.transceiverAttestedToMessage(
-                    rmsg2.srcChain,
-                    rmsg2.srcAddr,
-                    rmsg2.sequence,
-                    rmsg2.dstAddr,
-                    rmsg2.payloadHash,
-                    0
-                ),
-                "Transceiver did not attest to message 2"
-            );
-
-            // But the messages should not be marked executed.
-            require(
-                !nttManagerZeroRateLimiterOther.isMessageExecuted(
-                    rmsg0.srcChain, rmsg0.srcAddr, rmsg0.sequence, rmsg0.dstAddr, rmsg0.payloadHash
-                ),
-                "Message 0 should not be marked executed yet"
-            );
-            require(
-                !nttManagerZeroRateLimiterOther.isMessageExecuted(
-                    rmsg1.srcChain, rmsg1.srcAddr, rmsg1.sequence, rmsg1.dstAddr, rmsg1.payloadHash
-                ),
-                "Message 1 should not be marked executed yet"
-            );
-            require(
-                !nttManagerZeroRateLimiterOther.isMessageExecuted(
-                    rmsg2.srcChain, rmsg2.srcAddr, rmsg2.sequence, rmsg2.dstAddr, rmsg2.payloadHash
-                ),
-                "Message 2 should not be marked executed yet"
-            );
-        }
-
-        // {
-        //     // Get the execution events from the logs.
-        //     Vm.Log[] memory logEvents = vm.getRecordedLogs();
-        //     (, bytes memory payload1) =
-        //         getExecutionSent(logEvents, chainId, address(nttManagerZeroRateLimiter), s1);
-        //     (, bytes memory payload2) =
-        //         getExecutionSent(logEvents, chainId, address(nttManagerZeroRateLimiter), s2);
-        //     (, bytes memory payload3) =
-        //         getExecutionSent(logEvents, chainId, address(nttManagerZeroRateLimiter), s3);
-
-        //     nttManagerZeroRateLimiterOther.executeMsg(
-        //         chainId,
-        //         UniversalAddressLibrary.fromAddress(address(nttManagerZeroRateLimiter)),
-        //         s1,
-        //         payload1
-        //     );
-        // }
+        checkAttestationAndExecution(nttManagerZeroRateLimiterOther, rmsg, 2);
     }
 
     // === ownership
@@ -438,14 +343,18 @@ contract TestNttManager is Test, IRateLimiterEvents {
         nttManager.setTransceiver(address(e));
     }
 
-    // TODO: Do we need these two tests?
-    // function test_disableReenableTransceiver() public {
-    //     DummyTransceiver e = new DummyTransceiver(chainId, address(router));
-    //     nttManager.setTransceiver(address(e));
-    //     nttManager.removeTransceiver(address(e));
-    //     nttManager.setTransceiver(address(e));
-    // }
+    function test_disableReenableTransceiver() public {
+        DummyTransceiver e = new DummyTransceiver(chainId, address(router));
+        nttManager.setTransceiver(address(e));
+        nttManager.enableSendTransceiver(chainId2, address(e));
+        nttManager.enableRecvTransceiver(chainId2, address(e));
+        nttManager.disableSendTransceiver(chainId2, address(e));
+        nttManager.disableRecvTransceiver(chainId2, address(e));
+        nttManager.enableSendTransceiver(chainId2, address(e));
+        nttManager.enableRecvTransceiver(chainId2, address(e));
+    }
 
+    // TODO: Not sure what this test should do now.
     // function test_disableAllTransceiversFails() public {
     //     vm.expectRevert(abi.encodeWithSelector(IManagerBase.ZeroThreshold.selector));
     //     nttManager.removeTransceiver(address(transceiver));
@@ -514,49 +423,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
     //     DummyTransceiver c = new DummyTransceiver(chainId, address(router));
     //     vm.expectRevert(TransceiverRegistry.TooManyTransceivers.selector);
     //     nttManager.setTransceiver(address(c));
-    // }
-
-    // TODO: The new transceiver doesn't support instructions.
-    // function test_passingInstructionsToTransceivers() public {
-    //     // Let's register a transceiver and then disable the original transceiver. We now have 2 registered transceivers
-    //     // since we register 1 in the setup
-    //     DummyTransceiver e = new DummyTransceiver(chainId, address(router));
-    //     nttManager.setTransceiver(address(e));
-    //     nttManager.removeTransceiver(address(transceiver));
-
-    //     user_A = address(0x123);
-    //     user_B = address(0x456);
-
-    //     DummyToken token = DummyToken(nttManager.token());
-
-    //     uint8 decimals = token.decimals();
-
-    //     nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
-    //     nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
-
-    //     token.mintDummy(address(user_A), 5 * 10 ** decimals);
-
-    //     vm.startPrank(user_A);
-
-    //     token.approve(address(nttManager), 3 * 10 ** decimals);
-
-    //     // Pass some instructions for the enabled transceiver
-    //     TransceiverStructs.TransceiverInstruction memory transceiverInstruction =
-    //         TransceiverStructs.TransceiverInstruction({index: 1, payload: new bytes(1)});
-    //     TransceiverStructs.TransceiverInstruction[] memory transceiverInstructions =
-    //         new TransceiverStructs.TransceiverInstruction[](1);
-    //     transceiverInstructions[0] = transceiverInstruction;
-    //     bytes memory instructions =
-    //         TransceiverStructs.encodeTransceiverInstructions(transceiverInstructions);
-
-    //     nttManager.transfer(
-    //         1 * 10 ** decimals,
-    //         chainId2,
-    //         toWormholeFormat(user_B),
-    //         toWormholeFormat(user_A),
-    //         false,
-    //         instructions
-    //     );
     // }
 
     function test_cancellingOutboundQueuedTransfers() public {
@@ -696,7 +562,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // This should work.
         transceiver.receiveMessage(rmsg);
-        checkAttestation(nttManager, 0, rmsg);
+        checkAttestationOnly(nttManager, rmsg, 1, 0);
 
         // But if we disable the transceiver for receiving, it should fail.
         nttManager.disableRecvTransceiver(chainId2, address(transceiver));
@@ -718,7 +584,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // The router and transceiver don't block this, so this should succeed.
         transceiver.receiveMessage(rmsg);
-        checkAttestation(nttManager, 0, rmsg);
+        checkAttestationOnly(nttManager, rmsg, 1, 0);
 
         // But the call to executeMsg should check the peer.
         bytes memory message = "Hello, World";
@@ -747,7 +613,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // Attest the message. This should work.
         transceiver.receiveMessage(rmsg);
-        checkAttestation(nttManager, 0, rmsg);
+        checkAttestationOnly(nttManager, rmsg, 1, 0);
 
         // Can't attest the same message twice.
         vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
@@ -855,163 +721,152 @@ contract TestNttManager is Test, IRateLimiterEvents {
         );
     }
 
-    // function test_attestationQuorum() public {
-    //     user_B = address(0x456);
+    function test_alreadyExecuted() public {
+        TrimmedAmount transferAmount = packTrimmedAmount(50, 8);
 
-    //     (DummyTransceiver e1, DummyTransceiver e2) =
-    //         TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        // Get rid of the original transceiver and add two new ones.
+        nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
+        nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
 
-    //     TrimmedAmount transferAmount = packTrimmedAmount(50, 8);
+        DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
+        (transceivers[0], transceivers[1]) =
+            TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
 
-    //     TransceiverStructs.NttManagerMessage memory m;
-    //     bytes memory encodedEm;
-    //     {
-    //         DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
-    //         transceivers[0] = e1;
-    //         transceivers[1] = e2;
+        TransceiverStructs.NttManagerMessage memory m;
+        DummyTransceiver.Message memory rmsg;
+        (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
+            user_B,
+            0,
+            chainId2,
+            nttManager,
+            nttManagerOther,
+            transferAmount,
+            packTrimmedAmount(type(uint64).max, 8),
+            transceivers
+        );
 
-    //         TransceiverStructs.TransceiverMessage memory em;
-    //         (m, em) = TransceiverHelpersLib.attestTransceiversHelper(
-    //             user_B,
-    //             0,
-    //             chainId,
-    //             nttManager,
-    //             nttManagerOther,
-    //             transferAmount,
-    //             packTrimmedAmount(type(uint64).max, 8),
-    //             transceivers
-    //         );
-    //         encodedEm = TransceiverStructs.encodeTransceiverMessage(
-    //             TransceiverHelpersLib.TEST_TRANSCEIVER_PAYLOAD_PREFIX, em
-    //         );
-    //     }
+        checkAttestationAndExecution(nttManagerOther, rmsg, 2);
 
-    //     {
-    //         token = DummyToken(nttManager.token());
-    //         assertEq(token.balanceOf(address(user_B)), transferAmount.untrim(token.decimals()));
-    //     }
+        // Replay protection should revert.
+        vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
+        transceivers[0].receiveMessage(rmsg);
+    }
 
-    //     // replay protection for transceiver
-    //     vm.recordLogs();
-    //     vm.expectRevert(
-    //         abi.encodeWithSelector(
-    //             IManagerBase.TransceiverAlreadyAttestedToMessage.selector,
-    //             TransceiverStructs.nttManagerMessageDigest(
-    //                 TransceiverHelpersLib.SENDING_CHAIN_ID, m
-    //             )
-    //         )
-    //     );
-    //     e2.receiveMessage(encodedEm);
-    // }
+    function test_transfersOnForkedChains() public {
+        uint256 evmChainId = block.chainid;
 
-    // function test_transfersOnForkedChains() public {
-    //     uint256 evmChainId = block.chainid;
+        DummyToken token = DummyToken(nttManager.token());
+        uint8 decimals = token.decimals();
 
-    //     uint8 decimals = token.decimals();
+        nttManager.setOutboundLimit(0);
 
-    //     nttManager.setPeer(
-    //         TransceiverHelpersLib.SENDING_CHAIN_ID,
-    //         toWormholeFormat(address(nttManagerOther)),
-    //         9,
-    //         type(uint64).max
-    //     );
-    //     nttManager.setOutboundLimit(0);
+        token.mintDummy(address(user_A), 5 * 10 ** decimals);
 
-    //     token.mintDummy(address(user_A), 5 * 10 ** decimals);
+        vm.startPrank(user_A);
 
-    //     vm.startPrank(user_A);
+        token.approve(address(nttManager), 3 * 10 ** decimals);
 
-    //     token.approve(address(nttManager), 3 * 10 ** decimals);
+        uint64 sequence = nttManager.transfer(
+            1 * 10 ** decimals,
+            chainId2,
+            toWormholeFormat(user_B),
+            toWormholeFormat(user_A),
+            true, // Should queue
+            new bytes(1)
+        );
 
-    //     uint64 sequence = nttManager.transfer(
-    //         1 * 10 ** decimals,
-    //         TransceiverHelpersLib.SENDING_CHAIN_ID,
-    //         toWormholeFormat(user_B),
-    //         toWormholeFormat(user_A),
-    //         true,
-    //         new bytes(1)
-    //     );
+        // We should have enqueued message zero but not have sent anything out.
+        assertEq(sequence, 0);
+        require(0 == transceiver.getMessages().length, "Should not have sent a message out");
 
-    //     vm.warp(vm.getBlockTimestamp() + 1 days);
+        vm.warp(vm.getBlockTimestamp() + 1 days);
 
-    //     vm.chainId(chainId);
+        vm.chainId(chainId);
 
-    //     // Queued outbound transfers can't be completed
-    //     vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
-    //     nttManager.completeOutboundQueuedTransfer(sequence);
+        // Queued outbound transfers can't be completed
+        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        nttManager.completeOutboundQueuedTransfer(sequence);
 
-    //     // Queued outbound transfers can't be cancelled
-    //     vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
-    //     nttManager.cancelOutboundQueuedTransfer(sequence);
+        // Queued outbound transfers can't be cancelled
+        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        nttManager.cancelOutboundQueuedTransfer(sequence);
 
-    //     // Outbound transfers fail when queued
-    //     vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
-    //     nttManager.transfer(
-    //         1 * 10 ** decimals,
-    //         TransceiverHelpersLib.SENDING_CHAIN_ID,
-    //         toWormholeFormat(user_B),
-    //         toWormholeFormat(user_A),
-    //         true,
-    //         new bytes(1)
-    //     );
-    //     vm.stopPrank();
+        // Outbound transfers fail when queued
+        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        nttManager.transfer(
+            1 * 10 ** decimals,
+            chainId2,
+            toWormholeFormat(user_B),
+            toWormholeFormat(user_A),
+            true, // Should queue
+            new bytes(1)
+        );
+        vm.stopPrank();
 
-    //     nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
-    //     // Outbound transfers fail when not queued
-    //     vm.prank(user_A);
-    //     vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
-    //     nttManager.transfer(
-    //         1 * 10 ** decimals,
-    //         TransceiverHelpersLib.SENDING_CHAIN_ID,
-    //         toWormholeFormat(user_B),
-    //         toWormholeFormat(user_A),
-    //         false,
-    //         new bytes(1)
-    //     );
+        nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
+        // Outbound transfers fail when not queued
+        vm.prank(user_A);
+        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        nttManager.transfer(
+            1 * 10 ** decimals,
+            chainId2,
+            toWormholeFormat(user_B),
+            toWormholeFormat(user_A),
+            false,
+            new bytes(1)
+        );
 
-    //     // INBOUND
+        // INBOUND
 
-    //     bytes memory tokenTransferMessage = TransceiverStructs.encodeNativeTokenTransfer(
-    //         TransceiverStructs.NativeTokenTransfer({
-    //             amount: packTrimmedAmount(100, 8),
-    //             sourceToken: toWormholeFormat(address(token)),
-    //             to: toWormholeFormat(user_B),
-    //             toChain: chainId
-    //         })
-    //     );
+        bytes memory tokenTransferMessage = TransceiverStructs.encodeNativeTokenTransfer(
+            TransceiverStructs.NativeTokenTransfer({
+                amount: packTrimmedAmount(100, 8),
+                sourceToken: toWormholeFormat(address(token)),
+                to: toWormholeFormat(user_B),
+                toChain: chainId,
+                additionalPayload: ""
+            })
+        );
 
-    //     bytes memory transceiverMessage;
-    //     TransceiverStructs.NttManagerMessage memory nttManagerMessage;
-    //     (nttManagerMessage, transceiverMessage) = TransceiverHelpersLib
-    //         .buildTransceiverMessageWithNttManagerPayload(
-    //         0,
-    //         toWormholeFormat(address(0x1)),
-    //         toWormholeFormat(address(nttManagerOther)),
-    //         toWormholeFormat(address(nttManager)),
-    //         tokenTransferMessage
-    //     );
+        TransceiverStructs.NttManagerMessage memory m = TransceiverStructs.NttManagerMessage(
+            0, toWormholeFormat(address(0x1)), tokenTransferMessage
+        );
+        bytes memory nttManagerMessage = TransceiverStructs.encodeNttManagerMessage(m);
 
-    //     // Inbound transfers can't be completed
-    //     vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
-    //     transceiver.receiveMessage(transceiverMessage);
+        DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
+            srcChain: chainId2,
+            srcAddr: UniversalAddressLibrary.fromAddress(address(nttManagerOther)),
+            sequence: 0,
+            dstChain: chainId,
+            dstAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
+            payloadHash: keccak256(nttManagerMessage),
+            refundAddr: address(user_A)
+        });
 
-    //     // Inbound queued transfers can't be completed
-    //     nttManager.setInboundLimit(0, TransceiverHelpersLib.SENDING_CHAIN_ID);
+        // The router doesn't do fork detection so the attestation will succeed.
+        transceiver.receiveMessage(rmsg);
 
-    //     vm.chainId(evmChainId);
+        // But the execute should fail.
+        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        nttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
 
-    //     bytes32 hash = TransceiverStructs.nttManagerMessageDigest(
-    //         TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerMessage
-    //     );
-    //     transceiver.receiveMessage(transceiverMessage);
+        // Inbound queued transfers can't be completed
+        nttManager.setInboundLimit(0, chainId2);
 
-    //     vm.chainId(chainId);
+        vm.chainId(evmChainId);
 
-    //     vm.warp(vm.getBlockTimestamp() + 1 days);
+        rmsg.sequence = 1; // Update the router sequence number so we don't get duplicate attestation.
+        transceiver.receiveMessage(rmsg);
+        nttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
 
-    //     vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
-    //     nttManager.completeInboundQueuedTransfer(hash);
-    // }
+        vm.chainId(chainId);
+
+        vm.warp(vm.getBlockTimestamp() + 1 days);
+
+        bytes32 hash = TransceiverStructs.nttManagerMessageDigest(chainId2, m);
+        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        nttManager.completeInboundQueuedTransfer(hash);
+    }
 
     // TODO:
     // currently there is no way to test the threshold logic and the duplicate
@@ -1125,8 +980,9 @@ contract TestNttManager is Test, IRateLimiterEvents {
         transceivers[0] = e1;
         transceivers[1] = e2;
 
-        TransceiverStructs.NttManagerMessage memory m = TransceiverHelpersLib
-            .attestTransceiversHelper(
+        TransceiverStructs.NttManagerMessage memory m;
+        DummyTransceiver.Message memory rmsg;
+        (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             0,
             chainId2,
@@ -1137,19 +993,21 @@ contract TestNttManager is Test, IRateLimiterEvents {
             transceivers
         );
 
+        checkAttestationAndExecution(nttManagerOther, rmsg, 2);
         assertEq(token.balanceOf(address(user_B)), transferAmount.untrim(token.decimals()));
 
-        /*
         // Step 2 (upgrade to a new nttManager)
         MockNttManagerContract newNttManager = new MockNttManagerContract(
             address(router), nttManager.token(), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
-        nttManagerOther.upgrade(address(newNttManager));
 
-        TransceiverHelpersLib.attestTransceiversHelper(
+        ///////////////////////////////////////// TODO: This doesn't work because the integrator is changing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // nttManagerOther.upgrade(address(newNttManager));
+
+        (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             bytes32(uint256(1)),
-            chainId,
+            chainId2,
             nttManager, // this is the proxy
             nttManagerOther, // this is the proxy
             transferAmount,
@@ -1157,11 +1015,10 @@ contract TestNttManager is Test, IRateLimiterEvents {
             transceivers
         );
 
+        checkAttestationAndExecution(nttManagerOther, rmsg, 2);
         assertEq(token.balanceOf(address(user_B)), transferAmount.untrim(token.decimals()) * 2);
-        */
     }
 
-    /*
     function test_tokenUpgradedAndDecimalsChanged() public {
         DummyToken dummy1 = new DummyTokenMintAndBurn();
 
@@ -1179,11 +1036,11 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // register nttManager peer and transceiver
         bytes32 peer = toWormholeFormat(address(nttManager));
-        newNttManager.setPeer(TransceiverHelpersLib.SENDING_CHAIN_ID, peer, 9, type(uint64).max);
-        {
-            DummyTransceiver e = new DummyTransceiver(chainId, address(newNttManager));
-            newNttManager.setTransceiver(address(e));
-        }
+        newNttManager.setPeer(chainId2, peer, 9, type(uint64).max);
+        DummyTransceiver e1 = new DummyTransceiver(chainId, address(router));
+        newNttManager.setTransceiver(address(e1));
+        newNttManager.enableSendTransceiver(chainId2, address(e1));
+        newNttManager.enableRecvTransceiver(chainId2, address(e1));
 
         t.mintDummy(address(user_A), 5 * 10 ** t.decimals());
 
@@ -1192,7 +1049,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         t.approve(address(newNttManager), 3 * 10 ** t.decimals());
         newNttManager.transfer(
             1 * 10 ** t.decimals(),
-            TransceiverHelpersLib.SENDING_CHAIN_ID,
+            chainId2,
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
@@ -1201,9 +1058,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
         vm.stopPrank();
 
         // Check that we can receive a transfer
-        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(newNttManager);
-        newNttManager.setThreshold(1);
-
         bytes memory transceiverMessage;
         bytes memory tokenTransferMessage;
 
@@ -1214,15 +1068,30 @@ contract TestNttManager is Test, IRateLimiterEvents {
                 amount: transferAmount,
                 sourceToken: toWormholeFormat(address(t)),
                 to: toWormholeFormat(user_B),
-                toChain: chainId
+                toChain: chainId,
+                additionalPayload: ""
             })
         );
 
-        (, transceiverMessage) = TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
-            0, bytes32(0), peer, toWormholeFormat(address(newNttManager)), tokenTransferMessage
+        TransceiverStructs.NttManagerMessage memory m = TransceiverStructs.NttManagerMessage(
+            0, toWormholeFormat(address(0x1)), tokenTransferMessage
         );
+        bytes memory nttManagerMessage = TransceiverStructs.encodeNttManagerMessage(m);
 
-        e1.receiveMessage(transceiverMessage);
+        DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
+            srcChain: chainId2,
+            srcAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
+            sequence: 0,
+            dstChain: chainId,
+            dstAddr: UniversalAddressLibrary.fromAddress(address(newNttManager)),
+            payloadHash: keccak256(nttManagerMessage),
+            refundAddr: address(user_A)
+        });
+
+        // The router doesn't do fork detection so the attestation will succeed.
+        e1.receiveMessage(rmsg);
+        newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
+
         uint256 userBBalanceBefore = t.balanceOf(address(user_B));
         assertEq(userBBalanceBefore, transferAmount.untrim(t.decimals()));
 
@@ -1232,8 +1101,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         vm.startPrank(user_A);
         newNttManager.transfer(
-            1 * 10 ** 10,
-            TransceiverHelpersLib.SENDING_CHAIN_ID,
+            1 * 10 ** t.decimals(),
+            chainId2,
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
@@ -1241,14 +1110,16 @@ contract TestNttManager is Test, IRateLimiterEvents {
         );
         vm.stopPrank();
 
-        (, transceiverMessage) = TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
-            bytes32("1"),
-            bytes32(0),
-            peer,
-            toWormholeFormat(address(newNttManager)),
-            tokenTransferMessage
+        m = TransceiverStructs.NttManagerMessage(
+            bytes32("1"), toWormholeFormat(address(0x1)), tokenTransferMessage
         );
-        e1.receiveMessage(transceiverMessage);
+        nttManagerMessage = TransceiverStructs.encodeNttManagerMessage(m);
+
+        rmsg.sequence++;
+        rmsg.payloadHash = keccak256(nttManagerMessage);
+        e1.receiveMessage(rmsg);
+        newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
+
         assertEq(
             t.balanceOf(address(user_B)), userBBalanceBefore + transferAmount.untrim(t.decimals())
         );
@@ -1261,7 +1132,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(abi.encodeWithSelector(NumberOfDecimalsNotEqual.selector, 8, 7));
         newNttManager.transfer(
             1 * 10 ** 7,
-            TransceiverHelpersLib.SENDING_CHAIN_ID,
+            chainId2,
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
@@ -1269,52 +1140,17 @@ contract TestNttManager is Test, IRateLimiterEvents {
         );
         vm.stopPrank();
 
-        (, transceiverMessage) = TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
-            bytes32("2"),
-            bytes32(0),
-            peer,
-            toWormholeFormat(address(newNttManager)),
-            tokenTransferMessage
+        m = TransceiverStructs.NttManagerMessage(
+            bytes32("2"), toWormholeFormat(address(0x1)), tokenTransferMessage
         );
+        nttManagerMessage = TransceiverStructs.encodeNttManagerMessage(m);
+
+        rmsg.sequence++;
+        rmsg.payloadHash = keccak256(nttManagerMessage);
+        e1.receiveMessage(rmsg);
         vm.expectRevert(abi.encodeWithSelector(NumberOfDecimalsNotEqual.selector, 8, 7));
-        e1.receiveMessage(transceiverMessage);
+        newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
     }
-
-    function test_transferWithInstructionIndexOutOfBounds() public {
-        TransceiverStructs.TransceiverInstruction memory TransceiverInstruction =
-            TransceiverStructs.TransceiverInstruction({index: 100, payload: new bytes(1)});
-        TransceiverStructs.TransceiverInstruction[] memory TransceiverInstructions =
-            new TransceiverStructs.TransceiverInstruction[](1);
-        TransceiverInstructions[0] = TransceiverInstruction;
-        bytes memory encodedInstructions =
-            TransceiverStructs.encodeTransceiverInstructions(TransceiverInstructions);
-
-        DummyToken token = DummyToken(nttManager.token());
-
-        uint8 decimals = token.decimals();
-
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
-        nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
-
-        token.mintDummy(address(user_A), 5 * 10 ** decimals);
-
-        vm.startPrank(user_A);
-
-        token.approve(address(nttManager), 3 * 10 ** decimals);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(TransceiverStructs.InvalidInstructionIndex.selector, 100, 1)
-        );
-        nttManager.transfer(
-            1 * 10 ** decimals,
-            chainId2,
-            toWormholeFormat(user_B),
-            toWormholeFormat(user_A),
-            false,
-            encodedInstructions
-        );
-    }
-    */
 
     error ExecutionEventNotFoundInLogs(uint64 nttSeqNo);
 
@@ -1340,14 +1176,15 @@ contract TestNttManager is Test, IRateLimiterEvents {
         revert ExecutionEventNotFoundInLogs(nttSeqNo);
     }
 
-    function checkAttestation(
-        MockNttManagerContract nttm,
-        uint8 transceiverIdx,
-        DummyTransceiver.Message memory rmsg
+    function checkAttestationOnly(
+        NttManager nttm,
+        DummyTransceiver.Message memory rmsg,
+        uint8 expectedAttestations,
+        uint8 transceiverIdx
     ) public view {
         // Verify that it shows as attested.
         require(
-            1 << transceiverIdx
+            expectedAttestations
                 == nttm.messageAttestations(
                     rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
                 ),
@@ -1373,6 +1210,29 @@ contract TestNttManager is Test, IRateLimiterEvents {
                 rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
             ),
             "Message should not be marked executed yet"
+        );
+    }
+
+    error WrongNumberOfAttestations(uint8 expected, uint8 actual);
+
+    function checkAttestationAndExecution(
+        NttManager nttm,
+        DummyTransceiver.Message memory rmsg,
+        uint8 expectedAttestations
+    ) public view {
+        // Verify that it shows as attested.
+        uint8 actual = nttm.messageAttestations(
+            rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
+        );
+        if (actual != expectedAttestations) {
+            revert WrongNumberOfAttestations(expectedAttestations, actual);
+        }
+
+        require(
+            nttManagerOther.isMessageExecuted(
+                rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
+            ),
+            "Message should be marked executed yet"
         );
     }
 }

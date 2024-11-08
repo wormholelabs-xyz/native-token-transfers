@@ -32,7 +32,7 @@ library TransceiverHelpersLib {
         return (e1, e2);
     }
 
-    function attestTransceiversHelper(
+    function transferAttestAndReceive(
         address to,
         bytes32 id,
         uint16 toChain,
@@ -41,31 +41,46 @@ library TransceiverHelpersLib {
         TrimmedAmount amount,
         TrimmedAmount inboundLimit,
         DummyTransceiver[] memory transceivers
-    ) internal returns (TransceiverStructs.NttManagerMessage memory m) {
+    )
+        internal
+        returns (
+            TransceiverStructs.NttManagerMessage memory m,
+            DummyTransceiver.Message memory rmsg
+        )
+    {
         m = buildNttManagerMessage(to, id, toChain, nttManager, amount);
         bytes memory encodedM = TransceiverStructs.encodeNttManagerMessage(m);
-
         prepTokenReceive(nttManager, recipientNttManager, amount, inboundLimit);
+        rmsg = attestAndReceiveMsg(nttManager, recipientNttManager, 0, transceivers, encodedM);
+    }
 
-        DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
-            srcChain: nttManager.chainId(),
-            srcAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
-            sequence: 0,
-            dstChain: recipientNttManager.chainId(),
-            dstAddr: UniversalAddressLibrary.fromAddress(address(recipientNttManager)),
+    function attestAndReceiveMsg(
+        NttManager srcNttManager,
+        NttManager dstNttManager,
+        uint64 sequence,
+        DummyTransceiver[] memory transceivers,
+        bytes memory encodedM
+    ) internal returns (DummyTransceiver.Message memory rmsg) {
+        rmsg = DummyTransceiver.Message({
+            srcChain: srcNttManager.chainId(),
+            srcAddr: UniversalAddressLibrary.fromAddress(address(srcNttManager)),
+            sequence: sequence,
+            dstChain: dstNttManager.chainId(),
+            dstAddr: UniversalAddressLibrary.fromAddress(address(dstNttManager)),
             payloadHash: keccak256(encodedM),
             refundAddr: address(0)
         });
 
         // Attest the message on all the transceivers.
-        for (uint256 i; i < transceivers.length; i++) {
+        uint8 numTrans = uint8(transceivers.length);
+        for (uint8 i; i < numTrans; i++) {
             transceivers[i].receiveMessage(rmsg);
         }
 
         // Execute the message.
-        recipientNttManager.executeMsg(
-            nttManager.chainId(),
-            UniversalAddressLibrary.fromAddress(address(nttManager)),
+        dstNttManager.executeMsg(
+            srcNttManager.chainId(),
+            UniversalAddressLibrary.fromAddress(address(srcNttManager)),
             0,
             encodedM
         );
