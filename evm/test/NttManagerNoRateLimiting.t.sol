@@ -4,7 +4,7 @@ pragma solidity >=0.8.8 <0.9.0;
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
 
-import "../src/NttManager/NttManager.sol";
+import "../src/NttManager/NttManagerNoRateLimiting.sol";
 import "../src/interfaces/INttManager.sol";
 import "../src/interfaces/IRateLimiter.sol";
 import "../src/interfaces/IManagerBase.sol";
@@ -28,11 +28,9 @@ import "./mocks/MockNttManager.sol";
 import "./mocks/MockRouter.sol";
 
 // TODO: set this up so the common functionality tests can be run against both
-contract TestNttManager is Test, IRateLimiterEvents {
-    MockNttManagerContract nttManager;
-    MockNttManagerContract nttManagerOther;
-    MockNttManagerContract nttManagerZeroRateLimiter;
-    MockNttManagerContract nttManagerZeroRateLimiterOther;
+contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
+    MockNttManagerNoRateLimitingContract nttManager;
+    MockNttManagerNoRateLimitingContract nttManagerOther;
     MockRouter router;
     MockRouter routerOther;
     DummyTransceiver transceiver;
@@ -65,19 +63,22 @@ contract TestNttManager is Test, IRateLimiterEvents {
         routerOther = new MockRouter(chainId2);
 
         DummyToken t = new DummyToken();
-        NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+        NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
-        NttManager otherImplementation = new MockNttManagerContract(
-            address(routerOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
+        NttManagerNoRateLimiting otherImplementation = new MockNttManagerNoRateLimitingContract(
+            address(routerOther), address(t), IManagerBase.Mode.LOCKING, chainId2
         );
 
-        nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
+        nttManager = MockNttManagerNoRateLimitingContract(
+            address(new ERC1967Proxy(address(implementation), ""))
+        );
         nttManager.initialize();
 
-        nttManagerOther =
-            MockNttManagerContract(address(new ERC1967Proxy(address(otherImplementation), "")));
+        nttManagerOther = MockNttManagerNoRateLimitingContract(
+            address(new ERC1967Proxy(address(otherImplementation), ""))
+        );
         nttManagerOther.initialize();
 
         nttManager.setPeer(
@@ -123,88 +124,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
         assertEq(simpleCount(n), countSetBits(n));
     }
 
-    // === Deployments with rate limiter disabled
-
-    function test_disabledRateLimiter() public {
-        DummyToken token = new DummyToken();
-        uint8 decimals = token.decimals();
-
-        // Create the first NttManager without rate limiting with two transceivers.
-        NttManager implementation = new MockNttManagerContract(
-            address(router), address(token), IManagerBase.Mode.LOCKING, chainId, 0, true
-        );
-        nttManagerZeroRateLimiter =
-            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
-        nttManagerZeroRateLimiter.initialize();
-        TransceiverHelpersLib.setup_transceivers(nttManagerZeroRateLimiter, chainId2);
-
-        // Create the second NttManager without rate limiting with two transceivers.
-        implementation = new MockNttManagerContract(
-            address(routerOther), address(token), IManagerBase.Mode.LOCKING, chainId2, 0, true
-        );
-        nttManagerZeroRateLimiterOther =
-            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
-        nttManagerZeroRateLimiterOther.initialize();
-        DummyTransceiver[] memory transceiversOther = new DummyTransceiver[](2);
-        (transceiversOther[0], transceiversOther[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerZeroRateLimiterOther, chainId);
-
-        nttManagerZeroRateLimiter.setPeer(
-            chainId2,
-            toWormholeFormat(address(nttManagerZeroRateLimiterOther)),
-            token.decimals(),
-            type(uint64).max
-        );
-
-        nttManagerZeroRateLimiterOther.setPeer(
-            chainId,
-            toWormholeFormat(address(nttManagerZeroRateLimiter)),
-            token.decimals(),
-            type(uint64).max
-        );
-
-        token.mintDummy(address(user_A), 5 * 10 ** decimals);
-
-        // Test outgoing transfers complete successfully with rate limit disabled
-        vm.startPrank(user_A);
-        token.approve(address(nttManagerZeroRateLimiter), 3 * 10 ** decimals);
-
-        uint64 s1 = nttManagerZeroRateLimiter.transfer(
-            1 * 10 ** decimals, chainId2, toWormholeFormat(user_B)
-        );
-        uint64 s2 = nttManagerZeroRateLimiter.transfer(
-            1 * 10 ** decimals, chainId2, toWormholeFormat(user_B)
-        );
-        uint64 s3 = nttManagerZeroRateLimiter.transfer(
-            1 * 10 ** decimals, chainId2, toWormholeFormat(user_B)
-        );
-        vm.stopPrank();
-
-        assertEq(s1, 0);
-        assertEq(s2, 1);
-        assertEq(s3, 2);
-
-        // Test incoming transfer completes successfully with rate limit disabled
-        TrimmedAmount amount = packTrimmedAmount(50, 8);
-        token.mintDummy(address(nttManagerZeroRateLimiterOther), amount.untrim(token.decimals()));
-
-        TransceiverStructs.NttManagerMessage memory m = TransceiverHelpersLib.buildNttManagerMessage(
-            user_B, 0, chainId2, nttManagerZeroRateLimiter, amount
-        );
-        bytes memory encodedM = TransceiverStructs.encodeNttManagerMessage(m);
-
-        // Attest and receive the message on the other manager.
-        DummyTransceiver.Message memory rmsg = TransceiverHelpersLib.attestAndReceiveMsg(
-            nttManagerZeroRateLimiter,
-            nttManagerZeroRateLimiterOther,
-            0,
-            transceiversOther,
-            encodedM
-        );
-
-        checkAttestationAndExecution(nttManagerZeroRateLimiterOther, rmsg, 2);
-    }
-
     // === ownership
 
     function test_owner() public {
@@ -233,7 +152,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         nttManager.pause();
         assertEq(nttManager.isPaused(), true);
 
-        // When the NttManager is paused, initiating transfers, completing queued transfers on both source and destination chains,
+        // When the NttManagerNoRateLimiting is paused, initiating transfers, completing queued transfers on both source and destination chains,
         // executing transfers and attesting to transfers should all revert
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
@@ -265,7 +184,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         bytes memory message = "Hello, World";
 
-        // But executeMsg should be paused in the NttManager.
+        // But executeMsg should be paused in the NttManagerNoRateLimiting.
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
         );
@@ -298,17 +217,18 @@ contract TestNttManager is Test, IRateLimiterEvents {
     // === deployment with invalid token
     function test_brokenToken() public {
         DummyToken t = new DummyTokenBroken();
-        NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+        NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
-        NttManager newNttManager =
-            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
+        NttManagerNoRateLimiting newNttManagerNoRateLimiting = MockNttManagerNoRateLimitingContract(
+            address(new ERC1967Proxy(address(implementation), ""))
+        );
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
-        newNttManager.initialize();
+        newNttManagerNoRateLimiting.initialize();
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
-        newNttManager.transfer(1, 1, bytes32("1"));
+        newNttManagerNoRateLimiting.transfer(1, 1, bytes32("1"));
     }
 
     // === transceiver registration
@@ -371,30 +291,34 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     function test_noEnabledTransceivers() public {
         DummyToken token = new DummyToken();
-        NttManager implementation = new MockNttManagerContract(
-            address(router), address(token), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+        NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
+            address(router), address(token), IManagerBase.Mode.LOCKING, chainId
         );
 
-        MockNttManagerContract newNttManager =
-            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
-        newNttManager.initialize();
+        MockNttManagerNoRateLimitingContract newNttManagerNoRateLimiting =
+        MockNttManagerNoRateLimitingContract(address(new ERC1967Proxy(address(implementation), "")));
+        newNttManagerNoRateLimiting.initialize();
 
         user_A = address(0x123);
         user_B = address(0x456);
 
         uint8 decimals = token.decimals();
 
-        newNttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
-        newNttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
+        newNttManagerNoRateLimiting.setPeer(
+            chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max
+        );
+        newNttManagerNoRateLimiting.setOutboundLimit(
+            packTrimmedAmount(type(uint64).max, 8).untrim(decimals)
+        );
 
         token.mintDummy(address(user_A), 5 * 10 ** decimals);
 
         vm.startPrank(user_A);
 
-        token.approve(address(newNttManager), 3 * 10 ** decimals);
+        token.approve(address(newNttManagerNoRateLimiting), 3 * 10 ** decimals);
 
         vm.expectRevert(abi.encodeWithSelector(Router.TransceiverNotEnabled.selector));
-        newNttManager.transfer(
+        newNttManagerNoRateLimiting.transfer(
             1 * 10 ** decimals,
             chainId2,
             toWormholeFormat(user_B),
@@ -408,86 +332,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
         // TODO: this is accepted currently. should we include a check to ensure
         // only transceivers can be registered? (this would be a convenience check, not a security one)
         nttManager.setTransceiver(address(0x123));
-    }
-
-    function test_maxOutTransceivers() public {
-        // We should be able to register 128 transceivers total. We registered one in set up, so go with one less than the max.
-        uint256 numTransceivers = router.maxTransceivers() - 1;
-        for (uint256 i = 0; i < numTransceivers; ++i) {
-            DummyTransceiver d = new DummyTransceiver(chainId, address(router));
-            nttManager.setTransceiver(address(d));
-        }
-
-        // Registering a new transceiver should fail as we've hit the cap
-        DummyTransceiver c = new DummyTransceiver(chainId, address(router));
-        vm.expectRevert(TransceiverRegistry.TooManyTransceivers.selector);
-        nttManager.setTransceiver(address(c));
-    }
-
-    function test_cancellingOutboundQueuedTransfers() public {
-        DummyToken token = DummyToken(nttManager.token());
-
-        uint8 decimals = token.decimals();
-
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
-        nttManager.setOutboundLimit(0);
-
-        token.mintDummy(address(user_A), 5 * 10 ** decimals);
-
-        vm.startPrank(user_A);
-
-        token.approve(address(nttManager), 3 * 10 ** decimals);
-
-        uint256 userBalanceBefore = token.balanceOf(user_A);
-        uint256 nttManagerBalanceBefore = token.balanceOf(address(nttManager));
-
-        uint64 s1 = nttManager.transfer(
-            1 * 10 ** decimals,
-            chainId2,
-            toWormholeFormat(user_B),
-            toWormholeFormat(user_A),
-            true,
-            new bytes(1)
-        );
-        vm.stopPrank();
-
-        // Another user should not be able to cancel the transfer
-        vm.prank(user_B);
-        vm.expectRevert(
-            abi.encodeWithSelector(INttManager.CancellerNotSender.selector, user_B, user_A)
-        );
-        nttManager.cancelOutboundQueuedTransfer(s1);
-
-        vm.startPrank(user_A);
-        nttManager.cancelOutboundQueuedTransfer(s1);
-
-        // The balance before and after the cancel should be identical
-        assertEq(userBalanceBefore, token.balanceOf(user_A));
-        assertEq(nttManagerBalanceBefore, token.balanceOf(address(nttManager)));
-
-        // We cannot cancel a queued transfer more than once
-        vm.expectRevert(
-            abi.encodeWithSelector(IRateLimiter.OutboundQueuedTransferNotFound.selector, s1)
-        );
-        nttManager.cancelOutboundQueuedTransfer(s1);
-
-        // We cannot complete an outbound transfer that has already been cancelled
-        vm.expectRevert(
-            abi.encodeWithSelector(IRateLimiter.OutboundQueuedTransferNotFound.selector, s1)
-        );
-        nttManager.completeOutboundQueuedTransfer(s1);
-
-        // The next transfer has previous sequence number + 1
-        uint64 s2 = nttManager.transfer(
-            1 * 10 ** decimals,
-            chainId2,
-            toWormholeFormat(user_B),
-            toWormholeFormat(user_A),
-            true,
-            new bytes(1)
-        );
-
-        assertEq(s2, s1 + 1);
     }
 
     // == threshold
@@ -529,19 +373,19 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     // == threshold
 
-    function test_peerRegistrationLimitsCanBeUpdated() public {
+    function test_peerRegistrationLimitsCantBeUpdated() public {
         bytes32 peer = toWormholeFormat(address(nttManager));
         nttManager.setPeer(nttManagerOther.chainId(), peer, 9, 0);
 
         IRateLimiter.RateLimitParams memory params =
             nttManager.getInboundLimitParams(nttManagerOther.chainId());
         assertEq(params.limit.getAmount(), 0);
-        assertEq(params.limit.getDecimals(), 8);
+        assertEq(params.limit.getDecimals(), 0);
 
         nttManager.setInboundLimit(type(uint64).max, nttManagerOther.chainId());
         params = nttManager.getInboundLimitParams(nttManagerOther.chainId());
-        assertEq(params.limit.getAmount(), type(uint64).max / 10 ** (18 - 8));
-        assertEq(params.limit.getDecimals(), 8);
+        assertEq(params.limit.getAmount(), 0);
+        assertEq(params.limit.getDecimals(), 0);
     }
 
     // === attestation
@@ -573,7 +417,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     function test_onlyPeerNttManagerCanAttest() public {
         DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
             srcChain: chainId2,
-            srcAddr: UniversalAddressLibrary.fromAddress(address(0xdeadbeef)), // This is not the peer NttManager.
+            srcAddr: UniversalAddressLibrary.fromAddress(address(0xdeadbeef)), // This is not the peer NttManagerNoRateLimiting.
             sequence: 0,
             dstChain: chainId,
             dstAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
@@ -692,12 +536,20 @@ contract TestNttManager is Test, IRateLimiterEvents {
         vm.startPrank(user_A);
         token.approve(address(nttManager), type(uint256).max);
 
-        // When transferring to a chain with 6 decimals the amount will get trimmed to 6 decimals
-        // and then scaled back up to 8 for local accounting. If we get the trimmed amount to be
-        // type(uint64).max, then when scaling up we could overflow. We safely cast to prevent this.
-
+        // When transferring to a chain with 6 decimals the amount will get trimmed to 6 decimals.
+        // Without rate limiting, this won't be scaled back up to 8 for local accounting.
         uint256 amount = type(uint64).max * 10 ** (decimals - 6);
+        nttManager.transfer(
+            amount,
+            chainId2,
+            toWormholeFormat(user_B),
+            toWormholeFormat(user_A),
+            false,
+            new bytes(1)
+        );
 
+        // However, attempting to transfer an amount higher than the destination chain can handle will revert.
+        amount = type(uint64).max * 10 ** (decimals - 4);
         vm.expectRevert("SafeCast: value doesn't fit in 64 bits");
         nttManager.transfer(
             amount,
@@ -774,20 +626,20 @@ contract TestNttManager is Test, IRateLimiterEvents {
             new bytes(1)
         );
 
-        // We should have enqueued message zero and not have sent anything out.
+        // We should have sent out message zero.
         assertEq(sequence, 0);
-        require(0 == transceiver.getMessages().length, "Should not have sent a message out");
+        require(1 == transceiver.getMessages().length, "Should have sent a message out");
 
         vm.warp(vm.getBlockTimestamp() + 1 days);
 
         vm.chainId(chainId);
 
-        // Queued outbound transfers can't be completed
-        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        // Queued outbound transfers can't be completed, per usual
+        vm.expectRevert(abi.encodeWithSelector(INttManager.NotImplemented.selector));
         nttManager.completeOutboundQueuedTransfer(sequence);
 
-        // Queued outbound transfers can't be cancelled
-        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        // Queued outbound transfers can't be cancelled, per usual
+        vm.expectRevert(abi.encodeWithSelector(INttManager.NotImplemented.selector));
         nttManager.cancelOutboundQueuedTransfer(sequence);
 
         // Outbound transfers fail when queued
@@ -849,7 +701,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
         nttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
 
-        // Inbound queued transfers can't be completed
+        // Inbound queued transfers can't be completed, per usual
         nttManager.setInboundLimit(0, chainId2);
 
         vm.chainId(evmChainId);
@@ -863,7 +715,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         vm.warp(vm.getBlockTimestamp() + 1 days);
 
         bytes32 hash = TransceiverStructs.nttManagerMessageDigest(chainId2, m);
-        vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
+        vm.expectRevert(abi.encodeWithSelector(INttManager.NotImplemented.selector));
         nttManager.completeInboundQueuedTransfer(hash);
     }
 
@@ -879,8 +731,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     function test_noAutomaticSlot() public {
         DummyToken t = new DummyToken();
-        MockNttManagerContract c = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, 1, 1 days, false
+        MockNttManagerNoRateLimitingContract c = new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, 1
         );
         assertEq(c.lastSlot(), 0x0);
     }
@@ -890,8 +742,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         vm.startStateDiffRecording();
 
-        new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, 1, 1 days, false
+        new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, 1
         );
 
         Utils.assertSafeUpgradeableConstructor(vm.stopAndReturnStateDiff());
@@ -955,7 +807,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         require(keccak256(result) == keccak256(expectedRevert), "call did not revert as expected");
     }
 
-    function test_upgradeNttManager() public {
+    function test_upgradeNttManagerNoRateLimiting() public {
         // The testing strategy here is as follows:
         // Step 1: Deploy the nttManager contract with two transceivers and
         //         receive a message through it.
@@ -996,12 +848,12 @@ contract TestNttManager is Test, IRateLimiterEvents {
         assertEq(token.balanceOf(address(user_B)), transferAmount.untrim(token.decimals()));
 
         // Step 2 (upgrade to a new nttManager)
-        MockNttManagerContract newNttManager = new MockNttManagerContract(
-            address(router), nttManager.token(), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+        MockNttManagerNoRateLimitingContract newNttManagerNoRateLimiting = new MockNttManagerNoRateLimitingContract(
+            address(router), nttManager.token(), IManagerBase.Mode.LOCKING, chainId
         );
 
         ///////////////////////////////////////// TODO: This doesn't work because the integrator is changing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // nttManagerOther.upgrade(address(newNttManager));
+        // nttManagerOther.upgrade(address(newNttManagerNoRateLimiting));
 
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
@@ -1018,6 +870,51 @@ contract TestNttManager is Test, IRateLimiterEvents {
         assertEq(token.balanceOf(address(user_B)), transferAmount.untrim(token.decimals()) * 2);
     }
 
+    // NOTE: There are additional tests in `Upgrades.t.sol` to verifying upgrading from `NttManager` to `NttManagerNoRateLimiting`.
+
+    function test_canUpgradeFromNoRateLimitingToRateLimitingDisabled() public {
+        // Create a standard manager with rate limiting disabled.
+        DummyToken t = new DummyToken();
+        NttManager implementation = new MockNttManagerContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 0, true
+        );
+
+        MockNttManagerContract thisNttManager =
+            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
+        thisNttManager.initialize();
+
+        thisNttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+
+        // Upgrade from NttManagerNoRateLimiting to NttManager with rate limiting enabled. This should work.
+        NttManager rateLimitingImplementation = new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId
+        );
+
+        thisNttManager.upgrade(address(rateLimitingImplementation));
+    }
+
+    function test_cannotUpgradeFromNoRateLimitingToRateLimitingEnaabled() public {
+        // Create a standard manager with rate limiting enabled.
+        DummyToken t = new DummyToken();
+        NttManager implementation = new MockNttManagerContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+        );
+
+        MockNttManagerContract thisNttManager =
+            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
+        thisNttManager.initialize();
+
+        thisNttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+
+        // Upgrade from NttManagerNoRateLimiting to NttManager with rate limiting enabled. The immutable check should panic.
+        NttManager rateLimitingImplementation = new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId
+        );
+
+        vm.expectRevert(); // Reverts with a panic on the assert. So, no way to tell WHY this happened.
+        thisNttManager.upgrade(address(rateLimitingImplementation));
+    }
+
     function test_tokenUpgradedAndDecimalsChanged() public {
         DummyToken dummy1 = new DummyTokenMintAndBurn();
 
@@ -1025,28 +922,28 @@ contract TestNttManager is Test, IRateLimiterEvents {
         DummyTokenMintAndBurn t =
             DummyTokenMintAndBurn(address(new ERC1967Proxy(address(dummy1), "")));
 
-        NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+        NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
+            address(router), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
-        MockNttManagerContract newNttManager =
-            MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
-        newNttManager.initialize();
+        MockNttManagerNoRateLimitingContract newNttManagerNoRateLimiting =
+        MockNttManagerNoRateLimitingContract(address(new ERC1967Proxy(address(implementation), "")));
+        newNttManagerNoRateLimiting.initialize();
 
         // register nttManager peer and transceiver
         bytes32 peer = toWormholeFormat(address(nttManager));
-        newNttManager.setPeer(chainId2, peer, 9, type(uint64).max);
+        newNttManagerNoRateLimiting.setPeer(chainId2, peer, 9, type(uint64).max);
         DummyTransceiver e1 = new DummyTransceiver(chainId, address(router));
-        newNttManager.setTransceiver(address(e1));
-        newNttManager.enableSendTransceiver(chainId2, address(e1));
-        newNttManager.enableRecvTransceiver(chainId2, address(e1));
+        newNttManagerNoRateLimiting.setTransceiver(address(e1));
+        newNttManagerNoRateLimiting.enableSendTransceiver(chainId2, address(e1));
+        newNttManagerNoRateLimiting.enableRecvTransceiver(chainId2, address(e1));
 
         t.mintDummy(address(user_A), 5 * 10 ** t.decimals());
 
         // Check that we can initiate a transfer
         vm.startPrank(user_A);
-        t.approve(address(newNttManager), 3 * 10 ** t.decimals());
-        newNttManager.transfer(
+        t.approve(address(newNttManagerNoRateLimiting), 3 * 10 ** t.decimals());
+        newNttManagerNoRateLimiting.transfer(
             1 * 10 ** t.decimals(),
             chainId2,
             toWormholeFormat(user_B),
@@ -1081,24 +978,26 @@ contract TestNttManager is Test, IRateLimiterEvents {
             srcAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
             sequence: 0,
             dstChain: chainId,
-            dstAddr: UniversalAddressLibrary.fromAddress(address(newNttManager)),
+            dstAddr: UniversalAddressLibrary.fromAddress(address(newNttManagerNoRateLimiting)),
             payloadHash: keccak256(nttManagerMessage),
             refundAddr: address(user_A)
         });
 
         // The router doesn't do fork detection so the attestation will succeed.
         e1.receiveMessage(rmsg);
-        newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
+        newNttManagerNoRateLimiting.executeMsg(
+            rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage
+        );
 
-        uint256 userBBalanceBefore = t.balanceOf(address(user_B));
-        assertEq(userBBalanceBefore, transferAmount.untrim(t.decimals()));
+        uint256 userBExpectedBalance = transferAmount.untrim(t.decimals());
+        assertEq(t.balanceOf(address(user_B)), userBExpectedBalance);
 
         // If the token decimals change to the same trimmed amount, we should safely receive the correct number of tokens
         DummyTokenDifferentDecimals dummy2 = new DummyTokenDifferentDecimals(10); // 10 gets trimmed to 8
         t.upgrade(address(dummy2));
 
         vm.startPrank(user_A);
-        newNttManager.transfer(
+        newNttManagerNoRateLimiting.transfer(
             1 * 10 ** t.decimals(),
             chainId2,
             toWormholeFormat(user_B),
@@ -1116,19 +1015,20 @@ contract TestNttManager is Test, IRateLimiterEvents {
         rmsg.sequence++;
         rmsg.payloadHash = keccak256(nttManagerMessage);
         e1.receiveMessage(rmsg);
-        newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
-
-        assertEq(
-            t.balanceOf(address(user_B)), userBBalanceBefore + transferAmount.untrim(t.decimals())
+        newNttManagerNoRateLimiting.executeMsg(
+            rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage
         );
 
-        // Now if the token decimals change to a different trimmed amount, we shouldn't be able to send or receive
+        userBExpectedBalance = userBExpectedBalance + transferAmount.untrim(t.decimals());
+        assertEq(t.balanceOf(address(user_B)), userBExpectedBalance);
+
+        // If the token decimals change to a different trimmed amount, we should still be able
+        // to send and receive, as this only errored in the RateLimiter.
         DummyTokenDifferentDecimals dummy3 = new DummyTokenDifferentDecimals(7); // 7 is 7 trimmed
         t.upgrade(address(dummy3));
 
         vm.startPrank(user_A);
-        vm.expectRevert(abi.encodeWithSelector(NumberOfDecimalsNotEqual.selector, 8, 7));
-        newNttManager.transfer(
+        newNttManagerNoRateLimiting.transfer(
             1 * 10 ** 7,
             chainId2,
             toWormholeFormat(user_B),
@@ -1146,8 +1046,11 @@ contract TestNttManager is Test, IRateLimiterEvents {
         rmsg.sequence++;
         rmsg.payloadHash = keccak256(nttManagerMessage);
         e1.receiveMessage(rmsg);
-        vm.expectRevert(abi.encodeWithSelector(NumberOfDecimalsNotEqual.selector, 8, 7));
-        newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
+        newNttManagerNoRateLimiting.executeMsg(
+            rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage
+        );
+        userBExpectedBalance = userBExpectedBalance + transferAmount.untrim(t.decimals());
+        assertEq(t.balanceOf(address(user_B)), userBExpectedBalance);
     }
 
     error ExecutionEventNotFoundInLogs(uint64 nttSeqNo);
@@ -1175,7 +1078,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     }
 
     function checkAttestationOnly(
-        NttManager nttm,
+        NttManagerNoRateLimiting nttm,
         DummyTransceiver.Message memory rmsg,
         uint8 expectedAttestations,
         uint8 transceiverIdx
@@ -1214,7 +1117,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     error WrongNumberOfAttestations(uint8 expected, uint8 actual);
 
     function checkAttestationAndExecution(
-        NttManager nttm,
+        NttManagerNoRateLimiting nttm,
         DummyTransceiver.Message memory rmsg,
         uint8 expectedAttestations
     ) public view {
