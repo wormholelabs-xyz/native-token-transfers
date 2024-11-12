@@ -143,4 +143,28 @@ library TransceiverHelpersLib {
         );
         return (m, transceiverMessage);
     }
+
+    error ExecutionEventNotFoundInLogs(uint64 nttSeqNo);
+
+    function getExecutionSent(
+        Vm.Log[] memory events,
+        uint16 srcChain,
+        address nttManager,
+        uint64 nttSeqNo
+    ) public pure returns (uint64 routerSeq, bytes memory payload) {
+        for (uint256 idx = 0; idx < events.length; ++idx) {
+            if (
+                events[idx].topics[0]
+                    == bytes32(0x34a042d85c0b260d1be6cd4bf178c0a3f85c6cf64868e6d64ec7a11027449d5a)
+                    && events[idx].topics[1] == bytes32(uint256(srcChain))
+                    && events[idx].emitter == nttManager
+                    && events[idx].topics[3] == bytes32(uint256(nttSeqNo))
+            ) {
+                (routerSeq,,, payload) =
+                    abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
+                return (routerSeq, payload);
+            }
+        }
+        revert ExecutionEventNotFoundInLogs(nttSeqNo);
+    }
 }
