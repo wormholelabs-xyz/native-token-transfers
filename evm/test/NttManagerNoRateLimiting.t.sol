@@ -588,7 +588,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             0,
-            chainId2,
             nttManager,
             nttManagerOther,
             transferAmount,
@@ -836,7 +835,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             0,
-            chainId2,
             nttManager,
             nttManagerOther,
             transferAmount,
@@ -858,7 +856,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             bytes32(uint256(1)),
-            chainId2,
             nttManager, // this is the proxy
             nttManagerOther, // this is the proxy
             transferAmount,

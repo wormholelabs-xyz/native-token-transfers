@@ -32,10 +32,31 @@ library TransceiverHelpersLib {
         return (e1, e2);
     }
 
+    function transferAndAttest(
+        address to,
+        bytes32 id,
+        NttManager nttManager,
+        NttManager recipientNttManager,
+        TrimmedAmount amount,
+        TrimmedAmount inboundLimit,
+        DummyTransceiver[] memory transceivers
+    )
+        internal
+        returns (
+            TransceiverStructs.NttManagerMessage memory m,
+            bytes memory encodedM,
+            DummyTransceiver.Message memory rmsg
+        )
+    {
+        m = buildNttManagerMessage(to, id, recipientNttManager.chainId(), nttManager, amount);
+        encodedM = TransceiverStructs.encodeNttManagerMessage(m);
+        prepTokenReceive(nttManager, recipientNttManager, amount, inboundLimit);
+        rmsg = attestMsg(nttManager, recipientNttManager, 0, transceivers, encodedM);
+    }
+
     function transferAttestAndReceive(
         address to,
         bytes32 id,
-        uint16 toChain,
         NttManager nttManager,
         NttManager recipientNttManager,
         TrimmedAmount amount,
@@ -48,13 +69,13 @@ library TransceiverHelpersLib {
             DummyTransceiver.Message memory rmsg
         )
     {
-        m = buildNttManagerMessage(to, id, toChain, nttManager, amount);
+        m = buildNttManagerMessage(to, id, recipientNttManager.chainId(), nttManager, amount);
         bytes memory encodedM = TransceiverStructs.encodeNttManagerMessage(m);
         prepTokenReceive(nttManager, recipientNttManager, amount, inboundLimit);
         rmsg = attestAndReceiveMsg(nttManager, recipientNttManager, 0, transceivers, encodedM);
     }
 
-    function attestAndReceiveMsg(
+    function attestMsg(
         NttManager srcNttManager,
         NttManager dstNttManager,
         uint64 sequence,
@@ -76,6 +97,16 @@ library TransceiverHelpersLib {
         for (uint8 i; i < numTrans; i++) {
             transceivers[i].receiveMessage(rmsg);
         }
+    }
+
+    function attestAndReceiveMsg(
+        NttManager srcNttManager,
+        NttManager dstNttManager,
+        uint64 sequence,
+        DummyTransceiver[] memory transceivers,
+        bytes memory encodedM
+    ) internal returns (DummyTransceiver.Message memory rmsg) {
+        rmsg = attestMsg(srcNttManager, dstNttManager, sequence, transceivers, encodedM);
 
         // Execute the message.
         dstNttManager.executeMsg(

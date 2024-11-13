@@ -69,7 +69,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
-        NttManager otherImplementation = new MockNttManagerContract(
+        NttManager implementationOther = new MockNttManagerContract(
             address(routerOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
         );
 
@@ -77,7 +77,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         nttManager.initialize();
 
         nttManagerOther =
-            MockNttManagerContract(address(new ERC1967Proxy(address(otherImplementation), "")));
+            MockNttManagerContract(address(new ERC1967Proxy(address(implementationOther), "")));
         nttManagerOther.initialize();
 
         nttManager.setPeer(
@@ -727,8 +727,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
         nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
         nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
 
-        DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
-        (transceivers[0], transceivers[1]) =
+        DummyTransceiver[] memory transceiversOther = new DummyTransceiver[](2);
+        (transceiversOther[0], transceiversOther[1]) =
             TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
 
         TransceiverStructs.NttManagerMessage memory m;
@@ -736,19 +736,18 @@ contract TestNttManager is Test, IRateLimiterEvents {
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             0,
-            chainId2,
             nttManager,
             nttManagerOther,
             transferAmount,
             packTrimmedAmount(type(uint64).max, 8),
-            transceivers
+            transceiversOther
         );
 
         checkAttestationAndExecution(nttManagerOther, rmsg, 2);
 
         // Replay protection should revert.
         vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
-        transceivers[0].receiveMessage(rmsg);
+        transceiversOther[0].receiveMessage(rmsg);
     }
 
     function test_transfersOnForkedChains() public {
@@ -984,7 +983,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             0,
-            chainId2,
             nttManager,
             nttManagerOther,
             transferAmount,
@@ -1006,7 +1004,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
             bytes32(uint256(1)),
-            chainId2,
             nttManager, // this is the proxy
             nttManagerOther, // this is the proxy
             transferAmount,

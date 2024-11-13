@@ -94,14 +94,6 @@ interface IManagerBase {
     /// @param msgHash The hash of the message.
     error MessageNotApproved(bytes32 msgHash);
 
-    /// @notice Emitted when a message has already been executed to
-    ///         notify client of against retries.
-    /// @dev Topic0
-    ///      0x4069dff8c9df7e38d2867c0910bd96fd61787695e5380281148c04932d02bef2.
-    /// @param sourceNttManager The address of the source nttManager.
-    /// @param msgHash The keccak-256 hash of the message.
-    event MessageAlreadyExecuted(bytes32 indexed sourceNttManager, bytes32 indexed msgHash);
-
     /// @notice There are no transceivers enabled with the Manager
     /// @dev Selector 0x69cf632a
     error NoEnabledTransceivers();
