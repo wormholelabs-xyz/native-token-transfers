@@ -103,9 +103,10 @@ abstract contract Transceiver is
     /// @inheritdoc ITransceiver
     function quoteDeliveryPrice(
         uint16 targetChain,
+        uint256 gasLimit,
         TransceiverStructs.TransceiverInstruction memory instruction
     ) external view returns (uint256) {
-        return _quoteDeliveryPrice(targetChain, instruction);
+        return _quoteDeliveryPrice(targetChain, gasLimit, instruction);
     }
 
     /// @inheritdoc ITransceiver
@@ -158,6 +159,7 @@ abstract contract Transceiver is
 
     function _quoteDeliveryPrice(
         uint16 targetChain,
+        uint256 gasLimit,
         TransceiverStructs.TransceiverInstruction memory transceiverInstruction
     ) internal view virtual returns (uint256);
 }

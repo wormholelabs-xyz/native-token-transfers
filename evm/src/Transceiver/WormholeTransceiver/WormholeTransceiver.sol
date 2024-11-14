@@ -150,8 +150,13 @@ contract WormholeTransceiver is
 
     function _quoteDeliveryPrice(
         uint16 targetChain,
+        uint256 _gasLimit, // optional
         TransceiverStructs.TransceiverInstruction memory instruction
     ) internal view override returns (uint256 nativePriceQuote) {
+        if (_gasLimit == 0) {
+            // if 0 provided, we use the hardcoded upper bound
+            _gasLimit = gasLimit;
+        }
         // Check the special instruction up front to see if we should skip sending via a relayer
         WormholeTransceiverInstruction memory weIns =
             parseWormholeTransceiverInstruction(instruction.payload);

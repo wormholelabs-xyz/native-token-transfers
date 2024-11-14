@@ -456,7 +456,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             TransceiverStructs.TransceiverInstruction[] memory instructions,
             uint256[] memory priceQuotes,
             uint256 totalPriceQuote
-        ) = _prepareForTransfer(recipientChain, transceiverInstructions);
+        ) = _prepareForTransfer(recipientChain, 0, transceiverInstructions);
 
         // push it on the stack again to avoid a stack too deep error
         uint64 seq = sequence;

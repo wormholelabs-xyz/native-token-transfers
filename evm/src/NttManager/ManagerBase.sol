@@ -102,9 +102,12 @@ abstract contract ManagerBase is
         }
     }
 
+    // TODO: create a version of this with the old siganture (and all the other
+    // public functions that we just changed to maintain backwards compat)
     /// @inheritdoc IManagerBase
     function quoteDeliveryPrice(
         uint16 recipientChain,
+        uint256 gasLimit,
         bytes memory transceiverInstructions
     ) public view returns (uint256[] memory, uint256) {
         address[] memory enabledTransceivers = _getEnabledTransceiversStorage();
@@ -112,13 +115,14 @@ abstract contract ManagerBase is
         TransceiverStructs.TransceiverInstruction[] memory instructions = TransceiverStructs
             .parseTransceiverInstructions(transceiverInstructions, enabledTransceivers.length);
 
-        return _quoteDeliveryPrice(recipientChain, instructions, enabledTransceivers);
+        return _quoteDeliveryPrice(recipientChain, gasLimit, instructions, enabledTransceivers);
     }
 
     // =============== Internal Logic ===========================================================
 
     function _quoteDeliveryPrice(
         uint16 recipientChain,
+        uint256 gasLimit,
         TransceiverStructs.TransceiverInstruction[] memory transceiverInstructions,
         address[] memory enabledTransceivers
     ) internal view returns (uint256[] memory, uint256) {
@@ -131,7 +135,7 @@ abstract contract ManagerBase is
             address transceiverAddr = enabledTransceivers[i];
             uint8 registeredTransceiverIndex = transceiverInfos[transceiverAddr].index;
             uint256 transceiverPriceQuote = ITransceiver(transceiverAddr).quoteDeliveryPrice(
-                recipientChain, transceiverInstructions[registeredTransceiverIndex]
+                recipientChain, gasLimit, transceiverInstructions[registeredTransceiverIndex]
             );
             priceQuotes[i] = transceiverPriceQuote;
             totalPriceQuote += transceiverPriceQuote;
@@ -221,6 +225,7 @@ abstract contract ManagerBase is
 
     function _prepareForTransfer(
         uint16 recipientChain,
+        uint256 gasLimit,
         bytes memory transceiverInstructions
     )
         internal
@@ -250,7 +255,7 @@ abstract contract ManagerBase is
         }
 
         (uint256[] memory priceQuotes, uint256 totalPriceQuote) =
-            _quoteDeliveryPrice(recipientChain, instructions, enabledTransceivers);
+            _quoteDeliveryPrice(recipientChain, gasLimit, instructions, enabledTransceivers);
         {
             // check up front that msg.value will cover the delivery price
             if (msg.value < totalPriceQuote) {

@@ -147,10 +147,12 @@ interface IManagerBase {
 
     /// @notice Fetch the delivery price for a given recipient chain transfer.
     /// @param recipientChain The Wormhole chain ID of the transfer destination.
+    /// @param gasLimit The gas limit for the delivery transaction (zero for not specified).
     /// @param transceiverInstructions The transceiver specific instructions for quoting and sending
     /// @return - The delivery prices associated with each enabled endpoint and the total price.
     function quoteDeliveryPrice(
         uint16 recipientChain,
+        uint256 gasLimit,
         bytes memory transceiverInstructions
     ) external view returns (uint256[] memory, uint256);
 

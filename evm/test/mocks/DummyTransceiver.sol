@@ -33,8 +33,10 @@ contract DummyTransceiver is Transceiver, ITransceiverReceiver, Test {
 
     function _quoteDeliveryPrice(
         uint16, /* recipientChain */
+        uint256, /* gasLimit */
         TransceiverStructs.TransceiverInstruction memory /* transceiverInstruction */
     ) internal pure override returns (uint256) {
+        // TODO: maybe return gasLimit?
         return 0;
     }
 
