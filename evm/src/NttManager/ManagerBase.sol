@@ -4,9 +4,12 @@ pragma solidity >=0.8.8 <0.9.0;
 import "wormhole-solidity-sdk/Utils.sol";
 import "wormhole-solidity-sdk/libraries/BytesParsing.sol";
 
-import "example-gmp-router/evm/src/interfaces/IRouterAdmin.sol";
-import "example-gmp-router/evm/src/interfaces/IRouterIntegrator.sol";
-import "example-gmp-router/evm/src/Router.sol"; // TODO: Doing this to access TransceiverRegistry publics. Should there be an interface??
+import "example-messaging-endpoint/evm/src/interfaces/IEndpointAdmin.sol";
+import "example-messaging-endpoint/evm/src/interfaces/IEndpointIntegrator.sol";
+
+// TODO: Doing this to access AdapterRegistry publics. Should there be an interface??
+//       Then again, once we implement per-chain thresholding, this reference may go away.
+import "example-messaging-endpoint/evm/src/Endpoint.sol";
 
 import "../libraries/external/OwnableUpgradeable.sol";
 import "../libraries/external/ReentrancyGuardUpgradeable.sol";
@@ -40,27 +43,22 @@ abstract contract ManagerBase is
     /// This chain ID is formatted based on standardized chain IDs, e.g. Ethereum mainnet is 1, Sepolia is 11155111, etc.
     uint256 immutable evmChainId;
 
-    IRouterIntegrator public immutable router;
+    IEndpointIntegrator public immutable endpoint;
 
     // =============== Setup =================================================================
 
-    constructor(address _router, address _token, Mode _mode, uint16 _chainId) {
-        router = IRouterIntegrator(_router);
+    constructor(address _endpoint, address _token, Mode _mode, uint16 _chainId) {
+        endpoint = IEndpointIntegrator(_endpoint);
         token = _token;
         mode = _mode;
         chainId = _chainId;
         evmChainId = block.chainid;
         // save the deployer (check this on initialization)
         deployer = msg.sender;
-
-        // TODO: Doing this here registered the wrong integrator. I think because the proxy stuff made `this` not what we want.
-        // Register this contract as an integrator with the router. For now we are assuming this contract is the admin for the router. TODO: Is that okay?
-        // router.register(address(this));
     }
 
     function _migrate() internal virtual override {
         _checkThresholdInvariants();
-        // TODO: Check that the router doesn't change.
     }
 
     // =============== Storage ==============================================================
@@ -79,7 +77,6 @@ abstract contract ManagerBase is
         }
     }
 
-    // TODO: Do we still need this? The code assigns a sequence number before enqueuing, so I don't think we can just use the router one.
     function _getMessageSequenceStorage() internal pure returns (_Sequence storage $) {
         uint256 slot = uint256(MESSAGE_SEQUENCE_SLOT);
         assembly ("memory-safe") {
@@ -93,7 +90,7 @@ abstract contract ManagerBase is
     function quoteDeliveryPrice(
         uint16 recipientChain
     ) public view returns (uint256) {
-        return router.quoteDeliveryPrice(recipientChain); // TODO: Add in executor delivery price.
+        return endpoint.quoteDeliveryPrice(recipientChain); // TODO: Add in executor delivery price.
     }
 
     // =============== Internal Logic ===========================================================
@@ -131,7 +128,7 @@ abstract contract ManagerBase is
         bytes32 payloadHash
     ) public view returns (bool) {
         (uint128 enabled, uint128 attested,) =
-            router.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
+            endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
 
         return (enabled == attested);
     }
@@ -141,7 +138,6 @@ abstract contract ManagerBase is
         return _getMessageSequenceStorage().num;
     }
 
-    // TODO: What's the difference between this and isMessageApproved?
     /// @inheritdoc IManagerBase
     function isMessageExecuted(
         uint16 srcChain,
@@ -151,7 +147,7 @@ abstract contract ManagerBase is
         bytes32 payloadHash
     ) public view returns (bool) {
         (,, bool executed) =
-            router.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
+            endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
 
         return executed;
     }
@@ -166,7 +162,7 @@ abstract contract ManagerBase is
         uint8 index
     ) public view returns (bool) {
         (, uint128 attested,) =
-            router.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
+            endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
 
         return attested & uint64(1 << index) > 0;
     }
@@ -180,7 +176,7 @@ abstract contract ManagerBase is
         bytes32 payloadHash
     ) public view returns (uint8 count) {
         (, uint128 attested,) =
-            router.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
+            endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
 
         return countSetBits128(attested);
     }
@@ -215,7 +211,7 @@ abstract contract ManagerBase is
     function setTransceiver(
         address transceiver
     ) external onlyOwner {
-        uint8 index = IRouterAdmin(address(router)).addTransceiver(address(this), transceiver);
+        uint8 index = IEndpointAdmin(address(endpoint)).addAdapter(address(this), transceiver);
 
         _Threshold storage _threshold = _getThresholdStorage();
         // We do not automatically increase the threshold here.
@@ -242,22 +238,22 @@ abstract contract ManagerBase is
 
     /// @inheritdoc IManagerBase
     function enableSendTransceiver(uint16 chain, address transceiver) external {
-        IRouterAdmin(address(router)).enableSendTransceiver(address(this), chain, transceiver);
+        IEndpointAdmin(address(endpoint)).enableSendAdapter(address(this), chain, transceiver);
     }
 
     /// @inheritdoc IManagerBase
     function enableRecvTransceiver(uint16 chain, address transceiver) external {
-        IRouterAdmin(address(router)).enableRecvTransceiver(address(this), chain, transceiver);
+        IEndpointAdmin(address(endpoint)).enableRecvAdapter(address(this), chain, transceiver);
     }
 
     /// @inheritdoc IManagerBase
     function disableSendTransceiver(uint16 chain, address transceiver) external {
-        IRouterAdmin(address(router)).disableSendTransceiver(address(this), chain, transceiver);
+        IEndpointAdmin(address(endpoint)).disableSendAdapter(address(this), chain, transceiver);
     }
 
     /// @inheritdoc IManagerBase
     function disableRecvTransceiver(uint16 chain, address transceiver) external {
-        IRouterAdmin(address(router)).disableRecvTransceiver(address(this), chain, transceiver);
+        IEndpointAdmin(address(endpoint)).disableRecvAdapter(address(this), chain, transceiver);
     }
 
     /// @inheritdoc IManagerBase
@@ -295,13 +291,13 @@ abstract contract ManagerBase is
 
     function _checkThresholdInvariants() internal view {
         // TODO: Need to have per-chain thresholds and make sure the threshold is not greater than the enabled on any chain.
-        // Question: Should TransceiverRegistry be able to return the list of chains enabled for receiving for an integrator?
+        // Question: Should AdapterRegistry be able to return the list of chains enabled for receiving for an integrator?
 
         uint8 threshold = _getThresholdStorage().num;
 
         // TODO: This is not right since some of these may be disabled. Really need to do per-chain transceivers anyway.
         address[] memory enabledTransceivers =
-            Router(address(router)).getTransceivers(address(this));
+            Endpoint(address(endpoint)).getAdapters(address(this));
 
         // invariant: threshold <= enabledTransceivers.length
         if (threshold > enabledTransceivers.length) {

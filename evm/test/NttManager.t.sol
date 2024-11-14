@@ -19,13 +19,13 @@ import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 import "wormhole-solidity-sdk/testing/helpers/WormholeSimulator.sol";
 import "wormhole-solidity-sdk/Utils.sol";
-import "example-gmp-router/evm/src/TransceiverRegistry.sol";
+import "example-messaging-endpoint/evm/src/AdapterRegistry.sol";
 import "./libraries/TransceiverHelpers.sol";
 import "./libraries/NttManagerHelpers.sol";
 import "./mocks/DummyTransceiver.sol";
 import "../src/mocks/DummyToken.sol";
 import "./mocks/MockNttManager.sol";
-import "./mocks/MockRouter.sol";
+import "./mocks/MockEndpoint.sol";
 
 // TODO: set this up so the common functionality tests can be run against both
 contract TestNttManager is Test, IRateLimiterEvents {
@@ -33,8 +33,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
     MockNttManagerContract nttManagerOther;
     MockNttManagerContract nttManagerZeroRateLimiter;
     MockNttManagerContract nttManagerZeroRateLimiterOther;
-    MockRouter router;
-    MockRouter routerOther;
+    MockEndpoint endpoint;
+    MockEndpoint endpointOther;
     DummyTransceiver transceiver;
     DummyTransceiver transceiverOther;
 
@@ -61,20 +61,23 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         guardian = new WormholeSimulator(address(wormhole), DEVNET_GUARDIAN_PK);
 
-        router = new MockRouter(chainId);
-        routerOther = new MockRouter(chainId2);
+        endpoint = new MockEndpoint(chainId);
+        endpointOther = new MockEndpoint(chainId2);
 
         DummyToken t = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
         NttManager implementationOther = new MockNttManagerContract(
-            address(routerOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
+            address(endpointOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
         );
 
         nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
         nttManager.initialize();
+
+        assertEq(uint8(IManagerBase.Mode.LOCKING), nttManager.getMode());
+        assertEq(0, nttManager.nextMessageSequence());
 
         nttManagerOther =
             MockNttManagerContract(address(new ERC1967Proxy(address(implementationOther), "")));
@@ -88,12 +91,12 @@ contract TestNttManager is Test, IRateLimiterEvents {
             chainId, toWormholeFormat(address(nttManager)), t.decimals(), type(uint64).max
         );
 
-        transceiver = new DummyTransceiver(chainId, address(router));
+        transceiver = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(transceiver));
         nttManager.enableSendTransceiver(chainId2, address(transceiver));
         nttManager.enableRecvTransceiver(chainId2, address(transceiver));
 
-        transceiverOther = new DummyTransceiver(chainId2, address(routerOther));
+        transceiverOther = new DummyTransceiver(chainId2, address(endpointOther));
         nttManagerOther.setTransceiver(address(transceiverOther));
         nttManagerOther.enableSendTransceiver(chainId, address(transceiverOther));
         nttManagerOther.enableRecvTransceiver(chainId, address(transceiverOther));
@@ -131,7 +134,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // Create the first NttManager without rate limiting with two transceivers.
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(token), IManagerBase.Mode.LOCKING, chainId, 0, true
+            address(endpoint), address(token), IManagerBase.Mode.LOCKING, chainId, 0, true
         );
         nttManagerZeroRateLimiter =
             MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
@@ -140,7 +143,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // Create the second NttManager without rate limiting with two transceivers.
         implementation = new MockNttManagerContract(
-            address(routerOther), address(token), IManagerBase.Mode.LOCKING, chainId2, 0, true
+            address(endpointOther), address(token), IManagerBase.Mode.LOCKING, chainId2, 0, true
         );
         nttManagerZeroRateLimiterOther =
             MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
@@ -250,7 +253,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         );
         nttManager.completeInboundQueuedTransfer(bytes32(0));
 
-        // The router and transceiver are not pausable, so calling receiveMessage should still work.
+        // The endpoint and transceiver are not pausable, so calling receiveMessage should still work.
         DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
             srcChain: chainId2,
             srcAddr: UniversalAddressLibrary.fromAddress(address(nttManagerOther)),
@@ -299,7 +302,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     function test_brokenToken() public {
         DummyToken t = new DummyTokenBroken();
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
         NttManager newNttManager =
@@ -314,12 +317,12 @@ contract TestNttManager is Test, IRateLimiterEvents {
     // === transceiver registration
 
     function test_registerTransceiver() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(e));
     }
 
     function test_onlyOwnerCanModifyTransceivers() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(e));
 
         address notOwner = address(0x123);
@@ -332,19 +335,17 @@ contract TestNttManager is Test, IRateLimiterEvents {
     }
 
     function test_cantEnableTransceiverTwice() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(e));
 
         vm.expectRevert(
-            abi.encodeWithSelector(
-                TransceiverRegistry.TransceiverAlreadyRegistered.selector, address(e)
-            )
+            abi.encodeWithSelector(AdapterRegistry.AdapterAlreadyRegistered.selector, address(e))
         );
         nttManager.setTransceiver(address(e));
     }
 
     function test_disableReenableTransceiver() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(e));
         nttManager.enableSendTransceiver(chainId2, address(e));
         nttManager.enableRecvTransceiver(chainId2, address(e));
@@ -362,8 +363,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     function test_multipleTransceivers() public {
         // Setup already added one transceiver for chainId2 so we'll add a couple more.
-        DummyTransceiver e1 = new DummyTransceiver(chainId2, address(router));
-        DummyTransceiver e2 = new DummyTransceiver(chainId2, address(router));
+        DummyTransceiver e1 = new DummyTransceiver(chainId2, address(endpoint));
+        DummyTransceiver e2 = new DummyTransceiver(chainId2, address(endpoint));
 
         nttManager.setTransceiver(address(e1));
         nttManager.setTransceiver(address(e2));
@@ -372,7 +373,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     function test_noEnabledTransceivers() public {
         DummyToken token = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(token), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint), address(token), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
         MockNttManagerContract newNttManager =
@@ -393,7 +394,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         token.approve(address(newNttManager), 3 * 10 ** decimals);
 
-        vm.expectRevert(abi.encodeWithSelector(Router.TransceiverNotEnabled.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.AdapterNotEnabled.selector));
         newNttManager.transfer(
             1 * 10 ** decimals,
             chainId2,
@@ -412,15 +413,15 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     function test_maxOutTransceivers() public {
         // We should be able to register 128 transceivers total. We registered one in set up, so go with one less than the max.
-        uint256 numTransceivers = router.maxTransceivers() - 1;
+        uint256 numTransceivers = endpoint.maxAdapters() - 1;
         for (uint256 i = 0; i < numTransceivers; ++i) {
-            DummyTransceiver d = new DummyTransceiver(chainId, address(router));
+            DummyTransceiver d = new DummyTransceiver(chainId, address(endpoint));
             nttManager.setTransceiver(address(d));
         }
 
         // Registering a new transceiver should fail as we've hit the cap
-        DummyTransceiver c = new DummyTransceiver(chainId, address(router));
-        vm.expectRevert(TransceiverRegistry.TooManyTransceivers.selector);
+        DummyTransceiver c = new DummyTransceiver(chainId, address(endpoint));
+        vm.expectRevert(AdapterRegistry.TooManyAdapters.selector);
         nttManager.setTransceiver(address(c));
     }
 
@@ -499,8 +500,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
     }
 
     function test_canSetThreshold() public {
-        DummyTransceiver e1 = new DummyTransceiver(chainId, address(router));
-        DummyTransceiver e2 = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e1 = new DummyTransceiver(chainId, address(endpoint));
+        DummyTransceiver e2 = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(e1));
         nttManager.setTransceiver(address(e2));
 
@@ -510,7 +511,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     }
 
     function test_cantSetThresholdToZero() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(e));
 
         vm.expectRevert(abi.encodeWithSelector(IManagerBase.ZeroThreshold.selector));
@@ -566,7 +567,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         // But if we disable the transceiver for receiving, it should fail.
         nttManager.disableRecvTransceiver(chainId2, address(transceiver));
 
-        vm.expectRevert(abi.encodeWithSelector(Router.TransceiverNotEnabled.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.AdapterNotEnabled.selector));
         transceiver.receiveMessage(rmsg);
     }
 
@@ -581,7 +582,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             refundAddr: address(user_A)
         });
 
-        // The router and transceiver don't block this, so this should succeed.
+        // The endpoint and transceiver don't block this, so this should succeed.
         transceiver.receiveMessage(rmsg);
         checkAttestationOnly(nttManager, rmsg, 1, 0);
 
@@ -615,7 +616,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         checkAttestationOnly(nttManager, rmsg, 1, 0);
 
         // Can't attest the same message twice.
-        vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.DuplicateMessageAttestation.selector));
         transceiver.receiveMessage(rmsg);
 
         // Can't attest when the transceiver is disabled.
@@ -631,7 +632,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             refundAddr: address(user_A)
         });
 
-        vm.expectRevert(abi.encodeWithSelector(Router.TransceiverNotEnabled.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.AdapterNotEnabled.selector));
         transceiver.receiveMessage(rmsg);
     }
 
@@ -723,13 +724,9 @@ contract TestNttManager is Test, IRateLimiterEvents {
     function test_alreadyExecuted() public {
         TrimmedAmount transferAmount = packTrimmedAmount(50, 8);
 
-        // Get rid of the original transceiver and add two new ones.
-        nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
-        nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
-
         DummyTransceiver[] memory transceiversOther = new DummyTransceiver[](2);
         (transceiversOther[0], transceiversOther[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
+            TransceiverHelpersLib.addTransceiver(nttManagerOther, transceiverOther, chainId);
 
         TransceiverStructs.NttManagerMessage memory m;
         DummyTransceiver.Message memory rmsg;
@@ -746,7 +743,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         checkAttestationAndExecution(nttManagerOther, rmsg, 2);
 
         // Replay protection should revert.
-        vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.DuplicateMessageAttestation.selector));
         transceiversOther[0].receiveMessage(rmsg);
     }
 
@@ -841,7 +838,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             refundAddr: address(user_A)
         });
 
-        // The router doesn't do fork detection so the attestation will succeed.
+        // The endpoint doesn't do fork detection so the attestation will succeed.
         transceiver.receiveMessage(rmsg);
 
         // But the execute should fail.
@@ -853,7 +850,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         vm.chainId(evmChainId);
 
-        rmsg.sequence = 1; // Update the router sequence number so we don't get duplicate attestation.
+        rmsg.sequence = 1; // Update the endpoint sequence number so we don't get duplicate attestation.
         transceiver.receiveMessage(rmsg);
         nttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
 
@@ -879,7 +876,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
     function test_noAutomaticSlot() public {
         DummyToken t = new DummyToken();
         MockNttManagerContract c = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, 1, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, 1, 1 days, false
         );
         assertEq(c.lastSlot(), 0x0);
     }
@@ -890,7 +887,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         vm.startStateDiffRecording();
 
         new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, 1, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, 1, 1 days, false
         );
 
         Utils.assertSafeUpgradeableConstructor(vm.stopAndReturnStateDiff());
@@ -964,19 +961,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
         //           transceivers) and receive a message through it.
         // This ensures that the storage slots don't get clobbered through the upgrades.
 
-        // Get rid of the original transceiver so we can add two new ones.
-        nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
-        nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
-
         DummyToken token = DummyToken(nttManager.token());
         TrimmedAmount transferAmount = packTrimmedAmount(50, 8);
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
 
         // Step 1 (contract is deployed by setUp())
         DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
-        transceivers[0] = e1;
-        transceivers[1] = e2;
+        (transceivers[0], transceivers[1]) =
+            TransceiverHelpersLib.addTransceiver(nttManagerOther, transceiverOther, chainId);
 
         TransceiverStructs.NttManagerMessage memory m;
         DummyTransceiver.Message memory rmsg;
@@ -995,11 +986,15 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // Step 2 (upgrade to a new nttManager)
         MockNttManagerContract newNttManager = new MockNttManagerContract(
-            address(router), nttManager.token(), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(nttManagerOther.endpoint()),
+            nttManagerOther.token(),
+            nttManagerOther.mode(),
+            nttManagerOther.chainId(),
+            1 days,
+            false
         );
 
-        ///////////////////////////////////////// TODO: This doesn't work because the integrator is changing!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // nttManagerOther.upgrade(address(newNttManager));
+        nttManagerOther.upgrade(address(newNttManager));
 
         (m, rmsg) = TransceiverHelpersLib.transferAttestAndReceive(
             user_B,
@@ -1023,7 +1018,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             DummyTokenMintAndBurn(address(new ERC1967Proxy(address(dummy1), "")));
 
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
         MockNttManagerContract newNttManager =
@@ -1033,7 +1028,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         // register nttManager peer and transceiver
         bytes32 peer = toWormholeFormat(address(nttManager));
         newNttManager.setPeer(chainId2, peer, 9, type(uint64).max);
-        DummyTransceiver e1 = new DummyTransceiver(chainId, address(router));
+        DummyTransceiver e1 = new DummyTransceiver(chainId, address(endpoint));
         newNttManager.setTransceiver(address(e1));
         newNttManager.enableSendTransceiver(chainId2, address(e1));
         newNttManager.enableRecvTransceiver(chainId2, address(e1));
@@ -1083,7 +1078,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             refundAddr: address(user_A)
         });
 
-        // The router doesn't do fork detection so the attestation will succeed.
+        // The endpoint doesn't do fork detection so the attestation will succeed.
         e1.receiveMessage(rmsg);
         newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
 
@@ -1154,7 +1149,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
         uint16 srcChain,
         address integrator,
         uint64 nttSeqNo
-    ) public pure returns (uint64 routerSeq, bytes memory payload) {
+    ) public pure returns (uint64 epSeq, bytes memory payload) {
         for (uint256 idx = 0; idx < events.length; ++idx) {
             if (
                 events[idx].topics[0]
@@ -1163,9 +1158,8 @@ contract TestNttManager is Test, IRateLimiterEvents {
                     && events[idx].emitter == integrator
                     && events[idx].topics[3] == bytes32(uint256(nttSeqNo))
             ) {
-                (routerSeq,,, payload) =
-                    abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
-                return (routerSeq, payload);
+                (epSeq,,, payload) = abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
+                return (epSeq, payload);
             }
         }
         revert ExecutionEventNotFoundInLogs(nttSeqNo);
@@ -1197,6 +1191,12 @@ contract TestNttManager is Test, IRateLimiterEvents {
                 transceiverIdx
             ),
             "Transceiver did not attest to message"
+        );
+
+        require(
+            nttm.isMessageApproved(
+                rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
+            )
         );
 
         // But the message should not be marked as executed.

@@ -14,7 +14,7 @@ interface IWormhole {
 
 contract DeployWormholeNtt is Script, DeployWormholeNttBase {
     function run(
-        address router,
+        address endpoint,
         address wormhole,
         address transceiver,
         address token,
@@ -65,7 +65,7 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
             decimals > TRIMMED_DECIMALS ? uint256(10 ** (decimals - TRIMMED_DECIMALS)) : 1;
 
         DeploymentParams memory params = DeploymentParams({
-            routerAddr: router,
+            endpointAddr: endpoint,
             token: token,
             mode: mode,
             wormholeChainId: chainId,
@@ -104,7 +104,7 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
         bool shouldSkipRatelimiter = rateLimitDuration == 0;
 
         NttManager implementation = new NttManager(
-            address(nttManager.router()),
+            address(nttManager.endpoint()),
             nttManager.token(),
             nttManager.mode(),
             nttManager.chainId(),

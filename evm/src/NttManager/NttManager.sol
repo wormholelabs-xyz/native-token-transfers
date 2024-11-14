@@ -45,7 +45,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     // =============== Setup =================================================================
 
     constructor(
-        address _router,
+        address _endpoint,
         address _token,
         Mode _mode,
         uint16 _chainId,
@@ -53,7 +53,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bool _skipRateLimiting
     )
         RateLimiter(_rateLimitDuration, _skipRateLimiting)
-        ManagerBase(_router, _token, _mode, _chainId)
+        ManagerBase(_endpoint, _token, _mode, _chainId)
     {}
 
     function __NttManager_init() internal onlyInitializing {
@@ -69,7 +69,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         _setOutboundLimit(TrimmedAmountLib.max(tokenDecimals()));
 
         // TODO: I tried doing this in the constructor of ManagerBase but the proxy stuff seems to make `this` wrong.
-        router.register(address(this));
+        endpoint.register(address(this));
     }
 
     function _initialize() internal virtual override {
@@ -190,7 +190,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     function executeMsg(
         uint16 sourceChainId,
         UniversalAddress sourceNttManagerAddress,
-        uint64 routerSeq,
+        uint64 epSeq,
         bytes memory payload
     ) public whenNotPaused {
         // We should only except messages from a peer.
@@ -201,12 +201,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             );
         }
 
-        // The router uses the payload hash, not the actual payload.
+        // The endpoint uses the payload hash, not the actual payload.
         bytes32 payloadHash = keccak256(payload);
 
-        // The router does replay protection and verifies that there has been at least one attestation.
+        // The endpoint does replay protection and verifies that there has been at least one attestation.
         (uint128 enabled, uint128 attested) =
-            router.recvMessage(sourceChainId, sourceNttManagerAddress, routerSeq, payloadHash);
+            endpoint.recvMessage(sourceChainId, sourceNttManagerAddress, epSeq, payloadHash);
 
         // TODO: This should be per-chain thresholding.
         if (enabled != attested) {
@@ -566,7 +566,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 payloadHash = keccak256(encodedNttManagerPayload);
 
         // send the message
-        uint64 routerSeqNo = router.sendMessage(
+        uint64 epSeqNo = endpoint.sendMessage(
             destinationChain,
             UniversalAddressLibrary.fromBytes32(peerAddress),
             payloadHash,
@@ -582,7 +582,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             chainId,
             address(this),
             seq,
-            routerSeqNo,
+            epSeqNo,
             destinationChain,
             peerAddress,
             encodedNttManagerPayload

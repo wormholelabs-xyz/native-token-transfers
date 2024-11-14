@@ -14,7 +14,7 @@ import {DummyToken, DummyTokenMintAndBurn} from "./NttManager.t.sol";
 import "../src/libraries/TransceiverStructs.sol";
 import "./libraries/TransceiverHelpers.sol";
 import "./mocks/MockNttManagerAdditionalPayload.sol";
-import "./mocks/MockRouter.sol";
+import "./mocks/MockEndpoint.sol";
 import "./mocks/DummyTransceiver.sol";
 
 import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
@@ -22,12 +22,12 @@ import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 import "wormhole-solidity-sdk/testing/helpers/WormholeSimulator.sol";
 import "wormhole-solidity-sdk/Utils.sol";
-import "example-gmp-router/evm/src/Router.sol";
+import "example-messaging-endpoint/evm/src/Endpoint.sol";
 //import "wormhole-solidity-sdk/testing/WormholeRelayerTest.sol";
 
 contract TestAdditionalPayload is Test {
-    MockRouter routerChain1;
-    MockRouter routerChain2;
+    MockEndpoint endpointChain1;
+    MockEndpoint endpointChain2;
 
     NttManagerNoRateLimiting nttManagerChain1;
     NttManagerNoRateLimiting nttManagerChain2;
@@ -64,13 +64,13 @@ contract TestAdditionalPayload is Test {
 
         guardian = new WormholeSimulator(address(wormhole), DEVNET_GUARDIAN_PK);
 
-        routerChain1 = new MockRouter(chainId1);
-        routerChain2 = new MockRouter(chainId2);
+        endpointChain1 = new MockEndpoint(chainId1);
+        endpointChain2 = new MockEndpoint(chainId2);
 
         vm.chainId(chainId1);
         DummyToken t1 = new DummyToken();
         NttManagerNoRateLimiting implementation = new MockNttManagerAdditionalPayloadContract(
-            address(routerChain1), address(t1), IManagerBase.Mode.LOCKING, chainId1
+            address(endpointChain1), address(t1), IManagerBase.Mode.LOCKING, chainId1
         );
 
         nttManagerChain1 = MockNttManagerAdditionalPayloadContract(
@@ -78,7 +78,7 @@ contract TestAdditionalPayload is Test {
         );
         nttManagerChain1.initialize();
 
-        transceiverChain1 = new DummyTransceiver(chainId1, address(routerChain1));
+        transceiverChain1 = new DummyTransceiver(chainId1, address(endpointChain1));
         nttManagerChain1.setTransceiver(address(transceiverChain1));
         nttManagerChain1.enableSendTransceiver(chainId2, address(transceiverChain1));
         nttManagerChain1.enableRecvTransceiver(chainId2, address(transceiverChain1));
@@ -87,7 +87,7 @@ contract TestAdditionalPayload is Test {
         vm.chainId(chainId2);
         DummyToken t2 = new DummyTokenMintAndBurn();
         NttManagerNoRateLimiting implementationChain2 = new MockNttManagerAdditionalPayloadContract(
-            address(routerChain2), address(t2), IManagerBase.Mode.BURNING, chainId2
+            address(endpointChain2), address(t2), IManagerBase.Mode.BURNING, chainId2
         );
 
         nttManagerChain2 = MockNttManagerAdditionalPayloadContract(
@@ -95,7 +95,7 @@ contract TestAdditionalPayload is Test {
         );
         nttManagerChain2.initialize();
 
-        transceiverChain2 = new DummyTransceiver(chainId2, address(routerChain2));
+        transceiverChain2 = new DummyTransceiver(chainId2, address(endpointChain2));
         nttManagerChain2.setTransceiver(address(transceiverChain2));
         nttManagerChain2.enableSendTransceiver(chainId1, address(transceiverChain2));
         nttManagerChain2.enableRecvTransceiver(chainId1, address(transceiverChain2));
@@ -183,7 +183,7 @@ contract TestAdditionalPayload is Test {
         vm.chainId(chainId2);
 
         // Wrong chain receiving the signed VAA
-        vm.expectRevert(Router.InvalidDestinationChain.selector);
+        vm.expectRevert(Endpoint.InvalidDestinationChain.selector);
         transceiverChain1.receiveMessage(rmsgs[0]);
 
         // Attest on the correct chain.

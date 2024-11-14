@@ -8,19 +8,19 @@ import "../src/interfaces/IManagerBase.sol";
 import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {DummyTransceiver} from "./NttManager.t.sol";
 import {DummyToken} from "./NttManager.t.sol";
-import "./mocks/MockRouter.sol";
+import "./mocks/MockEndpoint.sol";
 
 contract OwnershipTests is Test {
-    MockRouter router;
+    MockEndpoint endpoint;
     NttManager nttManager;
     uint16 constant chainId = 7;
 
     function setUp() public {
         DummyToken t = new DummyToken();
-        router = new MockRouter(chainId);
+        endpoint = new MockEndpoint(chainId);
 
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
         nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
@@ -29,7 +29,7 @@ contract OwnershipTests is Test {
 
     function test_setUp() public {}
 
-    // The transceiver is no longer owned by the NttManager. It's owned by the router. Nothing to test here.
+    // The transceiver is no longer owned by the NttManager. It's owned by the endpoint. Nothing to test here.
     // function checkOwnership(DummyTransceiver e, address nttManagerOwner) public {
     //     address transceiverNttManager = e.getNttManagerOwner();
     //     assertEq(transceiverNttManager, nttManagerOwner);

@@ -4,20 +4,20 @@ pragma solidity >=0.8.8 <0.9.0;
 
 import "forge-std/Test.sol";
 
-import "example-gmp-router/evm/src/interfaces/IRouterTransceiver.sol";
-import "example-gmp-router/evm/src/interfaces/ITransceiver.sol";
+import "example-messaging-endpoint/evm/src/interfaces/IEndpointAdapter.sol";
+import "example-messaging-endpoint/evm/src/interfaces/IAdapter.sol";
 
-contract DummyTransceiver is ITransceiver {
+contract DummyTransceiver is IAdapter {
     uint16 public immutable chainId;
-    address public immutable router;
+    address public immutable endpoint;
     bytes4 constant TEST_TRANSCEIVER_PAYLOAD_PREFIX = 0x99455454;
 
-    constructor(uint16 _chainId, address _router) {
+    constructor(uint16 _chainId, address _endpoint) {
         chainId = _chainId;
-        router = _router;
+        endpoint = _endpoint;
     }
 
-    function getTransceiverType() external pure returns (string memory) {
+    function getAdapterType() external pure returns (string memory) {
         return "dummy";
     }
 
@@ -66,7 +66,7 @@ contract DummyTransceiver is ITransceiver {
     function receiveMessage(
         Message memory m
     ) external {
-        IRouterTransceiver(router).attestMessage(
+        IEndpointAdapter(endpoint).attestMessage(
             m.srcChain, m.srcAddr, m.sequence, m.dstChain, m.dstAddr, m.payloadHash
         );
     }

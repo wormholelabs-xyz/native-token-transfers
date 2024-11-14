@@ -13,7 +13,7 @@ import {ParseNttConfig} from "./helpers/ParseNttConfig.sol";
 
 contract UpgradeNttManager is ParseNttConfig {
     struct DeploymentParams {
-        address router;
+        address endpoint;
         address token;
         INttManager.Mode mode;
         uint16 wormholeChainId;
@@ -27,7 +27,7 @@ contract UpgradeNttManager is ParseNttConfig {
     ) internal {
         // Deploy the Manager Implementation.
         NttManager implementation = new NttManager(
-            params.router,
+            params.endpoint,
             params.token,
             params.mode,
             params.wormholeChainId,

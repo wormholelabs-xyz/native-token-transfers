@@ -13,14 +13,14 @@ import "./libraries/TransceiverHelpers.sol";
 import "./libraries/NttManagerHelpers.sol";
 import "wormhole-solidity-sdk/libraries/BytesParsing.sol";
 import "./mocks/MockNttManager.sol";
-import "./mocks/MockRouter.sol";
+import "./mocks/MockEndpoint.sol";
 import "./mocks/DummyTransceiver.sol";
 
 pragma solidity >=0.8.8 <0.9.0;
 
 contract TestRateLimit is Test, IRateLimiterEvents {
-    MockRouter router;
-    MockRouter routerOther;
+    MockEndpoint endpoint;
+    MockEndpoint endpointOther;
     MockNttManagerContract nttManager;
     MockNttManagerContract nttManagerOther;
     DummyTransceiver transceiver;
@@ -49,16 +49,16 @@ contract TestRateLimit is Test, IRateLimiterEvents {
 
         guardian = new WormholeSimulator(address(wormhole), DEVNET_GUARDIAN_PK);
 
-        router = new MockRouter(chainId);
-        routerOther = new MockRouter(chainId2);
+        endpoint = new MockEndpoint(chainId);
+        endpointOther = new MockEndpoint(chainId2);
 
         DummyToken t = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(router), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
         );
 
         NttManager implementationOther = new MockNttManagerContract(
-            address(routerOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
+            address(endpointOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
         );
 
         nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
@@ -76,12 +76,12 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             chainId, toWormholeFormat(address(nttManager)), t.decimals(), type(uint64).max
         );
 
-        transceiver = new DummyTransceiver(chainId, address(nttManager));
+        transceiver = new DummyTransceiver(chainId, address(endpoint));
         nttManager.setTransceiver(address(transceiver));
         nttManager.enableSendTransceiver(chainId2, address(transceiver));
         nttManager.enableRecvTransceiver(chainId2, address(transceiver));
 
-        transceiverOther = new DummyTransceiver(chainId2, address(nttManagerOther));
+        transceiverOther = new DummyTransceiver(chainId2, address(endpointOther));
         nttManagerOther.setTransceiver(address(transceiverOther));
         nttManagerOther.enableSendTransceiver(chainId, address(transceiverOther));
         nttManagerOther.enableRecvTransceiver(chainId, address(transceiverOther));
@@ -533,13 +533,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
     }
 
     function test_inboundRateLimit_simple() public {
-        // Get rid of the original transceiver and add two new ones.
-        nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
-        nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
-
         DummyTransceiver[] memory transceiversOther = new DummyTransceiver[](2);
         (transceiversOther[0], transceiversOther[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
+            TransceiverHelpersLib.addTransceiver(nttManagerOther, transceiverOther, chainId);
 
         DummyToken token = DummyToken(nttManager.token());
 
@@ -575,13 +571,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
     function test_inboundRateLimit_queue() public {
         DummyToken token = DummyToken(nttManager.token());
 
-        // Get rid of the original transceiver and add two new ones.
-        nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
-        nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
-
         DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
         (transceivers[0], transceivers[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
+            TransceiverHelpersLib.addTransceiver(nttManagerOther, transceiverOther, chainId);
 
         (
             TransceiverStructs.NttManagerMessage memory m,
@@ -699,13 +691,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
 
         // now receive 10 tokens from user_B -> user_A
 
-        // Get rid of the original transceiver and add two new ones.
-        nttManager.disableSendTransceiver(chainId2, address(transceiver));
-        nttManager.disableRecvTransceiver(chainId2, address(transceiver));
-
         DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
         (transceivers[0], transceivers[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManager, chainId2);
+            TransceiverHelpersLib.addTransceiver(nttManager, transceiver, chainId2);
 
         TransceiverHelpersLib.transferAttestAndReceive(
             user_A, 0, nttManagerOther, nttManager, transferAmount, mintAmount, transceivers
@@ -791,13 +779,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
     }
 
     function initializeTransceivers() public returns (DummyTransceiver[] memory) {
-        // Get rid of the original transceiver and add two new ones.
-        nttManager.disableSendTransceiver(chainId2, address(transceiver));
-        nttManager.disableRecvTransceiver(chainId2, address(transceiver));
-
         DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
         (transceivers[0], transceivers[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManager, chainId2);
+            TransceiverHelpersLib.addTransceiver(nttManager, transceiver, chainId2);
         return transceivers;
     }
 
@@ -1044,13 +1028,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         inboundLimitAmt = bound(amount, 0, amount - 1);
         DummyToken token = DummyToken(nttManager.token());
 
-        // Get rid of the original transceiver and add two new ones.
-        nttManagerOther.disableSendTransceiver(chainId, address(transceiverOther));
-        nttManagerOther.disableRecvTransceiver(chainId, address(transceiverOther));
-
         DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
         (transceivers[0], transceivers[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther, chainId);
+            TransceiverHelpersLib.addTransceiver(nttManagerOther, transceiverOther, chainId);
 
         // TransceiverStructs.NttManagerMessage memory m;
         // bytes memory encodedEm;

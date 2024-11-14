@@ -15,21 +15,21 @@ import "../src/libraries/TransceiverStructs.sol";
 import "./libraries/TransceiverHelpers.sol";
 import "./mocks/DummyTransceiver.sol";
 import "./mocks/MockNttManager.sol";
-import "./mocks/MockRouter.sol";
+import "./mocks/MockEndpoint.sol";
 
 import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 import "wormhole-solidity-sdk/testing/helpers/WormholeSimulator.sol";
 import "wormhole-solidity-sdk/Utils.sol";
-import "example-gmp-router/evm/src/Router.sol";
+import "example-messaging-endpoint/evm/src/Endpoint.sol";
 
 contract TestEndToEndBase is Test, IRateLimiterEvents {
     NttManager nttManagerChain1;
     NttManager nttManagerChain2;
 
-    MockRouter routerChain1;
-    MockRouter routerChain2;
+    MockEndpoint endpointChain1;
+    MockEndpoint endpointChain2;
 
     DummyTransceiver transceiverChain1;
     DummyTransceiver transceiverChain2;
@@ -63,20 +63,20 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
 
         guardian = new WormholeSimulator(address(wormhole), DEVNET_GUARDIAN_PK);
 
-        routerChain1 = new MockRouter(chainId1);
-        routerChain2 = new MockRouter(chainId2);
+        endpointChain1 = new MockEndpoint(chainId1);
+        endpointChain2 = new MockEndpoint(chainId2);
 
         vm.chainId(chainId1);
         DummyToken t1 = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(routerChain1), address(t1), IManagerBase.Mode.LOCKING, chainId1, 1 days, false
+            address(endpointChain1), address(t1), IManagerBase.Mode.LOCKING, chainId1, 1 days, false
         );
 
         nttManagerChain1 =
             MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
         nttManagerChain1.initialize();
 
-        transceiverChain1 = new DummyTransceiver(chainId1, address(routerChain1));
+        transceiverChain1 = new DummyTransceiver(chainId1, address(endpointChain1));
         nttManagerChain1.setTransceiver(address(transceiverChain1));
         nttManagerChain1.enableSendTransceiver(chainId2, address(transceiverChain1));
         nttManagerChain1.enableRecvTransceiver(chainId2, address(transceiverChain1));
@@ -88,14 +88,14 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         vm.chainId(chainId2);
         DummyToken t2 = new DummyTokenMintAndBurn();
         NttManager implementationChain2 = new MockNttManagerContract(
-            address(routerChain2), address(t2), IManagerBase.Mode.BURNING, chainId2, 1 days, false
+            address(endpointChain2), address(t2), IManagerBase.Mode.BURNING, chainId2, 1 days, false
         );
 
         nttManagerChain2 =
             MockNttManagerContract(address(new ERC1967Proxy(address(implementationChain2), "")));
         nttManagerChain2.initialize();
 
-        transceiverChain2 = new DummyTransceiver(chainId2, address(routerChain2));
+        transceiverChain2 = new DummyTransceiver(chainId2, address(endpointChain2));
         nttManagerChain2.setTransceiver(address(transceiverChain2));
         nttManagerChain2.enableSendTransceiver(chainId1, address(transceiverChain2));
         nttManagerChain2.enableRecvTransceiver(chainId1, address(transceiverChain2));
@@ -171,7 +171,7 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         vm.chainId(chainId2);
 
         // Wrong chain receiving the attestation.
-        vm.expectRevert(abi.encodeWithSelector(Router.InvalidDestinationChain.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.InvalidDestinationChain.selector));
         transceiverChain1.receiveMessage(rmsgs[0]);
 
         // Right chain receiving the attestation.
@@ -192,7 +192,7 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         }
 
         // Can't resubmit the same message twice
-        vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.DuplicateMessageAttestation.selector));
         transceiverChain2.receiveMessage(rmsgs[0]);
 
         // Go back the other way from a THIRD user
@@ -312,7 +312,7 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         vm.stopPrank();
 
         // Wrong chain receiving the attestation.
-        vm.expectRevert(abi.encodeWithSelector(Router.InvalidDestinationChain.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.InvalidDestinationChain.selector));
         transceiverChain1.receiveMessage(rmsgs[0]);
 
         // Right chain receiving the attestation.
@@ -334,7 +334,7 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         }
 
         // Can't resubmit the same message twice
-        vm.expectRevert(abi.encodeWithSelector(Router.DuplicateMessageAttestation.selector));
+        vm.expectRevert(abi.encodeWithSelector(Endpoint.DuplicateMessageAttestation.selector));
         transceiverChain2.receiveMessage(rmsgs[0]);
 
         // Go back the other way from a THIRD user
@@ -459,17 +459,13 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         }
     }
 
-    function test_multiTransceiver() public {
+    function test_multIAdapter() public {
         vm.chainId(chainId1);
 
         // Create a dual transceiver for each manager.
-        // Get rid of the original transceiver and add two new ones.
-
-        nttManagerChain1.disableSendTransceiver(chainId2, address(transceiverChain1));
-        nttManagerChain1.disableRecvTransceiver(chainId2, address(transceiverChain1));
         DummyTransceiver[] memory transceiversChain1 = new DummyTransceiver[](2);
         (transceiversChain1[0], transceiversChain1[1]) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerChain1, chainId2);
+            TransceiverHelpersLib.addTransceiver(nttManagerChain1, transceiverChain1, chainId2);
 
         nttManagerChain2.disableSendTransceiver(chainId1, address(transceiverChain2));
         nttManagerChain2.disableRecvTransceiver(chainId1, address(transceiverChain2));

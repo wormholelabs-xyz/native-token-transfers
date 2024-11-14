@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.8 <0.9.0;
 
-import "example-gmp-router/evm/src/libraries/UniversalAddress.sol";
+import "example-messaging-endpoint/evm/src/libraries/UniversalAddress.sol";
 
 import "../libraries/TrimmedAmount.sol";
 import "../libraries/TransceiverStructs.sol";
@@ -78,7 +78,7 @@ interface INttManager is IManagerBase {
         uint16 indexed srcChain,
         address indexed srcAddr,
         uint64 indexed nttSeqNo,
-        uint64 routerSeqNo,
+        uint64 epSeqNo,
         uint16 dstChain,
         bytes32 destAddr,
         bytes payload

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.8 <0.9.0;
 
-import "example-gmp-router/evm/src/libraries/UniversalAddress.sol";
+import "example-messaging-endpoint/evm/src/libraries/UniversalAddress.sol";
 
 import "../libraries/TransceiverStructs.sol";
 
@@ -108,24 +108,18 @@ interface IManagerBase {
     /// @notice Fetch the delivery price for a given recipient chain transfer.
     /// @param recipientChain The Wormhole chain ID of the transfer destination.
     /// @return - The delivery prices associated with each enabled endpoint and the total price.
-    function quoteDeliveryPrice(
-        uint16 recipientChain
-    ) external view returns (uint256);
+    function quoteDeliveryPrice(uint16 recipientChain) external view returns (uint256);
 
     /// @notice Sets the threshold for the number of attestations required for a message
     /// to be considered valid.
     /// @param threshold The new threshold (number of attestations).
     /// @dev This method can only be executed by the `owner`.
-    function setThreshold(
-        uint8 threshold
-    ) external;
+    function setThreshold(uint8 threshold) external;
 
     /// @notice Sets the transceiver for the given chain.
     /// @param transceiver The address of the transceiver.
     /// @dev This method can only be executed by the `owner`.
-    function setTransceiver(
-        address transceiver
-    ) external;
+    function setTransceiver(address transceiver) external;
 
     /// @notice This enables the sending of messages from the given transceiver on the given chain.
     /// @param transceiver The address of the Transceiver contract.
@@ -185,9 +179,7 @@ interface IManagerBase {
     /// @dev This is upgraded via a proxy, and can only be executed
     /// by the `owner`.
     /// @param newImplementation The address of the new implementation.
-    function upgrade(
-        address newImplementation
-    ) external;
+    function upgrade(address newImplementation) external;
 
     /// @notice Pauses the manager.
     function pause() external;

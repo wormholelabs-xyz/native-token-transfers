@@ -19,12 +19,26 @@ library TransceiverHelpersLib {
         uint16 peerChainId
     ) internal returns (DummyTransceiver, DummyTransceiver) {
         DummyTransceiver e1 =
-            new DummyTransceiver(nttManager.chainId(), address(nttManager.router()));
+            new DummyTransceiver(nttManager.chainId(), address(nttManager.endpoint()));
         DummyTransceiver e2 =
-            new DummyTransceiver(nttManager.chainId(), address(nttManager.router()));
+            new DummyTransceiver(nttManager.chainId(), address(nttManager.endpoint()));
         nttManager.setTransceiver(address(e1));
         nttManager.enableSendTransceiver(peerChainId, address(e1));
         nttManager.enableRecvTransceiver(peerChainId, address(e1));
+        nttManager.setTransceiver(address(e2));
+        nttManager.enableSendTransceiver(peerChainId, address(e2));
+        nttManager.enableRecvTransceiver(peerChainId, address(e2));
+        nttManager.setThreshold(2);
+        return (e1, e2);
+    }
+
+    function addTransceiver(
+        NttManager nttManager,
+        DummyTransceiver e1,
+        uint16 peerChainId
+    ) internal returns (DummyTransceiver, DummyTransceiver) {
+        DummyTransceiver e2 =
+            new DummyTransceiver(nttManager.chainId(), address(nttManager.endpoint()));
         nttManager.setTransceiver(address(e2));
         nttManager.enableSendTransceiver(peerChainId, address(e2));
         nttManager.enableRecvTransceiver(peerChainId, address(e2));
@@ -182,7 +196,7 @@ library TransceiverHelpersLib {
         uint16 srcChain,
         address nttManager,
         uint64 nttSeqNo
-    ) public pure returns (uint64 routerSeq, bytes memory payload) {
+    ) public pure returns (uint64 epSeq, bytes memory payload) {
         for (uint256 idx = 0; idx < events.length; ++idx) {
             if (
                 events[idx].topics[0]
@@ -191,9 +205,8 @@ library TransceiverHelpersLib {
                     && events[idx].emitter == nttManager
                     && events[idx].topics[3] == bytes32(uint256(nttSeqNo))
             ) {
-                (routerSeq,,, payload) =
-                    abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
-                return (routerSeq, payload);
+                (epSeq,,, payload) = abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
+                return (epSeq, payload);
             }
         }
         revert ExecutionEventNotFoundInLogs(nttSeqNo);

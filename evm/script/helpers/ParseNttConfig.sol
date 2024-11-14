@@ -5,7 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 
 import "../../src/interfaces/INttManager.sol";
-import "example-gmp-router/evm/src/interfaces/ITransceiver.sol";
+import "example-messaging-endpoint/evm/src/interfaces/IAdapter.sol";
 
 contract ParseNttConfig is Script {
     using stdJson for string;
@@ -25,17 +25,13 @@ contract ParseNttConfig is Script {
 
     mapping(uint16 => bool) duplicateChainIds;
 
-    function toUniversalAddress(
-        address evmAddr
-    ) internal pure returns (bytes32 converted) {
+    function toUniversalAddress(address evmAddr) internal pure returns (bytes32 converted) {
         assembly ("memory-safe") {
             converted := and(0xffffffffffffffffffffffffffffffffffffffff, evmAddr)
         }
     }
 
-    function fromUniversalAddress(
-        bytes32 universalAddr
-    ) internal pure returns (address converted) {
+    function fromUniversalAddress(bytes32 universalAddr) internal pure returns (address converted) {
         require(bytes12(universalAddr) == 0, "Address overflow");
 
         assembly ("memory-safe") {
@@ -43,15 +39,9 @@ contract ParseNttConfig is Script {
         }
     }
 
-    function _parseAndValidateConfigFile(
-        uint16 wormholeChainId
-    )
+    function _parseAndValidateConfigFile(uint16 wormholeChainId)
         internal
-        returns (
-            ChainConfig[] memory config,
-            INttManager nttManager,
-            ITransceiver wormholeTransceiver
-        )
+        returns (ChainConfig[] memory config, INttManager nttManager, IAdapter wormholeTransceiver)
     {
         string memory root = vm.projectRoot();
         string memory path = string.concat(root, "/cfg/WormholeNttConfig.json");
@@ -65,9 +55,7 @@ contract ParseNttConfig is Script {
         for (uint256 i = 0; i < config.length; i++) {
             require(config[i].chainId != 0, "Invalid chain ID");
             require(config[i].nttManager != bytes32(0), "Invalid NTT manager address");
-            require(
-                config[i].wormholeTransceiver != bytes32(0), "Invalid wormhole transceiver address"
-            );
+            require(config[i].wormholeTransceiver != bytes32(0), "Invalid wormhole transceiver address");
             require(config[i].inboundLimit != 0, "Invalid inbound limit");
 
             // If this is an evm chain, require a valid EVM address.
@@ -83,8 +71,7 @@ contract ParseNttConfig is Script {
             // Set the contract addresses for this chain.
             if (config[i].chainId == wormholeChainId) {
                 nttManager = INttManager(fromUniversalAddress(config[i].nttManager));
-                wormholeTransceiver =
-                    ITransceiver(fromUniversalAddress(config[i].wormholeTransceiver));
+                wormholeTransceiver = IAdapter(fromUniversalAddress(config[i].wormholeTransceiver));
             }
         }
     }
