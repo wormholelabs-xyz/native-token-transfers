@@ -10,6 +10,3 @@
 [submodule "evm/lib/solidity-bytes-utils"]
 	path = evm/lib/solidity-bytes-utils
 	url = https://github.com/GNSPS/solidity-bytes-utils
-[submodule "evm/lib/example-gmp-router"]
-	path = evm/lib/example-gmp-router
-	url = https://github.com/wormholelabs-xyz/example-gmp-router
