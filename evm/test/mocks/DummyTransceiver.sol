@@ -42,6 +42,7 @@ contract DummyTransceiver is Transceiver, ITransceiverReceiver, Test {
 
     function _sendMessage(
         uint16, /* recipientChain */
+        uint256, /* gasLimit */
         uint256, /* deliveryPayment */
         address caller,
         bytes32 recipientNttManagerAddress,

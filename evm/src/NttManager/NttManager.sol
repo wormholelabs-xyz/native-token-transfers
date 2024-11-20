@@ -480,6 +480,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         // send the message
         _sendMessageToTransceivers(
             recipientChain,
+            0, // gasLimit. 0 for not specified. TODO: add gasLimit to the API
             refundAddress,
             _getPeersStorage()[destinationChain].peerAddress,
             priceQuotes,

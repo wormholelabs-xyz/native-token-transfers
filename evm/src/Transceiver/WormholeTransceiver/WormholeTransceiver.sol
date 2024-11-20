@@ -169,7 +169,7 @@ contract WormholeTransceiver is
         }
 
         if (_shouldRelayViaStandardRelaying(targetChain)) {
-            (uint256 cost,) = wormholeRelayer.quoteEVMDeliveryPrice(targetChain, 0, gasLimit);
+            (uint256 cost,) = wormholeRelayer.quoteEVMDeliveryPrice(targetChain, 0, _gasLimit);
             return cost;
         } else if (isSpecialRelayingEnabled(targetChain)) {
             uint256 cost = specialRelayer.quoteDeliveryPrice(getNttManagerToken(), targetChain, 0);
@@ -182,6 +182,7 @@ contract WormholeTransceiver is
 
     function _sendMessage(
         uint16 recipientChain,
+        uint256 _gasLimit,
         uint256 deliveryPayment,
         address caller,
         bytes32 recipientNttManagerAddress,
@@ -210,25 +211,27 @@ contract WormholeTransceiver is
             // push onto the stack again to avoid stack too deep error
             bytes32 refundRecipient = refundAddress;
             uint16 destinationChain = recipientChain;
+            uint256 __gasLimit = _gasLimit;
 
             wormholeRelayer.sendPayloadToEvm{value: deliveryPayment}(
                 destinationChain,
                 fromWormholeFormat(getWormholePeer(destinationChain)),
                 encodedTransceiverPayload,
                 0,
-                gasLimit,
+                __gasLimit,
                 destinationChain,
                 fromWormholeFormat(refundRecipient)
             );
 
             emit RelayingInfo(uint8(RelayingType.Standard), refundAddress, deliveryPayment);
         } else if (!weIns.shouldSkipRelayerSend && isSpecialRelayingEnabled(recipientChain)) {
+            uint16 _recipientChain = recipientChain;
             uint256 wormholeFee = wormhole.messageFee();
             uint64 sequence = wormhole.publishMessage{value: wormholeFee}(
                 0, encodedTransceiverPayload, consistencyLevel
             );
             specialRelayer.requestDelivery{value: deliveryPayment - wormholeFee}(
-                getNttManagerToken(), recipientChain, 0, sequence
+                getNttManagerToken(), _recipientChain, 0, sequence
             );
 
             // NOTE: specialized relaying does not currently support refunds. The zero address

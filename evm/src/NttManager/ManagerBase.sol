@@ -191,6 +191,7 @@ abstract contract ManagerBase is
 
     function _sendMessageToTransceivers(
         uint16 recipientChain,
+        uint256 gasLimit,
         bytes32 refundAddress,
         bytes32 peerAddress,
         uint256[] memory priceQuotes,
@@ -199,7 +200,6 @@ abstract contract ManagerBase is
         bytes memory nttManagerMessage
     ) internal {
         uint256 numEnabledTransceivers = enabledTransceivers.length;
-        mapping(address => TransceiverInfo) storage transceiverInfos = _getTransceiverInfosStorage();
 
         if (peerAddress == bytes32(0)) {
             revert PeerNotRegistered(recipientChain);
@@ -215,7 +215,8 @@ abstract contract ManagerBase is
             // send it to the recipient nttManager based on the chain
             ITransceiver(transceiverAddr).sendMessage{value: priceQuotes[i]}(
                 recipientChain,
-                transceiverInstructions[transceiverInfos[transceiverAddr].index],
+                gasLimit,
+                transceiverInstructions[_getTransceiverInfosStorage()[transceiverAddr].index],
                 nttManagerMessage,
                 peerAddress,
                 refundRecipient

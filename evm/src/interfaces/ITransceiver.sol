@@ -61,6 +61,7 @@ interface ITransceiver {
 
     /// @dev Send a message to another chain.
     /// @param recipientChain The Wormhole chain ID of the recipient.
+    /// @param gasLimit The gas limit for the delivery transaction.
     /// @param instruction An additional Instruction provided by the Transceiver to be
     /// executed on the recipient chain.
     /// @param nttManagerMessage A message to be sent to the nttManager on the recipient chain.
@@ -68,6 +69,7 @@ interface ITransceiver {
     /// @param refundAddress The Wormhole formatted address of the refund recipient
     function sendMessage(
         uint16 recipientChain,
+        uint256 gasLimit,
         TransceiverStructs.TransceiverInstruction memory instruction,
         bytes memory nttManagerMessage,
         bytes32 recipientNttManagerAddress,

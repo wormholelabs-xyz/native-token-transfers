@@ -112,6 +112,7 @@ abstract contract Transceiver is
     /// @inheritdoc ITransceiver
     function sendMessage(
         uint16 recipientChain,
+        uint256 gasLimit,
         TransceiverStructs.TransceiverInstruction memory instruction,
         bytes memory nttManagerMessage,
         bytes32 recipientNttManagerAddress,
@@ -119,6 +120,7 @@ abstract contract Transceiver is
     ) external payable nonReentrant onlyNttManager {
         _sendMessage(
             recipientChain,
+            gasLimit,
             msg.value,
             msg.sender,
             recipientNttManagerAddress,
@@ -132,6 +134,7 @@ abstract contract Transceiver is
 
     function _sendMessage(
         uint16 recipientChain,
+        uint256 gasLimit,
         uint256 deliveryPayment,
         address caller,
         bytes32 recipientNttManagerAddress,
