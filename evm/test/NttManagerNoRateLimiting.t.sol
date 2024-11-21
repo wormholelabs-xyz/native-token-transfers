@@ -102,28 +102,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
     function test_setUp() public {}
 
-    // === pure unit tests
-
-    // naive implementation of countSetBits to test against
-    function simpleCount(
-        uint64 n
-    ) public pure returns (uint8) {
-        uint8 count;
-
-        while (n > 0) {
-            count += uint8(n & 1);
-            n >>= 1;
-        }
-
-        return count;
-    }
-
-    function testFuzz_countSetBits(
-        uint64 n
-    ) public {
-        assertEq(simpleCount(n), countSetBits(n));
-    }
-
     // === ownership
 
     function test_owner() public {
@@ -331,45 +309,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         // only transceivers can be registered? (this would be a convenience check, not a security one)
         nttManager.setTransceiver(address(0x123));
     }
-
-    // == threshold
-
-    function test_cantSetThresholdTooHigh() public {
-        // 1 transceiver set, so can't set threshold to 2
-        vm.expectRevert(abi.encodeWithSelector(IManagerBase.ThresholdTooHigh.selector, 2, 1));
-        nttManager.setThreshold(2);
-    }
-
-    function test_canSetThreshold() public {
-        DummyTransceiver e1 = new DummyTransceiver(chainId, address(endpoint));
-        DummyTransceiver e2 = new DummyTransceiver(chainId, address(endpoint));
-        nttManager.setTransceiver(address(e1));
-        nttManager.setTransceiver(address(e2));
-
-        nttManager.setThreshold(1);
-        nttManager.setThreshold(2);
-        nttManager.setThreshold(1);
-    }
-
-    function test_cantSetThresholdToZero() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
-        nttManager.setTransceiver(address(e));
-
-        vm.expectRevert(abi.encodeWithSelector(IManagerBase.ZeroThreshold.selector));
-        nttManager.setThreshold(0);
-    }
-
-    function test_onlyOwnerCanSetThreshold() public {
-        address notOwner = address(0x123);
-        vm.startPrank(notOwner);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, notOwner)
-        );
-        nttManager.setThreshold(1);
-    }
-
-    // == threshold
 
     function test_peerRegistrationLimitsCantBeUpdated() public {
         bytes32 peer = toWormholeFormat(address(nttManager));

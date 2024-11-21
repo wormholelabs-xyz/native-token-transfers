@@ -26,6 +26,22 @@ contract MockNttManagerContract is NttManager {
             result := my_slot.slot
         }
     }
+
+    function removeChainEnabledForReceive(
+        uint16 chain
+    ) public {
+        _removeChainEnabledForReceive(chain);
+    }
+
+    function addChainEnabledForReceive(
+        uint16 chain
+    ) public {
+        _addChainEnabledForReceive(chain);
+    }
+
+    function getChainsEnabledForReceive() public pure returns (uint16[] memory result) {
+        result = _getChainsEnabledForReceiveStorage();
+    }
 }
 
 contract MockNttManagerNoRateLimitingContract is NttManagerNoRateLimiting {

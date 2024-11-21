@@ -156,6 +156,12 @@ interface INttManager is IManagerBase {
     /// @dev Selector 0x20371f2a.
     error InvalidPeerSameChainId();
 
+    /// @notice Threshold has not been met for an attestation.
+    /// @dev Selector 0xf6f12287.
+    /// @param threshold The required threshold.
+    /// @param numAttested The number of attestations for this message.
+    error ThresholdNotMet(uint8 threshold, uint8 numAttested);
+
     /// @notice Feature is not implemented.
     error NotImplemented();
 

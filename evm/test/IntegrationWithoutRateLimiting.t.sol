@@ -107,10 +107,13 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
             chainId1, bytes32(uint256(uint160(address(nttManagerChain1)))), 7, type(uint64).max
         );
 
-        require(nttManagerChain1.getThreshold() != 0, "Threshold is zero with active transceivers");
+        require(
+            nttManagerChain1.getThreshold(chainId2) != 0,
+            "Threshold is zero with active transceivers"
+        );
 
-        nttManagerChain1.setThreshold(1);
-        nttManagerChain2.setThreshold(1);
+        nttManagerChain1.setThreshold(chainId2, 1);
+        nttManagerChain2.setThreshold(chainId1, 1);
 
         INttManager.NttManagerPeer memory peer = nttManagerChain1.getPeer(chainId2);
         require(9 == peer.tokenDecimals, "Peer has the wrong number of token decimals");

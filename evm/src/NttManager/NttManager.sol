@@ -205,12 +205,13 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 payloadHash = keccak256(payload);
 
         // The endpoint does replay protection and verifies that there has been at least one attestation.
-        (uint128 enabled, uint128 attested) =
+        (,, uint8 numAttested) =
             endpoint.recvMessage(sourceChainId, sourceNttManagerAddress, epSeq, payloadHash);
 
-        // TODO: This should be per-chain thresholding.
-        if (enabled != attested) {
-            revert ThresholdNotMet(enabled, attested);
+        uint8 threshold = getThreshold(sourceChainId);
+
+        if (numAttested < threshold) {
+            revert ThresholdNotMet(threshold, numAttested);
         }
 
         TransceiverStructs.NttManagerMessage memory message =

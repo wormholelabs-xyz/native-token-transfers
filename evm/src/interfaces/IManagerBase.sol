@@ -41,27 +41,20 @@ interface IManagerBase {
     /// @param index The index of the transceiver in the bitmap.
     event MessageAttestedTo(bytes32 digest, address transceiver, uint8 index);
 
-    /// @notice Emmitted when the threshold required transceivers is changed.
+    /// @notice Emitted when the threshold for a chain is changed.
     /// @dev Topic0
-    ///      0x2a855b929b9a53c6fb5b5ed248b27e502b709c088e036a5aa17620c8fc5085a9.
+    ///      0x77bc50d64a1fb4b6ef32894bc26fc008f4ee08223914c45472c9d62088c97f38.
+    /// @param chainId The chain for which the threshold was updated.
     /// @param oldThreshold The old threshold.
     /// @param threshold The new threshold.
-    event ThresholdChanged(uint8 oldThreshold, uint8 threshold);
+    event ThresholdChanged(uint16 chainId, uint8 oldThreshold, uint8 threshold);
 
     /// @notice Emitted when an transceiver is removed from the nttManager.
     /// @dev Topic0
-    ///      0xf05962b5774c658e85ed80c91a75af9d66d2af2253dda480f90bce78aff5eda5.
+    ///      0x2fb241a51a63da05063ac6be1f963395b281e455e8085bd246a7e8502b8950d5.
     /// @param transceiver The address of the transceiver.
     /// @param transceiversNum The current number of transceivers.
-    /// @param threshold The current threshold of transceivers.
-    event TransceiverAdded(address transceiver, uint256 transceiversNum, uint8 threshold);
-
-    /// @notice Emitted when an transceiver is removed from the nttManager.
-    /// @dev Topic0
-    ///     0x697a3853515b88013ad432f29f53d406debc9509ed6d9313dcfe115250fcd18f.
-    /// @param transceiver The address of the transceiver.
-    /// @param threshold The current threshold of transceivers.
-    event TransceiverRemoved(address transceiver, uint8 threshold);
+    event TransceiverAdded(address transceiver, uint256 transceiversNum);
 
     /// @notice payment for a transfer is too low.
     /// @param requiredPayment The required payment.
@@ -103,23 +96,26 @@ interface IManagerBase {
     /// @param chainId The target Wormhole chain id
     error PeerNotRegistered(uint16 chainId);
 
-    error ThresholdNotMet(uint128 enabled, uint128 attested); // TODO: Should this go in INttManager?
-
     /// @notice Fetch the delivery price for a given recipient chain transfer.
     /// @param recipientChain The Wormhole chain ID of the transfer destination.
     /// @return - The delivery prices associated with each enabled endpoint and the total price.
-    function quoteDeliveryPrice(uint16 recipientChain) external view returns (uint256);
+    function quoteDeliveryPrice(
+        uint16 recipientChain
+    ) external view returns (uint256);
 
     /// @notice Sets the threshold for the number of attestations required for a message
     /// to be considered valid.
+    /// @param chain The chain to which the threshold update applies.
     /// @param threshold The new threshold (number of attestations).
     /// @dev This method can only be executed by the `owner`.
-    function setThreshold(uint8 threshold) external;
+    function setThreshold(uint16 chain, uint8 threshold) external;
 
     /// @notice Sets the transceiver for the given chain.
     /// @param transceiver The address of the transceiver.
     /// @dev This method can only be executed by the `owner`.
-    function setTransceiver(address transceiver) external;
+    function setTransceiver(
+        address transceiver
+    ) external;
 
     /// @notice This enables the sending of messages from the given transceiver on the given chain.
     /// @param transceiver The address of the Transceiver contract.
@@ -179,7 +175,9 @@ interface IManagerBase {
     /// @dev This is upgraded via a proxy, and can only be executed
     /// by the `owner`.
     /// @param newImplementation The address of the new implementation.
-    function upgrade(address newImplementation) external;
+    function upgrade(
+        address newImplementation
+    ) external;
 
     /// @notice Pauses the manager.
     function pause() external;
@@ -188,9 +186,12 @@ interface IManagerBase {
     /// @return mode A uint8 corresponding to the mode
     function getMode() external view returns (uint8);
 
-    /// @notice Returns the number of Transceivers that must attest to a msgId for
+    /// @notice Returns the threshold for the specified chain.
     /// it to be considered valid and acted upon.
-    function getThreshold() external view returns (uint8);
+    /// @param chain The chain for which the threshold is requested.
+    function getThreshold(
+        uint16 chain
+    ) external view returns (uint8);
 
     /// @notice Returns a boolean indicating if the transceiver has attested to the message.
     /// @param srcChain The Wormhole chain ID of the sender.

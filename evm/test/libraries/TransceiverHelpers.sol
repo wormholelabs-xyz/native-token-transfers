@@ -28,7 +28,7 @@ library TransceiverHelpersLib {
         nttManager.setTransceiver(address(e2));
         nttManager.enableSendTransceiver(peerChainId, address(e2));
         nttManager.enableRecvTransceiver(peerChainId, address(e2));
-        nttManager.setThreshold(2);
+        nttManager.setThreshold(peerChainId, 2);
         return (e1, e2);
     }
 
@@ -42,7 +42,7 @@ library TransceiverHelpersLib {
         nttManager.setTransceiver(address(e2));
         nttManager.enableSendTransceiver(peerChainId, address(e2));
         nttManager.enableRecvTransceiver(peerChainId, address(e2));
-        nttManager.setThreshold(2);
+        nttManager.setThreshold(peerChainId, 2);
         return (e1, e2);
     }
 

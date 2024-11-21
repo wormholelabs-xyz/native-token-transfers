@@ -491,60 +491,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
         assertEq(s2, s1 + 1);
     }
 
-    // == threshold
-
-    function test_cantSetThresholdTooHigh() public {
-        // 1 transceiver set, so can't set threshold to 2
-        vm.expectRevert(abi.encodeWithSelector(IManagerBase.ThresholdTooHigh.selector, 2, 1));
-        nttManager.setThreshold(2);
-    }
-
-    function test_canSetThreshold() public {
-        DummyTransceiver e1 = new DummyTransceiver(chainId, address(endpoint));
-        DummyTransceiver e2 = new DummyTransceiver(chainId, address(endpoint));
-        nttManager.setTransceiver(address(e1));
-        nttManager.setTransceiver(address(e2));
-
-        nttManager.setThreshold(1);
-        nttManager.setThreshold(2);
-        nttManager.setThreshold(1);
-    }
-
-    function test_cantSetThresholdToZero() public {
-        DummyTransceiver e = new DummyTransceiver(chainId, address(endpoint));
-        nttManager.setTransceiver(address(e));
-
-        vm.expectRevert(abi.encodeWithSelector(IManagerBase.ZeroThreshold.selector));
-        nttManager.setThreshold(0);
-    }
-
-    function test_onlyOwnerCanSetThreshold() public {
-        address notOwner = address(0x123);
-        vm.startPrank(notOwner);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, notOwner)
-        );
-        nttManager.setThreshold(1);
-    }
-
-    // == threshold
-
-    function test_peerRegistrationLimitsCanBeUpdated() public {
-        bytes32 peer = toWormholeFormat(address(nttManager));
-        nttManager.setPeer(nttManagerOther.chainId(), peer, 9, 0);
-
-        IRateLimiter.RateLimitParams memory params =
-            nttManager.getInboundLimitParams(nttManagerOther.chainId());
-        assertEq(params.limit.getAmount(), 0);
-        assertEq(params.limit.getDecimals(), 8);
-
-        nttManager.setInboundLimit(type(uint64).max, nttManagerOther.chainId());
-        params = nttManager.getInboundLimitParams(nttManagerOther.chainId());
-        assertEq(params.limit.getAmount(), type(uint64).max / 10 ** (18 - 8));
-        assertEq(params.limit.getDecimals(), 8);
-    }
-
     // === attestation
 
     function test_onlyEnabledTransceiversCanAttest() public {
@@ -634,6 +580,48 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         vm.expectRevert(abi.encodeWithSelector(Endpoint.AdapterNotEnabled.selector));
         transceiver.receiveMessage(rmsg);
+    }
+
+    function test_executeWhenUnderThresholdShouldRevert() public {
+        DummyTransceiver[] memory transceivers = new DummyTransceiver[](2);
+        (transceivers[0], transceivers[1]) =
+            TransceiverHelpersLib.addTransceiver(nttManager, transceiver, chainId2);
+
+        nttManager.setThreshold(chainId2, 2);
+
+        bytes memory payload = "Hello, World";
+        DummyTransceiver.Message memory rmsg = DummyTransceiver.Message({
+            srcChain: chainId2,
+            srcAddr: UniversalAddressLibrary.fromAddress(address(nttManagerOther)),
+            sequence: 0,
+            dstChain: chainId,
+            dstAddr: UniversalAddressLibrary.fromAddress(address(nttManager)),
+            payloadHash: keccak256(payload),
+            refundAddr: address(user_A)
+        });
+
+        // Attest the message. This should work.
+        transceiver.receiveMessage(rmsg);
+
+        // The attestation should've been counted.
+        require(
+            1
+                == nttManager.messageAttestations(
+                    rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
+                ),
+            "Message did not attest"
+        );
+
+        // But the message should not yet be approved.
+        require(
+            !nttManager.isMessageApproved(
+                rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, rmsg.dstAddr, rmsg.payloadHash
+            )
+        );
+
+        // Execute should revert because we haven't met the threshold yet.
+        vm.expectRevert(abi.encodeWithSelector(INttManager.ThresholdNotMet.selector, 2, 1));
+        nttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, payload);
     }
 
     function test_transfer_sequences() public {

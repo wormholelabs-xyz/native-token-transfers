@@ -68,9 +68,16 @@ abstract contract ManagerBase is
 
     bytes32 private constant THRESHOLD_SLOT = bytes32(uint256(keccak256("ntt.threshold")) - 1);
 
+    bytes32 private constant RECV_ENABLED_CHAINS_SLOT =
+        bytes32(uint256(keccak256("ntt.recvEnabledChains")) - 1);
+
     // =============== Storage Getters/Setters ==============================================
 
-    function _getThresholdStorage() private pure returns (_Threshold storage $) {
+    function _getThresholdStorage()
+        private
+        pure
+        returns (mapping(uint16 => _Threshold) storage $)
+    {
         uint256 slot = uint256(THRESHOLD_SLOT);
         assembly ("memory-safe") {
             $.slot := slot
@@ -79,6 +86,13 @@ abstract contract ManagerBase is
 
     function _getMessageSequenceStorage() internal pure returns (_Sequence storage $) {
         uint256 slot = uint256(MESSAGE_SEQUENCE_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    function _getChainsEnabledForReceiveStorage() internal pure returns (uint16[] storage $) {
+        uint256 slot = uint256(RECV_ENABLED_CHAINS_SLOT);
         assembly ("memory-safe") {
             $.slot := slot
         }
@@ -115,8 +129,10 @@ abstract contract ManagerBase is
     }
 
     /// @inheritdoc IManagerBase
-    function getThreshold() public view returns (uint8) {
-        return _getThresholdStorage().num;
+    function getThreshold(
+        uint16 chain
+    ) public view returns (uint8) {
+        return _getThresholdStorage()[chain].num;
     }
 
     /// @inheritdoc IManagerBase
@@ -127,10 +143,9 @@ abstract contract ManagerBase is
         UniversalAddress dstAddr,
         bytes32 payloadHash
     ) public view returns (bool) {
-        (uint128 enabled, uint128 attested,) =
-            endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
-
-        return (enabled == attested);
+        uint8 numAttested = messageAttestations(srcChain, srcAddr, sequence, dstAddr, payloadHash);
+        uint8 threshold = getThreshold(srcChain);
+        return (numAttested >= threshold);
     }
 
     /// @inheritdoc IManagerBase
@@ -146,7 +161,7 @@ abstract contract ManagerBase is
         UniversalAddress dstAddr,
         bytes32 payloadHash
     ) public view returns (bool) {
-        (,, bool executed) =
+        (,,, bool executed) =
             endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
 
         return executed;
@@ -161,7 +176,7 @@ abstract contract ManagerBase is
         bytes32 payloadHash,
         uint8 index
     ) public view returns (bool) {
-        (, uint128 attested,) =
+        (, uint128 attested,,) =
             endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
 
         return attested & uint64(1 << index) > 0;
@@ -175,10 +190,7 @@ abstract contract ManagerBase is
         UniversalAddress dstAddr,
         bytes32 payloadHash
     ) public view returns (uint8 count) {
-        (, uint128 attested,) =
-            endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
-
-        return countSetBits128(attested);
+        (,, count,) = endpoint.getMessageStatus(srcChain, srcAddr, sequence, dstAddr, payloadHash);
     }
 
     // =============== Admin ==============================================================
@@ -212,8 +224,19 @@ abstract contract ManagerBase is
         address transceiver
     ) external onlyOwner {
         uint8 index = IEndpointAdmin(address(endpoint)).addAdapter(address(this), transceiver);
+        emit TransceiverAdded(transceiver, index);
+    }
 
-        _Threshold storage _threshold = _getThresholdStorage();
+    /// @inheritdoc IManagerBase
+    function enableSendTransceiver(uint16 chain, address transceiver) external {
+        IEndpointAdmin(address(endpoint)).enableSendAdapter(address(this), chain, transceiver);
+    }
+
+    /// @inheritdoc IManagerBase
+    function enableRecvTransceiver(uint16 chain, address transceiver) external {
+        IEndpointAdmin(address(endpoint)).enableRecvAdapter(address(this), chain, transceiver);
+
+        _Threshold storage _threshold = _getThresholdStorage()[chain];
         // We do not automatically increase the threshold here.
         // Automatically increasing the threshold can result in a scenario
         // where in-flight messages can't be redeemed.
@@ -229,21 +252,10 @@ abstract contract ManagerBase is
         // However if the threshold is 0 (the initial case) we do increment to 1.
         if (_threshold.num == 0) {
             _threshold.num = 1;
+            _addChainEnabledForReceive(chain);
         }
 
-        emit TransceiverAdded(transceiver, index, _threshold.num); // TODO
-
-        _checkThresholdInvariants();
-    }
-
-    /// @inheritdoc IManagerBase
-    function enableSendTransceiver(uint16 chain, address transceiver) external {
-        IEndpointAdmin(address(endpoint)).enableSendAdapter(address(this), chain, transceiver);
-    }
-
-    /// @inheritdoc IManagerBase
-    function enableRecvTransceiver(uint16 chain, address transceiver) external {
-        IEndpointAdmin(address(endpoint)).enableRecvAdapter(address(this), chain, transceiver);
+        _checkThresholdInvariantsForChain(chain);
     }
 
     /// @inheritdoc IManagerBase
@@ -254,23 +266,39 @@ abstract contract ManagerBase is
     /// @inheritdoc IManagerBase
     function disableRecvTransceiver(uint16 chain, address transceiver) external {
         IEndpointAdmin(address(endpoint)).disableRecvAdapter(address(this), chain, transceiver);
+
+        _Threshold storage _threshold = _getThresholdStorage()[chain];
+        uint8 numEnabled = IEndpointAdmin(address(endpoint)).getNumEnabledRecvAdaptersForChain(
+            address(this), chain
+        );
+
+        // TODO: Should we do this or just let _checkThresholdInvariantsForChain revert and make them reduce the threshold before disabling the chain?
+        if (_threshold.num > numEnabled) {
+            uint8 oldThreshold = _threshold.num;
+            _threshold.num = numEnabled;
+            emit ThresholdChanged(chainId, oldThreshold, numEnabled);
+        }
+
+        if (numEnabled == 0) {
+            _removeChainEnabledForReceive(chain);
+        }
+
+        _checkThresholdInvariantsForChain(chain);
     }
 
     /// @inheritdoc IManagerBase
-    function setThreshold(
-        uint8 threshold
-    ) external onlyOwner {
+    function setThreshold(uint16 chain, uint8 threshold) external onlyOwner {
         if (threshold == 0) {
             revert ZeroThreshold();
         }
 
-        _Threshold storage _threshold = _getThresholdStorage();
+        _Threshold storage _threshold = _getThresholdStorage()[chain];
         uint8 oldThreshold = _threshold.num;
 
         _threshold.num = threshold;
-        _checkThresholdInvariants();
-
-        emit ThresholdChanged(oldThreshold, threshold);
+        _addChainEnabledForReceive(chain);
+        _checkThresholdInvariantsForChain(chain);
+        emit ThresholdChanged(chainId, oldThreshold, threshold);
     }
 
     // =============== Internal ==============================================================
@@ -280,6 +308,41 @@ abstract contract ManagerBase is
         _getMessageSequenceStorage().num++;
     }
 
+    /// @dev It's not an error if the chain is not in the list.
+    function _removeChainEnabledForReceive(
+        uint16 chain
+    ) internal {
+        uint16[] storage chains = _getChainsEnabledForReceiveStorage();
+        uint256 len = chains.length;
+        for (uint256 idx = 0; (idx < len);) {
+            if (chains[idx] == chain) {
+                chains[idx] = chains[len - 1];
+                chains.pop();
+                return;
+            }
+            unchecked {
+                ++idx;
+            }
+        }
+    }
+
+    /// @dev It's not an error if the chain is already in the list.
+    function _addChainEnabledForReceive(
+        uint16 chain
+    ) internal {
+        uint16[] storage chains = _getChainsEnabledForReceiveStorage();
+        uint256 len = chains.length;
+        for (uint256 idx = 0; (idx < len);) {
+            if (chains[idx] == chain) {
+                return;
+            }
+            unchecked {
+                ++idx;
+            }
+        }
+        chains.push(chain);
+    }
+
     /// ============== Invariants =============================================
 
     /// @dev When we add new immutables, this function should be updated
@@ -287,24 +350,35 @@ abstract contract ManagerBase is
         assert(this.token() == token);
         assert(this.mode() == mode);
         assert(this.chainId() == chainId);
+        assert(this.endpoint() == endpoint);
     }
 
     function _checkThresholdInvariants() internal view {
-        // TODO: Need to have per-chain thresholds and make sure the threshold is not greater than the enabled on any chain.
-        // Question: Should AdapterRegistry be able to return the list of chains enabled for receiving for an integrator?
+        uint16[] storage chains = _getChainsEnabledForReceiveStorage();
+        uint256 len = chains.length;
+        for (uint256 idx = 0; (idx < len);) {
+            _checkThresholdInvariantsForChain(chains[idx]);
+            unchecked {
+                ++idx;
+            }
+        }
+    }
 
-        uint8 threshold = _getThresholdStorage().num;
-
-        // TODO: This is not right since some of these may be disabled. Really need to do per-chain transceivers anyway.
-        address[] memory enabledTransceivers =
-            Endpoint(address(endpoint)).getAdapters(address(this));
+    /// @dev This can be called directly when we are only manipulating a single chain. Otherwise use _checkThresholdInvariants.
+    function _checkThresholdInvariantsForChain(
+        uint16 chain
+    ) internal view {
+        uint8 threshold = _getThresholdStorage()[chain].num;
+        uint8 numEnabled = IEndpointAdmin(address(endpoint)).getNumEnabledRecvAdaptersForChain(
+            address(this), chain
+        );
 
         // invariant: threshold <= enabledTransceivers.length
-        if (threshold > enabledTransceivers.length) {
-            revert ThresholdTooHigh(threshold, enabledTransceivers.length);
+        if (threshold > numEnabled) {
+            revert ThresholdTooHigh(threshold, numEnabled);
         }
 
-        if (enabledTransceivers.length > 0) {
+        if (numEnabled > 0) {
             if (threshold == 0) {
                 revert ZeroThreshold();
             }
