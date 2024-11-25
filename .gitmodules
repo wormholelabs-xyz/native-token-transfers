@@ -13,3 +13,6 @@
 [submodule "evm/lib/example-messaging-endpoint"]
 	path = evm/lib/example-messaging-endpoint
 	url = https://github.com/wormholelabs-xyz/example-messaging-endpoint
+[submodule "evm/lib/example-executor.git"]
+	path = evm/lib/example-executor.git
+	url = https://github.com/wormholelabs-xyz/example-executor.git
