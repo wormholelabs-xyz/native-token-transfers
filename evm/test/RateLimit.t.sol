@@ -127,6 +127,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -171,6 +173,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -215,6 +219,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -254,6 +260,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -307,6 +315,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -354,6 +364,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -412,6 +424,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
     }
@@ -435,6 +449,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -463,6 +479,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
     }
@@ -493,6 +511,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -664,6 +684,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -741,6 +763,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(userA),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -844,6 +868,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
                 toWormholeFormat(user_B),
                 toWormholeFormat(user_A),
                 false,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
 
@@ -857,6 +883,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -926,6 +954,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -984,6 +1014,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 

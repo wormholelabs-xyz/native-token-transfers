@@ -135,7 +135,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
         );
-        nttManager.transfer(0, 0, bytes32(0));
+        nttManager.transfer(
+            0,
+            0,
+            bytes32(0),
+            0, // executorMsgValue
+            new bytes(1) // executorQuote
+        );
 
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
@@ -206,7 +212,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         newNttManagerNoRateLimiting.initialize();
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
-        newNttManagerNoRateLimiting.transfer(1, 1, bytes32("1"));
+        newNttManagerNoRateLimiting.transfer(
+            1,
+            1,
+            bytes32("1"),
+            0, // executorMsgValue
+            new bytes(1) // executorQuote
+        );
     }
 
     // === transceiver registration
@@ -300,6 +312,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
     }
@@ -436,6 +450,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
         uint64 s2 = nttManager.transfer(
@@ -444,6 +460,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
         uint64 s3 = nttManager.transfer(
@@ -452,6 +470,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -482,6 +502,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -494,6 +516,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -505,6 +529,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
     }
@@ -555,6 +581,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true, // Should queue
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -582,6 +610,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true, // Should queue
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
         vm.stopPrank();
@@ -596,6 +626,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -721,6 +753,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(to),
             toWormholeFormat(from),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
 
@@ -875,6 +909,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
         vm.stopPrank();
@@ -929,6 +965,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
         vm.stopPrank();
@@ -960,6 +998,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
+            0, // executorMsgValue
+            new bytes(1), // executorQuote
             new bytes(1)
         );
         vm.stopPrank();

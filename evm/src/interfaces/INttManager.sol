@@ -176,7 +176,9 @@ interface INttManager is IManagerBase {
     function transfer(
         uint256 amount,
         uint16 recipientChain,
-        bytes32 recipient
+        bytes32 recipient,
+        uint256 executorMsgValue,
+        bytes calldata executorQuote
     ) external payable returns (uint64 msgId);
 
     /// @notice Transfer a given amount to a recipient on a given chain. This function is called
@@ -197,6 +199,8 @@ interface INttManager is IManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
+        uint256 executorMsgValue,
+        bytes calldata executorQuote,
         bytes memory encodedInstructions
     ) external payable returns (uint64 msgId);
 

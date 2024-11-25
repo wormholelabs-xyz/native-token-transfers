@@ -141,8 +141,13 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
         {
             uint256 nttManagerBalanceBefore = token1.balanceOf(address(nttManagerChain1));
             uint256 userBalanceBefore = token1.balanceOf(address(userA));
-            seqNo =
-                nttManagerChain1.transfer(sendingAmount, chainId2, bytes32(uint256(uint160(userB))));
+            seqNo = nttManagerChain1.transfer(
+                sendingAmount,
+                chainId2,
+                bytes32(uint256(uint160(userB))),
+                0, // executorMsgValue
+                new bytes(1) // executorQuote
+            );
 
             // Balance check on funds going in and out working as expected
             uint256 nttManagerBalanceAfter = token1.balanceOf(address(nttManagerChain1));
@@ -215,6 +220,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 false,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
 
@@ -337,6 +344,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userB),
                 toWormholeFormat(userA),
                 true,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
 
@@ -414,6 +423,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 true,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
 
@@ -505,6 +516,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userB),
                 toWormholeFormat(userA),
                 false,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
         }
@@ -565,6 +578,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userA),
                 toWormholeFormat(userB),
                 false,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
             uint256 nttManagerBalanceAfter = token1.balanceOf(address(nttManagerChain2));

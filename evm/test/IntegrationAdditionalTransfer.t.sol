@@ -143,8 +143,13 @@ contract TestAdditionalPayload is Test {
         {
             uint256 nttManagerBalanceBefore = token1.balanceOf(address(nttManagerChain1));
             uint256 userBalanceBefore = token1.balanceOf(address(userA));
-            seqNo =
-                nttManagerChain1.transfer(sendingAmount, chainId2, bytes32(uint256(uint160(userB))));
+            seqNo = nttManagerChain1.transfer(
+                sendingAmount,
+                chainId2,
+                bytes32(uint256(uint160(userB))),
+                0, // executorMsgValue
+                new bytes(1) // executorQuote
+            );
 
             // Balance check on funds going in and out working as expected
             uint256 nttManagerBalanceAfter = token1.balanceOf(address(nttManagerChain1));
@@ -235,6 +240,8 @@ contract TestAdditionalPayload is Test {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 false,
+                0, // executorMsgValue
+                new bytes(1), // executorQuote
                 new bytes(1)
             );
 

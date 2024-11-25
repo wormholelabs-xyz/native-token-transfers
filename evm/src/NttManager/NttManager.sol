@@ -166,10 +166,20 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     function transfer(
         uint256 amount,
         uint16 recipientChain,
-        bytes32 recipient
+        bytes32 recipient,
+        uint256 executorMsgValue,
+        bytes calldata executorQuote
     ) external payable nonReentrant whenNotPaused returns (uint64) {
-        return
-            _transferEntryPoint(amount, recipientChain, recipient, recipient, false, new bytes(1));
+        return _transferEntryPoint(
+            amount,
+            recipientChain,
+            recipient,
+            recipient,
+            false,
+            executorMsgValue,
+            executorQuote,
+            new bytes(1)
+        );
     }
 
     /// @inheritdoc INttManager
@@ -179,10 +189,19 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
+        uint256 executorMsgValue,
+        bytes calldata executorQuote,
         bytes memory transceiverInstructions
     ) external payable nonReentrant whenNotPaused returns (uint64) {
         return _transferEntryPoint(
-            amount, recipientChain, recipient, refundAddress, shouldQueue, transceiverInstructions
+            amount,
+            recipientChain,
+            recipient,
+            refundAddress,
+            shouldQueue,
+            executorMsgValue,
+            executorQuote,
+            transceiverInstructions
         );
     }
 
@@ -358,7 +377,9 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             queuedTransfer.recipientChain,
             queuedTransfer.recipient,
             queuedTransfer.refundAddress,
-            queuedTransfer.sender
+            queuedTransfer.sender,
+            queuedTransfer.executorMsgValue,
+            queuedTransfer.executorQuote
         );
     }
 
@@ -394,6 +415,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
+        uint256 executorMsgValue,
+        bytes memory executorQuote,
         bytes memory transceiverInstructions
     ) internal returns (uint64) {
         if (amount == 0) {
@@ -458,6 +481,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             recipient,
             refundAddress,
             shouldQueue,
+            executorMsgValue,
+            executorQuote,
             transceiverInstructions,
             trimmedAmount,
             sequence
@@ -467,8 +492,16 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             return sequence;
         }
 
-        return
-            _transfer(sequence, trimmedAmount, recipientChain, recipient, refundAddress, msg.sender);
+        return _transfer(
+            sequence,
+            trimmedAmount,
+            recipientChain,
+            recipient,
+            refundAddress,
+            msg.sender,
+            executorMsgValue,
+            executorQuote
+        );
     }
 
     function _enqueueOrConsumeOutboundRateLimit(
@@ -477,6 +510,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
+        uint256 executorMsgValue,
+        bytes memory executorQuote,
         bytes memory transceiverInstructions,
         TrimmedAmount trimmedAmount,
         uint64 sequence
@@ -505,6 +540,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
                 recipient,
                 refundAddress,
                 msg.sender,
+                executorMsgValue,
+                executorQuote,
                 transceiverInstructions
             );
 
@@ -529,26 +566,31 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 recipientChain,
         bytes32 recipient,
         bytes32 refundAddress,
-        address sender
+        address sender,
+        uint256 executorMsgValue,
+        bytes memory executorQuote
     ) internal returns (uint64 msgSequence) {
         // verify chain has not forked
         checkFork(evmChainId);
 
         // refund user excess value from msg.value
-        uint256 totalPriceQuote = quoteDeliveryPrice(recipientChain);
-        uint256 excessValue = msg.value - totalPriceQuote;
-        if (excessValue > 0) {
-            _refundToSender(excessValue);
+        uint256 epTotalPriceQuote = quoteDeliveryPrice(recipientChain);
+        // Check for negative value.
+        {
+            uint256 excessValue = msg.value - epTotalPriceQuote;
+            if (excessValue > 0) {
+                _refundToSender(excessValue);
+            }
         }
 
         // push it on the stack again to avoid a stack too deep error
         uint64 seq = sequence;
         TrimmedAmount amt = amount;
         bytes32 recip = recipient;
+        bytes32 refundAddr = refundAddress;
 
-        TransceiverStructs.NativeTokenTransfer memory ntt = _prepareNativeTokenTransfer(
-            amount, recipient, recipientChain, seq, sender, refundAddress
-        );
+        TransceiverStructs.NativeTokenTransfer memory ntt =
+            _prepareNativeTokenTransfer(amount, recipient, recipientChain, seq, sender, refundAddr);
 
         // construct the NttManagerMessage payload
         bytes memory encodedNttManagerPayload = TransceiverStructs.encodeNttManagerMessage(
@@ -561,13 +603,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         // push onto the stack again to avoid stack too deep error
         uint16 destinationChain = recipientChain;
-        bytes32 refundAddr = refundAddress;
 
         bytes32 peerAddress = _getPeersStorage()[destinationChain].peerAddress;
         bytes32 payloadHash = keccak256(encodedNttManagerPayload);
 
         // send the message
-        uint64 epSeqNo = endpoint.sendMessage(
+        uint64 epSeqNo = endpoint.sendMessage{value: epTotalPriceQuote}(
             destinationChain,
             UniversalAddressLibrary.fromBytes32(peerAddress),
             payloadHash,
@@ -575,14 +616,14 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         );
 
         emit TransferSent(
-            recip, refundAddr, amt.untrim(tokenDecimals()), totalPriceQuote, destinationChain, seq
+            recip, refundAddr, amt.untrim(tokenDecimals()), epTotalPriceQuote, destinationChain, seq
         );
 
-        // This will be replaced by an executor call.
+        // This will be replaced by an executor call. // Executor value must be executorMsgValue.
         emit ExecutionSent(
             chainId,
             address(this),
-            seq,
+            seq, // Don't need this.
             epSeqNo,
             destinationChain,
             peerAddress,
