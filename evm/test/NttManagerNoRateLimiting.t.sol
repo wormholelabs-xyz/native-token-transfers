@@ -92,11 +92,19 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         nttManagerOther.initialize();
 
         nttManager.setPeer(
-            chainId2, toWormholeFormat(address(nttManagerOther)), t.decimals(), type(uint64).max
+            chainId2,
+            toWormholeFormat(address(nttManagerOther)),
+            t.decimals(),
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         nttManagerOther.setPeer(
-            chainId, toWormholeFormat(address(nttManager)), t.decimals(), type(uint64).max
+            chainId,
+            toWormholeFormat(address(nttManager)),
+            t.decimals(),
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         transceiver = new DummyTransceiver(chainId, address(endpoint));
@@ -303,7 +311,11 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         uint8 decimals = token.decimals();
 
         newNttManagerNoRateLimiting.setPeer(
-            chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
         newNttManagerNoRateLimiting.setOutboundLimit(
             packTrimmedAmount(type(uint64).max, 8).untrim(decimals)
@@ -339,7 +351,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
     function test_peerRegistrationLimitsCantBeUpdated() public {
         bytes32 peer = toWormholeFormat(address(nttManager));
-        nttManager.setPeer(nttManagerOther.chainId(), peer, 9, 0);
+        nttManager.setPeer(nttManagerOther.chainId(), peer, 9, NttManagerHelpersLib.gasLimit, 0);
 
         IRateLimiter.RateLimitParams memory params =
             nttManager.getInboundLimitParams(nttManagerOther.chainId());
@@ -448,7 +460,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         uint8 decimals = token.decimals();
 
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
         nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
 
         token.mintDummy(address(user_A), 5 * 10 ** decimals);
@@ -495,7 +513,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
     function test_transferWithAmountAndDecimalsThatCouldOverflow() public {
         // The source chain has 18 decimals trimmed to 8, and the peer has 6 decimals trimmed to 6
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 6, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            6,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
 
         DummyToken token = DummyToken(nttManager.token());
         uint8 decimals = token.decimals();
@@ -744,7 +768,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         uint256 maxAmount = 5 * 10 ** decimals;
         token.mintDummy(from, maxAmount);
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
         nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
         nttManager.setInboundLimit(
             packTrimmedAmount(type(uint64).max, 8).untrim(decimals), nttManagerOther.chainId()
@@ -872,7 +902,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
         thisNttManager.initialize();
 
-        thisNttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        thisNttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
 
         // Upgrade from NttManagerNoRateLimiting to NttManager with rate limiting enabled. This should work.
         NttManager rateLimitingImplementation = new MockNttManagerNoRateLimitingContract(
@@ -899,7 +935,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
         thisNttManager.initialize();
 
-        thisNttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        thisNttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
 
         // Upgrade from NttManagerNoRateLimiting to NttManager with rate limiting enabled. The immutable check should panic.
         NttManager rateLimitingImplementation = new MockNttManagerNoRateLimitingContract(
@@ -927,7 +969,9 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         // register nttManager peer and transceiver
         bytes32 peer = toWormholeFormat(address(nttManager));
-        newNttManagerNoRateLimiting.setPeer(chainId2, peer, 9, type(uint64).max);
+        newNttManagerNoRateLimiting.setPeer(
+            chainId2, peer, 9, NttManagerHelpersLib.gasLimit, type(uint64).max
+        );
         DummyTransceiver e1 = new DummyTransceiver(chainId, address(endpoint));
         newNttManagerNoRateLimiting.setTransceiver(address(e1));
         newNttManagerNoRateLimiting.enableSendTransceiver(chainId2, address(e1));

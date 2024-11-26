@@ -11,8 +11,9 @@ import "./IManagerBase.sol";
 interface INttManager is IManagerBase {
     /// @dev The peer on another chain.
     struct NttManagerPeer {
-        bytes32 peerAddress; // TODO: Can we make this UniversalAddress?
+        bytes32 peerAddress;
         uint8 tokenDecimals;
+        uint256 gasLimit;
     }
 
     /// @notice Emitted when a message is sent from the nttManager.
@@ -153,6 +154,11 @@ interface INttManager is IManagerBase {
     /// @notice Feature is not implemented.
     error NotImplemented();
 
+    /// @notice The gas limit for the specified chain is not set.
+    /// @dev Selector 0xb30dea62.
+    /// @param destChain The chain ID for which the gas limit is not set.
+    error InvalidGasLimitZero(uint16 destChain);
+
     /// @notice Transfer a given amount to a recipient on a given chain. This function is called
     ///         by the user to send the token cross-chain. This function will either lock or burn the
     ///         sender's tokens. Finally, this function will call into registered `Endpoint` contracts
@@ -244,14 +250,22 @@ interface INttManager is IManagerBase {
     /// @param peerChainId The Wormhole chain ID of the peer.
     /// @param peerContract The address of the peer nttManager contract.
     /// @param decimals The number of decimals of the token on the peer chain.
+    /// @param gasLimit The gas limit for the peer chain.
     /// @param inboundLimit The inbound rate limit for the peer chain id. This is formatted in the normal
     ///                     token representation. e.g. a limit of 100 for a token with 6 decimals = 100_000_000
     function setPeer(
         uint16 peerChainId,
         bytes32 peerContract,
         uint8 decimals,
+        uint256 gasLimit,
         uint256 inboundLimit
     ) external;
+
+    /// @notice Sets the gas limit for a given chain.
+    /// @dev This method can only be executed by the `owner`.
+    /// @param peerChainId The Wormhole chain ID of the peer.
+    /// @param limit The new gas limit.
+    function setGasLimit(uint16 peerChainId, uint256 limit) external;
 
     /// @notice Sets the outbound transfer limit for a given chain.
     /// @dev This method can only be executed by the `owner`.

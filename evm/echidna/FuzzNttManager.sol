@@ -583,7 +583,7 @@ contract FuzzNttManager is FuzzingHelpers {
             );
         }
 
-        try nttManager.setPeer(peerChainId, peerContract, decimals, inboundLimit) {}
+        try nttManager.setPeer(peerChainId, peerContract, decimals, 10000000000, inboundLimit) {}
         catch (bytes memory revertData) {
             uint256 errorSelector = extractErrorSelector(revertData);
 

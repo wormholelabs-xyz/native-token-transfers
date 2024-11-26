@@ -111,6 +111,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 peerChainId,
         bytes32 peerContract,
         uint8 decimals,
+        uint256 gasLimit,
         uint256 inboundLimit
     ) public onlyOwner {
         if (peerChainId == 0) {
@@ -122,6 +123,9 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         if (decimals == 0) {
             revert InvalidPeerDecimals();
         }
+        if (gasLimit == 0) {
+            revert InvalidGasLimitZero(peerChainId);
+        }
         if (peerChainId == chainId) {
             revert InvalidPeerSameChainId();
         }
@@ -130,6 +134,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         _getPeersStorage()[peerChainId].peerAddress = peerContract;
         _getPeersStorage()[peerChainId].tokenDecimals = decimals;
+        _getPeersStorage()[peerChainId].gasLimit = gasLimit;
 
         uint8 toDecimals = tokenDecimals();
         _setInboundLimit(inboundLimit.trim(toDecimals, toDecimals), peerChainId);
@@ -137,6 +142,17 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         emit PeerUpdated(
             peerChainId, oldPeer.peerAddress, oldPeer.tokenDecimals, peerContract, decimals
         );
+    }
+
+    /// @inheritdoc INttManager
+    function setGasLimit(uint16 peerChainId, uint256 gasLimit) external onlyOwner {
+        if (gasLimit == 0) {
+            revert InvalidGasLimitZero(peerChainId);
+        }
+        if (_getPeersStorage()[peerChainId].peerAddress == bytes32(0)) {
+            revert InvalidPeerZeroAddress();
+        }
+        _getPeersStorage()[peerChainId].gasLimit = gasLimit;
     }
 
     /// @inheritdoc INttManager
@@ -610,10 +626,16 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         uint256 execMsgVal = executorMsgValue;
         bytes memory execQuote = executorQuote;
+
+        uint256 gasLimit = _getPeersStorage()[destinationChain].gasLimit;
+        if (gasLimit == 0) {
+            revert InvalidGasLimitZero(destinationChain);
+        }
+
         executor.requestExecution(
             destinationChain,
             recip,
-            0, // TODO: uint256 gasLimit,
+            gasLimit,
             execMsgVal,
             UniversalAddressLibrary.fromBytes32(refundAddr).toAddress(),
             execQuote,

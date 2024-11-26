@@ -124,10 +124,18 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
 
         // Register peer contracts for the nttManager and transceiver. Transceivers and nttManager each have the concept of peers here.
         nttManagerChain1.setPeer(
-            chainId2, bytes32(uint256(uint160(address(nttManagerChain2)))), 9, type(uint64).max
+            chainId2,
+            bytes32(uint256(uint160(address(nttManagerChain2)))),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
         nttManagerChain2.setPeer(
-            chainId1, bytes32(uint256(uint160(address(nttManagerChain1)))), 7, type(uint64).max
+            chainId1,
+            bytes32(uint256(uint160(address(nttManagerChain1)))),
+            7,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         require(

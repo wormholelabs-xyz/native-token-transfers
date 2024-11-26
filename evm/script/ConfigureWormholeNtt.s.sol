@@ -24,9 +24,11 @@ contract ConfigureWormholeNtt is ParseNttConfig {
         require(params.wormholeChainId != 0, "Invalid chain ID");
     }
 
-    function configureNttManager(INttManager nttManager, ChainConfig[] memory config, ConfigParams memory params)
-        internal
-    {
+    function configureNttManager(
+        INttManager nttManager,
+        ChainConfig[] memory config,
+        ConfigParams memory params
+    ) internal {
         for (uint256 i = 0; i < config.length; i++) {
             ChainConfig memory targetConfig = config[i];
             if (targetConfig.chainId == params.wormholeChainId) {
@@ -34,7 +36,11 @@ contract ConfigureWormholeNtt is ParseNttConfig {
             } else {
                 // Set peer.
                 nttManager.setPeer(
-                    targetConfig.chainId, targetConfig.nttManager, targetConfig.decimals, targetConfig.inboundLimit
+                    targetConfig.chainId,
+                    targetConfig.nttManager,
+                    targetConfig.decimals,
+                    targetConfig.gasLimit,
+                    targetConfig.inboundLimit
                 );
                 console2.log("Peer set for chain", targetConfig.chainId);
             }
@@ -46,7 +52,8 @@ contract ConfigureWormholeNtt is ParseNttConfig {
 
         // Sanity check deployment parameters.
         ConfigParams memory params = _readEnvVariables();
-        (ChainConfig[] memory config, INttManager nttManager,) = _parseAndValidateConfigFile(params.wormholeChainId);
+        (ChainConfig[] memory config, INttManager nttManager,) =
+            _parseAndValidateConfigFile(params.wormholeChainId);
 
         configureNttManager(nttManager, config, params);
 

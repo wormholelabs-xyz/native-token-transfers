@@ -102,11 +102,19 @@ contract TestNttManager is Test, IRateLimiterEvents {
         nttManagerOther.initialize();
 
         nttManager.setPeer(
-            chainId2, toWormholeFormat(address(nttManagerOther)), t.decimals(), type(uint64).max
+            chainId2,
+            toWormholeFormat(address(nttManagerOther)),
+            t.decimals(),
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         nttManagerOther.setPeer(
-            chainId, toWormholeFormat(address(nttManager)), t.decimals(), type(uint64).max
+            chainId,
+            toWormholeFormat(address(nttManager)),
+            t.decimals(),
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         transceiver = new DummyTransceiver(chainId, address(endpoint));
@@ -121,6 +129,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
     }
 
     function test_setUp() public {}
+
+    bytes32 private constant JUNK_SLOT = bytes32(uint256(keccak256("ntt.junk")) - 1);
+
+    struct OldJunk {
+        bytes32 peerAddress;
+        uint8 tokenDecimals;
+    }
 
     // === pure unit tests
 
@@ -186,6 +201,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             chainId2,
             toWormholeFormat(address(nttManagerZeroRateLimiterOther)),
             token.decimals(),
+            NttManagerHelpersLib.gasLimit,
             type(uint64).max
         );
 
@@ -193,6 +209,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             chainId,
             toWormholeFormat(address(nttManagerZeroRateLimiter)),
             token.decimals(),
+            NttManagerHelpersLib.gasLimit,
             type(uint64).max
         );
 
@@ -445,7 +462,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         uint8 decimals = token.decimals();
 
-        newNttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        newNttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
         newNttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
 
         token.mintDummy(address(user_A), 5 * 10 ** decimals);
@@ -495,7 +518,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         uint8 decimals = token.decimals();
 
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
         nttManager.setOutboundLimit(0);
 
         token.mintDummy(address(user_A), 5 * 10 ** decimals);
@@ -698,7 +727,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         uint8 decimals = token.decimals();
 
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
         nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
 
         token.mintDummy(address(user_A), 5 * 10 ** decimals);
@@ -745,7 +780,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     function test_transferWithAmountAndDecimalsThatCouldOverflow() public {
         // The source chain has 18 decimals trimmed to 8, and the peer has 6 decimals trimmed to 6
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 6, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            6,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
 
         DummyToken token = DummyToken(nttManager.token());
         uint8 decimals = token.decimals();
@@ -996,7 +1037,13 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         uint256 maxAmount = 5 * 10 ** decimals;
         token.mintDummy(from, maxAmount);
-        nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
+        nttManager.setPeer(
+            chainId2,
+            toWormholeFormat(address(0x1)),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
+        );
         nttManager.setOutboundLimit(packTrimmedAmount(type(uint64).max, 8).untrim(decimals));
         nttManager.setInboundLimit(
             packTrimmedAmount(type(uint64).max, 8).untrim(decimals), nttManagerOther.chainId()
@@ -1130,7 +1177,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         // register nttManager peer and transceiver
         bytes32 peer = toWormholeFormat(address(nttManager));
-        newNttManager.setPeer(chainId2, peer, 9, type(uint64).max);
+        newNttManager.setPeer(chainId2, peer, 9, NttManagerHelpersLib.gasLimit, type(uint64).max);
         DummyTransceiver e1 = new DummyTransceiver(chainId, address(endpoint));
         newNttManager.setTransceiver(address(e1));
         newNttManager.enableSendTransceiver(chainId2, address(e1));
@@ -1252,6 +1299,52 @@ contract TestNttManager is Test, IRateLimiterEvents {
         e1.receiveMessage(rmsg);
         vm.expectRevert(abi.encodeWithSelector(NumberOfDecimalsNotEqual.selector, 8, 7));
         newNttManager.executeMsg(rmsg.srcChain, rmsg.srcAddr, rmsg.sequence, nttManagerMessage);
+    }
+
+    function test_cantSetGasLimitToZero() public {
+        assertEq(NttManagerHelpersLib.gasLimit, nttManager.getPeer(chainId2).gasLimit);
+
+        // Can't set the gas limit to zero directly.
+        vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidGasLimitZero.selector, chainId2));
+        nttManager.setGasLimit(chainId2, 0);
+        assertEq(NttManagerHelpersLib.gasLimit, nttManager.getPeer(chainId2).gasLimit);
+
+        // Can't specify a gas limit of zero when setting the peer.
+        bytes32 peer = toWormholeFormat(address(nttManagerOther));
+        uint8 decimals = DummyToken(nttManagerOther.token()).decimals();
+        vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidGasLimitZero.selector, chainId2));
+        nttManager.setPeer(chainId2, peer, decimals, 0, type(uint64).max);
+        assertEq(NttManagerHelpersLib.gasLimit, nttManager.getPeer(chainId2).gasLimit);
+
+        // Can't set the gas limit if the peer is not already set.
+        vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidPeerZeroAddress.selector));
+        nttManager.setGasLimit(chainId2 + 1, NttManagerHelpersLib.gasLimit);
+        assertEq(0, nttManager.getPeer(chainId2 + 1).gasLimit);
+
+        // Can update the gas on an existing peer.
+        nttManager.setGasLimit(chainId2, NttManagerHelpersLib.gasLimit - 100000);
+        assertEq(NttManagerHelpersLib.gasLimit - 100000, nttManager.getPeer(chainId2).gasLimit);
+    }
+
+    function test_cantTransferWithZeroGasLimit() public {
+        DummyToken token = DummyToken(nttManager.token());
+        uint256 amount = 1 * 10 ** token.decimals();
+        uint256 limit = 5 * amount;
+
+        token.mintDummy(address(user_A), limit);
+
+        nttManager.setGasLimitToZero(nttManagerOther.chainId());
+
+        vm.startPrank(user_A);
+        token.approve(address(nttManager), amount);
+
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
+        vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidGasLimitZero.selector, chainId2));
+        nttManager.transfer(
+            amount, chainId2, toWormholeFormat(user_B), executorMsgValue, executorSignedQuote
+        );
     }
 
     function checkAttestationOnly(

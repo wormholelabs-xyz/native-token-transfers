@@ -87,11 +87,19 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         nttManagerOther.initialize();
 
         nttManager.setPeer(
-            chainId2, toWormholeFormat(address(nttManagerOther)), t.decimals(), type(uint64).max
+            chainId2,
+            toWormholeFormat(address(nttManagerOther)),
+            t.decimals(),
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         nttManagerOther.setPeer(
-            chainId, toWormholeFormat(address(nttManager)), t.decimals(), type(uint64).max
+            chainId,
+            toWormholeFormat(address(nttManager)),
+            t.decimals(),
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         transceiver = new DummyTransceiver(chainId, address(endpoint));

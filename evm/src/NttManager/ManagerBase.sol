@@ -44,10 +44,10 @@ abstract contract ManagerBase is
     /// This chain ID is formatted based on standardized chain IDs, e.g. Ethereum mainnet is 1, Sepolia is 11155111, etc.
     uint256 immutable evmChainId;
 
-    // The modular messaging endpoint used for sending and receiving messages.
+    // The modular messaging endpoint used for sending and receiving attestations.
     IEndpointIntegrator public immutable endpoint;
 
-    // The executor used for publishing messages for relaying.
+    // The executor used for publishing message payloads.
     IExecutor public immutable executor;
 
     // =============== Setup =================================================================

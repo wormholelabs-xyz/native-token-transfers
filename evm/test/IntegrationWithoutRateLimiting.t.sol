@@ -116,10 +116,18 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Register peer contracts for the nttManager and transceiver. Transceivers and nttManager each have the concept of peers here.
         nttManagerChain1.setPeer(
-            chainId2, bytes32(uint256(uint160(address(nttManagerChain2)))), 9, type(uint64).max
+            chainId2,
+            bytes32(uint256(uint160(address(nttManagerChain2)))),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
         nttManagerChain2.setPeer(
-            chainId1, bytes32(uint256(uint160(address(nttManagerChain1)))), 7, type(uint64).max
+            chainId1,
+            bytes32(uint256(uint160(address(nttManagerChain1)))),
+            7,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         require(
@@ -299,20 +307,34 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
         // Everything else should.
         vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidPeerChainIdZero.selector));
         nttManagerChain1.setPeer(
-            0, bytes32(uint256(uint160(address(nttManagerChain2)))), 9, type(uint64).max
+            0,
+            bytes32(uint256(uint160(address(nttManagerChain2)))),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidPeerZeroAddress.selector));
-        nttManagerChain1.setPeer(chainId2, bytes32(0), 9, type(uint64).max);
+        nttManagerChain1.setPeer(
+            chainId2, bytes32(0), 9, NttManagerHelpersLib.gasLimit, type(uint64).max
+        );
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidPeerDecimals.selector));
         nttManagerChain1.setPeer(
-            chainId2, bytes32(uint256(uint160(address(nttManagerChain2)))), 0, type(uint64).max
+            chainId2,
+            bytes32(uint256(uint160(address(nttManagerChain2)))),
+            0,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.InvalidPeerSameChainId.selector));
         nttManagerChain1.setPeer(
-            chainId1, bytes32(uint256(uint160(address(nttManagerChain2)))), 9, type(uint64).max
+            chainId1,
+            bytes32(uint256(uint160(address(nttManagerChain2)))),
+            9,
+            NttManagerHelpersLib.gasLimit,
+            type(uint64).max
         );
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.NotImplemented.selector));

@@ -11,6 +11,8 @@ import "../../src/interfaces/INttManager.sol";
 library NttManagerHelpersLib {
     using TrimmedAmountLib for TrimmedAmount;
 
+    uint256 public constant gasLimit = 100000000;
+
     function setConfigs(
         TrimmedAmount inboundLimit,
         NttManager nttManager,
@@ -29,6 +31,7 @@ library NttManagerHelpersLib {
             nttManager.chainId(),
             toWormholeFormat(address(nttManager)),
             tokenDecimals,
+            gasLimit,
             type(uint64).max
         );
         recipientNttManager.setInboundLimit(inboundLimit.untrim(decimals), nttManager.chainId());

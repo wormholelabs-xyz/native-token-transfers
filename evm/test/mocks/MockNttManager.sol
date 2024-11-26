@@ -43,6 +43,17 @@ contract MockNttManagerContract is NttManager {
     function getChainsEnabledForReceive() public pure returns (uint16[] memory result) {
         result = _getChainsEnabledForReceiveStorage();
     }
+
+    function setGasLimitToZero(
+        uint16 peerChainId
+    ) external onlyOwner {
+        _getPeersStorage()[peerChainId].gasLimit = 0;
+    }
+
+    struct OldNttManagerPeer {
+        bytes32 peerAddress;
+        uint8 tokenDecimals;
+    }
 }
 
 contract MockNttManagerNoRateLimitingContract is NttManagerNoRateLimiting {
