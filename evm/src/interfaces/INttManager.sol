@@ -17,7 +17,7 @@ interface INttManager is IManagerBase {
 
     /// @notice Emitted when a message is sent from the nttManager.
     /// @dev Topic0
-    ///      0xe54e51e42099622516fa3b48e9733581c9dbdcb771cafb093f745a0532a35982.
+    ///      0x75eb8927cc7c4810b30fa2e8011fce37da6da7d18eb82c642c367ae4445c3625.
     /// @param recipient The recipient of the message.
     /// @param refundAddress The address on the destination chain to which the
     ///                      refund of unused gas will be paid
@@ -31,7 +31,8 @@ interface INttManager is IManagerBase {
         uint256 amount,
         uint256 fee,
         uint16 recipientChain,
-        uint64 msgSequence
+        uint64 msgSequence,
+        bytes32 msgHash
     );
 
     /// @notice Emitted when a message is sent from the nttManager.
@@ -70,19 +71,6 @@ interface INttManager is IManagerBase {
     /// @param recipient The canceller and recipient of the funds
     /// @param amount The amount of the transfer being cancelled
     event OutboundTransferCancelled(uint256 sequence, address recipient, uint256 amount);
-
-    /// @notice Emitted when a message is submitted to the executor.
-    /// @dev Topic0
-    ///      0x34a042d85c0b260d1be6cd4bf178c0a3f85c6cf64868e6d64ec7a11027449d5a
-    event ExecutionSent(
-        uint16 indexed srcChain,
-        address indexed srcAddr,
-        uint64 indexed nttSeqNo,
-        uint64 epSeqNo,
-        uint16 dstChain,
-        bytes32 destAddr,
-        bytes payload
-    );
 
     /// @notice The transfer has some dust.
     /// @dev Selector 0x71f0634a

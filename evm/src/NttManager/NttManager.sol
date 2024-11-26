@@ -46,6 +46,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
     constructor(
         address _endpoint,
+        address _executor,
         address _token,
         Mode _mode,
         uint16 _chainId,
@@ -53,7 +54,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bool _skipRateLimiting
     )
         RateLimiter(_rateLimitDuration, _skipRateLimiting)
-        ManagerBase(_endpoint, _token, _mode, _chainId)
+        ManagerBase(_endpoint, _executor, _token, _mode, _chainId)
     {}
 
     function __NttManager_init() internal onlyInitializing {
@@ -573,15 +574,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         // verify chain has not forked
         checkFork(evmChainId);
 
-        // refund user excess value from msg.value
-        uint256 epTotalPriceQuote = quoteDeliveryPrice(recipientChain);
-        // Check for negative value.
-        {
-            uint256 excessValue = msg.value - epTotalPriceQuote;
-            if (excessValue > 0) {
-                _refundToSender(excessValue);
-            }
-        }
+        // Compute the quote price and refund user excess value from msg.value
+        uint256 epTotalPriceQuote = quoteAndRefund(recipientChain);
 
         // push it on the stack again to avoid a stack too deep error
         uint64 seq = sequence;
@@ -589,49 +583,80 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recip = recipient;
         bytes32 refundAddr = refundAddress;
 
+        bytes memory encodedNttManagerPayload =
+            buildEncodedPayload(amt, recip, recipientChain, seq, sender, refundAddr);
+
+        // push onto the stack again to avoid stack too deep error
+        uint16 destinationChain = recipientChain;
+
+        // send the message
+        bytes32 payloadHash = keccak256(encodedNttManagerPayload);
+        endpoint.sendMessage{value: epTotalPriceQuote}(
+            destinationChain,
+            UniversalAddressLibrary.fromBytes32(_getPeersStorage()[destinationChain].peerAddress),
+            payloadHash,
+            UniversalAddressLibrary.toAddress(UniversalAddressLibrary.fromBytes32(refundAddr))
+        );
+
+        emit TransferSent(
+            recip,
+            refundAddr,
+            amt.untrim(tokenDecimals()),
+            epTotalPriceQuote,
+            destinationChain,
+            seq,
+            payloadHash
+        );
+
+        uint256 execMsgVal = executorMsgValue;
+        bytes memory execQuote = executorQuote;
+        executor.requestExecution(
+            destinationChain,
+            recip,
+            0, // TODO: uint256 gasLimit,
+            execMsgVal,
+            UniversalAddressLibrary.fromBytes32(refundAddr).toAddress(),
+            execQuote,
+            encodedNttManagerPayload
+        );
+
+        // return the sequence number
+        return seq;
+    }
+
+    function quoteAndRefund(
+        uint16 recipientChain
+    ) internal returns (uint256 epTotalPriceQuote) {
+        // refund user excess value from msg.value
+        epTotalPriceQuote = quoteDeliveryPrice(recipientChain);
+        // Check for negative value.
+        {
+            uint256 excessValue = msg.value - epTotalPriceQuote;
+            if (excessValue > 0) {
+                _refundToSender(excessValue);
+            }
+        }
+    }
+
+    function buildEncodedPayload(
+        TrimmedAmount amount,
+        bytes32 recipient,
+        uint16 recipientChain,
+        uint64 seq,
+        address sender,
+        bytes32 refundAddr
+    ) internal returns (bytes memory encodedNttManagerPayload) {
         TransceiverStructs.NativeTokenTransfer memory ntt =
             _prepareNativeTokenTransfer(amount, recipient, recipientChain, seq, sender, refundAddr);
 
         // construct the NttManagerMessage payload
-        bytes memory encodedNttManagerPayload = TransceiverStructs.encodeNttManagerMessage(
+        encodedNttManagerPayload = TransceiverStructs.encodeNttManagerMessage(
             TransceiverStructs.NttManagerMessage(
                 bytes32(uint256(seq)),
                 toWormholeFormat(sender),
                 TransceiverStructs.encodeNativeTokenTransfer(ntt)
             )
         );
-
-        // push onto the stack again to avoid stack too deep error
-        uint16 destinationChain = recipientChain;
-
-        bytes32 peerAddress = _getPeersStorage()[destinationChain].peerAddress;
-        bytes32 payloadHash = keccak256(encodedNttManagerPayload);
-
-        // send the message
-        uint64 epSeqNo = endpoint.sendMessage{value: epTotalPriceQuote}(
-            destinationChain,
-            UniversalAddressLibrary.fromBytes32(peerAddress),
-            payloadHash,
-            UniversalAddressLibrary.toAddress(UniversalAddressLibrary.fromBytes32(refundAddr))
-        );
-
-        emit TransferSent(
-            recip, refundAddr, amt.untrim(tokenDecimals()), epTotalPriceQuote, destinationChain, seq
-        );
-
-        // This will be replaced by an executor call. // Executor value must be executorMsgValue.
-        emit ExecutionSent(
-            chainId,
-            address(this),
-            seq, // Don't need this.
-            epSeqNo,
-            destinationChain,
-            peerAddress,
-            encodedNttManagerPayload
-        );
-
-        // return the sequence number
-        return seq;
     }
 
     /// @dev Override this function to provide an additional payload on the NativeTokenTransfer

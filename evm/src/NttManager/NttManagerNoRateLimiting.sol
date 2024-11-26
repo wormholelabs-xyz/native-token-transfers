@@ -13,10 +13,11 @@ import "./NttManager.sol";
 contract NttManagerNoRateLimiting is NttManager {
     constructor(
         address _endpoint,
+        address _executor,
         address _token,
         Mode _mode,
         uint16 _chainId
-    ) NttManager(_endpoint, _token, _mode, _chainId, 0, true) {}
+    ) NttManager(_endpoint, _executor, _token, _mode, _chainId, 0, true) {}
 
     // ==================== Override RateLimiter functions =========================
 

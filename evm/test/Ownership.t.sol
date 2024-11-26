@@ -9,18 +9,27 @@ import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {DummyTransceiver} from "./NttManager.t.sol";
 import {DummyToken} from "./NttManager.t.sol";
 import "./mocks/MockEndpoint.sol";
+import "./mocks/MockExecutor.sol";
 
 contract OwnershipTests is Test {
     MockEndpoint endpoint;
+    MockExecutor executor;
     NttManager nttManager;
     uint16 constant chainId = 7;
 
     function setUp() public {
         DummyToken t = new DummyToken();
         endpoint = new MockEndpoint(chainId);
+        executor = new MockExecutor(chainId);
 
         NttManager implementation = new MockNttManagerContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint),
+            address(executor),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId,
+            1 days,
+            false
         );
 
         nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));

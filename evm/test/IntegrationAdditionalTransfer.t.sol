@@ -15,6 +15,7 @@ import "../src/libraries/TransceiverStructs.sol";
 import "./libraries/TransceiverHelpers.sol";
 import "./mocks/MockNttManagerAdditionalPayload.sol";
 import "./mocks/MockEndpoint.sol";
+import "./mocks/MockExecutor.sol";
 import "./mocks/DummyTransceiver.sol";
 
 import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
@@ -28,6 +29,9 @@ import "example-messaging-endpoint/evm/src/Endpoint.sol";
 contract TestAdditionalPayload is Test {
     MockEndpoint endpointChain1;
     MockEndpoint endpointChain2;
+
+    MockExecutor executorChain1;
+    MockExecutor executorChain2;
 
     NttManagerNoRateLimiting nttManagerChain1;
     NttManagerNoRateLimiting nttManagerChain2;
@@ -67,10 +71,17 @@ contract TestAdditionalPayload is Test {
         endpointChain1 = new MockEndpoint(chainId1);
         endpointChain2 = new MockEndpoint(chainId2);
 
+        executorChain1 = new MockExecutor(chainId1);
+        executorChain2 = new MockExecutor(chainId2);
+
         vm.chainId(chainId1);
         DummyToken t1 = new DummyToken();
         NttManagerNoRateLimiting implementation = new MockNttManagerAdditionalPayloadContract(
-            address(endpointChain1), address(t1), IManagerBase.Mode.LOCKING, chainId1
+            address(endpointChain1),
+            address(executorChain1),
+            address(t1),
+            IManagerBase.Mode.LOCKING,
+            chainId1
         );
 
         nttManagerChain1 = MockNttManagerAdditionalPayloadContract(
@@ -87,7 +98,11 @@ contract TestAdditionalPayload is Test {
         vm.chainId(chainId2);
         DummyToken t2 = new DummyTokenMintAndBurn();
         NttManagerNoRateLimiting implementationChain2 = new MockNttManagerAdditionalPayloadContract(
-            address(endpointChain2), address(t2), IManagerBase.Mode.BURNING, chainId2
+            address(endpointChain2),
+            address(executorChain2),
+            address(t2),
+            IManagerBase.Mode.BURNING,
+            chainId2
         );
 
         nttManagerChain2 = MockNttManagerAdditionalPayloadContract(
@@ -147,8 +162,8 @@ contract TestAdditionalPayload is Test {
                 sendingAmount,
                 chainId2,
                 bytes32(uint256(uint160(userB))),
-                0, // executorMsgValue
-                new bytes(1) // executorQuote
+                executorChain1.msgValue(),
+                executorChain1.createSignedQuote(executorChain2.chainId())
             );
 
             // Balance check on funds going in and out working as expected
@@ -170,9 +185,8 @@ contract TestAdditionalPayload is Test {
 
         // Get the execution events from the logs.
         Vm.Log[] memory recordedLogs = vm.getRecordedLogs();
-        (, bytes memory encoded) = TransceiverHelpersLib.getExecutionSent(
-            recordedLogs, chainId1, address(nttManagerChain1), seqNo
-        );
+        bytes memory encoded =
+            TransceiverHelpersLib.getExecutionSent(recordedLogs, address(nttManagerChain1), seqNo);
 
         vm.stopPrank();
 
@@ -240,8 +254,8 @@ contract TestAdditionalPayload is Test {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 false,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorChain2.msgValue(),
+                executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );
 
@@ -257,9 +271,8 @@ contract TestAdditionalPayload is Test {
         }
 
         recordedLogs = vm.getRecordedLogs();
-        (, encoded) = TransceiverHelpersLib.getExecutionSent(
-            recordedLogs, chainId2, address(nttManagerChain2), seqNo
-        );
+        encoded =
+            TransceiverHelpersLib.getExecutionSent(recordedLogs, address(nttManagerChain2), seqNo);
 
         // Chain1 verification and checks with the receiving of the message
         vm.chainId(chainId1);

@@ -20,6 +20,7 @@ contract DeployWormholeNttBase is ParseNttConfig {
         address wormholeRelayerAddr;
         address specialRelayerAddr;
         address endpointAddr;
+        address executorAddr;
         uint8 consistencyLevel;
         uint256 gasLimit;
         uint256 outboundLimit;
@@ -35,6 +36,7 @@ contract DeployWormholeNttBase is ParseNttConfig {
         // Deploy the Manager Implementation.
         NttManager implementation = new NttManager(
             params.endpointAddr,
+            params.executorAddr,
             params.token,
             params.mode,
             params.wormholeChainId,

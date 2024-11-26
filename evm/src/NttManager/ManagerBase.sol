@@ -6,6 +6,7 @@ import "wormhole-solidity-sdk/libraries/BytesParsing.sol";
 
 import "example-messaging-endpoint/evm/src/interfaces/IEndpointAdmin.sol";
 import "example-messaging-endpoint/evm/src/interfaces/IEndpointIntegrator.sol";
+import "example-executor.git/evm/src/interfaces/IExecutor.sol";
 
 // TODO: Doing this to access AdapterRegistry publics. Should there be an interface??
 //       Then again, once we implement per-chain thresholding, this reference may go away.
@@ -43,12 +44,17 @@ abstract contract ManagerBase is
     /// This chain ID is formatted based on standardized chain IDs, e.g. Ethereum mainnet is 1, Sepolia is 11155111, etc.
     uint256 immutable evmChainId;
 
+    // The modular messaging endpoint used for sending and receiving messages.
     IEndpointIntegrator public immutable endpoint;
+
+    // The executor used for publishing messages for relaying.
+    IExecutor public immutable executor;
 
     // =============== Setup =================================================================
 
-    constructor(address _endpoint, address _token, Mode _mode, uint16 _chainId) {
+    constructor(address _endpoint, address _executor, address _token, Mode _mode, uint16 _chainId) {
         endpoint = IEndpointIntegrator(_endpoint);
+        executor = IExecutor(_executor);
         token = _token;
         mode = _mode;
         chainId = _chainId;

@@ -189,26 +189,48 @@ library TransceiverHelpersLib {
         return (m, transceiverMessage);
     }
 
-    error ExecutionEventNotFoundInLogs(uint64 nttSeqNo);
+    error TransferSentEventNotFoundInLogs(uint64 nttSeqNo);
+    error ExecutorEventNotFoundInLogs(uint64 nttSeqNo, bytes32 payloadHash);
 
     function getExecutionSent(
         Vm.Log[] memory events,
-        uint16 srcChain,
         address nttManager,
         uint64 nttSeqNo
-    ) public pure returns (uint64 epSeq, bytes memory payload) {
+    ) public pure returns (bytes memory payload) {
+        // To find the payload bytes from the logs we need to do it in two steps:
+        // 1. Look for the TransferSent event for our NttManager and sequence number to get the payload hash.
+        // 2. Look at the RequestForExecution events to find one where the hash of its payload matches what we are looking for.
         for (uint256 idx = 0; idx < events.length; ++idx) {
             if (
                 events[idx].topics[0]
-                    == bytes32(0x34a042d85c0b260d1be6cd4bf178c0a3f85c6cf64868e6d64ec7a11027449d5a)
-                    && events[idx].topics[1] == bytes32(uint256(srcChain))
+                    == bytes32(0x75eb8927cc7c4810b30fa2e8011fce37da6da7d18eb82c642c367ae4445c3625)
                     && events[idx].emitter == nttManager
-                    && events[idx].topics[3] == bytes32(uint256(nttSeqNo))
             ) {
-                (epSeq,,, payload) = abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
-                return (epSeq, payload);
+                (,,, uint64 sequence, bytes32 msgHash) =
+                    abi.decode(events[idx].data, (uint256, uint256, uint16, uint64, bytes32));
+
+                if (sequence == nttSeqNo) {
+                    for (idx = 0; idx < events.length; ++idx) {
+                        if (
+                            events[idx].topics[0]
+                                == bytes32(
+                                    0x48f75baf726bbb12e77ca4f0f39aeed4ec43e710a7bdd132adbe1645ee90e0a2
+                                )
+                        ) {
+                            (,,,,,,, payload) = abi.decode(
+                                events[idx].data,
+                                (uint256, uint16, bytes32, uint256, uint256, address, bytes, bytes)
+                            );
+                            bytes32 payloadHash = keccak256(payload);
+                            if (payloadHash == msgHash) {
+                                return payload;
+                            }
+                        }
+                    }
+                    revert ExecutorEventNotFoundInLogs(nttSeqNo, msgHash);
+                }
             }
         }
-        revert ExecutionEventNotFoundInLogs(nttSeqNo);
+        revert TransferSentEventNotFoundInLogs(nttSeqNo);
     }
 }

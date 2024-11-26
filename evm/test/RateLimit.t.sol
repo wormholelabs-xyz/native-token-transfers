@@ -14,6 +14,7 @@ import "./libraries/NttManagerHelpers.sol";
 import "wormhole-solidity-sdk/libraries/BytesParsing.sol";
 import "./mocks/MockNttManager.sol";
 import "./mocks/MockEndpoint.sol";
+import "./mocks/MockExecutor.sol";
 import "./mocks/DummyTransceiver.sol";
 
 pragma solidity >=0.8.8 <0.9.0;
@@ -21,6 +22,8 @@ pragma solidity >=0.8.8 <0.9.0;
 contract TestRateLimit is Test, IRateLimiterEvents {
     MockEndpoint endpoint;
     MockEndpoint endpointOther;
+    MockExecutor executor;
+    MockExecutor executorOther;
     MockNttManagerContract nttManager;
     MockNttManagerContract nttManagerOther;
     DummyTransceiver transceiver;
@@ -52,13 +55,28 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         endpoint = new MockEndpoint(chainId);
         endpointOther = new MockEndpoint(chainId2);
 
+        executor = new MockExecutor(chainId);
+        executorOther = new MockExecutor(chainId2);
+
         DummyToken t = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint),
+            address(executor),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId,
+            1 days,
+            false
         );
 
         NttManager implementationOther = new MockNttManagerContract(
-            address(endpointOther), address(t), IManagerBase.Mode.LOCKING, chainId2, 1 days, false
+            address(endpointOther),
+            address(executorOther),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId2,
+            1 days,
+            false
         );
 
         nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));
@@ -127,8 +145,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -173,8 +191,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -219,8 +237,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -260,8 +278,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -315,8 +333,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -364,8 +382,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -413,6 +431,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         uint256 transferAmount = 3 * 10 ** decimals;
         token.approve(address(nttManager), transferAmount);
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         vm.expectRevert(
             abi.encodeWithSelector(
                 IRateLimiter.NotEnoughCapacity.selector, outboundLimit, transferAmount
@@ -424,8 +445,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
     }
@@ -449,8 +470,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -466,6 +487,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         uint256 badTransferAmount = 2 * 10 ** decimals;
         token.approve(address(nttManager), badTransferAmount);
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         vm.expectRevert(
             abi.encodeWithSelector(
                 IRateLimiter.NotEnoughCapacity.selector,
@@ -479,8 +503,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
     }
@@ -511,8 +535,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId(), 2 days), // We are going to warp the time below.
             new bytes(1)
         );
 
@@ -684,8 +708,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -763,8 +787,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(userA),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -861,6 +885,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         // check error conditions
         // revert if amount to be transferred is 0
         if (transferAmount.getAmount() == 0) {
+            uint256 executorMsgValue = executor.msgValue();
+            bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
             vm.expectRevert(abi.encodeWithSelector(INttManager.ZeroAmount.selector));
             nttManager.transfer(
                 transferAmount.untrim(decimals),
@@ -868,8 +895,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
                 toWormholeFormat(user_B),
                 toWormholeFormat(user_A),
                 false,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorMsgValue,
+                executorSignedQuote,
                 new bytes(1)
             );
 
@@ -883,8 +910,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -954,8 +981,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -1014,8 +1041,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId(), 2 days), // We are going to warp the time below.
             new bytes(1)
         );
 

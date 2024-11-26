@@ -15,10 +15,12 @@ import "./mocks/DummyTransceiver.sol";
 import "../src/mocks/DummyToken.sol";
 import "./mocks/MockNttManager.sol";
 import "./mocks/MockEndpoint.sol";
+import "./mocks/MockExecutor.sol";
 
 contract TestThreshold is Test {
     MockNttManagerContract nttManager;
     MockEndpoint endpoint;
+    MockExecutor executor;
 
     uint16 constant chainId = 7;
     uint16 constant chainId2 = 8;
@@ -26,10 +28,17 @@ contract TestThreshold is Test {
 
     function setUp() public {
         endpoint = new MockEndpoint(chainId);
+        endpoint = new MockEndpoint(chainId);
 
         DummyToken t = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint),
+            address(executor),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId,
+            1 days,
+            false
         );
 
         nttManager = MockNttManagerContract(address(new ERC1967Proxy(address(implementation), "")));

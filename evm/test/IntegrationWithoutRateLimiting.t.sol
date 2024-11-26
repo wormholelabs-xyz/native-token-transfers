@@ -16,6 +16,7 @@ import "./libraries/TransceiverHelpers.sol";
 import "./mocks/DummyTransceiver.sol";
 import "./mocks/MockNttManager.sol";
 import "./mocks/MockEndpoint.sol";
+import "./mocks/MockExecutor.sol";
 
 import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -30,6 +31,9 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
     MockEndpoint endpointChain1;
     MockEndpoint endpointChain2;
+
+    MockExecutor executorChain1;
+    MockExecutor executorChain2;
 
     DummyTransceiver transceiverChain1;
     DummyTransceiver transceiverChain2;
@@ -66,10 +70,17 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
         endpointChain1 = new MockEndpoint(chainId1);
         endpointChain2 = new MockEndpoint(chainId2);
 
+        executorChain1 = new MockExecutor(chainId1);
+        executorChain2 = new MockExecutor(chainId2);
+
         vm.chainId(chainId1);
         DummyToken t1 = new DummyToken();
         NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
-            address(endpointChain1), address(t1), IManagerBase.Mode.LOCKING, chainId1
+            address(endpointChain1),
+            address(executorChain1),
+            address(t1),
+            IManagerBase.Mode.LOCKING,
+            chainId1
         );
 
         nttManagerChain1 = MockNttManagerNoRateLimitingContract(
@@ -86,7 +97,11 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
         vm.chainId(chainId2);
         DummyToken t2 = new DummyTokenMintAndBurn();
         NttManagerNoRateLimiting implementationChain2 = new MockNttManagerNoRateLimitingContract(
-            address(endpointChain2), address(t2), IManagerBase.Mode.BURNING, chainId2
+            address(endpointChain2),
+            address(executorChain2),
+            address(t2),
+            IManagerBase.Mode.BURNING,
+            chainId2
         );
 
         nttManagerChain2 = MockNttManagerNoRateLimitingContract(
@@ -145,8 +160,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 sendingAmount,
                 chainId2,
                 bytes32(uint256(uint160(userB))),
-                0, // executorMsgValue
-                new bytes(1) // executorQuote
+                executorChain1.msgValue(),
+                executorChain1.createSignedQuote(executorChain2.chainId())
             );
 
             // Balance check on funds going in and out working as expected
@@ -168,9 +183,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Get the execution events from the logs.
         Vm.Log[] memory logEvents = vm.getRecordedLogs();
-        (, bytes memory encoded) = TransceiverHelpersLib.getExecutionSent(
-            logEvents, chainId1, address(nttManagerChain1), seqNo
-        );
+        bytes memory encoded =
+            TransceiverHelpersLib.getExecutionSent(logEvents, address(nttManagerChain1), seqNo);
 
         vm.stopPrank();
 
@@ -220,8 +234,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 false,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorChain2.msgValue(),
+                executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );
 
@@ -242,9 +256,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Get the execution events from the logs.
         logEvents = vm.getRecordedLogs();
-        (, encoded) = TransceiverHelpersLib.getExecutionSent(
-            logEvents, chainId2, address(nttManagerChain2), seqNo
-        );
+        encoded =
+            TransceiverHelpersLib.getExecutionSent(logEvents, address(nttManagerChain2), seqNo);
 
         // Chain1 verification and checks with the receiving of the message
         vm.chainId(chainId1);
@@ -344,8 +357,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userB),
                 toWormholeFormat(userA),
                 true,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorChain1.msgValue(),
+                executorChain1.createSignedQuote(executorChain2.chainId()),
                 new bytes(1)
             );
 
@@ -368,9 +381,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Get the execution events from the logs.
         Vm.Log[] memory logEvents = vm.getRecordedLogs();
-        (, bytes memory encoded) = TransceiverHelpersLib.getExecutionSent(
-            logEvents, chainId1, address(nttManagerChain1), seqNo
-        );
+        bytes memory encoded =
+            TransceiverHelpersLib.getExecutionSent(logEvents, address(nttManagerChain1), seqNo);
 
         vm.stopPrank();
 
@@ -423,8 +435,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 true,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorChain2.msgValue(),
+                executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );
 
@@ -446,9 +458,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Get the execution events from the logs.
         logEvents = vm.getRecordedLogs();
-        (, encoded) = TransceiverHelpersLib.getExecutionSent(
-            logEvents, chainId2, address(nttManagerChain2), seqNo
-        );
+        encoded =
+            TransceiverHelpersLib.getExecutionSent(logEvents, address(nttManagerChain2), seqNo);
 
         // Chain1 verification and checks with the receiving of the message
         vm.chainId(chainId1);
@@ -516,8 +527,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userB),
                 toWormholeFormat(userA),
                 false,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorChain1.msgValue(),
+                executorChain1.createSignedQuote(executorChain2.chainId()),
                 new bytes(1)
             );
         }
@@ -532,9 +543,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Get the execution events from the logs.
         Vm.Log[] memory logEvents = vm.getRecordedLogs();
-        (, bytes memory encoded) = TransceiverHelpersLib.getExecutionSent(
-            logEvents, chainId1, address(nttManagerChain1), seqNo
-        );
+        bytes memory encoded =
+            TransceiverHelpersLib.getExecutionSent(logEvents, address(nttManagerChain1), seqNo);
 
         vm.chainId(chainId2);
 
@@ -578,8 +588,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userA),
                 toWormholeFormat(userB),
                 false,
-                0, // executorMsgValue
-                new bytes(1), // executorQuote
+                executorChain2.msgValue(),
+                executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );
             uint256 nttManagerBalanceAfter = token1.balanceOf(address(nttManagerChain2));
@@ -602,9 +612,8 @@ contract TestNoRateLimitingEndToEndBase is Test, IRateLimiterEvents {
 
         // Get the execution events from the logs.
         logEvents = vm.getRecordedLogs();
-        (, encoded) = TransceiverHelpersLib.getExecutionSent(
-            logEvents, chainId2, address(nttManagerChain2), seqNo
-        );
+        encoded =
+            TransceiverHelpersLib.getExecutionSent(logEvents, address(nttManagerChain2), seqNo);
 
         vm.chainId(chainId1);
 

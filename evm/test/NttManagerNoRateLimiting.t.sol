@@ -26,6 +26,7 @@ import "./mocks/DummyTransceiver.sol";
 import "../src/mocks/DummyToken.sol";
 import "./mocks/MockNttManager.sol";
 import "./mocks/MockEndpoint.sol";
+import "./mocks/MockExecutor.sol";
 
 // TODO: set this up so the common functionality tests can be run against both
 contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
@@ -33,6 +34,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
     MockNttManagerNoRateLimitingContract nttManagerOther;
     MockEndpoint endpoint;
     MockEndpoint endpointOther;
+    MockExecutor executor;
+    MockExecutor executorOther;
     DummyTransceiver transceiver;
     DummyTransceiver transceiverOther;
 
@@ -62,13 +65,20 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         endpoint = new MockEndpoint(chainId);
         endpointOther = new MockEndpoint(chainId2);
 
+        executor = new MockExecutor(chainId);
+        executorOther = new MockExecutor(chainId2);
+
         DummyToken t = new DummyToken();
         NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
         NttManagerNoRateLimiting otherImplementation = new MockNttManagerNoRateLimitingContract(
-            address(endpointOther), address(t), IManagerBase.Mode.LOCKING, chainId2
+            address(endpointOther),
+            address(executorOther),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId2
         );
 
         nttManager = MockNttManagerNoRateLimitingContract(
@@ -130,18 +140,15 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         nttManager.pause();
         assertEq(nttManager.isPaused(), true);
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         // When the NttManagerNoRateLimiting is paused, initiating transfers, completing queued transfers on both source and destination chains,
         // executing transfers and attesting to transfers should all revert
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
         );
-        nttManager.transfer(
-            0,
-            0,
-            bytes32(0),
-            0, // executorMsgValue
-            new bytes(1) // executorQuote
-        );
+        nttManager.transfer(0, 0, bytes32(0), executorMsgValue, executorSignedQuote);
 
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
@@ -202,7 +209,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
     function test_brokenToken() public {
         DummyToken t = new DummyTokenBroken();
         NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
         NttManagerNoRateLimiting newNttManagerNoRateLimiting = MockNttManagerNoRateLimitingContract(
@@ -211,13 +218,12 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
         newNttManagerNoRateLimiting.initialize();
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
         newNttManagerNoRateLimiting.transfer(
-            1,
-            1,
-            bytes32("1"),
-            0, // executorMsgValue
-            new bytes(1) // executorQuote
+            1, 1, bytes32("1"), executorMsgValue, executorSignedQuote
         );
     }
 
@@ -280,7 +286,11 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
     function test_noEnabledTransceivers() public {
         DummyToken token = new DummyToken();
         NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(token), IManagerBase.Mode.LOCKING, chainId
+            address(endpoint),
+            address(executorOther),
+            address(token),
+            IManagerBase.Mode.LOCKING,
+            chainId
         );
 
         MockNttManagerNoRateLimitingContract newNttManagerNoRateLimiting =
@@ -305,6 +315,9 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         token.approve(address(newNttManagerNoRateLimiting), 3 * 10 ** decimals);
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         vm.expectRevert(abi.encodeWithSelector(Endpoint.AdapterNotEnabled.selector));
         newNttManagerNoRateLimiting.transfer(
             1 * 10 ** decimals,
@@ -312,8 +325,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
     }
@@ -450,8 +463,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
         uint64 s2 = nttManager.transfer(
@@ -460,8 +473,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
         uint64 s3 = nttManager.transfer(
@@ -470,8 +483,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -502,10 +515,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
+
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         // However, attempting to transfer an amount higher than the destination chain can handle will revert.
         amount = type(uint64).max * 10 ** (decimals - 4);
@@ -516,8 +532,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
 
@@ -529,8 +545,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
     }
@@ -581,8 +597,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true, // Should queue
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
@@ -602,6 +618,9 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(abi.encodeWithSelector(INttManager.NotImplemented.selector));
         nttManager.cancelOutboundQueuedTransfer(sequence);
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         // Outbound transfers fail when queued
         vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));
         nttManager.transfer(
@@ -610,8 +629,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true, // Should queue
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
         vm.stopPrank();
@@ -626,8 +645,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
 
@@ -696,7 +715,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
     function test_noAutomaticSlot() public {
         DummyToken t = new DummyToken();
         MockNttManagerNoRateLimitingContract c = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, 1
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, 1
         );
         assertEq(c.lastSlot(), 0x0);
     }
@@ -707,7 +726,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.startStateDiffRecording();
 
         new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, 1
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, 1
         );
 
         Utils.assertSafeUpgradeableConstructor(vm.stopAndReturnStateDiff());
@@ -742,6 +761,9 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         uint256 amountWithDust = transferAmount + dustAmount; // An amount with 19 digits, which will result in dust due to 18 decimals
         token.approve(address(nttManager), amountWithDust);
 
+        uint256 executorMsgValue = executor.msgValue();
+        bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+
         vm.expectRevert(
             abi.encodeWithSelector(
                 INttManager.TransferAmountHasDust.selector, amountWithDust, dustAmount
@@ -753,8 +775,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(to),
             toWormholeFormat(from),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executorMsgValue,
+            executorSignedQuote,
             new bytes(1)
         );
 
@@ -809,6 +831,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         // Step 2 (upgrade to a new nttManager)
         MockNttManagerNoRateLimitingContract newNttManagerNoRateLimiting = new MockNttManagerNoRateLimitingContract(
             address(nttManagerOther.endpoint()),
+            address(nttManagerOther.executor()),
             nttManagerOther.token(),
             nttManagerOther.mode(),
             nttManagerOther.chainId()
@@ -836,7 +859,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         // Create a standard manager with rate limiting disabled.
         DummyToken t = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 0, true
+            address(endpoint),
+            address(executor),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId,
+            0,
+            true
         );
 
         MockNttManagerContract thisNttManager =
@@ -847,7 +876,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         // Upgrade from NttManagerNoRateLimiting to NttManager with rate limiting enabled. This should work.
         NttManager rateLimitingImplementation = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
         thisNttManager.upgrade(address(rateLimitingImplementation));
@@ -857,7 +886,13 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         // Create a standard manager with rate limiting enabled.
         DummyToken t = new DummyToken();
         NttManager implementation = new MockNttManagerContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId, 1 days, false
+            address(endpoint),
+            address(executor),
+            address(t),
+            IManagerBase.Mode.LOCKING,
+            chainId,
+            1 days,
+            false
         );
 
         MockNttManagerContract thisNttManager =
@@ -868,7 +903,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         // Upgrade from NttManagerNoRateLimiting to NttManager with rate limiting enabled. The immutable check should panic.
         NttManager rateLimitingImplementation = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
         vm.expectRevert(); // Reverts with a panic on the assert. So, no way to tell WHY this happened.
@@ -883,7 +918,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             DummyTokenMintAndBurn(address(new ERC1967Proxy(address(dummy1), "")));
 
         NttManagerNoRateLimiting implementation = new MockNttManagerNoRateLimitingContract(
-            address(endpoint), address(t), IManagerBase.Mode.LOCKING, chainId
+            address(endpoint), address(executor), address(t), IManagerBase.Mode.LOCKING, chainId
         );
 
         MockNttManagerNoRateLimitingContract newNttManagerNoRateLimiting =
@@ -909,8 +944,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
         vm.stopPrank();
@@ -965,8 +1000,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
         vm.stopPrank();
@@ -998,8 +1033,8 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            0, // executorMsgValue
-            new bytes(1), // executorQuote
+            executor.msgValue(),
+            executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
         vm.stopPrank();
@@ -1017,29 +1052,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         );
         userBExpectedBalance = userBExpectedBalance + transferAmount.untrim(t.decimals());
         assertEq(t.balanceOf(address(user_B)), userBExpectedBalance);
-    }
-
-    error ExecutionEventNotFoundInLogs(uint64 nttSeqNo);
-
-    function getExecutionSent(
-        Vm.Log[] memory events,
-        uint16 srcChain,
-        address integrator,
-        uint64 nttSeqNo
-    ) public pure returns (uint64 epSeq, bytes memory payload) {
-        for (uint256 idx = 0; idx < events.length; ++idx) {
-            if (
-                events[idx].topics[0]
-                    == bytes32(0x34a042d85c0b260d1be6cd4bf178c0a3f85c6cf64868e6d64ec7a11027449d5a)
-                    && events[idx].topics[1] == bytes32(uint256(srcChain))
-                    && events[idx].emitter == integrator
-                    && events[idx].topics[3] == bytes32(uint256(nttSeqNo))
-            ) {
-                (epSeq,,, payload) = abi.decode(events[idx].data, (uint64, uint16, bytes32, bytes));
-                return (epSeq, payload);
-            }
-        }
-        revert ExecutionEventNotFoundInLogs(nttSeqNo);
     }
 
     function checkAttestationOnly(
