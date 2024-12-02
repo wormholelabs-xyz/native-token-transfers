@@ -8,10 +8,6 @@ import "example-messaging-endpoint/evm/src/interfaces/IEndpointAdmin.sol";
 import "example-messaging-endpoint/evm/src/interfaces/IEndpointIntegrator.sol";
 import "example-messaging-executor/evm/src/interfaces/IExecutor.sol";
 
-// TODO: Doing this to access AdapterRegistry publics. Should there be an interface??
-//       Then again, once we implement per-chain thresholding, this reference may go away.
-import "example-messaging-endpoint/evm/src/Endpoint.sol";
-
 import "../libraries/external/OwnableUpgradeable.sol";
 import "../libraries/external/ReentrancyGuardUpgradeable.sol";
 import "../libraries/TransceiverStructs.sol";

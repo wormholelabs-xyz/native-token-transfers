@@ -130,13 +130,6 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
     function test_setUp() public {}
 
-    bytes32 private constant JUNK_SLOT = bytes32(uint256(keccak256("ntt.junk")) - 1);
-
-    struct OldJunk {
-        bytes32 peerAddress;
-        uint8 tokenDecimals;
-    }
-
     // === pure unit tests
 
     // naive implementation of countSetBits to test against
@@ -482,7 +475,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
     }
 
@@ -536,7 +529,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -574,7 +567,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
 
         assertEq(s2, s1 + 1);
@@ -740,7 +733,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         uint64 s2 = nttManager.transfer(
             1 * 10 ** decimals,
@@ -749,7 +742,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         uint64 s3 = nttManager.transfer(
             1 * 10 ** decimals,
@@ -758,7 +751,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
 
         assertEq(s1, 0);
@@ -801,7 +794,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
 
         // A (slightly) more sensible amount should work normally
@@ -813,7 +806,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
     }
 
@@ -864,7 +857,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true, // Should queue
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
 
         // We should have enqueued message zero and not have sent anything out.
@@ -894,7 +887,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true, // Should queue
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -909,7 +902,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
 
         // INBOUND
@@ -1055,7 +1048,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(from),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
 
         vm.stopPrank();
@@ -1174,7 +1167,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -1227,7 +1220,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -1260,7 +1253,7 @@ contract TestNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 

@@ -333,7 +333,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
     }
 
@@ -476,7 +476,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         uint64 s2 = nttManager.transfer(
             1 * 10 ** decimals,
@@ -485,7 +485,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         uint64 s3 = nttManager.transfer(
             1 * 10 ** decimals,
@@ -494,7 +494,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
 
         assertEq(s1, 0);
@@ -531,7 +531,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
 
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
@@ -546,7 +546,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
 
         // A (slightly) more sensible amount should work normally
@@ -558,7 +558,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
     }
 
@@ -609,7 +609,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true, // Should queue
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
 
         // We should have sent out message zero.
@@ -639,7 +639,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true, // Should queue
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -654,7 +654,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
 
         // INBOUND
@@ -788,7 +788,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(from),
             false,
             executorSignedQuote,
-            new bytes(1)
+            new bytes(0)
         );
 
         vm.stopPrank();
@@ -970,7 +970,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -1025,7 +1025,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 
@@ -1057,7 +1057,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(1)
+            new bytes(0)
         );
         vm.stopPrank();
 

@@ -74,7 +74,7 @@ contract FuzzNttManager is FuzzingHelpers {
 
         // We always queue to ensure we're always seizing the tokens
         try nttManager.transfer(
-            amount, recipientChainId, validAddress, validAddress, true, new bytes(1)
+            amount, recipientChainId, validAddress, validAddress, true, new bytes(0)
         ) {
             assert(IERC20(dummyToken).balanceOf(address(this)) == thisAddressBalanceBefore - amount);
             assert(
@@ -227,7 +227,7 @@ contract FuzzNttManager is FuzzingHelpers {
         uint64 nextMessageSequence = nttManager.nextMessageSequence();
 
         try nttManager.transfer(
-            amount, recipientChainId, recipient, recipient, shouldQueue, new bytes(1)
+            amount, recipientChainId, recipient, recipient, shouldQueue, new bytes(0)
         ) {
             // If we queued, we should have an item in the queue
             if ((shouldQueue && amount > currentOutboundCapacity)) {

@@ -262,7 +262,7 @@ contract TestAdditionalPayload is Test {
                 toWormholeFormat(userC),
                 false,
                 executorChain2.createSignedQuote(executorChain1.chainId()),
-                new bytes(1)
+                new bytes(0)
             );
 
             uint256 supplyAfter = token2.totalSupply();
