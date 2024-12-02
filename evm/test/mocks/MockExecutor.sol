@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity ^0.8.19;
 
-import "example-executor.git/evm/src/Executor.sol";
+import "example-messaging-executor/evm/src/Executor.sol";
 
 contract MockExecutor is Executor {
     constructor(

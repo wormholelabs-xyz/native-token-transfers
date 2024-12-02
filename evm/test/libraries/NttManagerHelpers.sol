@@ -11,7 +11,7 @@ import "../../src/interfaces/INttManager.sol";
 library NttManagerHelpersLib {
     using TrimmedAmountLib for TrimmedAmount;
 
-    uint256 public constant gasLimit = 100000000;
+    uint128 public constant gasLimit = 100000000;
 
     function setConfigs(
         TrimmedAmount inboundLimit,

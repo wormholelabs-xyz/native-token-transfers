@@ -148,7 +148,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         nttManager.pause();
         assertEq(nttManager.isPaused(), true);
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         // When the NttManagerNoRateLimiting is paused, initiating transfers, completing queued transfers on both source and destination chains,
@@ -156,7 +155,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
         );
-        nttManager.transfer(0, 0, bytes32(0), executorMsgValue, executorSignedQuote);
+        nttManager.transfer(0, 0, bytes32(0), executorSignedQuote);
 
         vm.expectRevert(
             abi.encodeWithSelector(PausableUpgradeable.RequireContractIsNotPaused.selector)
@@ -226,13 +225,10 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
         newNttManagerNoRateLimiting.initialize();
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         vm.expectRevert(abi.encodeWithSelector(INttManager.StaticcallFailed.selector));
-        newNttManagerNoRateLimiting.transfer(
-            1, 1, bytes32("1"), executorMsgValue, executorSignedQuote
-        );
+        newNttManagerNoRateLimiting.transfer(1, 1, bytes32("1"), executorSignedQuote);
     }
 
     // === transceiver registration
@@ -327,7 +323,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
 
         token.approve(address(newNttManagerNoRateLimiting), 3 * 10 ** decimals);
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         vm.expectRevert(abi.encodeWithSelector(Endpoint.AdapterNotEnabled.selector));
@@ -337,7 +332,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -481,7 +475,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -491,7 +484,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -501,7 +493,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -539,12 +530,10 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         // However, attempting to transfer an amount higher than the destination chain can handle will revert.
@@ -556,7 +545,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -569,7 +557,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -621,7 +608,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true, // Should queue
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -642,7 +628,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         vm.expectRevert(abi.encodeWithSelector(INttManager.NotImplemented.selector));
         nttManager.cancelOutboundQueuedTransfer(sequence);
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         // Outbound transfers fail when queued
@@ -653,7 +638,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true, // Should queue
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -669,7 +653,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -791,7 +774,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         uint256 amountWithDust = transferAmount + dustAmount; // An amount with 19 digits, which will result in dust due to 18 decimals
         token.approve(address(nttManager), amountWithDust);
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         vm.expectRevert(
@@ -805,7 +787,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(to),
             toWormholeFormat(from),
             false,
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -988,7 +969,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -1044,7 +1024,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -1077,7 +1056,6 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );

@@ -12,6 +12,8 @@ import "../libraries/RateLimiter.sol";
 import "../interfaces/INttManager.sol";
 import "../interfaces/INttToken.sol";
 
+import "example-messaging-executor/evm/src/libraries/RelayInstructions.sol";
+
 import {ManagerBase} from "./ManagerBase.sol";
 
 /// @title NttManager
@@ -111,7 +113,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 peerChainId,
         bytes32 peerContract,
         uint8 decimals,
-        uint256 gasLimit,
+        uint128 gasLimit,
         uint256 inboundLimit
     ) public onlyOwner {
         if (peerChainId == 0) {
@@ -145,7 +147,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     }
 
     /// @inheritdoc INttManager
-    function setGasLimit(uint16 peerChainId, uint256 gasLimit) external onlyOwner {
+    function setGasLimit(uint16 peerChainId, uint128 gasLimit) external onlyOwner {
         if (gasLimit == 0) {
             revert InvalidGasLimitZero(peerChainId);
         }
@@ -184,18 +186,10 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint256 amount,
         uint16 recipientChain,
         bytes32 recipient,
-        uint256 executorMsgValue,
         bytes calldata executorQuote
     ) external payable nonReentrant whenNotPaused returns (uint64) {
         return _transferEntryPoint(
-            amount,
-            recipientChain,
-            recipient,
-            recipient,
-            false,
-            executorMsgValue,
-            executorQuote,
-            new bytes(1)
+            amount, recipientChain, recipient, recipient, false, executorQuote, new bytes(1)
         );
     }
 
@@ -206,7 +200,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
-        uint256 executorMsgValue,
         bytes calldata executorQuote,
         bytes memory transceiverInstructions
     ) external payable nonReentrant whenNotPaused returns (uint64) {
@@ -216,7 +209,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             recipient,
             refundAddress,
             shouldQueue,
-            executorMsgValue,
             executorQuote,
             transceiverInstructions
         );
@@ -395,7 +387,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             queuedTransfer.recipient,
             queuedTransfer.refundAddress,
             queuedTransfer.sender,
-            queuedTransfer.executorMsgValue,
             queuedTransfer.executorQuote
         );
     }
@@ -432,7 +423,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
-        uint256 executorMsgValue,
         bytes memory executorQuote,
         bytes memory transceiverInstructions
     ) internal returns (uint64) {
@@ -498,7 +488,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             recipient,
             refundAddress,
             shouldQueue,
-            executorMsgValue,
             executorQuote,
             transceiverInstructions,
             trimmedAmount,
@@ -516,7 +505,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             recipient,
             refundAddress,
             msg.sender,
-            executorMsgValue,
             executorQuote
         );
     }
@@ -527,7 +515,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
-        uint256 executorMsgValue,
         bytes memory executorQuote,
         bytes memory transceiverInstructions,
         TrimmedAmount trimmedAmount,
@@ -557,7 +544,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
                 recipient,
                 refundAddress,
                 msg.sender,
-                executorMsgValue,
                 executorQuote,
                 transceiverInstructions
             );
@@ -584,9 +570,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         address sender,
-        uint256 executorMsgValue,
         bytes memory executorQuote
-    ) internal returns (uint64 msgSequence) {
+    )
+        // Add "bytes memory relayInstructions"
+        internal
+        returns (uint64 msgSequence)
+    {
         // verify chain has not forked
         checkFork(evmChainId);
 
@@ -624,22 +613,22 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             payloadHash
         );
 
-        uint256 execMsgVal = executorMsgValue;
         bytes memory execQuote = executorQuote;
 
-        uint256 gasLimit = _getPeersStorage()[destinationChain].gasLimit;
+        uint128 gasLimit = _getPeersStorage()[destinationChain].gasLimit; // Make this u128
         if (gasLimit == 0) {
             revert InvalidGasLimitZero(destinationChain);
         }
 
+        bytes memory relayInstructions = RelayInstructions.encodeGas(gasLimit, 0);
+
         executor.requestExecution(
             destinationChain,
             recip,
-            gasLimit,
-            execMsgVal,
             UniversalAddressLibrary.fromBytes32(refundAddr).toAddress(),
             execQuote,
-            encodedNttManagerPayload
+            encodedNttManagerPayload,
+            relayInstructions
         );
 
         // return the sequence number

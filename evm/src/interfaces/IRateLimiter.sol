@@ -70,7 +70,6 @@ interface IRateLimiter {
         uint64 txTimestamp;
         uint16 recipientChain;
         address sender;
-        uint256 executorMsgValue;
         bytes executorQuote;
         bytes transceiverInstructions;
     }

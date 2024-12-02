@@ -13,7 +13,7 @@ interface INttManager is IManagerBase {
     struct NttManagerPeer {
         bytes32 peerAddress;
         uint8 tokenDecimals;
-        uint256 gasLimit;
+        uint128 gasLimit;
     }
 
     /// @notice Emitted when a message is sent from the nttManager.
@@ -171,7 +171,6 @@ interface INttManager is IManagerBase {
         uint256 amount,
         uint16 recipientChain,
         bytes32 recipient,
-        uint256 executorMsgValue,
         bytes calldata executorQuote
     ) external payable returns (uint64 msgId);
 
@@ -193,7 +192,6 @@ interface INttManager is IManagerBase {
         bytes32 recipient,
         bytes32 refundAddress,
         bool shouldQueue,
-        uint256 executorMsgValue,
         bytes calldata executorQuote,
         bytes memory encodedInstructions
     ) external payable returns (uint64 msgId);
@@ -257,7 +255,7 @@ interface INttManager is IManagerBase {
         uint16 peerChainId,
         bytes32 peerContract,
         uint8 decimals,
-        uint256 gasLimit,
+        uint128 gasLimit,
         uint256 inboundLimit
     ) external;
 
@@ -265,7 +263,7 @@ interface INttManager is IManagerBase {
     /// @dev This method can only be executed by the `owner`.
     /// @param peerChainId The Wormhole chain ID of the peer.
     /// @param limit The new gas limit.
-    function setGasLimit(uint16 peerChainId, uint256 limit) external;
+    function setGasLimit(uint16 peerChainId, uint128 limit) external;
 
     /// @notice Sets the outbound transfer limit for a given chain.
     /// @dev This method can only be executed by the `owner`.

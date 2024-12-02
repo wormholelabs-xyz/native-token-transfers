@@ -170,7 +170,6 @@ contract TestAdditionalPayload is Test {
                 sendingAmount,
                 chainId2,
                 bytes32(uint256(uint160(userB))),
-                executorChain1.msgValue(),
                 executorChain1.createSignedQuote(executorChain2.chainId())
             );
 
@@ -262,7 +261,6 @@ contract TestAdditionalPayload is Test {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 false,
-                executorChain2.msgValue(),
                 executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );

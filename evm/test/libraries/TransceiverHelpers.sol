@@ -214,12 +214,12 @@ library TransceiverHelpersLib {
                         if (
                             events[idx].topics[0]
                                 == bytes32(
-                                    0x48f75baf726bbb12e77ca4f0f39aeed4ec43e710a7bdd132adbe1645ee90e0a2
+                                    0xd870d87e4a7c33d0943b0a3d2822b174e239cc55c169af14cc56467a4489e3b5
                                 )
                         ) {
-                            (,,,,,,, payload) = abi.decode(
+                            (,,,,, payload,) = abi.decode(
                                 events[idx].data,
-                                (uint256, uint16, bytes32, uint256, uint256, address, bytes, bytes)
+                                (uint256, uint16, bytes32, address, bytes, bytes, bytes)
                             );
                             bytes32 payloadHash = keccak256(payload);
                             if (payloadHash == msgHash) {

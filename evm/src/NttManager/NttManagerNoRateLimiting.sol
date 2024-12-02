@@ -97,7 +97,6 @@ contract NttManagerNoRateLimiting is NttManager {
         bytes32, // recipient
         bytes32, // refundAddress
         bool, // shouldQueue
-        uint256, // executorMsgValue
         bytes memory, // executorQuote
         bytes memory, // transceiverInstructions
         TrimmedAmount, // trimmedAmount

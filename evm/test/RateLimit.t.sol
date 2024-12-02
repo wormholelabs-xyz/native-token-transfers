@@ -153,7 +153,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -199,7 +198,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -245,7 +243,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -286,7 +283,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -341,7 +337,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -390,7 +385,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -439,7 +433,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         uint256 transferAmount = 3 * 10 ** decimals;
         token.approve(address(nttManager), transferAmount);
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         vm.expectRevert(
@@ -453,7 +446,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -478,7 +470,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -495,7 +486,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         uint256 badTransferAmount = 2 * 10 ** decimals;
         token.approve(address(nttManager), badTransferAmount);
 
-        uint256 executorMsgValue = executor.msgValue();
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
         vm.expectRevert(
@@ -511,7 +501,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executorMsgValue,
             executorSignedQuote,
             new bytes(1)
         );
@@ -543,7 +532,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId(), 2 days), // We are going to warp the time below.
             new bytes(1)
         );
@@ -716,7 +704,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -795,7 +782,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(userA),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -893,7 +879,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         // check error conditions
         // revert if amount to be transferred is 0
         if (transferAmount.getAmount() == 0) {
-            uint256 executorMsgValue = executor.msgValue();
             bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
 
             vm.expectRevert(abi.encodeWithSelector(INttManager.ZeroAmount.selector));
@@ -903,7 +888,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
                 toWormholeFormat(user_B),
                 toWormholeFormat(user_A),
                 false,
-                executorMsgValue,
                 executorSignedQuote,
                 new bytes(1)
             );
@@ -918,7 +902,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -989,7 +972,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             false,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId()),
             new bytes(1)
         );
@@ -1049,7 +1031,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_B),
             toWormholeFormat(user_A),
             true,
-            executor.msgValue(),
             executor.createSignedQuote(executorOther.chainId(), 2 days), // We are going to warp the time below.
             new bytes(1)
         );

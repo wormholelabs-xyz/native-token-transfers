@@ -173,7 +173,6 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
                 sendingAmount,
                 chainId2,
                 bytes32(uint256(uint160(userB))),
-                executorChain1.msgValue(),
                 executorChain1.createSignedQuote(executorChain2.chainId())
             );
 
@@ -247,7 +246,6 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 false,
-                executorChain2.msgValue(),
                 executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );
@@ -319,7 +317,6 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userB),
                 toWormholeFormat(userA),
                 true,
-                executorChain1.msgValue(),
                 executorChain1.createSignedQuote(executorChain2.chainId()),
                 new bytes(1)
             );
@@ -396,7 +393,6 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userD),
                 toWormholeFormat(userC),
                 true,
-                executorChain2.msgValue(),
                 executorChain2.createSignedQuote(executorChain1.chainId(), 2 days), // We are going to warp the time below.
                 new bytes(1)
             );
@@ -534,7 +530,6 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userB),
                 toWormholeFormat(userA),
                 false,
-                executorChain1.msgValue(),
                 executorChain1.createSignedQuote(executorChain2.chainId()),
                 new bytes(1)
             );
@@ -594,7 +589,6 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
                 toWormholeFormat(userA),
                 toWormholeFormat(userB),
                 false,
-                executorChain2.msgValue(),
                 executorChain2.createSignedQuote(executorChain1.chainId()),
                 new bytes(1)
             );

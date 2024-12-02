@@ -15,7 +15,7 @@ contract ParseNttConfig is Script {
     struct ChainConfig {
         uint16 chainId;
         uint8 decimals;
-        uint256 gasLimit;
+        uint128 gasLimit;
         uint256 inboundLimit;
         bool isEvmChain;
         bool isSpecialRelayingEnabled;
