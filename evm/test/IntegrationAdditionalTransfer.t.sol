@@ -170,7 +170,9 @@ contract TestAdditionalPayload is Test {
                 sendingAmount,
                 chainId2,
                 bytes32(uint256(uint160(userB))),
-                executorChain1.createSignedQuote(executorChain2.chainId())
+                executorChain1.createSignedQuote(executorChain2.chainId()),
+                executorChain1.createRelayInstructions(),
+                endpointChain1.createAdapterInstructions()
             );
 
             // Balance check on funds going in and out working as expected
@@ -262,7 +264,8 @@ contract TestAdditionalPayload is Test {
                 toWormholeFormat(userC),
                 false,
                 executorChain2.createSignedQuote(executorChain1.chainId()),
-                new bytes(0)
+                executorChain2.createRelayInstructions(),
+                endpointChain2.createAdapterInstructions()
             );
 
             uint256 supplyAfter = token2.totalSupply();

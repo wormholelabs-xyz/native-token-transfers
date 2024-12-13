@@ -22,7 +22,8 @@ contract DummyTransceiver is IAdapter {
     }
 
     function quoteDeliveryPrice(
-        uint16 /* recipientChain */
+        uint16, /* recipientChain */
+        bytes calldata /* adapterInstructions */
     ) external pure returns (uint256) {
         return 0;
     }
@@ -49,7 +50,8 @@ contract DummyTransceiver is IAdapter {
         uint16 dstChain,
         UniversalAddress dstAddr,
         bytes32 payloadHash,
-        address refundAddr
+        address refundAddr,
+        bytes calldata // adapterInstructions
     ) external payable {
         Message memory m = Message({
             srcChain: chainId,

@@ -63,6 +63,7 @@ interface IRateLimiter {
     ///    - recipientChain: the chain of the recipient.
     ///    - sender: the sender of the transfer.
     ///    - relayInstructions: additional instructions to be forwarded to the relayer.
+    ///    - transceiverInstructions: instructions to be passed into the adapters.
     struct OutboundQueuedTransfer {
         bytes32 recipient;
         bytes32 refundAddress;
@@ -72,6 +73,7 @@ interface IRateLimiter {
         address sender;
         bytes executorQuote;
         bytes relayInstructions;
+        bytes transceiverInstructions;
     }
 
     /// @notice Parameters for an inbound queued transfer.

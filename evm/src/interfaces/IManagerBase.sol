@@ -98,9 +98,11 @@ interface IManagerBase {
 
     /// @notice Fetch the delivery price for a given recipient chain transfer.
     /// @param recipientChain The Wormhole chain ID of the transfer destination.
+    /// @param transceiverInstructions The encoded adapter instructions to be passed to the endpoint.
     /// @return - The delivery prices associated with each enabled endpoint and the total price.
     function quoteDeliveryPrice(
-        uint16 recipientChain
+        uint16 recipientChain,
+        bytes memory transceiverInstructions
     ) external view returns (uint256);
 
     /// @notice Sets the threshold for the number of attestations required for a message

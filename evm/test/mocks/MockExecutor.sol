@@ -47,6 +47,10 @@ contract MockExecutor is Executor {
         return encodeSignedQuoteHeader(signedQuote);
     }
 
+    function createRelayInstructions() public pure returns (bytes memory) {
+        return new bytes(0);
+    }
+
     function msgValue() public pure returns (uint256) {
         return 0;
     }

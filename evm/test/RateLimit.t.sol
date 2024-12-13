@@ -154,7 +154,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -199,7 +200,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -244,7 +246,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -284,7 +287,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -338,7 +342,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -386,7 +391,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -434,6 +440,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         token.approve(address(nttManager), transferAmount);
 
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+        bytes memory executorRelayInstructions = executor.createRelayInstructions();
+        bytes memory adapterInstructions = endpoint.createAdapterInstructions();
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -447,7 +455,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(0)
+            executorRelayInstructions,
+            adapterInstructions
         );
     }
 
@@ -471,7 +480,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         // assert that first transfer went through
@@ -487,6 +497,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         token.approve(address(nttManager), badTransferAmount);
 
         bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+        bytes memory executorRelayInstructions = executor.createRelayInstructions();
+        bytes memory adapterInstructions = endpoint.createAdapterInstructions();
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -502,7 +514,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executorSignedQuote,
-            new bytes(0)
+            executorRelayInstructions,
+            adapterInstructions
         );
     }
 
@@ -533,7 +546,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true,
             executor.createSignedQuote(executorOther.chainId(), 2 days), // We are going to warp the time below.
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         // assert that the transfer got queued up
@@ -705,7 +719,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -783,7 +798,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(userA),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -880,6 +896,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         // revert if amount to be transferred is 0
         if (transferAmount.getAmount() == 0) {
             bytes memory executorSignedQuote = executor.createSignedQuote(executorOther.chainId());
+            bytes memory executorRelayInstructions = executor.createRelayInstructions();
+            bytes memory adapterInstructions = endpoint.createAdapterInstructions();
 
             vm.expectRevert(abi.encodeWithSelector(INttManager.ZeroAmount.selector));
             nttManager.transfer(
@@ -889,7 +907,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
                 toWormholeFormat(user_A),
                 false,
                 executorSignedQuote,
-                new bytes(0)
+                executorRelayInstructions,
+                adapterInstructions
             );
 
             return;
@@ -903,7 +922,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -973,7 +993,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             false,
             executor.createSignedQuote(executorOther.chainId()),
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         vm.stopPrank();
@@ -1032,7 +1053,8 @@ contract TestRateLimit is Test, IRateLimiterEvents {
             toWormholeFormat(user_A),
             true,
             executor.createSignedQuote(executorOther.chainId(), 2 days), // We are going to warp the time below.
-            new bytes(0)
+            executor.createRelayInstructions(),
+            endpoint.createAdapterInstructions()
         );
 
         // assert that the transfer got queued up

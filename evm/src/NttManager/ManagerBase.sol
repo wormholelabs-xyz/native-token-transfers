@@ -104,9 +104,10 @@ abstract contract ManagerBase is
 
     /// @inheritdoc IManagerBase
     function quoteDeliveryPrice(
-        uint16 recipientChain
+        uint16 recipientChain,
+        bytes memory transceiverInstructions
     ) public view returns (uint256) {
-        return endpoint.quoteDeliveryPrice(recipientChain); // TODO: Add in executor delivery price.
+        return endpoint.quoteDeliveryPrice(recipientChain, transceiverInstructions);
     }
 
     // =============== Internal Logic ===========================================================

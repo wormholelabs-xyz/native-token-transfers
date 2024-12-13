@@ -166,12 +166,17 @@ interface INttManager is IManagerBase {
     /// @param amount The amount to transfer.
     /// @param recipientChain The Wormhole chain ID for the destination.
     /// @param recipient The recipient address.
+    /// @param executorQuote The signed quote to be passed to the executor.
+    /// @param relayInstructions The relay instructions to be passed to the executor.
+    /// @param transceiverInstructions The adapter instructions to be passed to the endpoint.
     /// @return msgId The resulting message ID of the transfer
     function transfer(
         uint256 amount,
         uint16 recipientChain,
         bytes32 recipient,
-        bytes calldata executorQuote
+        bytes calldata executorQuote,
+        bytes calldata relayInstructions,
+        bytes calldata transceiverInstructions
     ) external payable returns (uint64 msgId);
 
     /// @notice Transfer a given amount to a recipient on a given chain. This function is called
@@ -182,9 +187,11 @@ interface INttManager is IManagerBase {
     /// @param amount The amount to transfer.
     /// @param recipientChain The Wormhole chain ID for the destination.
     /// @param recipient The recipient address.
-    /// @param refundAddress The address to which a refund for unussed gas is issued on the recipient chain.
+    /// @param refundAddress The address to which a refund for unused gas is issued on the recipient chain.
     /// @param shouldQueue Whether the transfer should be queued if the outbound limit is hit.
-    /// @param encodedInstructions Additional instructions to be forwarded to the recipient chain.
+    /// @param executorQuote The signed quote to be passed to the executor.
+    /// @param relayInstructions The relay instructions to be passed to the executor.
+    /// @param transceiverInstructions The adapter instructions to be passed to the endpoint.
     /// @return msgId The resulting message ID of the transfer
     function transfer(
         uint256 amount,
@@ -193,7 +200,8 @@ interface INttManager is IManagerBase {
         bytes32 refundAddress,
         bool shouldQueue,
         bytes calldata executorQuote,
-        bytes memory encodedInstructions
+        bytes calldata relayInstructions,
+        bytes calldata transceiverInstructions
     ) external payable returns (uint64 msgId);
 
     /// @notice Complete an outbound transfer that's been queued.

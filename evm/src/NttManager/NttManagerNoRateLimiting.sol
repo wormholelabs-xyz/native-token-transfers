@@ -99,6 +99,7 @@ contract NttManagerNoRateLimiting is NttManager {
         bool, // shouldQueue
         bytes memory, // executorQuote
         bytes memory, // relayInstructions
+        bytes memory, // transceiverInstructions
         TrimmedAmount, // trimmedAmount
         uint64 // sequence
     ) internal pure override returns (bool) {

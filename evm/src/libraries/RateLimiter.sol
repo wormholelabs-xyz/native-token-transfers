@@ -70,8 +70,8 @@ abstract contract RateLimiter is IRateLimiter, IRateLimiterEvents {
 
     constructor(uint64 _rateLimitDuration, bool _skipRateLimiting) {
         if (
-            _rateLimitDuration == 0 && !_skipRateLimiting
-                || _rateLimitDuration != 0 && _skipRateLimiting
+            (_rateLimitDuration == 0 && !_skipRateLimiting)
+                || (_rateLimitDuration != 0 && _skipRateLimiting)
         ) {
             revert UndefinedRateLimiting();
         }
@@ -303,7 +303,8 @@ abstract contract RateLimiter is IRateLimiter, IRateLimiterEvents {
         bytes32 refundAddress,
         address senderAddress,
         bytes memory executorQuote,
-        bytes memory relayInstructions
+        bytes memory relayInstructions,
+        bytes memory transceiverInstructions
     ) internal {
         _getOutboundQueueStorage()[sequence] = OutboundQueuedTransfer({
             amount: amount,
@@ -313,7 +314,8 @@ abstract contract RateLimiter is IRateLimiter, IRateLimiterEvents {
             txTimestamp: uint64(block.timestamp),
             sender: senderAddress,
             executorQuote: executorQuote,
-            relayInstructions: relayInstructions
+            relayInstructions: relayInstructions,
+            transceiverInstructions: transceiverInstructions
         });
 
         emit OutboundTransferQueued(sequence);
