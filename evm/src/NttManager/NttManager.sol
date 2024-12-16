@@ -42,7 +42,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     using TrimmedAmountLib for uint256;
     using TrimmedAmountLib for TrimmedAmount;
 
-    string public constant NTT_MANAGER_VERSION = "1.1.0";
+    string public constant NTT_MANAGER_VERSION = "2.0.0";
 
     // =============== Setup =================================================================
 
@@ -597,7 +597,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         checkFork(evmChainId);
 
         // Compute the quote price and refund user excess value from msg.value
-        uint256 epTotalPriceQuote = quoteAndRefund(recipientChain, transceiverInstructions);
+        (uint256 epTotalPriceQuote, uint256 excessValue) =
+            quoteEndpoint(recipientChain, transceiverInstructions);
 
         return _transfer(
             _TransferArgs({
@@ -610,7 +611,8 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
                 executorQuote: executorQuote,
                 relayInstructions: relayInstructions,
                 transceiverInstructions: transceiverInstructions,
-                epTotalPriceQuote: epTotalPriceQuote
+                epTotalPriceQuote: epTotalPriceQuote,
+                excessValue: excessValue
             })
         );
     }
@@ -627,6 +629,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes relayInstructions;
         bytes transceiverInstructions;
         uint256 epTotalPriceQuote;
+        uint256 excessValue;
     }
 
     function _transfer(
@@ -667,7 +670,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             relayInstructions = abi.encodePacked(relayInstructions, args.relayInstructions);
         }
 
-        executor.requestExecution(
+        executor.requestExecution{value: args.excessValue}(
             args.recipientChain,
             peerData.peerAddress,
             UniversalAddressLibrary.fromBytes32(args.refundAddress).toAddress(),
@@ -682,15 +685,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         return args.sequence;
     }
 
-    function quoteAndRefund(
+    function quoteEndpoint(
         uint16 recipientChain,
         bytes memory transceiverInstructions
-    ) internal returns (uint256 epTotalPriceQuote) {
+    ) internal returns (uint256 epTotalPriceQuote, uint256 excessValue) {
         epTotalPriceQuote = quoteDeliveryPrice(recipientChain, transceiverInstructions);
-        uint256 excessValue = msg.value - epTotalPriceQuote;
-        if (excessValue > 0) {
-            _refundToSender(excessValue);
-        }
+        excessValue = msg.value - epTotalPriceQuote;
     }
 
     function buildEncodedPayload(
