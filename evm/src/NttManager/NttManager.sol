@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.8 <0.9.0;
 
+import "example-messaging-executor/evm/src/libraries/ExecutorMessages.sol";
 import "example-messaging-executor/evm/src/libraries/RelayInstructions.sol";
 import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -631,13 +632,14 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     function _transfer(
         _TransferArgs memory args
     ) internal returns (uint64 msgSequence) {
+        NttManagerPeer storage peerData = _getPeersStorage()[args.recipientChain];
         bytes memory encodedNttManagerPayload = buildEncodedPayload(args);
 
         // send the message
         bytes32 payloadHash = keccak256(encodedNttManagerPayload);
-        endpoint.sendMessage{value: args.epTotalPriceQuote}(
+        uint64 epSeqNo = endpoint.sendMessage{value: args.epTotalPriceQuote}(
             args.recipientChain,
-            UniversalAddressLibrary.fromBytes32(_getPeersStorage()[args.recipientChain].peerAddress),
+            UniversalAddressLibrary.fromBytes32(peerData.peerAddress),
             payloadHash,
             UniversalAddressLibrary.toAddress(
                 UniversalAddressLibrary.fromBytes32(args.refundAddress)
@@ -655,7 +657,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             payloadHash
         );
 
-        uint128 gasLimit = _getPeersStorage()[args.recipientChain].gasLimit;
+        uint128 gasLimit = peerData.gasLimit;
         if (gasLimit == 0) {
             revert InvalidGasLimitZero(args.recipientChain);
         }
@@ -667,10 +669,12 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         executor.requestExecution(
             args.recipientChain,
-            args.recipient,
+            peerData.peerAddress,
             UniversalAddressLibrary.fromBytes32(args.refundAddress).toAddress(),
             args.executorQuote,
-            encodedNttManagerPayload,
+            ExecutorMessages.makeMMRequest(
+                chainId, address(this), epSeqNo, encodedNttManagerPayload
+            ),
             relayInstructions
         );
 

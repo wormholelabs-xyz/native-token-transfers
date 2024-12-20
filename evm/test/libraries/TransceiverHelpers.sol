@@ -2,6 +2,7 @@
 
 pragma solidity >=0.8.8 <0.9.0;
 
+import "wormhole-solidity-sdk/libraries/BytesParsing.sol";
 import "./NttManagerHelpers.sol";
 import "../mocks/DummyTransceiver.sol";
 import "../../src/mocks/DummyToken.sol";
@@ -9,6 +10,7 @@ import "../../src/NttManager/NttManager.sol";
 import "../../src/libraries/TrimmedAmount.sol";
 
 library TransceiverHelpersLib {
+    using BytesParsing for bytes;
     using TrimmedAmountLib for TrimmedAmount;
 
     // 0x99'E''T''T'
@@ -197,40 +199,55 @@ library TransceiverHelpersLib {
         address nttManager,
         uint64 nttSeqNo
     ) public pure returns (bytes memory payload) {
-        // To find the payload bytes from the logs we need to do it in two steps:
-        // 1. Look for the TransferSent event for our NttManager and sequence number to get the payload hash.
-        // 2. Look at the RequestForExecution events to find one where the hash of its payload matches what we are looking for.
+        // To find the payload bytes from the logs we need to do the following steps:
+        // 1. Look for the TransferSent event for our NttManager and sequence number.
+        // 2. Immediately following that should be the RequestForExecution event.
+        // 3. Extract the payload of that, which is an MMRequest. Parse that to get the NTT payload.
         for (uint256 idx = 0; idx < events.length; ++idx) {
             if (
                 events[idx].topics[0]
                     == bytes32(0x75eb8927cc7c4810b30fa2e8011fce37da6da7d18eb82c642c367ae4445c3625)
                     && events[idx].emitter == nttManager
             ) {
-                (,,, uint64 sequence, bytes32 msgHash) =
+                (,,, uint64 sequence,) =
                     abi.decode(events[idx].data, (uint256, uint256, uint16, uint64, bytes32));
 
                 if (sequence == nttSeqNo) {
-                    for (idx = 0; idx < events.length; ++idx) {
-                        if (
-                            events[idx].topics[0]
-                                == bytes32(
-                                    0xd870d87e4a7c33d0943b0a3d2822b174e239cc55c169af14cc56467a4489e3b5
-                                )
-                        ) {
-                            (,,,,, payload,) = abi.decode(
-                                events[idx].data,
-                                (uint256, uint16, bytes32, address, bytes, bytes, bytes)
-                            );
-                            bytes32 payloadHash = keccak256(payload);
-                            if (payloadHash == msgHash) {
-                                return payload;
-                            }
-                        }
+                    // The next event in the log should be from the executor
+                    if (
+                        (idx + 1 < events.length)
+                            && (
+                                events[idx + 1].topics[0]
+                                    == bytes32(
+                                        0xd870d87e4a7c33d0943b0a3d2822b174e239cc55c169af14cc56467a4489e3b5
+                                    )
+                            )
+                    ) {
+                        bytes memory execPayload;
+                        (,,,,, execPayload,) = abi.decode(
+                            events[idx + 1].data,
+                            (uint256, uint16, bytes32, address, bytes, bytes, bytes)
+                        );
+                        return decodeMMRequest(execPayload);
                     }
-                    revert ExecutorEventNotFoundInLogs(nttSeqNo, msgHash);
                 }
             }
         }
         revert TransferSentEventNotFoundInLogs(nttSeqNo);
+    }
+
+    /// @dev This decodes an ExecutorMessages.makeMMRequest and returns the enclosed payload.
+    function decodeMMRequest(
+        bytes memory execPayload
+    ) internal pure returns (bytes memory payload) {
+        uint256 offset = 0;
+        uint32 payloadLen;
+
+        (, offset) = execPayload.asBytes4(offset); // msgType
+        (, offset) = execPayload.asUint16(offset); // srcChain
+        (, offset) = execPayload.asBytes32(offset); // srcAddr
+        (, offset) = execPayload.asUint64(offset); // seqNo
+        (payloadLen, offset) = execPayload.asUint32(offset);
+        (payload, offset) = execPayload.sliceUnchecked(offset, payloadLen);
     }
 }
