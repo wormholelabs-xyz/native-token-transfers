@@ -656,12 +656,13 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             args.amount.untrim(tokenDecimals()),
             args.epTotalPriceQuote,
             args.recipientChain,
-            args.sequence,
-            payloadHash
+            args.sequence
         );
 
         uint128 gasLimit = peerData.gasLimit;
         if (gasLimit == 0) {
+            // The gas limit can only be zero when a contract has been migrated from an older version,
+            // where the gasLimit was not defined in the manager peer struct and was not set during the upgrade.
             revert InvalidGasLimitZero(args.recipientChain);
         }
 

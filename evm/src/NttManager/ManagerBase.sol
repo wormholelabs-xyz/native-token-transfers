@@ -218,7 +218,9 @@ abstract contract ManagerBase is
     function transferOwnership(
         address newOwner
     ) public override onlyOwner {
-        // TODO: Just delete this function and let the Ownable one be called directly?
+        // It's intentional (at this time) that we are not transferring the endpoint admin.
+        // The endpoint functions are all called by the NttManager, which means the admin
+        // must remain the NttManager.
         super.transferOwnership(newOwner);
     }
 
@@ -354,6 +356,7 @@ abstract contract ManagerBase is
         assert(this.mode() == mode);
         assert(this.chainId() == chainId);
         assert(this.endpoint() == endpoint);
+        assert(this.executor() == executor);
     }
 
     function _checkThresholdInvariants() internal view {
