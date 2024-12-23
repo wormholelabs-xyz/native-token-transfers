@@ -206,11 +206,11 @@ library TransceiverHelpersLib {
         for (uint256 idx = 0; idx < events.length; ++idx) {
             if (
                 events[idx].topics[0]
-                    == bytes32(0x75eb8927cc7c4810b30fa2e8011fce37da6da7d18eb82c642c367ae4445c3625)
+                    == bytes32(0xe54e51e42099622516fa3b48e9733581c9dbdcb771cafb093f745a0532a35982)
                     && events[idx].emitter == nttManager
             ) {
-                (,,, uint64 sequence,) =
-                    abi.decode(events[idx].data, (uint256, uint256, uint16, uint64, bytes32));
+                (,,, uint64 sequence) =
+                    abi.decode(events[idx].data, (uint256, uint256, uint16, uint64));
 
                 if (sequence == nttSeqNo) {
                     // The next event in the log should be from the executor
