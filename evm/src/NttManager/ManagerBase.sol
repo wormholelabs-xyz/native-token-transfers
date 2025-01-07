@@ -4,6 +4,7 @@ pragma solidity >=0.8.8 <0.9.0;
 import "wormhole-solidity-sdk/Utils.sol";
 import "wormhole-solidity-sdk/libraries/BytesParsing.sol";
 
+import "example-messaging-endpoint/evm/src/interfaces/IAdapterRegistry.sol";
 import "example-messaging-endpoint/evm/src/interfaces/IEndpointAdmin.sol";
 import "example-messaging-endpoint/evm/src/interfaces/IEndpointIntegrator.sol";
 import "example-messaging-executor/evm/src/interfaces/IExecutor.sol";
@@ -70,9 +71,6 @@ abstract contract ManagerBase is
 
     bytes32 private constant THRESHOLD_SLOT = bytes32(uint256(keccak256("ntt.threshold")) - 1);
 
-    bytes32 private constant RECV_ENABLED_CHAINS_SLOT =
-        bytes32(uint256(keccak256("ntt.recvEnabledChains")) - 1);
-
     // =============== Storage Getters/Setters ==============================================
 
     function _getThresholdStorage()
@@ -88,13 +86,6 @@ abstract contract ManagerBase is
 
     function _getMessageSequenceStorage() internal pure returns (_Sequence storage $) {
         uint256 slot = uint256(MESSAGE_SEQUENCE_SLOT);
-        assembly ("memory-safe") {
-            $.slot := slot
-        }
-    }
-
-    function _getChainsEnabledForReceiveStorage() internal pure returns (uint16[] storage $) {
-        uint256 slot = uint256(RECV_ENABLED_CHAINS_SLOT);
         assembly ("memory-safe") {
             $.slot := slot
         }
@@ -257,7 +248,6 @@ abstract contract ManagerBase is
         // However if the threshold is 0 (the initial case) we do increment to 1.
         if (_threshold.num == 0) {
             _threshold.num = 1;
-            _addChainEnabledForReceive(chain);
         }
 
         _checkThresholdInvariantsForChain(chain);
@@ -273,7 +263,7 @@ abstract contract ManagerBase is
         IEndpointAdmin(address(endpoint)).disableRecvAdapter(address(this), chain, transceiver);
 
         _Threshold storage _threshold = _getThresholdStorage()[chain];
-        uint8 numEnabled = IEndpointAdmin(address(endpoint)).getNumEnabledRecvAdaptersForChain(
+        uint8 numEnabled = IAdapterRegistry(address(endpoint)).getNumEnabledRecvAdaptersForChain(
             address(this), chain
         );
 
@@ -282,10 +272,6 @@ abstract contract ManagerBase is
             uint8 oldThreshold = _threshold.num;
             _threshold.num = numEnabled;
             emit ThresholdChanged(chainId, oldThreshold, numEnabled);
-        }
-
-        if (numEnabled == 0) {
-            _removeChainEnabledForReceive(chain);
         }
 
         _checkThresholdInvariantsForChain(chain);
@@ -301,7 +287,6 @@ abstract contract ManagerBase is
         uint8 oldThreshold = _threshold.num;
 
         _threshold.num = threshold;
-        _addChainEnabledForReceive(chain);
         _checkThresholdInvariantsForChain(chain);
         emit ThresholdChanged(chainId, oldThreshold, threshold);
     }
@@ -311,41 +296,6 @@ abstract contract ManagerBase is
     function _useMessageSequence() internal returns (uint64 currentSequence) {
         currentSequence = _getMessageSequenceStorage().num;
         _getMessageSequenceStorage().num++;
-    }
-
-    /// @dev It's not an error if the chain is not in the list.
-    function _removeChainEnabledForReceive(
-        uint16 chain
-    ) internal {
-        uint16[] storage chains = _getChainsEnabledForReceiveStorage();
-        uint256 len = chains.length;
-        for (uint256 idx = 0; (idx < len);) {
-            if (chains[idx] == chain) {
-                chains[idx] = chains[len - 1];
-                chains.pop();
-                return;
-            }
-            unchecked {
-                ++idx;
-            }
-        }
-    }
-
-    /// @dev It's not an error if the chain is already in the list.
-    function _addChainEnabledForReceive(
-        uint16 chain
-    ) internal {
-        uint16[] storage chains = _getChainsEnabledForReceiveStorage();
-        uint256 len = chains.length;
-        for (uint256 idx = 0; (idx < len);) {
-            if (chains[idx] == chain) {
-                return;
-            }
-            unchecked {
-                ++idx;
-            }
-        }
-        chains.push(chain);
     }
 
     /// ============== Invariants =============================================
@@ -360,7 +310,8 @@ abstract contract ManagerBase is
     }
 
     function _checkThresholdInvariants() internal view {
-        uint16[] storage chains = _getChainsEnabledForReceiveStorage();
+        uint16[] memory chains =
+            IAdapterRegistry(address(endpoint)).getChainsEnabledForRecv(address(this));
         uint256 len = chains.length;
         for (uint256 idx = 0; (idx < len);) {
             _checkThresholdInvariantsForChain(chains[idx]);
@@ -375,7 +326,7 @@ abstract contract ManagerBase is
         uint16 chain
     ) internal view {
         uint8 threshold = _getThresholdStorage()[chain].num;
-        uint8 numEnabled = IEndpointAdmin(address(endpoint)).getNumEnabledRecvAdaptersForChain(
+        uint8 numEnabled = IAdapterRegistry(address(endpoint)).getNumEnabledRecvAdaptersForChain(
             address(this), chain
         );
 

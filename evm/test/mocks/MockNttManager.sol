@@ -28,22 +28,6 @@ contract MockNttManagerContract is NttManager {
         }
     }
 
-    function removeChainEnabledForReceive(
-        uint16 chain
-    ) public {
-        _removeChainEnabledForReceive(chain);
-    }
-
-    function addChainEnabledForReceive(
-        uint16 chain
-    ) public {
-        _addChainEnabledForReceive(chain);
-    }
-
-    function getChainsEnabledForReceive() public pure returns (uint16[] memory result) {
-        result = _getChainsEnabledForReceiveStorage();
-    }
-
     function setGasLimitToZero(
         uint16 peerChainId
     ) external onlyOwner {
