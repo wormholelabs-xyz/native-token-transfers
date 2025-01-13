@@ -48,16 +48,16 @@ import axios from "axios";
 
 export const NETWORK: "Devnet" = "Devnet";
 export const ENDPOINTS: { [chainId in ChainId]?: `0x${string}` } = {
-  2: "0xF9f67913ba058BD29E699BfcD0eb0ec878555226",
-  4: "0x86ee2Ad4bca65764928680812A6C5315eDA9EEfd",
+  2: "0x9259cB76111dD04b06f3a514B4a70Dc7e704d450",
+  4: "0xee54955A543e1FC45fb8b3BdC89C72881bc1b8C2",
 };
 export const EXECUTORS: { [chainId in ChainId]?: `0x${string}` } = {
   2: "0x0a65677098872f870224F6E9533734F4a4B0eBAB",
   4: "0xB67841A38bF16EB9999dC7B6015746506e20F0aA",
 };
 export const WHG_ADAPTERS: { [chainId in ChainId]?: `0x${string}` } = {
-  2: "0x47A17F7E84Fb16c752352325F854A5358b4461d0",
-  4: "0x9683b5Cb8F274510782183CB20E76c3F7C1c884b",
+  2: "0x9Ee7A4e1DC11226d90db33f326168cf33B2456cC",
+  4: "0x3Cc81b56192c66968Df4D0E9D23c46Fa6ce42628",
 };
 
 type NativeSdkSigner<P extends Platform> = P extends "Evm"

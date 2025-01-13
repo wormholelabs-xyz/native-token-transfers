@@ -19,7 +19,7 @@ import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 import "wormhole-solidity-sdk/testing/helpers/WormholeSimulator.sol";
 import "wormhole-solidity-sdk/Utils.sol";
-import "example-messaging-endpoint/evm/src/AdapterRegistry.sol";
+import "example-messaging-endpoint/evm/src/interfaces/IAdapterRegistry.sol";
 import "./libraries/TransceiverHelpers.sol";
 import "./libraries/NttManagerHelpers.sol";
 import "./mocks/DummyTransceiver.sol";
@@ -264,7 +264,7 @@ contract TestNoRateLimitingNttManager is Test, IRateLimiterEvents {
         nttManager.setTransceiver(address(e));
 
         vm.expectRevert(
-            abi.encodeWithSelector(AdapterRegistry.AdapterAlreadyRegistered.selector, address(e))
+            abi.encodeWithSelector(IAdapterRegistry.AdapterAlreadyRegistered.selector, address(e))
         );
         nttManager.setTransceiver(address(e));
     }
