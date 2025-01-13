@@ -6,7 +6,7 @@ WORKDIR /app/example-messaging-endpoint
 
 RUN git init && \
     git remote add origin https://github.com/wormholelabs-xyz/example-messaging-endpoint && \
-    git fetch --depth 1 origin 0f853ea0335937d611217f5048d677a4f46249fd && \
+    git fetch --depth 1 origin 026d20c6a276a3ee2e02c9f785df9c5279522566 && \
     git checkout FETCH_HEAD
 
 WORKDIR /app/example-messaging-endpoint/evm
