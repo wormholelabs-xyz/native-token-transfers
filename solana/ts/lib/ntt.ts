@@ -97,6 +97,8 @@ export namespace NTT {
       derivePda("outbox_rate_limit", programId);
     const tokenAuthority = (): PublicKey =>
       derivePda("token_authority", programId);
+    const pendingTokenAuthority = (): PublicKey =>
+      derivePda("pending_token_authority", programId);
     const peerAccount = (chain: Chain): PublicKey =>
       derivePda(["peer", chainToBytes(chain)], programId);
     const registeredTransceiver = (transceiver: PublicKey): PublicKey =>
@@ -131,6 +133,7 @@ export namespace NTT {
       inboxItemAccount,
       sessionAuthority,
       tokenAuthority,
+      pendingTokenAuthority,
       peerAccount,
       registeredTransceiver,
       lutAccount,
@@ -251,7 +254,7 @@ export namespace NTT {
     pdas = pdas ?? NTT.pdas(program.programId);
 
     const limit = new BN(args.outboundLimit.toString());
-    return await program.methods
+    return program.methods
       .initialize({ chainId, limit: limit, mode })
       .accountsStrict({
         payer: args.payer,
@@ -358,7 +361,7 @@ export namespace NTT {
       }
     }
 
-    return await program.methods
+    return program.methods
       .initializeLut(new BN(slot))
       .accountsStrict({
         payer: args.payer,
@@ -701,11 +704,87 @@ export namespace NTT {
     pdas?: Pdas
   ) {
     pdas = pdas ?? NTT.pdas(program.programId);
-    return await program.methods
+    return program.methods
       .transferOwnership()
       .accounts({
         config: pdas.configAccount(),
         newOwner: args.newOwner,
+      })
+      .instruction();
+  }
+
+  export async function createAcceptTokenAuthorityInstruction(
+    program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
+    config: NttBindings.Config<IdlVersion>,
+    args: {
+      currentAuthority: PublicKey;
+    },
+    pdas?: Pdas
+  ) {
+    pdas = pdas ?? NTT.pdas(program.programId);
+    return program.methods
+      .acceptTokenAuthority()
+      .accountsStrict({
+        config: pdas.configAccount(),
+        mint: config.mint,
+        tokenProgram: config.tokenProgram,
+        tokenAuthority: pdas.tokenAuthority(),
+        currentAuthority: args.currentAuthority,
+      })
+      .instruction();
+  }
+
+  export async function createSetTokenAuthorityInstruction(
+    program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
+    config: NttBindings.Config<IdlVersion>,
+    args: {
+      rentPayer: PublicKey;
+      owner: PublicKey;
+      newAuthority: PublicKey;
+    },
+    pdas?: Pdas
+  ) {
+    pdas = pdas ?? NTT.pdas(program.programId);
+    return program.methods
+      .setTokenAuthority()
+      .accountsStrict({
+        common: {
+          config: pdas.configAccount(),
+          tokenAuthority: pdas.tokenAuthority(),
+          mint: config.mint,
+          owner: args.owner,
+          newAuthority: args.newAuthority,
+        },
+        rentPayer: args.rentPayer,
+        pendingTokenAuthority: pdas.pendingTokenAuthority(),
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+
+  export async function createRevertTokenAuthorityInstruction(
+    program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
+    config: NttBindings.Config<IdlVersion>,
+    args: {
+      rentPayer: PublicKey;
+      owner: PublicKey;
+    },
+    pdas?: Pdas
+  ) {
+    pdas = pdas ?? NTT.pdas(program.programId);
+    return program.methods
+      .revertTokenAuthority()
+      .accountsStrict({
+        common: {
+          config: pdas.configAccount(),
+          mint: config.mint,
+          tokenAuthority: pdas.tokenAuthority(),
+          tokenProgram: config.tokenProgram,
+          systemProgram: SystemProgram.programId,
+          rentPayer: args.rentPayer,
+          pendingTokenAuthority: pdas.pendingTokenAuthority(),
+        },
+        owner: args.owner,
       })
       .instruction();
   }
@@ -723,7 +802,7 @@ export namespace NTT {
     pdas?: Pdas
   ) {
     pdas = pdas ?? NTT.pdas(program.programId);
-    return await program.methods
+    return program.methods
       .setPeer({
         chainId: { id: toChainId(args.chain) },
         address: Array.from(args.address),
@@ -750,7 +829,7 @@ export namespace NTT {
     pdas?: Pdas
   ) {
     pdas = pdas ?? NTT.pdas(program.programId);
-    return await program.methods
+    return program.methods
       .setPaused(args.paused)
       .accountsStrict({
         owner: args.owner,
@@ -768,7 +847,7 @@ export namespace NTT {
     pdas?: Pdas
   ) {
     pdas = pdas ?? NTT.pdas(program.programId);
-    return await program.methods
+    return program.methods
       .setOutboundLimit({
         limit: args.limit,
       })
@@ -790,7 +869,7 @@ export namespace NTT {
     pdas?: Pdas
   ) {
     pdas = pdas ?? NTT.pdas(program.programId);
-    return await program.methods
+    return program.methods
       .setInboundLimit({
         chainId: { id: toChainId(args.chain) },
         limit: args.limit,
@@ -855,7 +934,7 @@ export namespace NTT {
     program: Program<NttBindings.NativeTokenTransfer<IdlVersion>>,
     pdas: Pdas
   ): Promise<NttBindings.Config<IdlVersion>> {
-    return await program.account.config.fetch(pdas.configAccount());
+    return program.account.config.fetch(pdas.configAccount());
   }
 
   export async function getInboxItem(
@@ -863,7 +942,7 @@ export namespace NTT {
     fromChain: Chain,
     nttMessage: Ntt.Message
   ): Promise<NttBindings.InboxItem<IdlVersion>> {
-    return await program.account.inboxItem.fetch(
+    return program.account.inboxItem.fetch(
       NTT.pdas(program.programId).inboxItemAccount(fromChain, nttMessage)
     );
   }
