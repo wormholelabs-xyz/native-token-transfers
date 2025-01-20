@@ -54,7 +54,7 @@ export type ExampleNativeTokenTransfers = {
           "docs": [
             "The custody account that holds tokens in locking mode and temporarily",
             "holds tokens in burning mode.",
-            "function if  the token account has already been created."
+            "function if the token account has already been created."
           ]
         },
         {
@@ -77,6 +77,104 @@ export type ExampleNativeTokenTransfers = {
         },
         {
           "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": "InitializeArgs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "initializeMultisig",
+      "accounts": [
+        {
+          "name": "common",
+          "accounts": [
+            {
+              "name": "payer",
+              "isMut": true,
+              "isSigner": true
+            },
+            {
+              "name": "deployer",
+              "isMut": false,
+              "isSigner": true
+            },
+            {
+              "name": "programData",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "config",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "mint",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "rateLimit",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "tokenAuthority",
+              "isMut": false,
+              "isSigner": false,
+              "docs": [
+                "In any case, this function is used to set the Config and initialize the program so we",
+                "assume the caller of this function will have total control over the program.",
+                "",
+                "TODO: Using `UncheckedAccount` here leads to \"Access violation in stack frame ...\".",
+                "Could refactor code to use `Box<_>` to reduce stack size."
+              ]
+            },
+            {
+              "name": "custody",
+              "isMut": true,
+              "isSigner": false,
+              "docs": [
+                "The custody account that holds tokens in locking mode and temporarily",
+                "holds tokens in burning mode.",
+                "function if the token account has already been created."
+              ]
+            },
+            {
+              "name": "tokenProgram",
+              "isMut": false,
+              "isSigner": false,
+              "docs": [
+                "associated token account for the given mint."
+              ]
+            },
+            {
+              "name": "associatedTokenProgram",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "bpfLoaderUpgradeableProgram",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "systemProgram",
+              "isMut": false,
+              "isSigner": false
+            }
+          ]
+        },
+        {
+          "name": "multisig",
           "isMut": false,
           "isSigner": false
         }
@@ -539,6 +637,77 @@ export type ExampleNativeTokenTransfers = {
               "isSigner": false
             }
           ]
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": "ReleaseInboundArgs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "releaseInboundMintMultisig",
+      "accounts": [
+        {
+          "name": "common",
+          "accounts": [
+            {
+              "name": "payer",
+              "isMut": true,
+              "isSigner": true
+            },
+            {
+              "name": "config",
+              "accounts": [
+                {
+                  "name": "config",
+                  "isMut": false,
+                  "isSigner": false
+                }
+              ]
+            },
+            {
+              "name": "inboxItem",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "recipient",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "tokenAuthority",
+              "isMut": false,
+              "isSigner": false,
+              "docs": [
+                "CHECK The seeds constraint ensures that this is the correct address"
+              ]
+            },
+            {
+              "name": "mint",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "tokenProgram",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "custody",
+              "isMut": true,
+              "isSigner": false
+            }
+          ]
+        },
+        {
+          "name": "multisig",
+          "isMut": false,
+          "isSigner": false
         }
       ],
       "args": [
@@ -2279,6 +2448,11 @@ export type ExampleNativeTokenTransfers = {
       "code": 6026,
       "name": "IncorrectRentPayer",
       "msg": "IncorrectRentPayer"
+    },
+    {
+      "code": 6027,
+      "name": "InvalidMultisig",
+      "msg": "InvalidMultisig"
     }
   ]
 }
@@ -2338,7 +2512,7 @@ export const IDL: ExampleNativeTokenTransfers = {
           "docs": [
             "The custody account that holds tokens in locking mode and temporarily",
             "holds tokens in burning mode.",
-            "function if  the token account has already been created."
+            "function if the token account has already been created."
           ]
         },
         {
@@ -2361,6 +2535,104 @@ export const IDL: ExampleNativeTokenTransfers = {
         },
         {
           "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": "InitializeArgs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "initializeMultisig",
+      "accounts": [
+        {
+          "name": "common",
+          "accounts": [
+            {
+              "name": "payer",
+              "isMut": true,
+              "isSigner": true
+            },
+            {
+              "name": "deployer",
+              "isMut": false,
+              "isSigner": true
+            },
+            {
+              "name": "programData",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "config",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "mint",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "rateLimit",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "tokenAuthority",
+              "isMut": false,
+              "isSigner": false,
+              "docs": [
+                "In any case, this function is used to set the Config and initialize the program so we",
+                "assume the caller of this function will have total control over the program.",
+                "",
+                "TODO: Using `UncheckedAccount` here leads to \"Access violation in stack frame ...\".",
+                "Could refactor code to use `Box<_>` to reduce stack size."
+              ]
+            },
+            {
+              "name": "custody",
+              "isMut": true,
+              "isSigner": false,
+              "docs": [
+                "The custody account that holds tokens in locking mode and temporarily",
+                "holds tokens in burning mode.",
+                "function if the token account has already been created."
+              ]
+            },
+            {
+              "name": "tokenProgram",
+              "isMut": false,
+              "isSigner": false,
+              "docs": [
+                "associated token account for the given mint."
+              ]
+            },
+            {
+              "name": "associatedTokenProgram",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "bpfLoaderUpgradeableProgram",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "systemProgram",
+              "isMut": false,
+              "isSigner": false
+            }
+          ]
+        },
+        {
+          "name": "multisig",
           "isMut": false,
           "isSigner": false
         }
@@ -2823,6 +3095,77 @@ export const IDL: ExampleNativeTokenTransfers = {
               "isSigner": false
             }
           ]
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": "ReleaseInboundArgs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "releaseInboundMintMultisig",
+      "accounts": [
+        {
+          "name": "common",
+          "accounts": [
+            {
+              "name": "payer",
+              "isMut": true,
+              "isSigner": true
+            },
+            {
+              "name": "config",
+              "accounts": [
+                {
+                  "name": "config",
+                  "isMut": false,
+                  "isSigner": false
+                }
+              ]
+            },
+            {
+              "name": "inboxItem",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "recipient",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "tokenAuthority",
+              "isMut": false,
+              "isSigner": false,
+              "docs": [
+                "CHECK The seeds constraint ensures that this is the correct address"
+              ]
+            },
+            {
+              "name": "mint",
+              "isMut": true,
+              "isSigner": false
+            },
+            {
+              "name": "tokenProgram",
+              "isMut": false,
+              "isSigner": false
+            },
+            {
+              "name": "custody",
+              "isMut": true,
+              "isSigner": false
+            }
+          ]
+        },
+        {
+          "name": "multisig",
+          "isMut": false,
+          "isSigner": false
         }
       ],
       "args": [
@@ -4563,6 +4906,11 @@ export const IDL: ExampleNativeTokenTransfers = {
       "code": 6026,
       "name": "IncorrectRentPayer",
       "msg": "IncorrectRentPayer"
+    },
+    {
+      "code": 6027,
+      "name": "InvalidMultisig",
+      "msg": "InvalidMultisig"
     }
   ]
 }
