@@ -1106,22 +1106,6 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         // bytes memory encodedEm;
         uint256 inboundLimit = inboundLimitAmt;
         TrimmedAmount trimmedAmount = packTrimmedAmount(uint64(amount), 8);
-        // {
-        //     TransceiverStructs.TransceiverMessage memory em;
-        //     (m, em) = TransceiverHelpersLib.attestTransceiversHelper(
-        //         user_B,
-        //         0,
-        //         chainId,
-        //         nttManager,
-        //         nttManager,
-        //         trimmedAmount,
-        //         inboundLimit.trim(token.decimals(), token.decimals()),
-        //         transceivers
-        //     );
-        //     encodedEm = TransceiverStructs.encodeTransceiverMessage(
-        //         TransceiverHelpersLib.TEST_TRANSCEIVER_PAYLOAD_PREFIX, em
-        //     );
-        // }
 
         (
             TransceiverStructs.NttManagerMessage memory m,

@@ -170,27 +170,6 @@ library TransceiverHelpersLib {
         );
     }
 
-    function buildTransceiverMessageWithNttManagerPayload(
-        bytes32 id,
-        bytes32 sender,
-        bytes32 sourceNttManager,
-        bytes32 recipientNttManager,
-        bytes memory payload
-    ) internal pure returns (TransceiverStructs.NttManagerMessage memory, bytes memory) {
-        TransceiverStructs.NttManagerMessage memory m =
-            TransceiverStructs.NttManagerMessage(id, sender, payload);
-        bytes memory nttManagerMessage = TransceiverStructs.encodeNttManagerMessage(m);
-        bytes memory transceiverMessage;
-        (, transceiverMessage) = TransceiverStructs.buildAndEncodeTransceiverMessage(
-            TEST_TRANSCEIVER_PAYLOAD_PREFIX,
-            sourceNttManager,
-            recipientNttManager,
-            nttManagerMessage,
-            new bytes(0)
-        );
-        return (m, transceiverMessage);
-    }
-
     error TransferSentEventNotFoundInLogs(uint64 nttSeqNo);
     error ExecutorEventNotFoundInLogs(uint64 nttSeqNo, bytes32 payloadHash);
 
@@ -249,5 +228,16 @@ library TransceiverHelpersLib {
         (, offset) = execPayload.asUint64(offset); // seqNo
         (payloadLen, offset) = execPayload.asUint32(offset);
         (payload, offset) = execPayload.sliceUnchecked(offset, payloadLen);
+    }
+
+    /// @dev Variable-length transceiver-specific instruction that can be passed by the caller to the nttManager.
+    ///      The index field refers to the index of the registeredTransceiver that this instruction should be passed to.
+    ///      The serialization format is:
+    ///      - index - 1 byte
+    ///      - payloadLength - 1 byte
+    ///      - payload - `payloadLength` bytes
+    struct TransceiverInstruction {
+        uint8 index;
+        bytes payload;
     }
 }
