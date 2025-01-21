@@ -405,19 +405,6 @@ contract FuzzNttManager is FuzzingHelpers {
                     errorSelector == selectorToUint(IManagerBase.PeerNotRegistered.selector),
                     "NttManager: transfer expected to fail if sending to an unset peer"
                 );
-            } else if (
-                errorSelector == selectorToUint(TransceiverStructs.InvalidInstructionIndex.selector)
-            ) {
-                TransceiverStructs.TransceiverInstruction[] memory instructions = TransceiverStructs
-                    .parseTransceiverInstructions(encodedInstructions, numRegisteredTransceivers);
-                for (uint256 i = 0; i < instructions.length; ++i) {
-                    if (instructions[i].index < numRegisteredTransceivers) {
-                        assertWithMsg(
-                            false,
-                            "NttManager: transfer should not fail if instruction index is in bounds"
-                        );
-                    }
-                }
             } else {
                 assertWithMsg(false, "NttManager: transfer unexpected revert");
             }
@@ -481,21 +468,6 @@ contract FuzzNttManager is FuzzingHelpers {
                         == selectorToUint(IRateLimiter.OutboundQueuedTransferStillQueued.selector),
                     "NttManager: completeOutboundQueuedTransfer expected to fail if not queued for long enough"
                 );
-            } else if (
-                errorSelector == selectorToUint(TransceiverStructs.InvalidInstructionIndex.selector)
-            ) {
-                TransceiverStructs.TransceiverInstruction[] memory instructions = TransceiverStructs
-                    .parseTransceiverInstructions(
-                    queuedTransfer.transceiverInstructions, numRegisteredTransceivers
-                );
-                for (uint256 i = 0; i < instructions.length; ++i) {
-                    if (instructions[i].index < numRegisteredTransceivers) {
-                        assertWithMsg(
-                            false,
-                            "NttManager: transfer should not fail if instruction index is in bounds"
-                        );
-                    }
-                }
             } else if (numEnabledTransceivers == 0) {
                 // In this case the sender should be able to cancel their outbound queued transfer
                 try nttManager.cancelOutboundQueuedTransfer(messageSequence) {
