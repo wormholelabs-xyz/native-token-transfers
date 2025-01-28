@@ -17,7 +17,8 @@ pub struct OutboxItem {
     pub recipient_ntt_manager: [u8; 32],
     pub recipient_address: [u8; 32],
     pub release_timestamp: i64,
-    pub released: Bitmap,
+    // TODO: add a refund_address field, that stores the initial payer and gets refunded in release_outbound
+    pub released: Bitmap, // TODO: MM: remove bitmap, this is handled by MM, we just send it once
 }
 
 impl OutboxItem {

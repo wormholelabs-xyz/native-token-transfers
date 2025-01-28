@@ -20,6 +20,7 @@ pub struct ReleaseOutbound<'info> {
     #[account(
         mut,
         constraint = !outbox_item.released.get(transceiver.id)? @ NTTError::MessageAlreadySent,
+        // TODO: MM: check refund_recipient matches a refund_recipient account
     )]
     pub outbox_item: Account<'info, OutboxItem>,
 
@@ -53,6 +54,7 @@ pub struct ReleaseOutboundArgs {
     pub revert_on_delay: bool,
 }
 
+// TODO: MM: move release_outbound to the manager (in order to maintain rate limiting)
 pub fn release_outbound(ctx: Context<ReleaseOutbound>, args: ReleaseOutboundArgs) -> Result<()> {
     let accs = ctx.accounts;
     let released = accs.outbox_item.try_release(accs.transceiver.id)?;
@@ -64,6 +66,8 @@ pub fn release_outbound(ctx: Context<ReleaseOutbound>, args: ReleaseOutboundArgs
             return Ok(());
         }
     }
+
+    // TODO: MM: call endpoint send_message, followed by executor (once it exists, simply log for now)
 
     assert!(accs.outbox_item.released.get(accs.transceiver.id)?);
     let message: TransceiverMessage<WormholeTransceiver, NativeTokenTransfer<Payload>> =
@@ -98,6 +102,8 @@ pub fn release_outbound(ctx: Context<ReleaseOutbound>, args: ReleaseOutboundArgs
             &[ctx.bumps.wormhole_message],
         ]],
     )?;
+
+    // TODO: MM: manually close outbox_item, refunding lamports to refund_recipient
 
     Ok(())
 }

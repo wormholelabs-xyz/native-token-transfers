@@ -841,6 +841,9 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
           );
     asyncIxs.push(transferIx);
 
+    // TODO: MM: call release_outbound on NTT (manager)
+
+    // TODO: MM: loop over endpoint adapters here, calling pick_up_message
     for (let ix = 0; ix < this.transceivers.length; ++ix) {
       if (ix === 0) {
         const whTransceiver = await this.getWormholeTransceiver();
