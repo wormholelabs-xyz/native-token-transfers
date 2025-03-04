@@ -733,6 +733,21 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
     );
   }
 
+  async *registerTransceiver(args: {
+    ix: number,
+    payer: AccountAddress<C>,
+    owner: AccountAddress<C>
+  }) {
+    const payer = new SolanaAddress(args.payer).unwrap();
+    const owner = new SolanaAddress(args.owner).unwrap();
+    const ix = await this.createRegisterTransceiverIx(args.ix, payer, owner);
+
+    const tx = new Transaction();
+    tx.feePayer = new SolanaAddress(payer).unwrap();
+    tx.add(ix);
+    yield this.createUnsignedTx({ transaction: tx }, "Ntt.RegisterTransceiver");
+  }
+
   // TODO: maybe add to Ntt interface
   async createRegisterTransceiverIx(
     ix: number,
