@@ -16,11 +16,11 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import * as spl from "@solana/spl-token";
 import fs from "fs";
 import readline from "readline";
-import { ChainContext, UniversalAddress, Wormhole, assertChain, canonicalAddress, chainToPlatform, chains, isNetwork, networks, platforms, signSendWait, toUniversal, type AccountAddress, type Chain, type ChainAddress, type ConfigOverrides, type Network, type Platform } from "@wormhole-foundation/sdk";
+import { ChainContext, UniversalAddress, Wormhole, assertChain, canonicalAddress, chainToPlatform, chains, isNetwork, networks, platforms, signSendWait, toUniversal, type AccountAddress, type Chain, type ChainAddress, type WormholeConfigOverrides, type Network, type Platform } from "@wormhole-foundation/sdk";
 import "@wormhole-foundation/sdk-evm-ntt";
 import "@wormhole-foundation/sdk-solana-ntt";
 import "@wormhole-foundation/sdk-definitions-ntt";
-import type { Ntt, NttTransceiver } from "@wormhole-foundation/sdk-definitions-ntt";
+import type { Ntt } from "@wormhole-foundation/sdk-definitions-ntt";
 
 import { type SolanaChains, SolanaAddress } from "@wormhole-foundation/sdk-solana";
 
@@ -39,7 +39,7 @@ import { ethers } from "ethers";
 
 // TODO: check if manager can mint the token in burning mode (on solana it's
 // simple. on evm we need to simulate with prank)
-const overrides: ConfigOverrides<Network> = (function () {
+const overrides: WormholeConfigOverrides<Network> = (function () {
     // read overrides.json file if exists
     if (fs.existsSync("overrides.json")) {
         console.error(chalk.yellow("Using overrides.json"));
@@ -52,7 +52,6 @@ const overrides: ConfigOverrides<Network> = (function () {
 export type Deployment<C extends Chain> = {
     ctx: ChainContext<Network, C>,
     ntt: Ntt<Network, C>,
-    whTransceiver: NttTransceiver<Network, C, Ntt.Attestation>,
     decimals: number,
     manager: ChainAddress<C>,
     config: {
@@ -72,7 +71,8 @@ export type ChainConfig = {
     token: string,
     transceivers: {
         threshold: number,
-        wormhole: { address: string, pauser?: string },
+        wormhole: { address: string, pauser?: string, executor?: boolean },
+        paxos: { address?: string, coreBridge?: string, pauser?: string },
     },
     limits: {
         outbound: string,
@@ -89,6 +89,18 @@ export type Config = {
         outbound: string,
     }
 }
+
+type TransceiverType = "wormhole" | "paxos";
+
+// A transceiver config can be either a string (address) or an object with an
+// address and a config field. The precise structure of the config field is
+// specific to the transceiver type.
+type TransceiverConfig = string | {
+    address: string,
+    config?: any
+}
+
+type TransceiverConfigs = Partial<{  [Type in TransceiverType]: TransceiverConfig }>
 
 const options = {
     network: {
@@ -380,7 +392,7 @@ yargs(hideBin(process.argv))
             const deployedManager = await deploy(version, mode, ch, token, signerType, !argv["skip-verify"], argv["yes"], argv["payer"], argv["program-key"], argv["binary"], argv["solana-priority-fee"]);
 
             const [config, _ctx, _ntt, decimals] =
-                await pullChainConfig(network, deployedManager, overrides);
+                await pullChainConfig(network, deployedManager, {}, overrides);
 
             console.log("token decimals:", chalk.yellow(decimals));
 
@@ -454,9 +466,11 @@ yargs(hideBin(process.argv))
             const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides);
             const ch = wh.getChain(chain);
 
+
             const [_, ctx, ntt] = await pullChainConfig(
                 network,
                 { chain, address: toUniversal(chain, chainConfig.manager) },
+                transceiversFromConfig(chainConfig),
                 overrides
             );
 
@@ -474,7 +488,7 @@ yargs(hideBin(process.argv))
 
             // reinit the ntt object to get the new version
             // TODO: is there an easier way to do this?
-            const { ntt: upgraded } = await nttFromManager(ch, chainConfig.manager);
+            const { ntt: upgraded } = await nttFromManager(ch, chainConfig.manager, {});
 
             chainConfig.version = getVersion(chain, upgraded)
             fs.writeFileSync(path, JSON.stringify(deployments, null, 2));
@@ -532,7 +546,7 @@ yargs(hideBin(process.argv))
             const ntts: Partial<{ [C in Chain]: Ntt<Network, C> }> = {};
 
             const [config, _ctx, ntt, _decimals] =
-                await pullChainConfig(network, { chain, address: universalManager }, overrides);
+                await pullChainConfig(network, { chain, address: universalManager }, {}, overrides);
 
             ntts[chain] = ntt as any;
 
@@ -554,7 +568,7 @@ yargs(hideBin(process.argv))
                     continue;
                 }
                 const address: UniversalAddress = peer.address.address.toUniversalAddress()
-                const [peerConfig, _ctx, peerNtt] = await pullChainConfig(network, { chain: c, address }, overrides);
+                const [peerConfig, _ctx, peerNtt] = await pullChainConfig(network, { chain: c, address }, {}, overrides);
                 ntts[c] = peerNtt as any;
                 configs[c] = peerConfig;
             }
@@ -674,20 +688,26 @@ yargs(hideBin(process.argv))
                     const tx = ntt.setPeer(manager.address, manager.tokenDecimals, manager.inboundLimit, signer.address.address)
                     await signSendWait(ctx, tx, signer.signer)
                 }
-                for (const transceiver of missingConfig.transceiverPeers) {
-                    const tx = ntt.setTransceiverPeer(0, transceiver, signer.address.address)
+                for (const [transceiverType, missingTransceiverPeers] of Object.entries(missingConfig.transceiverPeers)) {
+                    for (const transceiver of missingTransceiverPeers) {
+                        const tx = ntt.setTransceiverPeer(transceiverType, transceiver, signer.address.address)
+                        await signSendWait(ctx, tx, signer.signer)
+                    }
+                }
+                for (const transceiverType of missingConfig.registeredTransceivers) {
+                    const tx = ntt.registerTransceiver(transceiverType, signer.address.address)
                     await signSendWait(ctx, tx, signer.signer)
                 }
                 for (const evmChain of missingConfig.evmChains) {
-                    const tx = (await ntt.getTransceiver(0) as EvmNttWormholeTranceiver<Network, EvmChains>).setIsEvmChain(evmChain, true)
+                    const tx = (await ntt.getTransceiver("wormhole") as EvmNttWormholeTranceiver<Network, EvmChains>).setIsEvmChain(evmChain, true)
                     await signSendWait(ctx, tx, signer.signer)
                 }
-                for (const relayingTarget of missingConfig.standardRelaying) {
-                    const tx = (await ntt.getTransceiver(0) as EvmNttWormholeTranceiver<Network, EvmChains>).setIsWormholeRelayingEnabled(relayingTarget, true)
+                for (const [relayingTarget, value] of missingConfig.standardRelaying) {
+                    const tx = (await ntt.getTransceiver("wormhole") as EvmNttWormholeTranceiver<Network, EvmChains>).setIsWormholeRelayingEnabled(relayingTarget, value)
                     await signSendWait(ctx, tx, signer.signer)
                 }
-                for (const relayingTarget of missingConfig.specialRelaying) {
-                    const tx = (await ntt.getTransceiver(0) as EvmNttWormholeTranceiver<Network, EvmChains>).setIsSpecialRelayingEnabled(relayingTarget, true)
+                for (const [relayingTarget, value] of missingConfig.specialRelaying) {
+                    const tx = (await ntt.getTransceiver("wormhole") as EvmNttWormholeTranceiver<Network, EvmChains>).setIsSpecialRelayingEnabled(relayingTarget, value)
                     await signSendWait(ctx, tx, signer.signer)
                 }
                 if (missingConfig.solanaWormholeTransceiver) {
@@ -797,8 +817,13 @@ yargs(hideBin(process.argv))
                 for (const manager of missingConfig.managerPeers) {
                     console.error(`  Missing manager peer: ${manager.address.chain}`);
                 }
-                for (const transceiver of missingConfig.transceiverPeers) {
-                    console.error(`  Missing transceiver peer: ${transceiver.chain}`);
+                for (const [transceiverType, missingTransceiverPeers] of Object.entries(missingConfig.transceiverPeers)) {
+                    for (const transceiverAddress of missingTransceiverPeers) {
+                        console.error(`  Missing transceiver peer (${transceiverType}): ${transceiverAddress.chain}`);
+                    }
+                }
+                for (const transciverType of missingConfig.registeredTransceivers) {
+                    console.error(`  Missing registered transceiver: ${transciverType}`);
                 }
                 for (const evmChain of missingConfig.evmChains) {
                     console.error(`  ${evmChain} needs to be configured as an EVM chain`);
@@ -883,6 +908,61 @@ yargs(hideBin(process.argv))
                         const ata = spl.getAssociatedTokenAddressSync(mint, owner, true, tokenProgram);
                         console.log(ata.toBase58());
                     })
+                // TODO: metadata
+                .command("create-token <tokenProgram> <nttProgram>",
+                    "Create a token and transfer mint authority to the NTT program",
+                    (yargs) => yargs
+                        .positional("tokenProgram", {
+                            describe: "Token program ID",
+                            type: "string",
+                            choices: ["legacy", "token22"],
+                            demandOption: true,
+                        })
+                        .positional("nttProgram", {
+                            describe: "NTT program ID",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .option("decimals", {
+                            describe: "Decimals",
+                            type: "number",
+                            default: 9,
+                        })
+                        .option("payer", { ...options.payer, demandOption: true })
+                        .option("path", options.deploymentPath),
+                    async (argv) => {
+                        const config = loadConfig(argv["path"]);
+                        const wh = new Wormhole(config.network as Network, [solana.Platform, evm.Platform], overrides);
+                        const ch = wh.getChain("Solana");
+
+                        const tokenProgram = argv["tokenProgram"] === "legacy"
+                            ? spl.TOKEN_PROGRAM_ID
+                            : spl.TOKEN_2022_PROGRAM_ID;
+
+                        const programId = new PublicKey(argv["nttProgram"]);
+                        const tokenAuthority = NTT.pdas(programId).tokenAuthority();
+
+                        const proc = Bun.spawn([
+                            "spl-token",
+                            "create-token",
+                            "--fee-payer", argv["payer"],
+                            "--mint-authority", tokenAuthority.toBase58(),
+                            "--decimals", argv["decimals"].toString(),
+                            "-u", ch.config.rpc,
+                            "--program-id", tokenProgram.toBase58(),
+                        ]);
+
+                        const out = await new Response(proc.stdout).text();
+                        await proc.exited;
+
+                        if (proc.exitCode !== 0) {
+                            console.error(out);
+                            process.exit(proc.exitCode ?? 1);
+                        }
+                        const address = out.split("\n").find((line) => line.startsWith("Address: "))?.split(" ")[2];
+
+                        console.log(address);
+                    })
                 .demandCommand()
         }
     )
@@ -899,12 +979,29 @@ yargs(hideBin(process.argv))
 // needs to be enabled for all chains where this is supported.
 type MissingImplicitConfig = {
     managerPeers: Ntt.Peer<Chain>[];
-    transceiverPeers: ChainAddress<Chain>[];
+    transceiverPeers: { [type: string]: ChainAddress<Chain>[] };
+    registeredTransceivers: string[]; // just the transceiver types. the addresses are known in the ntt object
     evmChains: Chain[];
-    standardRelaying: Chain[];
-    specialRelaying: Chain[];
+    standardRelaying: [Chain, boolean][];
+    specialRelaying: [Chain, boolean][];
     solanaWormholeTransceiver: boolean;
     solanaUpdateLUT: boolean;
+}
+
+function transceiversFromConfig(chainConfig: ChainConfig): TransceiverConfigs {
+    let transceivers: TransceiverConfigs = {
+        wormhole: chainConfig.transceivers.wormhole.address,
+    };
+
+    if (chainConfig.transceivers.paxos?.address) {
+        transceivers.paxos = {
+            address: chainConfig.transceivers.paxos.address,
+            config: {
+                coreBridge: chainConfig.transceivers.paxos.coreBridge
+            }
+        }
+    }
+    return transceivers;
 }
 
 function checkConfigErrors(deps: Partial<{ [C in Chain]: Deployment<Chain> }>): number {
@@ -979,7 +1076,7 @@ async function upgrade<N extends Network, C extends Chain>(
     const worktree = toVersion ? createWorkTree(platform, toVersion) : ".";
     switch (platform) {
         case "Evm":
-            const evmNtt = ntt as EvmNtt<N, EvmChains>;
+            const evmNtt = ntt as unknown as EvmNtt<N, EvmChains>;
             const evmCtx = ctx as ChainContext<N, EvmChains>;
             return upgradeEvm(worktree, evmNtt, evmCtx, signerType, evmVerify);
         case "Solana":
@@ -987,7 +1084,7 @@ async function upgrade<N extends Network, C extends Chain>(
                 console.error("Payer not found. Specify with --payer");
                 process.exit(1);
             }
-            const solanaNtt = ntt as SolanaNtt<N, SolanaChains>;
+            const solanaNtt = ntt as unknown as SolanaNtt<N, SolanaChains>;
             const solanaCtx = ctx as ChainContext<N, SolanaChains>;
             return upgradeSolana(worktree, toVersion, solanaNtt, solanaCtx, solanaPayer, solanaProgramKeyPath, solanaBinaryPath);
         default:
@@ -1051,9 +1148,7 @@ async function upgradeSolana<N extends Network, C extends SolanaChains>(
     programKeyPath?: string,
     binaryPath?: string
 ): Promise<void> {
-    if (version === null) {
-        throw new Error("Cannot upgrade Solana to local version"); // TODO: this is not hard to enabled
-    }
+    // TODO: extend account when the new bytecode is larger
     const mint = (await (ntt.getConfig())).mint;
     await deploySolana(pwd, version, await ntt.getMode(), ctx, mint.toBase58(), payer, false, programKeyPath, binaryPath);
     // TODO: call initializeOrUpdateLUT. currently it's done in the following 'ntt push' step.
@@ -1449,7 +1544,8 @@ async function missingConfigs(
 
         let missing: MissingImplicitConfig = {
             managerPeers: [],
-            transceiverPeers: [],
+            transceiverPeers: {},
+            registeredTransceivers: [],
             evmChains: [],
             standardRelaying: [],
             specialRelaying: [],
@@ -1475,6 +1571,21 @@ async function missingConfigs(
             if (!(await updateLUT.next()).done) {
                 count++;
                 missing.solanaUpdateLUT = true;
+            }
+        }
+
+        // check missing registered transceivers
+        for (const [transceiverType, transceiver] of Object.entries(await from.ntt.getTransceivers())) {
+            const fetchedType = await retryWithExponentialBackoff(() => transceiver.getTransceiverType(), 5, 5000);
+            if (fetchedType !== transceiverType) {
+                console.error(`Transceiver type mismatch for ${fromChain}: expected '${transceiverType}', got '${fetchedType}'`);
+                console.error(Buffer.from(transceiverType).toString('hex'))
+                console.error(Buffer.from(fetchedType).toString('hex'))
+            }
+            const registered = await retryWithExponentialBackoff(() => from.ntt.isTransceiverRegistered(transceiverType), 5, 5000);
+            if (!registered) {
+                count++;
+                missing.registeredTransceivers.push(transceiverType);
             }
         }
 
@@ -1508,7 +1619,7 @@ async function missingConfigs(
             if (chainToPlatform(fromChain) === "Evm") {
                 const toIsEvm = chainToPlatform(toChain) === "Evm";
                 const toIsSolana = chainToPlatform(toChain) === "Solana";
-                const whTransceiver = await from.ntt.getTransceiver(0) as EvmNttWormholeTranceiver<Network, EvmChains>;
+                const whTransceiver = await from.ntt.getTransceiver("wormhole") as EvmNttWormholeTranceiver<Network, EvmChains>;
 
                 if (toIsEvm) {
                     const remoteToEvm = await whTransceiver.isEvmChain(toChain);
@@ -1518,27 +1629,40 @@ async function missingConfigs(
                     }
 
                     const standardRelaying = await whTransceiver.isWormholeRelayingEnabled(toChain);
-                    if (!standardRelaying) {
+                    const desiredStandardRelaying = !(from.config.local?.transceivers.wormhole.executor ?? false);
+                    if (standardRelaying !== desiredStandardRelaying) {
                         count++;
-                        missing.standardRelaying.push(toChain);
+                        missing.standardRelaying.push([toChain, desiredStandardRelaying]);
                     }
                 } else if (toIsSolana) {
                     const specialRelaying = await whTransceiver.isSpecialRelayingEnabled(toChain);
-                    if (!specialRelaying) {
+                    const desiredSpecialRelaying = !(from.config.local?.transceivers.wormhole.executor ?? false);
+                    if (specialRelaying !== desiredSpecialRelaying) {
                         count++;
-                        missing.specialRelaying.push(toChain);
+                        missing.specialRelaying.push([toChain, desiredSpecialRelaying]);
                     }
                 }
             }
 
-            const transceiverPeer = await retryWithExponentialBackoff(() => from.whTransceiver.getPeer(toChain), 5, 5000);
-            if (transceiverPeer === null) {
-                count++;
-                missing.transceiverPeers.push(to.whTransceiver.getAddress());
-            } else {
-                // @ts-ignore TODO
-                if (!Buffer.from(transceiverPeer.address.address).equals(Buffer.from(to.whTransceiver.getAddress().address.address))) {
-                    console.error(`Transceiver peer address mismatch for ${fromChain} -> ${toChain}`);
+            for (const [transceiverType, transceiver] of Object.entries(await from.ntt.getTransceivers())) {
+                const transceiverPeer = await retryWithExponentialBackoff(() => transceiver.getPeer(toChain), 5, 5000);
+                let toTransceiver = await to.ntt.getTransceiver(transceiverType);
+                if (!toTransceiver) {
+                    // TODO: signal error?
+                    console.error(`${toChain} has no ${transceiverType} configured`)
+                    continue;
+                }
+                if (transceiverPeer === null) {
+                    count++;
+                    if (!missing.transceiverPeers[transceiverType]) {
+                        missing.transceiverPeers[transceiverType] = [];
+                    }
+                    missing.transceiverPeers[transceiverType].push(toTransceiver.getAddress());
+                } else {
+                    // @ts-ignore TODO
+                    if (!Buffer.from(transceiverPeer.address.address).equals(Buffer.from(toTransceiver.getAddress().address.address))) {
+                        console.error(`Transceiver peer address mismatch for ${fromChain} -> ${toChain}`);
+                    }
                 }
             }
 
@@ -1615,11 +1739,18 @@ async function pushDeployment<C extends Chain>(deployment: Deployment<C>, signer
             // transceivers.wormhole.pauser), and have a top-level mapping of
             // these entries to how they should be handled
             for (const j of Object.keys(diff[k] as object)) {
-                if (j === "wormhole") {
+                if (j === "threshold") {
+                    const newThreshold = diff[k]![j]!.push!;
+                    txs.push(deployment.ntt.setThreshold(newThreshold, signer.address.address));
+                } else if (j === "wormhole" || j === "paxos") {
+                    const transceiver = await deployment.ntt.getTransceiver(j);
+                    if (!transceiver) {
+                        throw new Error (`Not found transceiver ${j}`)
+                    }
                     for (const l of Object.keys(diff[k]![j] as object)) {
                         if (l === "pauser") {
                             const newTransceiverPauser = toUniversal(deployment.manager.chain, diff[k]![j]![l]!.push!);
-                            txs.push(deployment.whTransceiver.setPauser(newTransceiverPauser, signer.address.address));
+                            txs.push(transceiver.setPauser(newTransceiverPauser, signer.address.address));
                         } else {
                             console.error(`Unsupported field: ${k}.${j}.${l}`);
                             process.exit(1);
@@ -1661,28 +1792,20 @@ async function pullDeployments(deployments: Config, network: Network, verbose: b
             // process.exit(1);
             continue;
         }
+
         const [remote, ctx, ntt, decimals] = await pullChainConfig(
             network,
             { chain, address: toUniversal(chain, managerAddress) },
+            transceiversFromConfig(deployment),
             overrides
         );
         const local = deployments.chains[chain];
-
-        // TODO: what if it's not index 0...
-        // we should check that the address of this transceiver matches the
-        // address in the config. currently we just assume that ix 0 is the wormhole one
-        const whTransceiver = await ntt.getTransceiver(0);
-        if (whTransceiver === null) {
-            console.error(`Wormhole transceiver not found for ${chain}`);
-            process.exit(1);
-        }
 
         deps[chain] = {
             ctx,
             ntt,
             decimals,
             manager: { chain, address: toUniversal(chain, managerAddress) },
-            whTransceiver,
             config: {
                 remote,
                 local,
@@ -1699,7 +1822,8 @@ async function pullDeployments(deployments: Config, network: Network, verbose: b
 async function pullChainConfig<N extends Network, C extends Chain>(
     network: N,
     manager: ChainAddress<C>,
-    overrides?: ConfigOverrides<N>
+    transceivers: TransceiverConfigs,
+    overrides?: WormholeConfigOverrides<N>
 ): Promise<[ChainConfig, ChainContext<typeof network, C>, Ntt<typeof network, C>, number]> {
     const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides);
     const ch = wh.getChain(manager.chain);
@@ -1707,7 +1831,7 @@ async function pullChainConfig<N extends Network, C extends Chain>(
     const nativeManagerAddress = canonicalAddress(manager);
 
     const { ntt, addresses }: { ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts>; } =
-        await nttFromManager<N, C>(ch, nativeManagerAddress);
+        await nttFromManager<N, C>(ch, nativeManagerAddress, transceivers);
 
     const mode = await ntt.getMode();
     const outboundLimit = await ntt.getOutboundLimit();
@@ -1723,7 +1847,7 @@ async function pullChainConfig<N extends Network, C extends Chain>(
 
     const version = getVersion(manager.chain, ntt);
 
-    const transceiverPauser = await ntt.getTransceiver(0).then((t) => t?.getPauser() ?? null);
+    const whTransceiverPauser = await ntt.getTransceiver("wormhole").then((t) => t?.getPauser() ?? null);
 
     const config: ChainConfig = {
         version,
@@ -1734,15 +1858,22 @@ async function pullChainConfig<N extends Network, C extends Chain>(
         token: addresses.token!,
         transceivers: {
             threshold,
-            wormhole: { address: addresses.transceiver!.wormhole! },
+            wormhole: addresses.transceiver!.wormhole!, // TODO: fix (coalesce)
+            paxos: {} // we add this below
         },
         limits: {
             outbound: outboundLimitDecimals,
             inbound: {},
         },
     };
-    if (transceiverPauser) {
-        config.transceivers.wormhole.pauser = transceiverPauser.toString();
+    if (addresses.transceiver?.paxos) {
+        config.transceivers.paxos = {
+            address: addresses.transceiver.paxos.address, // TODO: fix (+ schema validation?)
+            coreBridge: addresses.transceiver.paxos.config.coreBridge
+        }
+    }
+    if (whTransceiverPauser) {
+        config.transceivers.wormhole.pauser = whTransceiverPauser.toString();
     }
     if (pauser) {
         config.pauser = pauser.toString();
@@ -1755,12 +1886,12 @@ async function getImmutables<N extends Network, C extends Chain>(chain: C, ntt: 
     if (platform !== "Evm") {
         return null;
     }
-    const evmNtt = ntt as EvmNtt<N, EvmChains>;
-    const transceiver = await evmNtt.getTransceiver(0) as EvmNttWormholeTranceiver<N, EvmChains>;
-    const consistencyLevel = await transceiver.transceiver.consistencyLevel();
-    const wormholeRelayer = await transceiver.transceiver.wormholeRelayer();
-    const specialRelayer = await transceiver.transceiver.specialRelayer();
-    const gasLimit = await transceiver.transceiver.gasLimit();
+    const evmNtt = ntt as unknown as EvmNtt<N, EvmChains>;
+    const whTransceiver = await evmNtt.getTransceiver("wormhole") as EvmNttWormholeTranceiver<N, EvmChains>;
+    const consistencyLevel = await whTransceiver.transceiver.consistencyLevel();
+    const wormholeRelayer = await whTransceiver.transceiver.wormholeRelayer();
+    const specialRelayer = await whTransceiver.transceiver.specialRelayer();
+    const gasLimit = await whTransceiver.transceiver.gasLimit();
 
     const token = await evmNtt.manager.token();
     const tokenDecimals = await evmNtt.manager.tokenDecimals();
@@ -1785,7 +1916,7 @@ async function getPdas<N extends Network, C extends Chain>(chain: C, ntt: Ntt<N,
     if (platform !== "Solana") {
         return null;
     }
-    const solanaNtt = ntt as SolanaNtt<N, SolanaChains>;
+    const solanaNtt = ntt as unknown as SolanaNtt<N, SolanaChains>;
     const config = solanaNtt.pdas.configAccount();
     const emitter = NTT.transceiverPdas(solanaNtt.program.programId).emitterAccount();
     const outboxRateLimit = solanaNtt.pdas.outboxRateLimitAccount();
@@ -1807,9 +1938,9 @@ function getVersion<N extends Network, C extends Chain>(chain: C, ntt: Ntt<N, C>
     const platform = chainToPlatform(chain);
     switch (platform) {
         case "Evm":
-            return (ntt as EvmNtt<N, EvmChains>).version
+            return (ntt as unknown as EvmNtt<N, EvmChains>).version
         case "Solana":
-            return (ntt as SolanaNtt<N, SolanaChains>).version
+            return (ntt as unknown as SolanaNtt<N, SolanaChains>).version
         default:
             throw new Error("Unsupported platform");
     }
@@ -1818,20 +1949,26 @@ function getVersion<N extends Network, C extends Chain>(chain: C, ntt: Ntt<N, C>
 // TODO: there should be a more elegant way to do this, than creating a
 // "dummy" NTT, then calling verifyAddresses to get the contract diff, then
 // finally reconstructing the "real" NTT object from that
+// TODO: take transceiver addresses too
 async function nttFromManager<N extends Network, C extends Chain>(
     ch: ChainContext<N, C>,
-    nativeManagerAddress: string
+    nativeManagerAddress: string,
+    transceivers: TransceiverConfigs
 ): Promise<{ ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts> }> {
     const onlyManager = await ch.getProtocol("Ntt", {
         ntt: {
             manager: nativeManagerAddress,
             token: null,
-            transceiver: {},
+            transceiver: transceivers,
         }
     });
     const diff = await onlyManager.verifyAddresses();
 
-    const addresses: Partial<Ntt.Contracts> = { manager: nativeManagerAddress, ...diff };
+    const addresses = {
+        manager: nativeManagerAddress,
+        token: diff?.token,
+        transceiver: { ...transceivers, ...diff?.transceiver }
+    };
 
     const ntt = await ch.getProtocol("Ntt", {
         ntt: addresses
@@ -1937,8 +2074,10 @@ async function checkSolanaBinary(binary: string, wormhole: string, providedProgr
     const wormholeHex = new PublicKey(wormhole).toBuffer().toString("hex");
     const providedProgramIdHex = new PublicKey(providedProgramId).toBuffer().toString("hex");
     const versionHex = version ? Buffer.from(version).toString("hex") : undefined;
+    // we also search for the literal version, in case it wasn't compiled with a declare_id! macro
+    const wormholeLiteralHex = Buffer.from(wormhole).toString("hex");
 
-    if (!searchHexInBinary(binary, wormholeHex)) {
+    if (!searchHexInBinary(binary, wormholeHex) && !searchHexInBinary(binary, wormholeLiteralHex)) {
         console.error(`Wormhole address not found in binary: ${wormhole}`);
         process.exit(1);
     }
