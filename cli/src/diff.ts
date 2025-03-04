@@ -40,14 +40,19 @@ export function diffObjects<T extends Record<string, any>>(obj1: T, obj2: T): Pa
         }
     }
 
-    // prune empty objects
-    for (const key in result) {
-        if (isObject(result[key])) {
-            if (Object.keys(result[key]).length === 0) {
-                delete result[key];
+    // prune empty objects recursively
+    function pruneEmptyObjects(obj: any) {
+        for (const key in obj) {
+            if (isObject(obj[key])) {
+                pruneEmptyObjects(obj[key]);
+                if (Object.keys(obj[key]).length === 0) {
+                    delete obj[key];
+                }
             }
         }
     }
+
+    pruneEmptyObjects(result);
 
     return result;
 }
