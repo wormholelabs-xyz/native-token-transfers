@@ -21,6 +21,7 @@ contract UpgradeWormholeTransceiver is ParseNttConfig {
         uint8 consistencyLevel;
         uint256 gasLimit;
         uint256 outboundLimit;
+        bytes32 transceiverType;
     }
 
     // The minimum gas limit to verify a message on mainnet. If you're worried about saving
@@ -39,7 +40,8 @@ contract UpgradeWormholeTransceiver is ParseNttConfig {
             params.wormholeRelayerAddr,
             params.specialRelayerAddr,
             params.consistencyLevel,
-            params.gasLimit
+            params.gasLimit,
+            params.transceiverType
         );
 
         console2.log("WormholeTransceiver Implementation deployed at: ", address(implementation));

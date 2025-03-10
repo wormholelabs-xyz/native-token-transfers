@@ -19,7 +19,8 @@ contract MockWormholeTransceiverContract is WormholeTransceiver {
             wormholeRelayerAddr,
             specialRelayerAddr,
             _consistencyLevel,
-            _gasLimit
+            _gasLimit,
+            "wormhole"
         )
     {}
 
@@ -47,7 +48,8 @@ contract MockWormholeTransceiverMigrateBasic is WormholeTransceiver {
             wormholeRelayerAddr,
             specialRelayerAddr,
             _consistencyLevel,
-            _gasLimit
+            _gasLimit,
+            "wormhole"
         )
     {}
 
@@ -71,7 +73,8 @@ contract MockWormholeTransceiverImmutableAllow is WormholeTransceiver {
             wormholeRelayerAddr,
             specialRelayerAddr,
             _consistencyLevel,
-            _gasLimit
+            _gasLimit,
+            "wormhole"
         )
     {}
 
@@ -101,7 +104,8 @@ contract MockWormholeTransceiverLayoutChange is WormholeTransceiver {
             wormholeRelayerAddr,
             specialRelayerAddr,
             _consistencyLevel,
-            _gasLimit
+            _gasLimit,
+            "wormhole"
         )
     {}
 

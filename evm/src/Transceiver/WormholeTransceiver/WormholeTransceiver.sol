@@ -35,13 +35,16 @@ contract WormholeTransceiver is
 
     string public constant WORMHOLE_TRANSCEIVER_VERSION = "1.1.0";
 
+    bytes32 immutable transceiverType;
+
     constructor(
         address nttManager,
         address wormholeCoreBridge,
         address wormholeRelayerAddr,
         address specialRelayerAddr,
         uint8 _consistencyLevel,
-        uint256 _gasLimit
+        uint256 _gasLimit,
+        bytes32 _transceiverType
     )
         WormholeTransceiverState(
             nttManager,
@@ -51,12 +54,14 @@ contract WormholeTransceiver is
             _consistencyLevel,
             _gasLimit
         )
-    {}
+    {
+        transceiverType = _transceiverType;
+    }
 
     // ==================== External Interface ===============================================
 
-    function getTransceiverType() external pure override returns (string memory) {
-        return "wormhole";
+    function getTransceiverType() external view override returns (string memory) {
+        return string(abi.encodePacked(transceiverType));
     }
 
     /// @inheritdoc IWormholeTransceiver

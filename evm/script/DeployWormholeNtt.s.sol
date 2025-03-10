@@ -4,6 +4,7 @@ pragma solidity >=0.8.8 <0.9.0;
 import {Script, console} from "forge-std/Script.sol";
 import {DeployWormholeNttBase} from "./helpers/DeployWormholeNttBase.sol";
 import {INttManager} from "../src/interfaces/INttManager.sol";
+import {ITransceiver} from "../src/interfaces/ITransceiver.sol";
 import {IWormholeTransceiver} from "../src/interfaces/IWormholeTransceiver.sol";
 import "../src/interfaces/IManagerBase.sol";
 import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
@@ -75,7 +76,8 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
             consistencyLevel: 202,
             gasLimit: 500000,
             // the trimming will trim this number to uint64.max
-            outboundLimit: uint256(type(uint64).max) * scale
+            outboundLimit: uint256(type(uint64).max) * scale,
+            transceiverType: "wormhole"
         });
 
         // Deploy NttManager.
@@ -88,6 +90,50 @@ contract DeployWormholeNtt is Script, DeployWormholeNttBase {
         configureNttManager(
             manager, transceiver, params.outboundLimit, params.shouldSkipRatelimiter
         );
+
+        vm.stopBroadcast();
+    }
+
+    function deployTransceiver(
+        address wormhole,
+        address manager,
+        address wormholeRelayer,
+        address specialRelayer,
+        bytes32 transceiverType
+    ) public {
+        vm.startBroadcast();
+
+        console.log("Deploying transceiver...");
+        IWormhole wh = IWormhole(wormhole);
+
+        uint16 chainId = wh.chainId();
+
+        console.log("Chain ID: ", chainId);
+
+        NttManager ntt = NttManager(manager);
+
+        // TODO: create a separate struct just for transceiver deployment params
+        DeploymentParams memory params = DeploymentParams({
+            token: ntt.token(),
+            mode: ntt.mode(),
+            wormholeChainId: chainId,
+            rateLimitDuration: 86400, // ignored
+            shouldSkipRatelimiter: false, // ignored
+            wormholeCoreBridge: wormhole,
+            wormholeRelayerAddr: wormholeRelayer,
+            specialRelayerAddr: specialRelayer,
+            consistencyLevel: 202,
+            gasLimit: 500000,
+            // the trimming will trim this number to uint64.max
+            outboundLimit: 0, // ignored
+            transceiverType: transceiverType
+        });
+
+        // Deploy Wormhole Transceiver.
+        address transceiver = deployWormholeTransceiver(params, manager);
+
+        console.log("Transceiver deployed at: ", transceiver);
+        console.log("Transceiver type: ", ITransceiver(transceiver).getTransceiverType());
 
         vm.stopBroadcast();
     }

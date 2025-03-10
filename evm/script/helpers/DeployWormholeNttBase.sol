@@ -25,6 +25,7 @@ contract DeployWormholeNttBase is ParseNttConfig {
         uint8 consistencyLevel;
         uint256 gasLimit;
         uint256 outboundLimit;
+        bytes32 transceiverType;
     }
 
     // The minimum gas limit to verify a message on mainnet. If you're worried about saving
@@ -65,7 +66,8 @@ contract DeployWormholeNttBase is ParseNttConfig {
             params.wormholeRelayerAddr,
             params.specialRelayerAddr,
             params.consistencyLevel,
-            params.gasLimit
+            params.gasLimit,
+            params.transceiverType
         );
 
         WormholeTransceiver transceiverProxy =
