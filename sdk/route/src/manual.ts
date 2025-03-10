@@ -225,7 +225,7 @@ export class NttManualRoute<N extends Network>
       ntt: receipt.params.normalizedParams.destinationContracts,
     });
     const sender = Wormhole.parseAddress(signer.chain(), signer.address());
-    const completeXfer = ntt.redeem([receipt.attestation.attestation], sender);
+    const completeXfer = ntt.redeem({ wormhole: receipt.attestation.attestation }, sender);
 
     const txids = await signSendWait(toChain, completeXfer, signer);
     return {
@@ -297,7 +297,9 @@ export class NttManualRoute<N extends Network>
             token,
             manager,
             transceiver: {
-              wormhole: whTransceiver,
+              wormhole: {
+                address: whTransceiver
+              },
             },
           },
           destinationContracts: {

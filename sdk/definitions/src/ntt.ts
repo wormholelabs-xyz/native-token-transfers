@@ -25,7 +25,7 @@ import {
   transceiverInstructionLayout,
   transceiverRegistration,
 } from "./layouts/index.js";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
 /**
  * @namespace Ntt
@@ -39,7 +39,10 @@ export namespace Ntt {
     token: string;
     manager: string;
     transceiver: {
-      [type: string]: string;
+      [type: string]: string | {
+        address: string;
+        config?: any // transceiver specific extra information
+      };
     };
     quoter?: string;
   };
@@ -184,6 +187,11 @@ export interface Ntt<N extends Network, C extends Chain> {
 
   getThreshold(): Promise<number>;
 
+  setThreshold(
+    threshold: number,
+    payer?: AccountAddress<C>
+  ): AsyncGenerator<UnsignedTransaction<N, C>>;
+
   setPeer(
     peer: ChainAddress,
     tokenDecimals: number,
@@ -191,9 +199,8 @@ export interface Ntt<N extends Network, C extends Chain> {
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
 
-  // TODO: replace ix with transceiver type
   setTransceiverPeer(
-    ix: number,
+    type: string,
     peer: ChainAddress,
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
@@ -235,7 +242,7 @@ export interface Ntt<N extends Network, C extends Chain> {
    * TODO: replace with Map<transceiver type, Attestation>
    */
   redeem(
-    attestations: Ntt.Attestation[],
+    attestations: { [type: string]: Ntt.Attestation },
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
 
@@ -248,13 +255,25 @@ export interface Ntt<N extends Network, C extends Chain> {
   /** Get the peer information for the given chain if it exists */
   getPeer<C extends Chain>(chain: C): Promise<Ntt.Peer<C> | null>;
 
-  /** Get the transceiver corresponding to index (0 = Wormhole)
-   *
-   * TODO: replace ix with transceiver type
+  /** Get the transceiver corresponding to type
    */
   getTransceiver(
-    ix: number
+    type: string // TODO: make a better type than string (maybe enum?) also the attestation type needs to depend on the transceiver type
   ): Promise<NttTransceiver<N, C, Ntt.Attestation> | null>;
+
+  getTransceivers(): Promise<{ [type: string]: NttTransceiver<N, C, any> }>;
+
+  /**
+   * Returns whether the transceiver is registered in the manager.
+   * The address of the transceiver is set at construction time on the Ntt object.
+   */
+  isTransceiverRegistered(type: string): Promise<boolean>;
+
+  /**
+   * Register a transceiver.
+   * The address of the transceiver is set at construction time on the Ntt object.
+   */
+  registerTransceiver(type: string, payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>>;
 
   /**
    * getCurrentOutboundCapacity returns the current outbound capacity of the Ntt manager
@@ -396,6 +415,8 @@ export interface NttTransceiver<
     attestation: A,
     sender?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
+
+  isRelayingAvailable(destination: Chain): Promise<boolean>;
 }
 
 export namespace WormholeNttTransceiver {
@@ -425,6 +446,8 @@ export interface SolanaNttTransceiver<
   A extends Ntt.Attestation
 > extends NttTransceiver<N, C, A> {
   programId: PublicKey;
+
+  createReleaseIx(outboxItem: PublicKey, revertOnDelay: boolean, payer: PublicKey): Promise<TransactionInstruction>;
 }
 
 export interface EvmNttTransceiver<

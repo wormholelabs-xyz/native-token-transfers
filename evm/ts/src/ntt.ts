@@ -61,9 +61,26 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
   }
 
   async getTransceiverType(): Promise<string> {
-    // NOTE: We hardcode the type here as transceiver type is only available for versions >1.1.0
-    // For those versions, we can return `this.transceiver.getTransceiverType()` directly
-    return "wormhole";
+    const contract = new Contract(
+      this.address,
+      ["function getTransceiverType() public view returns (string)"],
+      this.manager.provider
+    );
+    try {
+      const transceiverType: string = await contract
+        .getFunction("getTransceiverType")
+        .staticCall();
+      if (!transceiverType) {
+        throw new Error("getTransceiverType not found");
+      }
+      return Buffer.from(transceiverType).filter((x) => x !== 0).toString().trim();
+    } catch (e) {
+      console.error(e); // TODO: only when the method is not available should we return wormhole
+      // NOTE: if the transceiver doesn't have a getTransceiverType method, it
+      // means it's an old one that didn't have this function exposed.
+      // Only wormhole transceivers were deployed using the old version
+      return "wormhole"
+    }
   }
 
   getAddress(): ChainAddress<C> {
@@ -143,6 +160,16 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
     );
   }
 
+  async isRelayingAvailable(destination: Chain): Promise<boolean> {
+    // TODO: how to handle executor?
+    const [wh, special] = await Promise.all([
+      this.isWormholeRelayingEnabled(destination),
+      this.isSpecialRelayingEnabled(destination)
+    ])
+
+    return wh || special
+  }
+
   async isWormholeRelayingEnabled(destChain: Chain): Promise<boolean> {
     return await this.transceiver.isWormholeRelayingEnabled(
       toChainId(destChain)
@@ -186,7 +213,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
   tokenAddress: string;
   readonly chainId: bigint;
   manager: NttManagerBindings.NttManager;
-  xcvrs: EvmNttWormholeTranceiver<N, C>[];
+  xcvrs: { [type: string]: EvmNttTransceiver<N, C, Ntt.Attestation> };
   managerAddress: string;
 
   constructor(
@@ -213,38 +240,52 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       this.provider
     );
 
-    this.xcvrs = [];
-    if (
-      "wormhole" in contracts.ntt.transceiver &&
-      contracts.ntt.transceiver["wormhole"]
-    ) {
-      const transceiverTypes = [
-        "wormhole", // wormhole xcvr should be ix 0
-        ...Object.keys(contracts.ntt.transceiver).filter((transceiverType) => {
-          transceiverType !== "wormhole";
-        }),
-      ];
-      transceiverTypes.map((transceiverType) => {
-        // we currently only support wormhole transceivers
-        if (transceiverType !== "wormhole") {
-          throw new Error(`Unsupported transceiver type: ${transceiverType}`);
-        }
+    this.xcvrs = {};
+    Object.entries(contracts.ntt.transceiver).map(([transceiverType, transceiver]) => {
+      // we currently only support wormhole transceivers
+      if (!["wormhole", "paxos"].includes(transceiverType)) {
+        throw new Error(`Unsupported transceiver type: ${transceiverType}`);
+      }
 
-        // Enable more Transceivers here
-        this.xcvrs.push(
-          new EvmNttWormholeTranceiver(
-            this,
-            contracts.ntt!.transceiver[transceiverType]!,
-            abiBindings!
-          )
+      // Enable more Transceivers here
+      this.xcvrs[transceiverType] =
+        new EvmNttWormholeTranceiver(
+          this,
+          transceiver instanceof Object ? transceiver.address : transceiver,
+          abiBindings!
         );
-      });
-    }
+    });
   }
 
-  async getTransceiver(ix: number): Promise<NttTransceiver<N, C, any> | null> {
+  async getTransceiver(type: string): Promise<NttTransceiver<N, C, any> | null> {
     // TODO: should we make an RPC call here, or just trust that the xcvrs are set up correctly?
-    return this.xcvrs[ix] || null;
+    return this.xcvrs[type] || null;
+  }
+
+  async getTransceivers(): Promise<{ [type: string]: NttTransceiver<N, C, any> }> {
+    return this.xcvrs
+  }
+
+  async isTransceiverRegistered(type: string): Promise<boolean> {
+    const transceiver = this.xcvrs[type];
+    if (!transceiver) {
+      throw new Error(`Transceiver not found (${type})`);
+    }
+    const transceivers = await this.manager.getTransceivers();
+    return transceivers.map((a) => new EvmAddress(a).unwrap()).includes(new EvmAddress(transceiver.getAddress().address).unwrap());
+  }
+
+  async *registerTransceiver(type: string) {
+    const transceiver = this.xcvrs[type];
+    if (!transceiver) {
+      throw new Error(`Transceiver not found (${type})`);
+    }
+
+    const canonicalTransceiver = new EvmAddress(transceiver.getAddress().address).toString();
+    const tx = await this.manager.setTransceiver.populateTransaction(
+      canonicalTransceiver
+    );
+    yield this.createUnsignedTx(tx, "Ntt.registerTransceiver");
   }
 
   async getMode(): Promise<Ntt.Mode> {
@@ -290,19 +331,18 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     yield this.createUnsignedTx(tx, "Ntt.setPauser");
   }
 
+  async *setThreshold(threshold: number) {
+    const tx = await this.manager.setThreshold.populateTransaction(threshold);
+    yield this.createUnsignedTx(tx, "Ntt.setThreshold");
+  }
+
   async getThreshold(): Promise<number> {
     return Number(await this.manager.getThreshold());
   }
 
   async isRelayingAvailable(destination: Chain): Promise<boolean> {
     const enabled = await Promise.all(
-      this.xcvrs.map(async (x) => {
-        const [wh, special] = await Promise.all([
-          x.isWormholeRelayingEnabled(destination),
-          x.isSpecialRelayingEnabled(destination),
-        ]);
-        return wh || special;
-      })
+      Object.values(this.xcvrs).map((x) => x.isRelayingAvailable(destination))
     );
 
     return enabled.filter((x) => x).length > 0;
@@ -387,7 +427,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
 
     ixs.push({
       index: 0,
-      payload: this.xcvrs[0]!.encodeFlags({ skipRelay: !options.automatic }),
+      payload: (this.xcvrs["wormhole"]! as EvmNttWormholeTranceiver<N, C>).encodeFlags({ skipRelay: !options.automatic }),
     });
 
     return ixs;
@@ -448,14 +488,14 @@ export class EvmNtt<N extends Network, C extends EvmChains>
   }
 
   async *setWormholeTransceiverPeer(peer: ChainAddress<C>) {
-    yield* this.setTransceiverPeer(0, peer);
+    yield* this.setTransceiverPeer("wormhole", peer);
   }
 
-  async *setTransceiverPeer(ix: number, peer: ChainAddress<C>) {
-    if (ix >= this.xcvrs.length) {
-      throw new Error("Transceiver not found");
+  async *setTransceiverPeer(type: string, peer: ChainAddress<C>) {
+    if (!this.xcvrs[type]) {
+      throw new Error(`Transceiver not found (${type})`);
     }
-    yield* this.xcvrs[ix]!.setPeer(peer);
+    yield* this.xcvrs[type]!.setPeer(peer);
   }
 
   async *transfer(
@@ -506,22 +546,15 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     yield this.createUnsignedTx(addFrom(txReq, senderAddress), "Ntt.transfer");
   }
 
-  // TODO: should this be some map of idx to transceiver?
-  async *redeem(attestations: Ntt.Attestation[]) {
-    if (attestations.length !== this.xcvrs.length)
-      throw new Error(
-        "Not enough attestations for the registered Transceivers"
-      );
-
-    for (const idx in this.xcvrs) {
-      const xcvr = this.xcvrs[idx]!;
-      const attestation = attestations[idx];
+  async *redeem(attestations: { [type: string]: Ntt.Attestation }) {
+    for (const [transceiverType, transceiver] of Object.entries(this.xcvrs)) {
+      const attestation = attestations[transceiverType];
       if (attestation?.payloadName !== "WormholeTransfer") {
         // TODO: support standard relayer attestations
         // which must be submitted to the delivery provider
         throw new Error("Invalid attestation type for redeem");
       }
-      yield* xcvr.receive(attestation);
+      yield* transceiver.receive(attestation);
     }
   }
 
@@ -605,9 +638,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     const local: Partial<Ntt.Contracts> = {
       manager: this.managerAddress,
       token: this.tokenAddress,
-      transceiver: {
-        ...(this.xcvrs.length > 0 && { wormhole: this.xcvrs[0]!.address }),
-      },
+      transceiver: Object.fromEntries(Object.entries(this.xcvrs).map(([type, xcvr]) => [type, { address: xcvr.getAddress().address.toString() }])),
       // TODO: what about the quoter?
     };
 
@@ -615,11 +646,14 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       manager: this.managerAddress,
       token: await this.manager.token(),
       transceiver: {
-        wormhole: (await this.manager.getTransceivers())[0]!, // TODO: make this more generic
+        wormhole: {
+          address: (await this.manager.getTransceivers())[0]!,  // TODO: make this more generic
+        }
       },
     };
 
     const deleteMatching = (a: any, b: any) => {
+      if (!b || !a) return;
       for (const k in a) {
         if (typeof a[k] === "object") {
           deleteMatching(a[k], b[k]);

@@ -162,8 +162,10 @@ export namespace NttRoute {
           token: found.token,
           manager: found.manager,
           transceiver: {
-            wormhole: found.transceiver.find((v) => v.type === "wormhole")!
-              .address,
+            wormhole: {
+              address: found.transceiver.find((v) => v.type === "wormhole")!
+                .address
+            },
           },
           quoter: found.quoter,
         };
@@ -195,8 +197,10 @@ export namespace NttRoute {
           token: remote.token,
           manager: remote.manager,
           transceiver: {
-            wormhole: remote.transceiver.find((v) => v.type === "wormhole")!
-              .address,
+            wormhole: {
+              address: remote.transceiver.find((v) => v.type === "wormhole")!
+                .address,
+            }
           },
           quoter: remote.quoter,
         };

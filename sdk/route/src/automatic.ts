@@ -318,7 +318,9 @@ export class NttAutomaticRoute<N extends Network>
             token,
             manager,
             transceiver: {
-              wormhole: whTransceiver,
+              wormhole: {
+                address: whTransceiver
+              },
             },
           },
           destinationContracts: {
