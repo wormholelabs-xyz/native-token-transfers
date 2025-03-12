@@ -406,7 +406,7 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
       const managerKey = new PublicKey(contracts.ntt!.manager);
       const transceiverKey = new PublicKey(transceiver instanceof Object ? transceiver.address : transceiver);
       // handle emitterAccount case separately
-      if (NTT.transceiverPdas(managerKey).emitterAccount() === transceiverKey || managerKey === transceiverKey) {
+      if (NTT.transceiverPdas(managerKey).emitterAccount().equals(transceiverKey) || managerKey.equals(transceiverKey)) {
         const whTransceiver = new SolanaNttWormholeTransceiver(
           this,
           getTransceiverProgram(
