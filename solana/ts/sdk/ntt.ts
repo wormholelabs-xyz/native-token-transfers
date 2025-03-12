@@ -403,9 +403,10 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
         throw new Error(`Unsupported transceiver type: ${transceiverType}`);
       }
 
+      const managerKey = new PublicKey(contracts.ntt!.manager);
       const transceiverKey = new PublicKey(transceiver instanceof Object ? transceiver.address : transceiver);
       // handle emitterAccount case separately
-      if (!PublicKey.isOnCurve(transceiverKey)) { // TODO: maybe derive the emitter PDA instead? it's more precise
+      if (NTT.transceiverPdas(managerKey).emitterAccount() === transceiverKey || managerKey === transceiverKey) {
         const whTransceiver = new SolanaNttWormholeTransceiver(
           this,
           getTransceiverProgram(
@@ -416,13 +417,7 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
           contracts.coreBridge!,
           version
         );
-        if (!whTransceiver.pdas.emitterAccount().equals(transceiverKey)) {
-          throw new Error(
-            `Invalid emitterAccount provided. Expected: ${whTransceiver.pdas
-              .emitterAccount()
-              .toBase58()}; Actual: ${transceiverKey.toBase58()}`
-          );
-        }
+
         this.transceivers[transceiverType] = whTransceiver
       } else {
         if (!(transceiver instanceof Object)) {
