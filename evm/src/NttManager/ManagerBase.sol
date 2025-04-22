@@ -25,8 +25,6 @@ abstract contract ManagerBase is
 {
     // =============== Immutables ============================================================
 
-    /// @dev Address of the token that this NTT Manager is tied to
-    address public immutable token;
     /// @dev Contract deployer address
     address immutable deployer;
     /// @dev Mode of the NTT Manager -- this is either LOCKING (Mode = 0) or BURNING (Mode = 1)
@@ -42,8 +40,7 @@ abstract contract ManagerBase is
 
     // =============== Setup =================================================================
 
-    constructor(address _token, Mode _mode, uint16 _chainId) {
-        token = _token;
+    constructor(Mode _mode, uint16 _chainId) {
         mode = _mode;
         chainId = _chainId;
         evmChainId = block.chainid;
@@ -468,7 +465,6 @@ abstract contract ManagerBase is
 
     /// @dev When we add new immutables, this function should be updated
     function _checkImmutables() internal view virtual override {
-        assert(this.token() == token);
         assert(this.mode() == mode);
         assert(this.chainId() == chainId);
     }

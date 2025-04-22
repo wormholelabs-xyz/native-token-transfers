@@ -193,9 +193,6 @@ interface IManagerBase {
         bytes32 digest
     ) external view returns (uint8 count);
 
-    /// @notice Returns of the address of the token managed by this contract.
-    function token() external view returns (address);
-
     /// @notice Returns the chain ID.
     function chainId() external view returns (uint16);
 }

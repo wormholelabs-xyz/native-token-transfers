@@ -43,6 +43,10 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
     string public constant NTT_MANAGER_VERSION = "1.1.0";
 
+    // =============== Immutables ============================================================
+    /// @dev Address of the token that this NTT Manager is tied to
+    address public immutable token;
+
     // =============== Setup =================================================================
 
     constructor(
@@ -51,7 +55,9 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 _chainId,
         uint64 _rateLimitDuration,
         bool _skipRateLimiting
-    ) RateLimiter(_rateLimitDuration, _skipRateLimiting) ManagerBase(_token, _mode, _chainId) {}
+    ) RateLimiter(_rateLimitDuration, _skipRateLimiting) ManagerBase(_mode, _chainId) {
+        token = _token;
+    }
 
     function __NttManager_init() internal onlyInitializing {
         // check if the owner is the deployer of this contract
@@ -152,6 +158,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     /// @dev When we add new immutables, this function should be updated
     function _checkImmutables() internal view override {
         super._checkImmutables();
+        assert(this.token() == token);
         assert(this.rateLimitDuration() == rateLimitDuration);
     }
 

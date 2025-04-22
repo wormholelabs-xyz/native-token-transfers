@@ -144,6 +144,9 @@ interface INttManager is IManagerBase {
     /// @notice Feature is not implemented.
     error NotImplemented();
 
+    /// @notice Returns of the address of the token managed by this contract.
+    function token() external view returns (address);
+
     /// @notice Transfer a given amount to a recipient on a given chain. This function is called
     ///         by the user to send the token cross-chain. This function will either lock or burn the
     ///         sender's tokens. Finally, this function will call into registered `Endpoint` contracts
