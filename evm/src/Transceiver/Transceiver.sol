@@ -8,6 +8,7 @@ import "../libraries/PausableOwnable.sol";
 import "../libraries/external/ReentrancyGuardUpgradeable.sol";
 import "../libraries/Implementation.sol";
 
+import "../interfaces/IMsgReceiver.sol";
 import "../interfaces/INttManager.sol";
 import "../interfaces/ITransceiver.sol";
 
@@ -153,7 +154,7 @@ abstract contract Transceiver is
                 toWormholeFormat(nttManager), recipientNttManagerAddress
             );
         }
-        INttManager(nttManager).attestationReceived(sourceChainId, sourceNttManagerAddress, payload);
+        IMsgReceiver(nttManager).attestationReceived(sourceChainId, sourceNttManagerAddress, payload);
     }
 
     function _quoteDeliveryPrice(
