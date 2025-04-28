@@ -77,10 +77,7 @@ abstract contract MsgManagerBase is ManagerBase, IMsgReceiver {
         // construct the NttManagerMessage payload
         encodedNttManagerPayload = TransceiverStructs.encodeNttManagerMessage(
             TransceiverStructs.NttManagerMessage(
-                // TODO: Should we use `address(this)` instead of `msg.sender`?
-                bytes32(uint256(sequence)),
-                toWormholeFormat(msg.sender),
-                payload
+                bytes32(uint256(sequence)), toWormholeFormat(msg.sender), payload
             )
         );
 
