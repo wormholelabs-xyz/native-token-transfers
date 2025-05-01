@@ -13,7 +13,7 @@ import "../interfaces/INttManager.sol";
 import "../interfaces/INttToken.sol";
 import "../interfaces/ITransceiver.sol";
 
-import {ManagerBase} from "./ManagerBase.sol";
+import {MsgManagerBase} from "./MsgManagerBase.sol";
 
 /// @title NttManager
 /// @author Wormhole Project Contributors.
@@ -35,7 +35,7 @@ import {ManagerBase} from "./ManagerBase.sol";
 ///    to be too high, users will be refunded the difference.
 ///  - (optional) a flag to indicate whether the transfer should be queued
 ///    if the rate limit is exceeded
-contract NttManager is INttManager, RateLimiter, ManagerBase {
+contract NttManager is INttManager, RateLimiter, MsgManagerBase {
     using BytesParsing for bytes;
     using SafeERC20 for IERC20;
     using TrimmedAmountLib for uint256;
@@ -51,7 +51,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         uint16 _chainId,
         uint64 _rateLimitDuration,
         bool _skipRateLimiting
-    ) RateLimiter(_rateLimitDuration, _skipRateLimiting) ManagerBase(_token, _mode, _chainId) {}
+    ) RateLimiter(_rateLimitDuration, _skipRateLimiting) MsgManagerBase(_token, _mode, _chainId) {}
 
     function __NttManager_init() internal onlyInitializing {
         // check if the owner is the deployer of this contract
@@ -181,38 +181,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         );
     }
 
-    /// @inheritdoc INttManager
-    function attestationReceived(
-        uint16 sourceChainId,
-        bytes32 sourceNttManagerAddress,
-        TransceiverStructs.NttManagerMessage memory payload
-    ) external onlyTransceiver whenNotPaused {
-        _verifyPeer(sourceChainId, sourceNttManagerAddress);
-
-        // Compute manager message digest and record transceiver attestation.
-        bytes32 nttManagerMessageHash = _recordTransceiverAttestation(sourceChainId, payload);
-
-        if (isMessageApproved(nttManagerMessageHash)) {
-            executeMsg(sourceChainId, sourceNttManagerAddress, payload);
-        }
-    }
-
-    /// @inheritdoc INttManager
-    function executeMsg(
-        uint16 sourceChainId,
-        bytes32 sourceNttManagerAddress,
-        TransceiverStructs.NttManagerMessage memory message
-    ) public whenNotPaused {
-        (bytes32 digest, bool alreadyExecuted) =
-            _isMessageExecuted(sourceChainId, sourceNttManagerAddress, message);
-
-        if (alreadyExecuted) {
-            return;
-        }
-
-        _handleMsg(sourceChainId, sourceNttManagerAddress, message, digest);
-    }
-
     /// @dev Override this function to handle custom NttManager payloads.
     /// This can also be used to customize transfer logic by using your own
     /// _handleTransfer implementation.
@@ -221,7 +189,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 sourceNttManagerAddress,
         TransceiverStructs.NttManagerMessage memory message,
         bytes32 digest
-    ) internal virtual {
+    ) internal virtual override {
         _handleTransfer(sourceChainId, sourceNttManagerAddress, message, digest);
     }
 
@@ -527,55 +495,30 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         address sender,
         bytes memory transceiverInstructions
     ) internal returns (uint64 msgSequence) {
-        // verify chain has not forked
-        checkFork(evmChainId);
-
-        (
-            address[] memory enabledTransceivers,
-            TransceiverStructs.TransceiverInstruction[] memory instructions,
-            uint256[] memory priceQuotes,
-            uint256 totalPriceQuote
-        ) = _prepareForTransfer(recipientChain, transceiverInstructions);
-
-        // push it on the stack again to avoid a stack too deep error
-        uint64 seq = sequence;
-
         TransceiverStructs.NativeTokenTransfer memory ntt = _prepareNativeTokenTransfer(
-            amount, recipient, recipientChain, seq, sender, refundAddress
+            amount, recipient, recipientChain, sequence, sender, refundAddress
         );
 
-        // construct the NttManagerMessage payload
-        bytes memory encodedNttManagerPayload = TransceiverStructs.encodeNttManagerMessage(
-            TransceiverStructs.NttManagerMessage(
-                bytes32(uint256(seq)),
-                toWormholeFormat(sender),
-                TransceiverStructs.encodeNativeTokenTransfer(ntt)
-            )
-        );
-
-        // push onto the stack again to avoid stack too deep error
-        uint16 destinationChain = recipientChain;
-
-        // send the message
-        _sendMessageToTransceivers(
+        (uint256 totalPriceQuote, bytes memory encodedNttManagerPayload) = _sendMessage(
             recipientChain,
-            refundAddress,
-            _getPeersStorage()[destinationChain].peerAddress,
-            priceQuotes,
-            instructions,
-            enabledTransceivers,
-            encodedNttManagerPayload
+            _getPeersStorage()[recipientChain].peerAddress,
+            sequence,
+            TransceiverStructs.encodeNativeTokenTransfer(ntt),
+            transceiverInstructions
         );
 
         // push it on the stack again to avoid a stack too deep error
         TrimmedAmount amt = amount;
+
+        // push it on the stack again to avoid a stack too deep error
+        uint64 seq = sequence;
 
         emit TransferSent(
             recipient,
             refundAddress,
             amt.untrim(tokenDecimals()),
             totalPriceQuote,
-            destinationChain,
+            recipientChain,
             seq
         );
 
@@ -654,7 +597,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     // ==================== Internal Helpers ===============================================
 
     /// @dev Verify that the peer address saved for `sourceChainId` matches the `peerAddress`.
-    function _verifyPeer(uint16 sourceChainId, bytes32 peerAddress) internal view {
+    function _verifyPeer(uint16 sourceChainId, bytes32 peerAddress) internal view override {
         if (_getPeersStorage()[sourceChainId].peerAddress != peerAddress) {
             revert InvalidPeer(sourceChainId, peerAddress);
         }
