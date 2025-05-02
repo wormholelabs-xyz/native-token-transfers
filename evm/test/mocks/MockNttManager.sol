@@ -58,7 +58,6 @@ contract MockNttManagerMigrateBasic is NttManager {
     ) NttManager(token, mode, chainId, rateLimitDuration, skipRateLimiting) {}
 
     function _migrate() internal view override {
-        _checkThresholdInvariants();
         _checkTransceiversInvariants();
         revert("Proper migrate called");
     }

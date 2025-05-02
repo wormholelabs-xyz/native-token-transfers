@@ -93,11 +93,15 @@ contract TestEndToEndRelayer is IntegrationHelpers, IRateLimiterEvents, Wormhole
         );
         wormholeTransceiverChain1Other.initialize();
 
-        nttManagerChain1.setTransceiver(address(wormholeTransceiverChain1));
-        nttManagerChain1.setTransceiver(address(wormholeTransceiverChain1Other));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain1, chainId2, address(wormholeTransceiverChain1)
+        );
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain1, chainId2, address(wormholeTransceiverChain1Other)
+        );
         nttManagerChain1.setOutboundLimit(type(uint64).max);
         nttManagerChain1.setInboundLimit(type(uint64).max, chainId2);
-        nttManagerChain1.setThreshold(1);
+        nttManagerChain1.setThreshold(chainId2, 1);
     }
 
     // Setup the chain to relay to of the network
@@ -141,12 +145,16 @@ contract TestEndToEndRelayer is IntegrationHelpers, IRateLimiterEvents, Wormhole
         );
         wormholeTransceiverChain2Other.initialize();
 
-        nttManagerChain2.setTransceiver(address(wormholeTransceiverChain2));
-        nttManagerChain2.setTransceiver(address(wormholeTransceiverChain2Other));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain2, chainId1, address(wormholeTransceiverChain2)
+        );
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain2, chainId1, address(wormholeTransceiverChain2Other)
+        );
         nttManagerChain2.setOutboundLimit(type(uint64).max);
         nttManagerChain2.setInboundLimit(type(uint64).max, chainId1);
 
-        nttManagerChain2.setThreshold(1);
+        nttManagerChain2.setThreshold(chainId1, 1);
     }
 
     function test_chainToChainReverts() public {
