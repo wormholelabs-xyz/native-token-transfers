@@ -139,15 +139,20 @@ abstract contract ManagerBase is
         bytes32 nttManagerMessageHash =
             TransceiverStructs.nttManagerMessageDigest(sourceChainId, payload);
 
+        // The `msg.sender` is the transceiver. Get the index for it.
+        uint8 index = _getTransceiverInfosStorage()[msg.sender].index;
+
+        // If this transceiver is not enabled for this chain, ignore this attestation.
+        // TODO: Is there a race condition with disabling a transceiver while a tx is outstanding?
+        if (!_isRecvTransceiverEnabledForChain(sourceChainId, index)) {
+            return nttManagerMessageHash;
+        }
+
         // set the attested flag for this transceiver.
         // NOTE: Attestation is idempotent (bitwise or 1), but we revert
         // anyway to ensure that the client does not continue to initiate calls
         // to receive the same message through the same transceiver.
-        if (
-            transceiverAttestedToMessage(
-                nttManagerMessageHash, _getTransceiverInfosStorage()[msg.sender].index
-            )
-        ) {
+        if (transceiverAttestedToMessage(nttManagerMessageHash, index)) {
             revert TransceiverAlreadyAttestedToMessage(nttManagerMessageHash);
         }
         _setTransceiverAttestedToMessage(nttManagerMessageHash, msg.sender);
@@ -225,7 +230,7 @@ abstract contract ManagerBase is
         )
     {
         // cache enabled transceivers to avoid multiple storage reads
-        address[] memory enabledTransceivers = _getEnabledTransceiversStorage();
+        address[] memory enabledTransceivers = getEnabledSendTransceiversForChain(recipientChain);
 
         TransceiverStructs.TransceiverInstruction[] memory instructions;
 
