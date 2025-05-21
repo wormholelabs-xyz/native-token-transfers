@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.8 <0.9.0;
 
-/// @title TransceiverRegistry
-/// @author Wormhole Project Contributors.
-/// @notice This contract is responsible for handling the registration of Transceivers.
-/// @dev This contract checks that a few critical invariants hold when transceivers are added or removed,
-///      including:
-///         1. If a transceiver is not registered, it should be enabled.
-///         2. The value set in the bitmap of trannsceivers
-///            should directly correspond to the whether the transceiver is enabled
-abstract contract TransceiverRegistry {
-    constructor() {
-        _checkTransceiversInvariants();
-    }
-
+/// @dev TransceiverRegistryBase is a base class shared between TransceiverRegistry and TransceiverRegistryAdmin.
+abstract contract TransceiverRegistryBase {
     /// @dev Information about registered transceivers.
     struct TransceiverInfo {
         // whether this transceiver is registered
@@ -38,7 +27,83 @@ abstract contract TransceiverRegistry {
         uint8 enabled;
     }
 
-    uint8 constant MAX_TRANSCEIVERS = 64;
+    uint8 public constant MAX_TRANSCEIVERS = 64;
+
+    bytes32 internal constant TRANSCEIVER_INFOS_SLOT =
+        bytes32(uint256(keccak256("ntt.transceiverInfos")) - 1);
+
+    bytes32 internal constant TRANSCEIVER_BITMAP_SLOT =
+        bytes32(uint256(keccak256("ntt.transceiverBitmap")) - 1);
+
+    bytes32 internal constant ENABLED_TRANSCEIVERS_SLOT =
+        bytes32(uint256(keccak256("ntt.enabledTransceivers")) - 1);
+
+    bytes32 internal constant REGISTERED_TRANSCEIVERS_SLOT =
+        bytes32(uint256(keccak256("ntt.registeredTransceivers")) - 1);
+
+    bytes32 internal constant NUM_REGISTERED_TRANSCEIVERS_SLOT =
+        bytes32(uint256(keccak256("ntt.numRegisteredTransceivers")) - 1);
+
+    function _getTransceiverInfosStorage()
+        internal
+        pure
+        returns (mapping(address => TransceiverInfo) storage $)
+    {
+        uint256 slot = uint256(TRANSCEIVER_INFOS_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    function _getTransceiverBitmapStorage()
+        internal
+        pure
+        returns (_EnabledTransceiverBitmap storage $)
+    {
+        uint256 slot = uint256(TRANSCEIVER_BITMAP_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    function _getRegisteredTransceiversStorage() internal pure returns (address[] storage $) {
+        uint256 slot = uint256(REGISTERED_TRANSCEIVERS_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    function _getNumTransceiversStorage() internal pure returns (_NumTransceivers storage $) {
+        uint256 slot = uint256(NUM_REGISTERED_TRANSCEIVERS_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    function _getEnabledTransceiversStorage() internal pure returns (address[] storage $) {
+        uint256 slot = uint256(ENABLED_TRANSCEIVERS_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+}
+
+/// @title TransceiverRegistry
+/// @author Wormhole Project Contributors.
+/// @notice This contract is responsible for handling the registration of Transceivers.
+/// @dev This contract checks that a few critical invariants hold when transceivers are added or removed,
+///      including:
+///         1. If a transceiver is not registered, it should be enabled.
+///         2. The value set in the bitmap of trannsceivers
+///            should directly correspond to the whether the transceiver is enabled
+abstract contract TransceiverRegistry is TransceiverRegistryBase {
+    // TODO: Tests fail if I remove the immutable. Could pass this into the constructor and make `TransceiverRegistryAdmin` upgradeable.
+    address private immutable _admin;
+
+    constructor() {
+        _admin = address(new TransceiverRegistryAdmin());
+        _checkTransceiversInvariants();
+    }
 
     /// @notice Error when the caller is not the transceiver.
     /// @dev Selector 0xa0ae911d.
@@ -76,71 +141,99 @@ abstract contract TransceiverRegistry {
         _;
     }
 
-    // =============== Storage ===============================================
-
-    bytes32 private constant TRANSCEIVER_INFOS_SLOT =
-        bytes32(uint256(keccak256("ntt.transceiverInfos")) - 1);
-
-    bytes32 private constant TRANSCEIVER_BITMAP_SLOT =
-        bytes32(uint256(keccak256("ntt.transceiverBitmap")) - 1);
-
-    bytes32 private constant ENABLED_TRANSCEIVERS_SLOT =
-        bytes32(uint256(keccak256("ntt.enabledTransceivers")) - 1);
-
-    bytes32 private constant REGISTERED_TRANSCEIVERS_SLOT =
-        bytes32(uint256(keccak256("ntt.registeredTransceivers")) - 1);
-
-    bytes32 private constant NUM_REGISTERED_TRANSCEIVERS_SLOT =
-        bytes32(uint256(keccak256("ntt.numRegisteredTransceivers")) - 1);
-
-    function _getTransceiverInfosStorage()
-        internal
-        pure
-        returns (mapping(address => TransceiverInfo) storage $)
-    {
-        uint256 slot = uint256(TRANSCEIVER_INFOS_SLOT);
-        assembly ("memory-safe") {
-            $.slot := slot
-        }
-    }
-
-    function _getEnabledTransceiversStorage() internal pure returns (address[] storage $) {
-        uint256 slot = uint256(ENABLED_TRANSCEIVERS_SLOT);
-        assembly ("memory-safe") {
-            $.slot := slot
-        }
-    }
-
-    function _getTransceiverBitmapStorage()
-        private
-        pure
-        returns (_EnabledTransceiverBitmap storage $)
-    {
-        uint256 slot = uint256(TRANSCEIVER_BITMAP_SLOT);
-        assembly ("memory-safe") {
-            $.slot := slot
-        }
-    }
-
-    function _getRegisteredTransceiversStorage() internal pure returns (address[] storage $) {
-        uint256 slot = uint256(REGISTERED_TRANSCEIVERS_SLOT);
-        assembly ("memory-safe") {
-            $.slot := slot
-        }
-    }
-
-    function _getNumTransceiversStorage() internal pure returns (_NumTransceivers storage $) {
-        uint256 slot = uint256(NUM_REGISTERED_TRANSCEIVERS_SLOT);
-        assembly ("memory-safe") {
-            $.slot := slot
-        }
-    }
-
     // =============== Storage Getters/Setters ========================================
 
     function _setTransceiver(
         address transceiver
     ) internal returns (uint8 index) {
+        (bool success, bytes memory returnData) = _admin.delegatecall(
+            abi.encodeWithSelector(TransceiverRegistryAdmin._setTransceiver.selector, transceiver)
+        );
+        _checkDelegateCallRevert(success, returnData);
+        (index) = abi.decode(returnData, (uint8));
+    }
+
+    function _removeTransceiver(
+        address transceiver
+    ) internal {
+        (bool success, bytes memory returnData) = _admin.delegatecall(
+            abi.encodeWithSelector(
+                TransceiverRegistryAdmin._removeTransceiver.selector, transceiver
+            )
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
+    function _getEnabledTransceiversBitmap() internal view virtual returns (uint64 bitmap) {
+        return _getTransceiverBitmapStorage().bitmap;
+    }
+
+    /// @notice Returns the Transceiver contracts that have been enabled via governance.
+    function getTransceivers() external pure returns (address[] memory result) {
+        result = _getEnabledTransceiversStorage();
+    }
+
+    /// @notice Returns the info for all enabled transceivers
+    /// @dev moving this into `TransceiverRegistryAdmin` reduces the size of `NttManger` but increases the size of `NttManagerNoRateLimiting`.
+    function getTransceiverInfo() external view returns (TransceiverInfo[] memory) {
+        address[] memory enabledTransceivers = _getEnabledTransceiversStorage();
+        uint256 numEnabledTransceivers = enabledTransceivers.length;
+        TransceiverInfo[] memory result = new TransceiverInfo[](numEnabledTransceivers);
+
+        for (uint256 i = 0; i < numEnabledTransceivers; ++i) {
+            result[i] = _getTransceiverInfosStorage()[enabledTransceivers[i]];
+        }
+
+        return result;
+    }
+
+    // ============== Invariants =============================================
+
+    /// @dev Check that the transceiver nttManager is in a valid state.
+    /// Checking these invariants is somewhat costly, but we only need to do it
+    /// when modifying the transceivers, which happens infrequently.
+    function _checkTransceiversInvariants() internal view {
+        (bool success, bytes memory returnData) = _admin.staticcall(
+            abi.encodeWithSelector(TransceiverRegistryAdmin._checkTransceiversInvariants.selector)
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
+    // @dev Check that the transceiver is in a valid state.
+    function _checkTransceiverInvariants(
+        address transceiver
+    ) private view {
+        (bool success, bytes memory returnData) = _admin.staticcall(
+            abi.encodeWithSelector(
+                TransceiverRegistryAdmin._checkTransceiverInvariants.selector, transceiver
+            )
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
+    function _checkDelegateCallRevert(bool success, bytes memory returnData) private pure {
+        // if the function call reverted
+        if (success == false) {
+            // if there is a return reason string
+            if (returnData.length > 0) {
+                // bubble up any reason for revert
+                assembly {
+                    let returndata_size := mload(returnData)
+                    revert(add(32, returnData), returndata_size)
+                }
+            } else {
+                revert("_removeTransceiver reverted");
+            }
+        }
+    }
+}
+
+/// @dev TransceiverRegistryAdmin is a helper contract to TransceiverRegistry.
+///      It implements admin functionality and is called via `delegatecall`.
+contract TransceiverRegistryAdmin is TransceiverRegistryBase {
+    function _setTransceiver(
+        address transceiver
+    ) public returns (uint8 index) {
         mapping(address => TransceiverInfo) storage transceiverInfos = _getTransceiverInfosStorage();
         _EnabledTransceiverBitmap storage _enabledTransceiverBitmap = _getTransceiverBitmapStorage();
         address[] storage _enabledTransceivers = _getEnabledTransceiversStorage();
@@ -148,14 +241,14 @@ abstract contract TransceiverRegistry {
         _NumTransceivers storage _numTransceivers = _getNumTransceiversStorage();
 
         if (transceiver == address(0)) {
-            revert InvalidTransceiverZeroAddress();
+            revert TransceiverRegistry.InvalidTransceiverZeroAddress();
         }
 
         if (transceiverInfos[transceiver].registered) {
             transceiverInfos[transceiver].enabled = true;
         } else {
             if (_numTransceivers.registered >= MAX_TRANSCEIVERS) {
-                revert TooManyTransceivers();
+                revert TransceiverRegistry.TooManyTransceivers();
             }
 
             transceiverInfos[transceiver] = TransceiverInfo({
@@ -174,7 +267,7 @@ abstract contract TransceiverRegistry {
             _enabledTransceiverBitmap.bitmap | uint64(1 << transceiverInfos[transceiver].index);
         // ensure that this actually changed the bitmap
         if (updatedEnabledTransceiverBitmap == _enabledTransceiverBitmap.bitmap) {
-            revert TransceiverAlreadyEnabled(transceiver);
+            revert TransceiverRegistry.TransceiverAlreadyEnabled(transceiver);
         }
         _enabledTransceiverBitmap.bitmap = updatedEnabledTransceiverBitmap;
 
@@ -185,21 +278,21 @@ abstract contract TransceiverRegistry {
 
     function _removeTransceiver(
         address transceiver
-    ) internal {
+    ) public {
         mapping(address => TransceiverInfo) storage transceiverInfos = _getTransceiverInfosStorage();
         _EnabledTransceiverBitmap storage _enabledTransceiverBitmap = _getTransceiverBitmapStorage();
         address[] storage _enabledTransceivers = _getEnabledTransceiversStorage();
 
         if (transceiver == address(0)) {
-            revert InvalidTransceiverZeroAddress();
+            revert TransceiverRegistry.InvalidTransceiverZeroAddress();
         }
 
         if (!transceiverInfos[transceiver].registered) {
-            revert NonRegisteredTransceiver(transceiver);
+            revert TransceiverRegistry.NonRegisteredTransceiver(transceiver);
         }
 
         if (!transceiverInfos[transceiver].enabled) {
-            revert DisabledTransceiver(transceiver);
+            revert TransceiverRegistry.DisabledTransceiver(transceiver);
         }
 
         transceiverInfos[transceiver].enabled = false;
@@ -230,34 +323,10 @@ abstract contract TransceiverRegistry {
         _checkTransceiverInvariants(transceiver);
     }
 
-    function _getEnabledTransceiversBitmap() internal view virtual returns (uint64 bitmap) {
-        return _getTransceiverBitmapStorage().bitmap;
-    }
-
-    /// @notice Returns the Transceiver contracts that have been enabled via governance.
-    function getTransceivers() external pure returns (address[] memory result) {
-        result = _getEnabledTransceiversStorage();
-    }
-
-    /// @notice Returns the info for all enabled transceivers
-    function getTransceiverInfo() external view returns (TransceiverInfo[] memory) {
-        address[] memory enabledTransceivers = _getEnabledTransceiversStorage();
-        uint256 numEnabledTransceivers = enabledTransceivers.length;
-        TransceiverInfo[] memory result = new TransceiverInfo[](numEnabledTransceivers);
-
-        for (uint256 i = 0; i < numEnabledTransceivers; ++i) {
-            result[i] = _getTransceiverInfosStorage()[enabledTransceivers[i]];
-        }
-
-        return result;
-    }
-
-    // ============== Invariants =============================================
-
     /// @dev Check that the transceiver nttManager is in a valid state.
     /// Checking these invariants is somewhat costly, but we only need to do it
     /// when modifying the transceivers, which happens infrequently.
-    function _checkTransceiversInvariants() internal view {
+    function _checkTransceiversInvariants() public view {
         _NumTransceivers storage _numTransceivers = _getNumTransceiversStorage();
         address[] storage _enabledTransceivers = _getEnabledTransceiversStorage();
 
@@ -282,7 +351,7 @@ abstract contract TransceiverRegistry {
     // @dev Check that the transceiver is in a valid state.
     function _checkTransceiverInvariants(
         address transceiver
-    ) private view {
+    ) public view {
         mapping(address => TransceiverInfo) storage transceiverInfos = _getTransceiverInfosStorage();
         _EnabledTransceiverBitmap storage _enabledTransceiverBitmap = _getTransceiverBitmapStorage();
         _NumTransceivers storage _numTransceivers = _getNumTransceiversStorage();
