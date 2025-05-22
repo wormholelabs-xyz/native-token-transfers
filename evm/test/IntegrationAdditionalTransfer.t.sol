@@ -16,6 +16,7 @@ import {DummyToken, DummyTokenMintAndBurn} from "./NttManager.t.sol";
 import "../src/interfaces/IWormholeTransceiver.sol";
 import {WormholeTransceiver} from "../src/Transceiver/WormholeTransceiver/WormholeTransceiver.sol";
 import "../src/libraries/TransceiverStructs.sol";
+import "./libraries/TransceiverHelpers.sol";
 import "./mocks/MockNttManagerAdditionalPayload.sol";
 import "./mocks/MockTransceivers.sol";
 
@@ -94,7 +95,9 @@ contract TestAdditionalPayload is Test {
         // Actually initialize properly now
         wormholeTransceiverChain1.initialize();
 
-        nttManagerChain1.setTransceiver(address(wormholeTransceiverChain1));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain1, chainId2, address(wormholeTransceiverChain1)
+        );
         // nttManagerChain1.setOutboundLimit(type(uint64).max);
         // nttManagerChain1.setInboundLimit(type(uint64).max, chainId2);
 
@@ -123,7 +126,9 @@ contract TestAdditionalPayload is Test {
         );
         wormholeTransceiverChain2.initialize();
 
-        nttManagerChain2.setTransceiver(address(wormholeTransceiverChain2));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain2, chainId1, address(wormholeTransceiverChain2)
+        );
         // nttManagerChain2.setOutboundLimit(type(uint64).max);
         // nttManagerChain2.setInboundLimit(type(uint64).max, chainId1);
 

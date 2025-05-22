@@ -27,6 +27,11 @@ abstract contract TransceiverRegistryBase {
         uint8 enabled;
     }
 
+    /// @notice Error when attempting to enable an transceiver that is already enabled.
+    /// @dev Selector: TODO.
+    /// @param transceiver The address of the transceiver.
+    error TransceiverAlreadyEnabled(address transceiver);
+
     uint8 public constant MAX_TRANSCEIVERS = 64;
 
     bytes32 internal constant TRANSCEIVER_INFOS_SLOT =
@@ -197,11 +202,6 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
     /// @param transceiver The address of the transceiver.
     error NonRegisteredTransceiver(address transceiver);
 
-    /// @notice Error when attempting to enable a transceiver that is already enabled.
-    /// @dev Selector 0x8d68f84d.
-    /// @param transceiver The address of the transceiver.
-    error TransceiverAlreadyEnabled(address transceiver);
-
     /// @notice Error when attempting to use an incorrect chain.
     /// @dev Selector: 0x587c94c3.
     /// @param chain The id of the incorrect chain.
@@ -237,7 +237,7 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
         _checkDelegateCallRevert(success, returnData);
     }
 
-    function _enableSendTransceiverForChain(uint16 chain, address transceiver) internal {
+    function enableSendTransceiverForChain(uint16 chain, address transceiver) public {
         (bool success, bytes memory returnData) = _admin.delegatecall(
             abi.encodeWithSelector(
                 TransceiverRegistryAdmin._enableSendTransceiverForChain.selector, chain, transceiver
@@ -246,7 +246,7 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
         _checkDelegateCallRevert(success, returnData);
     }
 
-    function _disableSendTransceiverForChain(uint16 chain, address transceiver) internal {
+    function disableSendTransceiverForChain(uint16 chain, address transceiver) public {
         (bool success, bytes memory returnData) = _admin.delegatecall(
             abi.encodeWithSelector(
                 TransceiverRegistryAdmin._disableSendTransceiverForChain.selector,
@@ -257,7 +257,7 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
         _checkDelegateCallRevert(success, returnData);
     }
 
-    function _enableRecvTransceiverForChain(uint16 chain, address transceiver) internal {
+    function enableRecvTransceiverForChain(uint16 chain, address transceiver) public {
         (bool success, bytes memory returnData) = _admin.delegatecall(
             abi.encodeWithSelector(
                 TransceiverRegistryAdmin._enableRecvTransceiverForChain.selector, chain, transceiver
@@ -266,10 +266,12 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
         _checkDelegateCallRevert(success, returnData);
     }
 
-    function _disableRecvTransceiverForChain(uint16 chain, address transceiver) internal {
+    function disableRecvTransceiverForChain(uint16 chain, address transceiver) public {
         (bool success, bytes memory returnData) = _admin.delegatecall(
             abi.encodeWithSelector(
-                TransceiverRegistryAdmin._enableRecvTransceiverForChain.selector, chain, transceiver
+                TransceiverRegistryAdmin._disableRecvTransceiverForChain.selector,
+                chain,
+                transceiver
             )
         );
         _checkDelegateCallRevert(success, returnData);
@@ -395,11 +397,6 @@ contract TransceiverRegistryAdmin is TransceiverRegistryBase {
     /// @param transceiver The address of the transceiver.
     event RecvTransceiverDisabledForChain(uint16 chain, address transceiver);
 
-    /// @notice Error when attempting to enable an transceiver that is already enabled.
-    /// @dev Selector: TODO.
-    /// @param transceiver The address of the transceiver.
-    error TransceiverAlreadyEnabled(address transceiver);
-
     /// @notice Error when the transceiver is the zero address.
     /// @dev Selector: TODO.
     error InvalidTransceiverZeroAddress();
@@ -455,7 +452,7 @@ contract TransceiverRegistryAdmin is TransceiverRegistryBase {
             _enabledTransceiverBitmap.bitmap | uint64(1 << transceiverInfos[transceiver].index);
         // ensure that this actually changed the bitmap
         if (updatedEnabledTransceiverBitmap == _enabledTransceiverBitmap.bitmap) {
-            revert TransceiverRegistry.TransceiverAlreadyEnabled(transceiver);
+            revert TransceiverAlreadyEnabled(transceiver);
         }
         _enabledTransceiverBitmap.bitmap = updatedEnabledTransceiverBitmap;
 

@@ -142,10 +142,9 @@ abstract contract ManagerBase is
         // The `msg.sender` is the transceiver. Get the index for it.
         uint8 index = _getTransceiverInfosStorage()[msg.sender].index;
 
-        // If this transceiver is not enabled for this chain, ignore this attestation.
         // TODO: Is there a race condition with disabling a transceiver while a tx is outstanding?
         if (!_isRecvTransceiverEnabledForChain(sourceChainId, index)) {
-            return nttManagerMessageHash;
+            revert CallerNotTransceiver(msg.sender);
         }
 
         // set the attested flag for this transceiver.

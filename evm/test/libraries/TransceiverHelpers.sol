@@ -26,6 +26,38 @@ library TransceiverHelpersLib {
         return (e1, e2);
     }
 
+    function setup_transceivers(
+        uint16 chainId,
+        NttManager nttManager
+    ) internal returns (DummyTransceiver, DummyTransceiver) {
+        DummyTransceiver e1 = new DummyTransceiver(address(nttManager));
+        DummyTransceiver e2 = new DummyTransceiver(address(nttManager));
+        nttManager.setTransceiver(address(e1));
+        nttManager.enableSendTransceiverForChain(chainId, address(e1));
+        nttManager.enableRecvTransceiverForChain(chainId, address(e1));
+        nttManager.setTransceiver(address(e2));
+        nttManager.enableSendTransceiverForChain(chainId, address(e2));
+        nttManager.enableRecvTransceiverForChain(chainId, address(e2));
+        nttManager.setThreshold(2);
+        return (e1, e2);
+    }
+
+    function setAndEnableTransceiver(NttManager nttMgr, uint16 chnId, address transceiver) public {
+        nttMgr.setTransceiver(address(transceiver));
+        nttMgr.enableSendTransceiverForChain(chnId, address(transceiver));
+        nttMgr.enableRecvTransceiverForChain(chnId, address(transceiver));
+    }
+
+    function disableAndRemoveTransceiver(
+        NttManager nttMgr,
+        uint16 chnId,
+        address transceiver
+    ) public {
+        nttMgr.disableSendTransceiverForChain(chnId, address(transceiver));
+        nttMgr.disableRecvTransceiverForChain(chnId, address(transceiver));
+        nttMgr.removeTransceiver(address(transceiver));
+    }
+
     function attestTransceiversHelper(
         address to,
         bytes32 id,
