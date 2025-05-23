@@ -49,7 +49,7 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         nttManager.setPeer(chainId2, toWormholeFormat(address(0x1)), 9, type(uint64).max);
 
         DummyTransceiver e = new DummyTransceiver(address(nttManager));
-        nttManager.setTransceiver(address(e));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e));
     }
 
     function test_outboundRateLimit_setLimitSimple() public {
@@ -525,8 +525,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
     function test_inboundRateLimit_simple() public {
         address user_B = address(0x456);
 
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManager);
+        (DummyTransceiver e1, DummyTransceiver e2) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManager
+        );
 
         DummyToken token = DummyToken(nttManager.token());
 
@@ -565,8 +566,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
     function test_inboundRateLimit_queue() public {
         address user_B = address(0x456);
 
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManager);
+        (DummyTransceiver e1, DummyTransceiver e2) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManager
+        );
 
         DummyToken token = DummyToken(nttManager.token());
 
@@ -717,8 +719,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
         vm.warp(receiveTime);
 
         // now receive 10 tokens from user_B -> user_A
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManager);
+        (DummyTransceiver e1, DummyTransceiver e2) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManager
+        );
 
         ITransceiverReceiver[] memory transceivers = new ITransceiverReceiver[](2);
         transceivers[0] = e1;
@@ -811,8 +814,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
     }
 
     function initializeTransceivers() public returns (ITransceiverReceiver[] memory) {
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManager);
+        (DummyTransceiver e1, DummyTransceiver e2) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManager
+        );
 
         ITransceiverReceiver[] memory transceivers = new ITransceiverReceiver[](2);
         transceivers[0] = e1;
@@ -1068,8 +1072,9 @@ contract TestRateLimit is Test, IRateLimiterEvents {
 
         address user_B = address(0x456);
 
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManager);
+        (DummyTransceiver e1, DummyTransceiver e2) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManager
+        );
 
         DummyToken token = DummyToken(nttManager.token());
 

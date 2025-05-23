@@ -27,6 +27,11 @@ abstract contract TransceiverRegistryBase {
         uint8 enabled;
     }
 
+    /// @notice Error when attempting to enable an transceiver that is already enabled.
+    /// @dev Selector: TODO.
+    /// @param transceiver The address of the transceiver.
+    error TransceiverAlreadyEnabled(address transceiver);
+
     uint8 public constant MAX_TRANSCEIVERS = 64;
 
     bytes32 internal constant TRANSCEIVER_INFOS_SLOT =
@@ -43,6 +48,8 @@ abstract contract TransceiverRegistryBase {
 
     bytes32 internal constant NUM_REGISTERED_TRANSCEIVERS_SLOT =
         bytes32(uint256(keccak256("ntt.numRegisteredTransceivers")) - 1);
+
+    // =============== Storage slot accessor functions ========================================
 
     function _getTransceiverInfosStorage()
         internal
@@ -82,6 +89,72 @@ abstract contract TransceiverRegistryBase {
 
     function _getEnabledTransceiversStorage() internal pure returns (address[] storage $) {
         uint256 slot = uint256(ENABLED_TRANSCEIVERS_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    //
+    // =============== Per-chain transceiver storage ===========================================
+    //
+    struct _PerChainTransceiverBitmap {
+        uint64 bitmap;
+        uint8 threshold; // TODO: If we have the per-chain threshold here, we might be able to get rid of some of the admin code in `ManagerBase`.
+    }
+
+    // =============== Storage slot for per-chain transceivers, send side ======================
+
+    /// @dev Holds Chain ID => Enabled send side transceiver address[] mapping.
+    ///      mapping(uint16 => address[]).
+    bytes32 internal constant ENABLED_SEND_TRANSCEIVER_ARRAY_SLOT =
+        bytes32(uint256(keccak256("registry.sendTransceiverArray")) - 1);
+
+    // =============== Storage slot for per-chain transceivers, receive side ==================
+
+    /// @dev Holds Chain ID => Enabled transceiver receive side bitmap mapping.
+    ///      mapping(uint16 => uint64).
+    bytes32 internal constant ENABLED_RECV_TRANSCEIVER_BITMAP_SLOT =
+        bytes32(uint256(keccak256("registry.recvTransceiverBitmap")) - 1);
+
+    // =============== Storage slot for tracking enabled chains ===============================
+
+    /// @dev Holds mapping of array of chains with transceivers enabled for sending.
+    bytes32 internal constant SEND_ENABLED_CHAINS_SLOT =
+        bytes32(uint256(keccak256("registry.sendEnabledChains")) - 1);
+
+    /// @dev Holds mapping of array of chains with transceivers enabled for receiving.
+    bytes32 internal constant RECV_ENABLED_CHAINS_SLOT =
+        bytes32(uint256(keccak256("registry.recvEnabledChains")) - 1);
+
+    /// @dev Chain ID => Enabled transceiver bitmap mapping.
+    function _getPerChainSendTransceiverArrayStorage()
+        internal
+        pure
+        returns (mapping(uint16 => address[]) storage $)
+    {
+        uint256 slot = uint256(ENABLED_SEND_TRANSCEIVER_ARRAY_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    /// @dev Chain ID => Enabled transceiver bitmap mapping.
+    function _getPerChainRecvTransceiverBitmapStorage()
+        internal
+        pure
+        returns (mapping(uint16 => _PerChainTransceiverBitmap) storage $)
+    {
+        uint256 slot = uint256(ENABLED_RECV_TRANSCEIVER_BITMAP_SLOT);
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    /// @dev Contains all chains that have transceivers enabled.
+    function _getChainsEnabledStorage(
+        bytes32 tag
+    ) internal pure returns (uint16[] storage $) {
+        uint256 slot = uint256(tag);
         assembly ("memory-safe") {
             $.slot := slot
         }
@@ -129,10 +202,10 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
     /// @param transceiver The address of the transceiver.
     error NonRegisteredTransceiver(address transceiver);
 
-    /// @notice Error when attempting to enable a transceiver that is already enabled.
-    /// @dev Selector 0x8d68f84d.
-    /// @param transceiver The address of the transceiver.
-    error TransceiverAlreadyEnabled(address transceiver);
+    /// @notice Error when attempting to use an incorrect chain.
+    /// @dev Selector: 0x587c94c3.
+    /// @param chain The id of the incorrect chain.
+    error InvalidChain(uint16 chain);
 
     modifier onlyTransceiver() {
         if (!_getTransceiverInfosStorage()[msg.sender].enabled) {
@@ -164,6 +237,46 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
         _checkDelegateCallRevert(success, returnData);
     }
 
+    function enableSendTransceiverForChain(uint16 chain, address transceiver) public {
+        (bool success, bytes memory returnData) = _admin.delegatecall(
+            abi.encodeWithSelector(
+                TransceiverRegistryAdmin._enableSendTransceiverForChain.selector, chain, transceiver
+            )
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
+    function disableSendTransceiverForChain(uint16 chain, address transceiver) public {
+        (bool success, bytes memory returnData) = _admin.delegatecall(
+            abi.encodeWithSelector(
+                TransceiverRegistryAdmin._disableSendTransceiverForChain.selector,
+                chain,
+                transceiver
+            )
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
+    function enableRecvTransceiverForChain(uint16 chain, address transceiver) public {
+        (bool success, bytes memory returnData) = _admin.delegatecall(
+            abi.encodeWithSelector(
+                TransceiverRegistryAdmin._enableRecvTransceiverForChain.selector, chain, transceiver
+            )
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
+    function disableRecvTransceiverForChain(uint16 chain, address transceiver) public {
+        (bool success, bytes memory returnData) = _admin.delegatecall(
+            abi.encodeWithSelector(
+                TransceiverRegistryAdmin._disableRecvTransceiverForChain.selector,
+                chain,
+                transceiver
+            )
+        );
+        _checkDelegateCallRevert(success, returnData);
+    }
+
     function _getEnabledTransceiversBitmap() internal view virtual returns (uint64 bitmap) {
         return _getTransceiverBitmapStorage().bitmap;
     }
@@ -185,6 +298,31 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
         }
 
         return result;
+    }
+
+    /// @notice Returns the enabled send side transceiver addresses for the given chain.
+    /// @param chain The Wormhole chain ID for the desired transceivers.
+    /// @return result The enabled send side transceivers for the given chain.
+    function getEnabledSendTransceiversForChain(
+        uint16 chain
+    ) public view returns (address[] memory result) {
+        if (chain == 0) {
+            revert InvalidChain(chain);
+        }
+        result = _getPerChainSendTransceiverArrayStorage()[chain];
+    }
+
+    /// @notice Returns whether or not the receive side transceiver is enabled for the given chain.
+    /// @dev This function is private and should only be called by a function that checks the validity of chain and transceiver.
+    /// @param chain The Wormhole chain ID.
+    /// @param index The index of the transceiver.
+    /// @return true if the transceiver is enabled, false otherwise.
+    function _isRecvTransceiverEnabledForChain(
+        uint16 chain,
+        uint8 index
+    ) internal view returns (bool) {
+        uint64 bitmap = _getPerChainRecvTransceiverBitmapStorage()[chain].bitmap;
+        return (bitmap & uint64(1 << index)) > 0;
     }
 
     // ============== Invariants =============================================
@@ -231,6 +369,53 @@ abstract contract TransceiverRegistry is TransceiverRegistryBase {
 /// @dev TransceiverRegistryAdmin is a helper contract to TransceiverRegistry.
 ///      It implements admin functionality and is called via `delegatecall`.
 contract TransceiverRegistryAdmin is TransceiverRegistryBase {
+    /// @notice Emitted when a send side transceiver is enabled for a chain.
+    /// @dev Topic0
+    ///      TODO.
+    /// @param chain The Wormhole chain ID on which this transceiver is enabled.
+    /// @param transceiver The address of the transceiver.
+    event SendTransceiverEnabledForChain(uint16 chain, address transceiver);
+
+    /// @notice Emitted when a receive side transceiver is enabled for a chain.
+    /// @dev Topic0
+    ///      TODO.
+    /// @param chain The Wormhole chain ID on which this transceiver is enabled.
+    /// @param transceiver The address of the transceiver.
+    event RecvTransceiverEnabledForChain(uint16 chain, address transceiver);
+
+    /// @notice Emitted when a send side transceiver is removed from the endpoint.
+    /// @dev Topic0
+    ///      TODO.
+    /// @param chain The Wormhole chain ID on which this transceiver is disabled.
+    /// @param transceiver The address of the transceiver.
+    event SendTransceiverDisabledForChain(uint16 chain, address transceiver);
+
+    /// @notice Emitted when a receive side transceiver is removed from the endpoint.
+    /// @dev Topic0
+    ///      TODO.
+    /// @param chain The Wormhole chain ID on which this transceiver is disabled.
+    /// @param transceiver The address of the transceiver.
+    event RecvTransceiverDisabledForChain(uint16 chain, address transceiver);
+
+    /// @notice Error when the transceiver is the zero address.
+    /// @dev Selector: TODO.
+    error InvalidTransceiverZeroAddress();
+
+    /// @notice Error when attempting to use an incorrect chain.
+    /// @dev Selector: 0x587c94c3.
+    /// @param chain The id of the incorrect chain.
+    error InvalidChain(uint16 chain);
+
+    /// @notice Error when attempting to use an unregistered transceiver
+    ///         that is not registered.
+    /// @dev Selector: TODO.
+    /// @param transceiver The address of the transceiver.
+    error NonRegisteredTransceiver(address transceiver);
+
+    /// @notice Error when the transceiver is disabled.
+    /// @dev Selector: TODO.
+    error TransceiverAlreadyDisabled(address transceiver);
+
     function _setTransceiver(
         address transceiver
     ) public returns (uint8 index) {
@@ -267,7 +452,7 @@ contract TransceiverRegistryAdmin is TransceiverRegistryBase {
             _enabledTransceiverBitmap.bitmap | uint64(1 << transceiverInfos[transceiver].index);
         // ensure that this actually changed the bitmap
         if (updatedEnabledTransceiverBitmap == _enabledTransceiverBitmap.bitmap) {
-            revert TransceiverRegistry.TransceiverAlreadyEnabled(transceiver);
+            revert TransceiverAlreadyEnabled(transceiver);
         }
         _enabledTransceiverBitmap.bitmap = updatedEnabledTransceiverBitmap;
 
@@ -321,6 +506,189 @@ contract TransceiverRegistryAdmin is TransceiverRegistryBase {
         // we call the invariant check on the transceiver here as well, since
         // the above check only iterates through the enabled transceivers.
         _checkTransceiverInvariants(transceiver);
+    }
+
+    /// @dev This just enables the send side transceiver for a chain. It does not register it.
+    /// @param chain The Wormhole chain ID.
+    /// @param transceiver The transceiver address.
+    function _enableSendTransceiverForChain(
+        uint16 chain,
+        address transceiver
+    ) public onlyRegisteredTransceiver(chain, transceiver) {
+        if (_isSendTransceiverEnabledForChain(chain, transceiver)) {
+            revert TransceiverAlreadyEnabled(transceiver);
+        }
+        address[] storage sendTransceiverArray = _getPerChainSendTransceiverArrayStorage()[chain];
+        if (sendTransceiverArray.length == 0) {
+            _addEnabledChain(SEND_ENABLED_CHAINS_SLOT, chain);
+        }
+        sendTransceiverArray.push(transceiver);
+        emit SendTransceiverEnabledForChain(chain, transceiver);
+    }
+
+    /// @notice Disables a send side transceiver for a chain.
+    /// @param chain The chain ID.
+    /// @param transceiver The transceiver address.
+    function _disableSendTransceiverForChain(
+        uint16 chain,
+        address transceiver
+    ) public onlyRegisteredTransceiver(chain, transceiver) {
+        mapping(uint16 => address[]) storage enabledSendTransceivers =
+            _getPerChainSendTransceiverArrayStorage();
+        address[] storage transceivers = enabledSendTransceivers[chain];
+
+        // Get the index of the disabled transceiver in the enabled transceivers array
+        // and replace it with the last element in the array.
+        uint256 len = transceivers.length;
+        bool found = false;
+        for (uint256 i = 0; i < len;) {
+            if (transceivers[i] == transceiver) {
+                // Swap the last element with the element to be removed
+                transceivers[i] = transceivers[len - 1];
+                // Remove the last element
+                transceivers.pop();
+                found = true;
+                if (transceivers.length == 0) {
+                    _removeEnabledChain(SEND_ENABLED_CHAINS_SLOT, chain);
+                }
+                break;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        if (!found) {
+            revert TransceiverAlreadyDisabled(transceiver);
+        }
+
+        emit SendTransceiverDisabledForChain(chain, transceiver);
+    }
+
+    /// @dev This just enables the receive side transceiver for a chain. It does not register it.
+    /// @param chain The Wormhole chain ID.
+    /// @param transceiver The transceiver address.
+    function _enableRecvTransceiverForChain(
+        uint16 chain,
+        address transceiver
+    ) public onlyRegisteredTransceiver(chain, transceiver) {
+        if (_isRecvTransceiverEnabledForChain(chain, transceiver)) {
+            revert TransceiverAlreadyEnabled(transceiver);
+        }
+        uint8 index = _getTransceiverInfosStorage()[transceiver].index;
+        _PerChainTransceiverBitmap storage _bitmapEntry =
+            _getPerChainRecvTransceiverBitmapStorage()[chain];
+        if (_bitmapEntry.bitmap == 0) {
+            _addEnabledChain(RECV_ENABLED_CHAINS_SLOT, chain);
+        }
+        _bitmapEntry.bitmap |= uint64(1 << index);
+        emit RecvTransceiverEnabledForChain(chain, transceiver);
+    }
+
+    /// @notice Disables a receive side transceiver for a chain.
+    /// @dev Will revert under the following conditions:
+    ///         - The transceiver is the zero address.
+    ///         - The transceiver is not registered.
+    /// @param chain The Wormhole chain ID.
+    /// @param transceiver The transceiver address.
+    function _disableRecvTransceiverForChain(
+        uint16 chain,
+        address transceiver
+    ) public onlyRegisteredTransceiver(chain, transceiver) {
+        mapping(address => TransceiverInfo) storage transceiverInfos = _getTransceiverInfosStorage();
+        _PerChainTransceiverBitmap storage _bitmapEntry =
+            _getPerChainRecvTransceiverBitmapStorage()[chain];
+
+        uint64 updatedEnabledTransceiverBitmap =
+            _bitmapEntry.bitmap & uint64(~(1 << transceiverInfos[transceiver].index));
+        // ensure that this actually changed the bitmap
+        if (updatedEnabledTransceiverBitmap >= _bitmapEntry.bitmap) {
+            revert TransceiverAlreadyDisabled(transceiver);
+        }
+        _bitmapEntry.bitmap = updatedEnabledTransceiverBitmap;
+        if (_bitmapEntry.bitmap == 0) {
+            _removeEnabledChain(RECV_ENABLED_CHAINS_SLOT, chain);
+        }
+
+        emit RecvTransceiverDisabledForChain(chain, transceiver);
+    }
+
+    /// @notice Returns whether or not the send side transceiver is enabled for the given chain.
+    /// @dev This function is private and should only be called by a function that checks the validity of chain and transceiver.
+    /// @param chain The Wormhole chain ID.
+    /// @param transceiver The transceiver address.
+    /// @return true if the transceiver is enabled, false otherwise.
+    function _isSendTransceiverEnabledForChain(
+        uint16 chain,
+        address transceiver
+    ) private view returns (bool) {
+        address[] storage transceivers = _getPerChainSendTransceiverArrayStorage()[chain];
+        uint256 length = transceivers.length;
+        for (uint256 i = 0; i < length;) {
+            if (transceivers[i] == transceiver) {
+                return true;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
+    }
+
+    /// @notice Returns whether or not the receive side transceiver is enabled for the given chain.
+    /// @dev This function is private and should only be called by a function that checks the validity of chain and transceiver.
+    /// @param chain The Wormhole chain ID.
+    /// @param transceiver The transceiver address.
+    /// @return true if the transceiver is enabled, false otherwise.
+    function _isRecvTransceiverEnabledForChain(
+        uint16 chain,
+        address transceiver
+    ) private view returns (bool) {
+        uint64 bitmap = _getPerChainRecvTransceiverBitmapStorage()[chain].bitmap;
+        uint8 index = _getTransceiverInfosStorage()[transceiver].index;
+        return (bitmap & uint64(1 << index)) > 0;
+    }
+
+    /// @dev It is assumed that the chain is not already in the list. We can get away with this because the function is internal.
+    /// @dev Although this is a one line function, we have it for two reasons: (1) symmetry with remove, (2) simplifies testing.
+    ///      The assumption is that the compiler will inline it anyway.
+    function _addEnabledChain(bytes32 tag, uint16 chain) internal {
+        _getChainsEnabledStorage(tag).push(chain);
+    }
+
+    /// @dev It's not an error if the chain is not in the list.
+    function _removeEnabledChain(bytes32 tag, uint16 chain) internal {
+        uint16[] storage chains = _getChainsEnabledStorage(tag);
+        uint256 len = chains.length;
+        for (uint256 idx = 0; (idx < len);) {
+            if (chains[idx] == chain) {
+                chains[idx] = chains[len - 1];
+                chains.pop();
+                return;
+            }
+            unchecked {
+                ++idx;
+            }
+        }
+    }
+
+    // =============== Modifiers ======================================================
+
+    /// @notice This modifier will revert if the transceiver is an invalid address, not registered, or the chain is invalid.
+    /// @param chain The Wormhole chain ID.
+    /// @param transceiver The transceiver address.
+    modifier onlyRegisteredTransceiver(uint16 chain, address transceiver) {
+        if (transceiver == address(0)) {
+            revert InvalidTransceiverZeroAddress();
+        }
+
+        if (chain == 0) {
+            revert InvalidChain(chain);
+        }
+
+        if (!_getTransceiverInfosStorage()[transceiver].registered) {
+            revert NonRegisteredTransceiver(transceiver);
+        }
+        _;
     }
 
     /// @dev Check that the transceiver nttManager is in a valid state.
@@ -385,5 +753,7 @@ contract TransceiverRegistryAdmin is TransceiverRegistryBase {
         assert(transceiverInEnabledTransceivers == transceiverEnabled);
 
         assert(transceiverInfo.index < _numTransceivers.registered);
+
+        // TODO: Per chain invariants?
     }
 }

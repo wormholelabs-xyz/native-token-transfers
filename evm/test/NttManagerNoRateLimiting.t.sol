@@ -70,7 +70,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         nttManagerOther.initialize();
 
         dummyTransceiver = new DummyTransceiver(address(nttManager));
-        nttManager.setTransceiver(address(dummyTransceiver));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManager, chainId2, address(dummyTransceiver)
+        );
     }
 
     // === pure unit tests
@@ -206,7 +208,7 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
 
     function test_registerTransceiver() public {
         DummyTransceiver e = new DummyTransceiver(address(nttManager));
-        nttManager.setTransceiver(address(e));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e));
     }
 
     function test_onlyOwnerCanModifyTransceivers() public {
@@ -229,21 +231,23 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
 
     function test_cantEnableTransceiverTwice() public {
         DummyTransceiver e = new DummyTransceiver(address(nttManager));
-        nttManager.setTransceiver(address(e));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e));
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TransceiverRegistry.TransceiverAlreadyEnabled.selector, address(e)
+                TransceiverRegistryBase.TransceiverAlreadyEnabled.selector, address(e)
             )
         );
-        nttManager.setTransceiver(address(e));
+        nttManager.enableSendTransceiverForChain(chainId2, address(e));
     }
 
     function test_disableReenableTransceiver() public {
         DummyTransceiver e = new DummyTransceiver(address(nttManager));
-        nttManager.setTransceiver(address(e));
-        nttManager.removeTransceiver(address(e));
-        nttManager.setTransceiver(address(e));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e));
+        nttManager.disableSendTransceiverForChain(chainId2, address(e));
+        nttManager.disableRecvTransceiverForChain(chainId2, address(e));
+        nttManager.enableSendTransceiverForChain(chainId2, address(e));
+        nttManager.enableRecvTransceiverForChain(chainId2, address(e));
     }
 
     function test_disableAllTransceiversFails() public {
@@ -255,8 +259,8 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         DummyTransceiver e1 = new DummyTransceiver(address(nttManager));
         DummyTransceiver e2 = new DummyTransceiver(address(nttManager));
 
-        nttManager.setTransceiver(address(e1));
-        nttManager.setTransceiver(address(e2));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e1));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e2));
     }
 
     function test_transceiverIncompatibleNttManagerNoRateLimiting() public {
@@ -325,13 +329,13 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         // Let's register a transceiver and then disable it. We now have 2 registered managers
         // since we register 1 in the setup
         DummyTransceiver e = new DummyTransceiver(address(nttManager));
-        nttManager.setTransceiver(address(e));
-        nttManager.removeTransceiver(address(e));
+        TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(e));
+        TransceiverHelpersLib.disableAndRemoveTransceiver(nttManager, chainId2, address(e));
 
         // We should be able to register 64 transceivers total
         for (uint256 i = 0; i < 62; ++i) {
             DummyTransceiver d = new DummyTransceiver(address(nttManager));
-            nttManager.setTransceiver(address(d));
+            TransceiverHelpersLib.setAndEnableTransceiver(nttManager, chainId2, address(d));
         }
 
         // Registering a new transceiver should fail as we've hit the cap
@@ -339,7 +343,7 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         vm.expectRevert(TransceiverRegistry.TooManyTransceivers.selector);
         nttManager.setTransceiver(address(c));
 
-        // We should be able to renable an already registered transceiver at the cap
+        // We should be able to register an already registered transceiver at the cap
         nttManager.setTransceiver(address(e));
     }
 
@@ -442,8 +446,12 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     // === attestation
 
     function test_onlyEnabledTransceiversCanAttest() public {
-        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(nttManagerOther);
-        nttManagerOther.removeTransceiver(address(e1));
+        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther
+        );
+        nttManagerOther.disableRecvTransceiverForChain(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, address(e1)
+        );
         bytes32 peer = toWormholeFormat(address(nttManager));
         nttManagerOther.setPeer(TransceiverHelpersLib.SENDING_CHAIN_ID, peer, 9, type(uint64).max);
 
@@ -459,7 +467,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     }
 
     function test_onlyPeerNttManagerNoRateLimitingCanAttest() public {
-        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther
+        );
         nttManagerOther.setThreshold(2);
 
         bytes32 peer = toWormholeFormat(address(nttManager));
@@ -480,7 +490,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     }
 
     function test_attestSimple() public {
-        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther
+        );
         nttManagerOther.setThreshold(2);
 
         // register nttManager peer
@@ -503,7 +515,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     }
 
     function test_attestTwice() public {
-        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther
+        );
         nttManagerOther.setThreshold(2);
 
         // register nttManager peer
@@ -532,7 +546,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     }
 
     function test_attestDisabled() public {
-        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther
+        );
         nttManagerOther.setThreshold(2);
 
         bytes32 peer = toWormholeFormat(address(nttManager));
@@ -666,8 +682,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     function test_attestationQuorum() public {
         address user_B = address(0x456);
 
-        (DummyTransceiver e1, DummyTransceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        (DummyTransceiver e1, DummyTransceiver e2) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther
+        );
 
         TrimmedAmount transferAmount = packTrimmedAmount(50, 8);
 
@@ -713,6 +730,13 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
     }
 
     function test_transfersOnForkedChains() public {
+        nttManager.enableSendTransceiverForChain(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, address(dummyTransceiver)
+        );
+        nttManager.enableRecvTransceiverForChain(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, address(dummyTransceiver)
+        );
+
         uint256 evmChainId = block.chainid;
 
         address user_A = address(0x123);
@@ -927,8 +951,8 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         address user_B = address(0x456);
         DummyToken token = DummyToken(nttManager.token());
         TrimmedAmount transferAmount = packTrimmedAmount(50, 8);
-        (ITransceiverReceiver e1, ITransceiverReceiver e2) =
-            TransceiverHelpersLib.setup_transceivers(nttManagerOther);
+        (ITransceiverReceiver e1, ITransceiverReceiver e2) = TransceiverHelpersLib
+            .setup_transceivers(TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerOther);
 
         // Step 1 (contract is deployed by setUp())
         ITransceiverReceiver[] memory transceivers = new ITransceiverReceiver[](2);
@@ -1039,7 +1063,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         );
         {
             DummyTransceiver e = new DummyTransceiver(address(newNttManagerNoRateLimiting));
-            newNttManagerNoRateLimiting.setTransceiver(address(e));
+            TransceiverHelpersLib.setAndEnableTransceiver(
+                newNttManagerNoRateLimiting, TransceiverHelpersLib.SENDING_CHAIN_ID, address(e)
+            );
         }
 
         address user_A = address(0x123);
@@ -1060,8 +1086,9 @@ contract TestNttManagerNoRateLimiting is Test, IRateLimiterEvents {
         vm.stopPrank();
 
         // Check that we can receive a transfer
-        (DummyTransceiver e1,) =
-            TransceiverHelpersLib.setup_transceivers(newNttManagerNoRateLimiting);
+        (DummyTransceiver e1,) = TransceiverHelpersLib.setup_transceivers(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, newNttManagerNoRateLimiting
+        );
         newNttManagerNoRateLimiting.setThreshold(1);
 
         bytes memory transceiverMessage;
