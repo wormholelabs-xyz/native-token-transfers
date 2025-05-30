@@ -101,7 +101,7 @@ contract TestEndToEndRelayer is IntegrationHelpers, IRateLimiterEvents, Wormhole
         );
         nttManagerChain1.setOutboundLimit(type(uint64).max);
         nttManagerChain1.setInboundLimit(type(uint64).max, chainId2);
-        nttManagerChain1.setThreshold(1);
+        nttManagerChain1.setThreshold(chainId2, 1);
     }
 
     // Setup the chain to relay to of the network
@@ -154,7 +154,7 @@ contract TestEndToEndRelayer is IntegrationHelpers, IRateLimiterEvents, Wormhole
         nttManagerChain2.setOutboundLimit(type(uint64).max);
         nttManagerChain2.setInboundLimit(type(uint64).max, chainId1);
 
-        nttManagerChain2.setThreshold(1);
+        nttManagerChain2.setThreshold(chainId1, 1);
     }
 
     function test_chainToChainReverts() public {

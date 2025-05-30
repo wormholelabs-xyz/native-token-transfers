@@ -146,11 +146,14 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
             chainId1, bytes32(uint256(uint160(address(wormholeTransceiverChain1))))
         );
 
-        require(nttManagerChain1.getThreshold() != 0, "Threshold is zero with active transceivers");
+        require(
+            nttManagerChain1.getThreshold(chainId2) != 0,
+            "Threshold is zero with active transceivers"
+        );
 
         // Actually set it
-        nttManagerChain1.setThreshold(1);
-        nttManagerChain2.setThreshold(1);
+        nttManagerChain1.setThreshold(chainId2, 1);
+        nttManagerChain2.setThreshold(chainId1, 1);
     }
 
     function test_chainToChainBase() public {
@@ -549,8 +552,8 @@ contract TestEndToEndBase is Test, IRateLimiterEvents {
         );
 
         // Change the threshold from the setUp functions 1 to 2.
-        nttManagerChain1.setThreshold(2);
-        nttManagerChain2.setThreshold(2);
+        nttManagerChain1.setThreshold(chainId2, 2);
+        nttManagerChain2.setThreshold(chainId1, 2);
 
         // Setting up the transfer
         DummyToken token1 = DummyToken(nttManagerChain1.token());

@@ -166,7 +166,7 @@ abstract contract ManagerBase is
     ) internal returns (bytes32, bool) {
         bytes32 digest = TransceiverStructs.nttManagerMessageDigest(sourceChainId, message);
 
-        if (!isMessageApproved(digest)) {
+        if (!isMessageApproved(sourceChainId, digest)) {
             revert MessageNotApproved(digest);
         }
 
@@ -284,15 +284,15 @@ abstract contract ManagerBase is
     }
 
     /// @inheritdoc IManagerBase
-    function getThreshold() public view returns (uint8) {
-        return _getThresholdStorage().num;
+    function getThreshold(
+        uint16 sourceChainId
+    ) public view returns (uint8) {
+        return _getPerChainRecvTransceiverDataStorage()[sourceChainId].threshold;
     }
 
     /// @inheritdoc IManagerBase
-    function isMessageApproved(
-        bytes32 digest
-    ) public view returns (bool) {
-        uint8 threshold = getThreshold();
+    function isMessageApproved(uint16 sourceChainId, bytes32 digest) public view returns (bool) {
+        uint8 threshold = getThreshold(sourceChainId);
         return messageAttestations(digest) >= threshold && threshold > 0;
     }
 
@@ -401,20 +401,8 @@ abstract contract ManagerBase is
     }
 
     /// @inheritdoc IManagerBase
-    function setThreshold(
-        uint8 threshold
-    ) external onlyOwner {
-        if (threshold == 0) {
-            revert ZeroThreshold();
-        }
-
-        _Threshold storage _threshold = _getThresholdStorage();
-        uint8 oldThreshold = _threshold.num;
-
-        _threshold.num = threshold;
-        _checkThresholdInvariants();
-
-        emit ThresholdChanged(oldThreshold, threshold);
+    function setThreshold(uint16 sourceChainId, uint8 threshold) external onlyOwner {
+        _setThreshold(sourceChainId, threshold);
     }
 
     // =============== Internal ==============================================================
@@ -482,22 +470,6 @@ abstract contract ManagerBase is
             revert RetrievedIncorrectRegisteredTransceivers(
                 _getRegisteredTransceiversStorage().length, _getNumTransceiversStorage().registered
             );
-        }
-    }
-
-    function _checkThresholdInvariants() internal view {
-        uint8 threshold = _getThresholdStorage().num;
-        _NumTransceivers memory numTransceivers = _getNumTransceiversStorage();
-
-        // invariant: threshold <= enabledTransceivers.length
-        if (threshold > numTransceivers.enabled) {
-            revert ThresholdTooHigh(threshold, numTransceivers.enabled);
-        }
-
-        if (numTransceivers.registered > 0) {
-            if (threshold == 0) {
-                revert ZeroThreshold();
-            }
         }
     }
 }

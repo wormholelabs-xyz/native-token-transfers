@@ -141,8 +141,8 @@ contract TestUpgrades is Test, IRateLimiterEvents {
             chainId1, bytes32(uint256(uint160(address(wormholeTransceiverChain1))))
         );
 
-        nttManagerChain1.setThreshold(1);
-        nttManagerChain2.setThreshold(1);
+        nttManagerChain1.setThreshold(chainId2, 1);
+        nttManagerChain2.setThreshold(chainId1, 1);
         vm.chainId(chainId1);
     }
 
