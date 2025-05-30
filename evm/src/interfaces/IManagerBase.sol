@@ -39,13 +39,6 @@ interface IManagerBase {
     /// @param index The index of the transceiver in the bitmap.
     event MessageAttestedTo(bytes32 digest, address transceiver, uint8 index);
 
-    /// @notice Emmitted when the threshold required transceivers is changed.
-    /// @dev Topic0
-    ///      0x2a855b929b9a53c6fb5b5ed248b27e502b709c088e036a5aa17620c8fc5085a9.
-    /// @param oldThreshold The old threshold.
-    /// @param threshold The new threshold.
-    event ThresholdChanged(uint8 oldThreshold, uint8 threshold);
-
     /// @notice Emitted when an transceiver is removed from the nttManager.
     /// @dev Topic0
     ///      0xf05962b5774c658e85ed80c91a75af9d66d2af2253dda480f90bce78aff5eda5.
@@ -71,15 +64,7 @@ interface IManagerBase {
     /// @param refundAmount The refund amount.
     error RefundFailed(uint256 refundAmount);
 
-    /// @notice The number of thresholds should not be zero.
-    error ZeroThreshold();
-
     error RetrievedIncorrectRegisteredTransceivers(uint256 retrieved, uint256 registered);
-
-    /// @notice The threshold for transceiver attestations is too high.
-    /// @param threshold The threshold.
-    /// @param transceivers The number of transceivers.
-    error ThresholdTooHigh(uint256 threshold, uint256 transceivers);
 
     /// @notice Error when the tranceiver already attested to the message.
     ///         To ensure the client does not continue to initiate calls to the attestationReceived function.
@@ -120,11 +105,10 @@ interface IManagerBase {
 
     /// @notice Sets the threshold for the number of attestations required for a message
     /// to be considered valid.
+    /// @param sourceChainId The chain ID to which the threshold applies.
     /// @param threshold The new threshold (number of attestations).
     /// @dev This method can only be executed by the `owner`.
-    function setThreshold(
-        uint8 threshold
-    ) external;
+    function setThreshold(uint16 sourceChainId, uint8 threshold) external;
 
     /// @notice Sets the transceiver for the given chain.
     /// @param transceiver The address of the transceiver.
@@ -142,11 +126,10 @@ interface IManagerBase {
 
     /// @notice Checks if a message has been approved. The message should have at least
     /// the minimum threshold of attestations from distinct endpoints.
+    /// @param sourceChainId The chain ID from which the message was received.
     /// @param digest The digest of the message.
     /// @return - Boolean indicating if message has been approved.
-    function isMessageApproved(
-        bytes32 digest
-    ) external view returns (bool);
+    function isMessageApproved(uint16 sourceChainId, bytes32 digest) external view returns (bool);
 
     /// @notice Checks if a message has been executed.
     /// @param digest The digest of the message.
@@ -175,7 +158,10 @@ interface IManagerBase {
 
     /// @notice Returns the number of Transceivers that must attest to a msgId for
     /// it to be considered valid and acted upon.
-    function getThreshold() external view returns (uint8);
+    /// @param chainId The chain for which the threshold applies.
+    function getThreshold(
+        uint16 chainId
+    ) external view returns (uint8);
 
     /// @notice Returns a boolean indicating if the transceiver has attested to the message.
     /// @param digest The digest of the message.
