@@ -192,7 +192,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         // Compute manager message digest and record transceiver attestation.
         bytes32 nttManagerMessageHash = _recordTransceiverAttestation(sourceChainId, payload);
 
-        if (isMessageApproved(nttManagerMessageHash)) {
+        if (isMessageApproved(sourceChainId, nttManagerMessageHash)) {
             executeMsg(sourceChainId, sourceNttManagerAddress, payload);
         }
     }
