@@ -1000,7 +1000,7 @@ yargs(hideBin(process.argv))
                         const deployments: Config = loadConfig(path);
                         const chain: Chain = "Solana";
                         const network = deployments.network as Network;
-              
+
                         if (!fs.existsSync(argv["payer"])) {
                           console.error("Payer not found. Specify with --payer");
                           process.exit(1);
@@ -1010,7 +1010,7 @@ yargs(hideBin(process.argv))
                             JSON.parse(fs.readFileSync(argv["payer"]).toString())
                           )
                         );
-              
+
                         if (!(chain in deployments.chains)) {
                           console.error(`Chain ${chain} not found in ${path}`);
                           process.exit(1);
@@ -1026,7 +1026,7 @@ yargs(hideBin(process.argv))
                         );
                         const solanaNtt = ntt as SolanaNtt<typeof network, SolanaChains>;
                         const tokenAuthority = NTT.pdas(chainConfig.manager).tokenAuthority();
-              
+
                         // check if SPL-Multisig is supported for manager version
                         const major = Number(solanaNtt.version.split(".")[0]);
                         if (major < 3) {
@@ -1036,7 +1036,7 @@ yargs(hideBin(process.argv))
                           console.error("Use 'ntt upgrade' to upgrade the NTT contract to a specific version.");
                           process.exit(1);
                         }
-              
+
                         try {
                           // use same tokenProgram as token to create multisig
                           const tokenProgram = (await solanaNtt.getConfig()).tokenProgram;
@@ -1094,7 +1094,7 @@ yargs(hideBin(process.argv))
                         const deployments: Config = loadConfig(path);
                         const chain: Chain = "Solana";
                         const network = deployments.network as Network;
-              
+
                         if (!fs.existsSync(argv["payer"])) {
                           console.error("Payer not found. Specify with --payer");
                           process.exit(1);
@@ -1104,7 +1104,7 @@ yargs(hideBin(process.argv))
                             JSON.parse(fs.readFileSync(argv["payer"]).toString())
                           )
                         );
-              
+
                         if (!(chain in deployments.chains)) {
                           console.error(`Chain ${chain} not found in ${path}`);
                           process.exit(1);
@@ -1122,7 +1122,7 @@ yargs(hideBin(process.argv))
                         const major = Number(solanaNtt.version.split(".")[0]);
                         const config = await solanaNtt.getConfig();
                         const tokenAuthority = NTT.pdas(chainConfig.manager).tokenAuthority();
-              
+
                         // verify current mint authority is not token authority
                         const mintInfo = await spl.getMint(
                           connection,
@@ -1140,7 +1140,7 @@ yargs(hideBin(process.argv))
                           console.error("Please use https://github.com/wormhole-foundation/demo-ntt-token-mint-authority-transfer to transfer the token mint authority out of the NTT manager");
                           process.exit(1);
                         }
-                        
+
                         // verify current mint authority is not valid SPL Multisig
                         let isMultisigTokenAuthority = false;
                         try {
@@ -1165,7 +1165,7 @@ yargs(hideBin(process.argv))
                           console.error("Please use https://github.com/wormhole-foundation/demo-ntt-token-mint-authority-transfer to transfer the token mint authority out of the NTT manager");
                           process.exit(1);
                         }
-                        
+
                         // verify current mint authority is payer
                         if (!mintInfo.mintAuthority.equals(payerKeypair.publicKey)) {
                           console.error(
@@ -1173,7 +1173,7 @@ yargs(hideBin(process.argv))
                           );
                           process.exit(1);
                         }
-              
+
                         const isMultisig = argv["multisig"];
                         if (isMultisig) {
                           // check if SPL-Multisig is supported for manager version
@@ -1185,7 +1185,7 @@ yargs(hideBin(process.argv))
                             process.exit(1);
                           }
                         }
-              
+
                         // verify new authority address is valid
                         const newAuthority = new PublicKey(argv["newAuthority"]);
                         if (isMultisig && newAuthority.equals(tokenAuthority)) {
@@ -1200,7 +1200,7 @@ yargs(hideBin(process.argv))
                           );
                           process.exit(1);
                         }
-              
+
                         // ensure manager is paused
                         if (!(await solanaNtt.isPaused())) {
                           console.error(
@@ -1208,7 +1208,7 @@ yargs(hideBin(process.argv))
                           );
                           process.exit(1);
                         }
-              
+
                         // manager versions < 3.x.x have to call spl setAuthority instruction directly
                         if (major < 3) {
                           try {
@@ -1236,13 +1236,13 @@ yargs(hideBin(process.argv))
                             process.exit(1);
                           }
                         }
-              
+
                         // use lut if configured
                         const luts: AddressLookupTableAccount[] = [];
                         try {
                           luts.push(await solanaNtt.getAddressLookupTable());
                         } catch {}
-              
+
                         // send versioned transaction
                         try {
                           const latestBlockHash = await connection.getLatestBlockhash();
@@ -1856,13 +1856,13 @@ async function deploySui<N extends Network, C extends Chain>(
 ): Promise<ChainAddress<C>> {
     const finalPackagePath = packagePath || "sui";
     const finalGasBudget = gasBudget || 100000000;
-    
+
     console.log(`Deploying Sui NTT contracts in ${mode} mode...`);
     console.log(`Package path: ${finalPackagePath}`);
     console.log(`Gas budget: ${finalGasBudget}`);
     console.log(`Target chain: ${ch.chain}`);
     console.log(`Token: ${token}`);
-    
+
     // Build the Move packages
     console.log("Building Move packages...");
     try {
@@ -1880,14 +1880,14 @@ async function deploySui<N extends Network, C extends Chain>(
     console.log("2. Initialize NTT manager with token and mode");
     console.log("3. Set up transceivers and configuration");
     console.log("4. Return the deployed manager object ID");
-    
+
     // For now, return a placeholder address
     // In a real implementation, this would:
     // 1. Use sui client publish to deploy packages
-    // 2. Initialize the NTT manager with proper parameters  
+    // 2. Initialize the NTT manager with proper parameters
     // 3. Return the actual manager address
     const placeholderAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
-    
+
     console.log(chalk.green("Deployment placeholder completed"));
     return { chain: ch.chain, address: toUniversal(ch.chain, placeholderAddress) };
 }

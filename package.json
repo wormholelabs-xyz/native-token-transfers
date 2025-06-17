@@ -4,11 +4,12 @@
   "type": "module",
   "license": "Apache-2.0",
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present && npm run typecheck:cli",
     "rebuild": "npm run rebuild --workspaces --if-present",
     "build:solana": "npm run build --workspace=sdk/definitions --workspace=solana",
     "build:evm": "npm run build --workspace=sdk/definitions --workspace=sdk/evm",
     "build:sui": "npm run build --workspace=sdk/definitions --workspace=sui/ts",
+    "typecheck:cli": "cd cli && tsc --noEmit",
     "generate": "npm run generate --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:ci": "CI=true jest --config ./jest.config.ts",
