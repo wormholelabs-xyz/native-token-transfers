@@ -1863,33 +1863,224 @@ async function deploySui<N extends Network, C extends Chain>(
     console.log(`Target chain: ${ch.chain}`);
     console.log(`Token: ${token}`);
 
+    const signer = await getSigner(ch, signerType);
+    const rpc = await ch.getRpc();
+
     // Build the Move packages
     console.log("Building Move packages...");
+    const packagesPath = `${pwd}/${finalPackagePath}/packages`;
+
+    // Build ntt_common first (dependency)
     try {
-        execSync(`cd ${pwd}/${finalPackagePath} && sui move build`, { stdio: "inherit" });
+        console.log("Building ntt_common package...");
+        execSync(`cd ${packagesPath}/ntt_common && sui move build`, { stdio: "inherit" });
     } catch (e) {
-        console.error("Failed to build Move packages");
+        console.error("Failed to build ntt_common package");
         throw e;
     }
 
-    // TODO: Deploy the Move packages using sui client publish
-    // This is a placeholder implementation that shows the expected flow
-    console.log("TODO: Implement Sui package deployment");
-    console.log("Expected deployment steps:");
-    console.log("1. sui client publish --gas-budget " + finalGasBudget);
-    console.log("2. Initialize NTT manager with token and mode");
-    console.log("3. Set up transceivers and configuration");
-    console.log("4. Return the deployed manager object ID");
+    // Build ntt package
+    try {
+        console.log("Building ntt package...");
+        execSync(`cd ${packagesPath}/ntt && sui move build`, { stdio: "inherit" });
+    } catch (e) {
+        console.error("Failed to build ntt package");
+        throw e;
+    }
 
-    // For now, return a placeholder address
-    // In a real implementation, this would:
-    // 1. Use sui client publish to deploy packages
-    // 2. Initialize the NTT manager with proper parameters
-    // 3. Return the actual manager address
-    const placeholderAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    // Build wormhole_transceiver package
+    try {
+        console.log("Building wormhole_transceiver package...");
+        execSync(`cd ${packagesPath}/wormhole_transceiver && sui move build`, { stdio: "inherit" });
+    } catch (e) {
+        console.error("Failed to build wormhole_transceiver package");
+        throw e;
+    }
 
-    console.log(chalk.green("Deployment placeholder completed"));
-    return { chain: ch.chain, address: toUniversal(ch.chain, placeholderAddress) };
+    // Deploy packages in order
+    console.log("Deploying packages...");
+
+    // 1. Deploy ntt_common
+    console.log("Publishing ntt_common package...");
+    const nttCommonResult = execSync(
+        `cd ${packagesPath}/ntt_common && sui client publish --gas-budget ${finalGasBudget} --json`,
+        { encoding: "utf8" }
+    );
+
+    const nttCommonDeploy = JSON.parse(nttCommonResult);
+    if (!nttCommonDeploy.objectChanges) {
+        throw new Error("Failed to deploy ntt_common package");
+    }
+
+    const nttCommonPackageId = nttCommonDeploy.objectChanges.find(
+        (change: any) => change.type === "published"
+    )?.packageId;
+
+    if (!nttCommonPackageId) {
+        throw new Error("Could not find ntt_common package ID");
+    }
+
+    console.log(`ntt_common deployed at: ${nttCommonPackageId}`);
+
+    // 2. Deploy ntt package
+    console.log("Publishing ntt package...");
+    const nttResult = execSync(
+        `cd ${packagesPath}/ntt && sui client publish --gas-budget ${finalGasBudget} --json`,
+        { encoding: "utf8" }
+    );
+
+    const nttDeploy = JSON.parse(nttResult);
+    if (!nttDeploy.objectChanges) {
+        throw new Error("Failed to deploy ntt package");
+    }
+
+    const nttPackageId = nttDeploy.objectChanges.find(
+        (change: any) => change.type === "published"
+    )?.packageId;
+
+    if (!nttPackageId) {
+        throw new Error("Could not find ntt package ID");
+    }
+
+    console.log(`ntt deployed at: ${nttPackageId}`);
+
+    // 3. Deploy wormhole_transceiver package
+    console.log("Publishing wormhole_transceiver package...");
+    const whTransceiverResult = execSync(
+        `cd ${packagesPath}/wormhole_transceiver && sui client publish --gas-budget ${finalGasBudget} --json`,
+        { encoding: "utf8" }
+    );
+
+    const whTransceiverDeploy = JSON.parse(whTransceiverResult);
+    if (!whTransceiverDeploy.objectChanges) {
+        throw new Error("Failed to deploy wormhole_transceiver package");
+    }
+
+    const whTransceiverPackageId = whTransceiverDeploy.objectChanges.find(
+        (change: any) => change.type === "published"
+    )?.packageId;
+
+    if (!whTransceiverPackageId) {
+        throw new Error("Could not find wormhole_transceiver package ID");
+    }
+
+    console.log(`wormhole_transceiver deployed at: ${whTransceiverPackageId}`);
+
+    // Initialize NTT manager
+    console.log("Initializing NTT manager...");
+
+    // 1. Get the deployer caps from deployment results
+    const nttDeployerCapId = nttDeploy.objectChanges.find(
+        (change: any) => change.type === "created" &&
+                        change.objectType?.includes("setup::DeployerCap")
+    )?.objectId;
+
+    if (!nttDeployerCapId) {
+        throw new Error("Could not find NTT DeployerCap object ID");
+    }
+
+    const whTransceiverDeployerCapId = whTransceiverDeploy.objectChanges.find(
+        (change: any) => change.type === "created" &&
+                        change.objectType?.includes("DeployerCap")
+    )?.objectId;
+
+    if (!whTransceiverDeployerCapId) {
+        throw new Error("Could not find Wormhole Transceiver DeployerCap object ID");
+    }
+
+    // 2. Get the upgrade cap from NTT deployment
+    const nttUpgradeCapId = nttDeploy.objectChanges.find(
+        (change: any) => change.type === "created" &&
+                        change.objectType?.includes("UpgradeCap")
+    )?.objectId;
+
+    if (!nttUpgradeCapId) {
+        throw new Error("Could not find NTT UpgradeCap object ID");
+    }
+
+    // 3. Get Wormhole core bridge state
+    const wormholeCoreBridge = ch.config.contracts.coreBridge;
+    if (!wormholeCoreBridge) {
+        throw new Error("Wormhole core bridge not found in chain config");
+    }
+
+    // 4. Call setup::complete to initialize the NTT manager state
+    const chainId = ch.config.chainId; // Get numeric chain ID from config
+    const modeArg = mode === "locking" ? "locking" : "burning";
+
+    console.log(`Completing NTT setup with mode: ${modeArg}, chain ID: ${chainId}`);
+
+    const setupResult = execSync(
+        `sui client call ` +
+        `--package ${nttPackageId} ` +
+        `--module setup ` +
+        `--function complete ` +
+        `--type-args ${token} ` +
+        `--args ${nttDeployerCapId} ${nttUpgradeCapId} ${chainId} ${modeArg} vector[] ` +
+        `--gas-budget ${finalGasBudget} ` +
+        `--json`,
+        { encoding: "utf8" }
+    );
+
+    const setupDeploy = JSON.parse(setupResult);
+    if (!setupDeploy.objectChanges) {
+        throw new Error("Failed to complete NTT setup");
+    }
+
+    // Find the shared State object
+    const nttStateId = setupDeploy.objectChanges.find(
+        (change: any) => change.type === "created" &&
+                        change.objectType?.includes("state::State") &&
+                        change.owner === "Shared"
+    )?.objectId;
+
+    if (!nttStateId) {
+        throw new Error("Could not find NTT State object ID");
+    }
+
+    console.log(`NTT State created at: ${nttStateId}`);
+
+    // 5. Complete wormhole transceiver setup
+    console.log("Completing Wormhole Transceiver setup...");
+
+    const transceiverSetupResult = execSync(
+        `sui client call ` +
+        `--package ${whTransceiverPackageId} ` +
+        `--module wormhole_transceiver ` +
+        `--function complete ` +
+        `--type-args "ntt::contract_auth::ManagerAuth" ` +
+        `--args ${whTransceiverDeployerCapId} ${wormholeCoreBridge} ` +
+        `--gas-budget ${finalGasBudget} ` +
+        `--json`,
+        { encoding: "utf8" }
+    );
+
+    const transceiverSetupDeploy = JSON.parse(transceiverSetupResult);
+    if (!transceiverSetupDeploy.objectChanges) {
+        throw new Error("Failed to complete Wormhole Transceiver setup");
+    }
+
+    // Find the transceiver state
+    const transceiverStateId = transceiverSetupDeploy.objectChanges.find(
+        (change: any) => change.type === "created" &&
+                        change.objectType?.includes("wormhole_transceiver::State") &&
+                        change.owner === "Shared"
+    )?.objectId;
+
+    if (!transceiverStateId) {
+        throw new Error("Could not find Wormhole Transceiver State object ID");
+    }
+
+    console.log(`Wormhole Transceiver State created at: ${transceiverStateId}`);
+
+    console.log(chalk.green("Sui NTT deployment completed successfully!"));
+    console.log(`NTT Package ID: ${nttPackageId}`);
+    console.log(`NTT State ID: ${nttStateId}`);
+    console.log(`Wormhole Transceiver Package ID: ${whTransceiverPackageId}`);
+    console.log(`Wormhole Transceiver State ID: ${transceiverStateId}`);
+
+    // Return the NTT state object ID as the manager address
+    return { chain: ch.chain, address: toUniversal(ch.chain, nttStateId) };
 }
 
 async function missingConfigs(
