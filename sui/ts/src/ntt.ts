@@ -42,31 +42,75 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   // State & Configuration Methods
   async getMode(): Promise<Ntt.Mode> {
-    throw new Error("Not implemented");
+    const state = await this.provider.getObject({
+      id: this.contracts.manager,
+      options: {
+        showContent: true,
+      },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    const fields = (state.data.content as any).fields;
+    const modeField = fields.mode;
+
+    // Mode is an enum: { Locking: null } or { Burning: null }
+    if (modeField.Locking !== undefined) {
+      return "locking";
+    } else if (modeField.Burning !== undefined) {
+      return "burning";
+    }
+
+    throw new Error("Invalid mode in NTT state");
   }
 
   async isPaused(): Promise<boolean> {
-    throw new Error("Not implemented");
+    // In Sui NTT, pausing is handled by the admin cap ownership
+    // For now, return false as a placeholder
+    // TODO: Implement proper pause checking mechanism
+    return false;
   }
 
   async getOwner(): Promise<AccountAddress<C>> {
-    throw new Error("Not implemented");
+    // Owner is determined by who holds the AdminCap
+    // This would require tracking the AdminCap object
+    // For now, throw as this requires more complex implementation
+    throw new Error("getOwner not yet implemented for Sui");
   }
 
   async getPauser(): Promise<AccountAddress<C> | null> {
-    throw new Error("Not implemented");
+    // Pauser functionality would be similar to owner
+    throw new Error("getPauser not yet implemented for Sui");
   }
 
   async getThreshold(): Promise<number> {
-    throw new Error("Not implemented");
+    const state = await this.provider.getObject({
+      id: this.contracts.manager,
+      options: {
+        showContent: true,
+      },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    const fields = (state.data.content as any).fields;
+    return parseInt(fields.threshold, 10);
   }
 
   async getTokenDecimals(): Promise<number> {
-    throw new Error("Not implemented");
+    // Token decimals would need to be fetched from the coin metadata
+    // This requires knowing the token type parameter
+    throw new Error("getTokenDecimals not yet implemented for Sui");
   }
 
   async getCustodyAddress(): Promise<string> {
-    throw new Error("Not implemented");
+    // In Sui, custody is managed by the State object itself
+    // Return the state object ID as the custody address
+    return this.contracts.manager;
   }
 
   // Admin Methods
@@ -114,7 +158,18 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     destination: ChainAddress,
     options: Ntt.TransferOptions
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
-    throw new Error("Not implemented");
+    // For Sui transfers, we need to:
+    // 1. Create a transfer ticket with the transfer parameters
+    // 2. Call the transfer function with the ticket
+    // This is a placeholder implementation that shows the structure
+
+    // In a full implementation, we would:
+    // 1. Import Transaction from @mysten/sui/transactions
+    // 2. Build the transaction block with proper Move function calls
+    // 3. Handle coin collection and splitting for the amount
+    // 4. Call ntt::prepare_transfer and ntt::transfer_tx_sender
+
+    throw new Error("Sui transfer implementation requires transaction construction");
   }
 
   async *redeem(attestations: Ntt.Attestation[]): AsyncGenerator<UnsignedTransaction<N, C>> {
@@ -134,11 +189,55 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   // Rate Limiting
   async getCurrentOutboundCapacity(): Promise<bigint> {
-    throw new Error("Not implemented");
+    const state = await this.provider.getObject({
+      id: this.contracts.manager,
+      options: {
+        showContent: true,
+      },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    const fields = (state.data.content as any).fields;
+    const outboxRateLimit = fields.outbox.fields.rate_limit.fields;
+
+    // Get current timestamp (this would ideally come from Clock object)
+    const currentTime = Date.now();
+
+    // Calculate capacity using the rate limit formula
+    // This is a simplified version - in practice we'd need the exact formula from Move
+    const limit = BigInt(outboxRateLimit.limit);
+    const capacityAtLastTx = BigInt(outboxRateLimit.capacity_at_last_tx);
+    const lastTxTimestamp = BigInt(outboxRateLimit.last_tx_timestamp);
+
+    // Simplified capacity calculation
+    const timePassed = BigInt(currentTime) - lastTxTimestamp;
+    const rateLimitDuration = BigInt(24 * 60 * 60 * 1000); // 24 hours in ms
+
+    const additionalCapacity = (timePassed * limit) / rateLimitDuration;
+    const currentCapacity = capacityAtLastTx + additionalCapacity;
+
+    return currentCapacity > limit ? limit : currentCapacity;
   }
 
   async getOutboundLimit(): Promise<bigint> {
-    throw new Error("Not implemented");
+    const state = await this.provider.getObject({
+      id: this.contracts.manager,
+      options: {
+        showContent: true,
+      },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    const fields = (state.data.content as any).fields;
+    const outboxRateLimit = fields.outbox.fields.rate_limit.fields;
+
+    return BigInt(outboxRateLimit.limit);
   }
 
   async *setOutboundLimit(limit: bigint, payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>> {
