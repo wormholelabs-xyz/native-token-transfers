@@ -26,7 +26,7 @@ export async function getSuiSigner(
     debug?: boolean;
   },
 ): Promise<Signer> {
-  const keypair: Ed25519Keypair = 
+  const keypair: Ed25519Keypair =
     typeof key === 'string' ? Ed25519Keypair.fromSecretKey(key) : key;
 
   const chain = (await SuiPlatform.chainFromRpc(rpc))[1];
@@ -66,24 +66,61 @@ export class SuiNativeSigner<N extends Network, C extends SuiChains = SuiChains>
   async sign(tx: UnsignedTransaction<N, C>[]): Promise<SignedTx[]> {
     const signed = [];
 
-    for (const txn of tx) {
+
+    for (let i = 0; i < tx.length; i++) {
+      const txn = tx[i];
       const { transaction, description } = txn;
-      if (this.opts?.debug)
-        console.log(`Signing: ${description} for ${this.address()}`);
 
-      // Build the transaction block
-      const txb = new Transaction();
-      // TODO: This is a placeholder - we'll need to properly construct
-      // Sui transactions based on the transaction data
-      
-      // Sign the transaction
-      const result = await this.client.signAndExecuteTransaction({
-        signer: this._signer,
-        transaction: txb,
-      });
 
-      signed.push(result.digest);
+      // Enhanced validation and logging
+
+      if (transaction === null || transaction === undefined) {
+        console.error("ERROR: Transaction is null/undefined");
+        throw new Error(`Transaction ${i + 1} is null or undefined`);
+      }
+
+      // Use the actual transaction that was prepared, not a new empty one
+      // The transaction is already a Transaction object from SuiUnsignedTransaction
+      if (!(transaction instanceof Transaction)) {
+        console.error("ERROR: Expected Transaction object, got:", typeof transaction);
+        throw new Error(`Expected Transaction object, got ${typeof transaction}`);
+      }
+
+      try {
+
+        // Log transaction details for debugging
+        if (this.opts?.debug) {
+        }
+
+        // Sign the transaction
+        let transactionBytes;
+        if (transaction instanceof Uint8Array) {
+          transactionBytes = transaction;
+        } else {
+          transaction.setSenderIfNotSet(this._signer.toSuiAddress());
+          transactionBytes = await transaction.build({ client: this.client });
+        }
+        let result = await this._signer.signTransaction(transactionBytes);
+        signed.push({ transactionBlock: result.bytes, signature: result.signature });
+      } catch (error) {
+        console.error(`ERROR: Failed to sign/execute transaction ${i + 1}:`);
+        console.error("ERROR: Transaction signing error:", error);
+        if (error instanceof Error) {
+          console.error("ERROR: Transaction signing error stack:", error.stack);
+        }
+
+        // Log additional context that might help debug the bytes.length error
+        console.error("ERROR: Transaction context at time of failure:");
+        console.error("  - Description:", description);
+        console.error("  - Transaction type:", typeof transaction);
+        console.error("  - Transaction blockData exists:", !!transaction.blockData);
+        console.error("  - Signer exists:", !!this._signer);
+        console.error("  - Client exists:", !!this.client);
+
+        throw error;
+      }
     }
+
     return signed;
   }
 }

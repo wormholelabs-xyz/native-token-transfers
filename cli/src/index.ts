@@ -2,6 +2,7 @@
 import "./side-effects"; // doesn't quite work for silencing the bigint error message. why?
 import evm from "@wormhole-foundation/sdk/platforms/evm";
 import solana from "@wormhole-foundation/sdk/platforms/solana";
+import sui from "@wormhole-foundation/sdk/platforms/sui";
 import { encoding, type RpcConnection, type UnsignedTransaction, type WormholeConfigOverrides } from '@wormhole-foundation/sdk-connect';
 import { execSync } from "child_process";
 import * as myEvmSigner from "./evmsigner.js";
@@ -18,6 +19,8 @@ import * as spl from "@solana/spl-token";
 import fs from "fs";
 import readline from "readline";
 import { ChainContext, UniversalAddress, Wormhole, assertChain, canonicalAddress, chainToPlatform, chains, isNetwork, networks, platforms, signSendWait, toUniversal, type AccountAddress, type Chain, type ChainAddress, type Network, type Platform } from "@wormhole-foundation/sdk";
+import { Transaction } from "@mysten/sui/transactions";
+import { bcs } from "@mysten/sui/bcs";
 import "@wormhole-foundation/sdk-evm-ntt";
 import "@wormhole-foundation/sdk-solana-ntt";
 import "@wormhole-foundation/sdk-sui-ntt";
@@ -64,6 +67,20 @@ export type Deployment<C extends Chain> = {
     },
 }
 
+// Extended ChainAddress type for Sui deployments that includes additional metadata
+export type SuiDeploymentResult<C extends Chain> = ChainAddress<C> & {
+    adminCaps?: {
+        ntt?: string,
+        wormholeTransceiver?: string
+    },
+    packageIds?: {
+        ntt?: string,
+        nttCommon?: string,
+        wormholeTransceiver?: string
+    },
+    signerAddress?: string
+}
+
 // TODO: rename
 export type ChainConfig = {
     version: string,
@@ -80,7 +97,19 @@ export type ChainConfig = {
     limits: {
         outbound: string,
         inbound: Partial<{ [C in Chain]: string }>,
-    }
+    },
+    // AdminCap tracking for Sui deployments
+    adminCaps?: {
+        ntt?: string,
+        wormholeTransceiver?: string
+    },
+    // Package IDs for Sui deployments
+    packageIds?: {
+        ntt?: string,
+        nttCommon?: string,
+        wormholeTransceiver?: string
+    },
+    signerAddress?: string // TODO: do we need this?
 }
 
 export type Config = {
@@ -346,6 +375,10 @@ yargs(hideBin(process.argv))
                 type: "string",
                 default: "sui",
             })
+            .option("sui-wormhole-state", {
+                describe: "Wormhole state object ID for Sui (required for wormhole transceiver setup)",
+                type: "string",
+            })
             .option("signer-type", options.signerType)
             .option("skip-verify", options.skipVerify)
             .option("ver", options.version)
@@ -396,16 +429,27 @@ yargs(hideBin(process.argv))
             // let's deploy
 
             // TODO: factor out to function to get chain context
-            const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides); // TODO: Add sui.Platform
+            const wh = new Wormhole(network, [solana.Platform, evm.Platform, sui.Platform], overrides);
             const ch = wh.getChain(chain);
 
             // TODO: make manager configurable
-            const deployedManager = await deploy(version, mode, ch, token, signerType, !argv["skip-verify"], argv["yes"], argv["payer"], argv["program-key"], argv["binary"], argv["solana-priority-fee"], argv["sui-gas-budget"], argv["sui-package-path"]);
+            const deployedManager = await deploy(version, mode, ch, token, signerType, !argv["skip-verify"], argv["yes"], argv["payer"], argv["program-key"], argv["binary"], argv["solana-priority-fee"], argv["sui-gas-budget"], argv["sui-package-path"], argv["sui-wormhole-state"]);
 
             const [config, _ctx, _ntt, decimals] =
-                await pullChainConfig(network, deployedManager, overrides);
+                await pullChainConfig(network, deployedManager, overrides, (deployedManager as any).adminCaps, (deployedManager as any).packageIds);
 
             console.log("token decimals:", chalk.yellow(decimals));
+
+            // Add AdminCap and package ID information to config if available (for Sui)
+            if ((deployedManager as any).adminCaps) {
+                config.adminCaps = (deployedManager as any).adminCaps;
+                config.signerAddress = (deployedManager as any).signerAddress;
+                console.log("AdminCaps stored:", chalk.yellow(JSON.stringify((deployedManager as any).adminCaps, null, 2)));
+            }
+            if ((deployedManager as any).packageIds) {
+                config.packageIds = (deployedManager as any).packageIds;
+                console.log("Package IDs stored:", chalk.yellow(JSON.stringify((deployedManager as any).packageIds, null, 2)));
+            }
 
             deployments.chains[chain] = config;
             fs.writeFileSync(path, JSON.stringify(deployments, null, 2));
@@ -474,13 +518,15 @@ yargs(hideBin(process.argv))
                 await askForConfirmation();
             }
 
-            const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides); // TODO: Add sui.Platform
+            const wh = new Wormhole(network, [solana.Platform, evm.Platform, sui.Platform], overrides);
             const ch = wh.getChain(chain);
 
             const [_, ctx, ntt] = await pullChainConfig(
                 network,
                 { chain, address: toUniversal(chain, chainConfig.manager) },
-                overrides
+                overrides,
+                chainConfig.adminCaps,
+                chainConfig.packageIds
             );
 
             await upgrade(
@@ -1016,13 +1062,15 @@ yargs(hideBin(process.argv))
                           process.exit(1);
                         }
                         const chainConfig = deployments.chains[chain]!;
-                        const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides);
+                        const wh = new Wormhole(network, [solana.Platform, evm.Platform, sui.Platform], overrides);
                         const ch = wh.getChain(chain);
                         const connection = await ch.getRpc();
                         const [, , ntt] = await pullChainConfig(
                           network,
                           { chain, address: toUniversal(chain, chainConfig.manager) },
-                          overrides
+                          overrides,
+                          chainConfig.adminCaps,
+                          chainConfig.packageIds
                         );
                         const solanaNtt = ntt as SolanaNtt<typeof network, SolanaChains>;
                         const tokenAuthority = NTT.pdas(chainConfig.manager).tokenAuthority();
@@ -1110,13 +1158,15 @@ yargs(hideBin(process.argv))
                           process.exit(1);
                         }
                         const chainConfig = deployments.chains[chain]!;
-                        const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides);
+                        const wh = new Wormhole(network, [solana.Platform, evm.Platform, sui.Platform], overrides);
                         const ch = wh.getChain(chain);
                         const connection: Connection = await ch.getRpc();
                         const [, , ntt] = await pullChainConfig(
                           network,
                           { chain, address: toUniversal(chain, chainConfig.manager) },
-                          overrides
+                          overrides,
+                          chainConfig.adminCaps,
+                          chainConfig.packageIds
                         );
                         const solanaNtt = ntt as SolanaNtt<typeof network, SolanaChains>;
                         const major = Number(solanaNtt.version.split(".")[0]);
@@ -1281,6 +1331,316 @@ yargs(hideBin(process.argv))
                           } else if (error instanceof SendTransactionError) {
                             console.error(error.logs);
                           }
+                        }
+                    })
+                .demandCommand()
+        }
+    )
+    .command("manual",
+        "Manual NTT operations",
+        (yargs) => {
+            yargs
+                .command("set-peer <peer-chain> <peer-address>",
+                    "Manually set a peer relationship between NTT deployments",
+                    (yargs) => yargs
+                        .positional("peer-chain", {
+                            describe: "Target chain to set as peer",
+                            type: "string",
+                            choices: chains,
+                            demandOption: true,
+                        })
+                        .positional("peer-address", {
+                            describe: "Universal address of the peer NTT manager",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .option("chain", {
+                            describe: "Source chain where the peer will be set",
+                            type: "string",
+                            choices: chains,
+                            demandOption: true,
+                        })
+                        .option("token-decimals", {
+                            describe: "Token decimals for the peer chain",
+                            type: "number",
+                            demandOption: true,
+                        })
+                        .option("inbound-limit", {
+                            describe: "Inbound rate limit for transfers from this peer",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .option("path", options.deploymentPath)
+                        .option("network", options.network)
+                        .option("signer-type", options.signerType)
+                        .example("$0 manual set-peer Ethereum 0x742d35Cc6634C0532925a3b8D0C85e3c4e5cBB8D --chain Sui --token-decimals 18 --inbound-limit 1000000000000000000", "Set Ethereum as peer for Sui NTT"),
+                    async (argv) => {
+                        const path = argv["path"];
+                        const deployments: Config = loadConfig(path);
+                        const sourceChain: Chain = argv["chain"];
+                        const peerChain: Chain = argv["peer-chain"];
+                        const peerAddress = argv["peer-address"];
+                        const tokenDecimals = argv["token-decimals"];
+                        const inboundLimit = BigInt(argv["inbound-limit"]);
+                        const network = argv["network"];
+                        const signerType = argv["signer-type"] as SignerType;
+
+                        // Validate network
+                        if (!isNetwork(network)) {
+                            console.error("Invalid network");
+                            process.exit(1);
+                        }
+
+                        // Validate source chain exists in deployment
+                        const sourceConfig = deployments.chains[sourceChain];
+                        if (!sourceConfig) {
+                            console.error(`Source chain ${sourceChain} not found in deployment configuration`);
+                            process.exit(1);
+                        }
+
+                        console.log(chalk.blue("🔗 Manual setPeer Operation"));
+                        console.log(`Source Chain: ${chalk.yellow(sourceChain)}`);
+                        console.log(`Peer Chain: ${chalk.yellow(peerChain)}`);
+                        console.log(`Peer Address: ${chalk.yellow(peerAddress)}`);
+                        console.log(`Token Decimals: ${chalk.yellow(tokenDecimals)}`);
+                        console.log(`Inbound Limit: ${chalk.yellow(inboundLimit.toString())}`);
+
+                        try {
+                            // Load source chain NTT configuration
+                            const sourceManager = {
+                                chain: sourceChain,
+                                address: toUniversal(sourceChain, sourceConfig.manager)
+                            };
+                            const [config, ctx, ntt] = await pullChainConfig(
+                                network,
+                                sourceManager,
+                                overrides,
+                                sourceConfig.adminCaps,
+                                sourceConfig.packageIds
+                            );
+
+                            console.log(`\nSource NTT Manager: ${chalk.yellow(sourceConfig.manager)}`);
+
+                            // Create peer address object
+                            const peerChainAddress = {
+                                chain: peerChain,
+                                address: toUniversal(peerChain, peerAddress)
+                            };
+
+                            // Get signer for the source chain
+                            const signer = await getSigner(ctx, signerType);
+
+                            console.log(`Signer Address: ${chalk.yellow(signer.address.address.toString())}`);
+                            console.log("\n" + chalk.blue("Executing setPeer transaction..."));
+
+                            // Call setPeer on the NTT instance (it returns an AsyncGenerator)
+                            const setPeerTxs = ntt.setPeer(peerChainAddress, tokenDecimals, inboundLimit);
+
+                            // Create sign-send-wait function (no special owner for manual operations)
+                            const signSendWaitFunc = newSignSendWaiter(undefined);
+
+                            // Execute the transaction(s)
+
+                            try {
+                                const results = await signSendWaitFunc(ctx, setPeerTxs, signer.signer);
+
+                                // Display transaction results
+                                console.log(`Transaction Hash: ${chalk.green(results[0]?.txid || results[0] || "Transaction completed")}`);
+
+                            } catch (signSendError) {
+                                console.error("DEBUG: Error occurred in signSendWaitFunc:");
+                                console.error("DEBUG: signSendError type:", typeof signSendError);
+                                console.error("DEBUG: signSendError constructor:", signSendError?.constructor?.name);
+                                console.error("DEBUG: signSendError message:", signSendError instanceof Error ? signSendError.message : String(signSendError));
+
+                                if (signSendError instanceof Error) {
+                                    console.error("DEBUG: signSendError stack:");
+                                    console.error(signSendError.stack);
+                                }
+
+                                // Try to extract specific information about bytes.length error
+                                const errorString = String(signSendError);
+                                if (errorString.includes('bytes.length')) {
+                                    console.error("DEBUG: *** FOUND bytes.length ERROR! ***");
+                                    console.error("DEBUG: Full error string:", errorString);
+                                }
+
+                                throw signSendError;
+                            }
+
+                            console.log(chalk.green("\n✅ setPeer operation completed successfully!"));
+                            console.log(`Peer relationship established: ${sourceChain} ↔ ${peerChain}`);
+
+                        } catch (error) {
+                            console.error(chalk.red("\n❌ setPeer operation failed:"));
+                            console.error("ERROR: Main error message:", error instanceof Error ? error.message : String(error));
+
+                            // Enhanced error logging for debugging
+                            if (error instanceof Error) {
+                                console.error("ERROR: Error name:", error.name);
+                                console.error("ERROR: Error stack trace:");
+                                console.error(error.stack || "No stack trace available");
+
+                                // Check for nested errors or cause
+                                if ('cause' in error && error.cause) {
+                                    console.error("ERROR: Caused by:", error.cause);
+                                }
+                            }
+
+                            // Log the error type and constructor
+                            console.error("ERROR: Error type:", typeof error);
+                            console.error("ERROR: Error constructor:", error?.constructor?.name);
+
+                            // If it's a string or has toString, log that too
+                            if (typeof error === 'object' && error !== null) {
+                                try {
+                                    console.error("ERROR: Error as JSON:", JSON.stringify(error, null, 2));
+                                } catch (jsonError) {
+                                    console.error("ERROR: Could not stringify error object:", jsonError);
+                                }
+                            }
+
+                            process.exit(1);
+                        }
+                    })
+                .command("transfer <destination-chain> <destination-address> <amount>",
+                    "Transfer tokens via NTT to another chain",
+                    (yargs) => yargs
+                        .positional("destination-chain", {
+                            describe: "Target chain to transfer to",
+                            type: "string",
+                            choices: chains,
+                            demandOption: true,
+                        })
+                        .positional("destination-address", {
+                            describe: "Recipient address on the destination chain",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .positional("amount", {
+                            describe: "Amount to transfer (in token base units)",
+                            type: "string",
+                            demandOption: true,
+                        })
+                        .option("chain", {
+                            describe: "Source chain to transfer from",
+                            type: "string",
+                            choices: chains,
+                            demandOption: true,
+                        })
+                        .option("queue", {
+                            describe: "Queue the transfer if rate limit is exceeded",
+                            type: "boolean",
+                            default: false,
+                        })
+                        .option("path", options.deploymentPath)
+                        .option("network", options.network)
+                        .option("signer-type", options.signerType)
+                        .example("$0 manual transfer Ethereum 0x742d35Cc6634C0532925a3b8D0C85e3c4e5cBB8D 1000000000 --chain Sui", "Transfer 1 SUI to Ethereum"),
+                    async (argv) => {
+                        const path = argv["path"];
+                        const deployments: Config = loadConfig(path);
+                        const sourceChain: Chain = argv["chain"];
+                        const destinationChain: Chain = argv["destination-chain"];
+                        const destinationAddress = argv["destination-address"];
+                        const amount = BigInt(argv["amount"]);
+                        const queue = argv["queue"];
+                        const network = argv["network"];
+                        const signerType = argv["signer-type"] as SignerType;
+
+                        // Validate network
+                        if (!isNetwork(network)) {
+                            console.error("Invalid network");
+                            process.exit(1);
+                        }
+
+                        // Validate source chain exists in deployment
+                        const sourceConfig = deployments.chains[sourceChain];
+                        if (!sourceConfig) {
+                            console.error(`Source chain ${sourceChain} not found in deployment configuration`);
+                            process.exit(1);
+                        }
+
+                        console.log(chalk.blue("💰 Manual Transfer Operation"));
+                        console.log(`Source Chain: ${chalk.yellow(sourceChain)}`);
+                        console.log(`Destination Chain: ${chalk.yellow(destinationChain)}`);
+                        console.log(`Destination Address: ${chalk.yellow(destinationAddress)}`);
+                        console.log(`Amount: ${chalk.yellow(amount.toString())}`);
+                        console.log(`Queue if rate limited: ${chalk.yellow(queue.toString())}`);
+
+                        try {
+                            // Load source chain NTT configuration
+                            const sourceManager = {
+                                chain: sourceChain,
+                                address: toUniversal(sourceChain, sourceConfig.manager)
+                            };
+                            const [config, ctx, ntt] = await pullChainConfig(
+                                network,
+                                sourceManager,
+                                overrides,
+                                sourceConfig.adminCaps,
+                                sourceConfig.packageIds
+                            );
+
+                            console.log(`\nSource NTT Manager: ${chalk.yellow(sourceConfig.manager)}`);
+
+                            // Create destination address object
+                            const destinationChainAddress = {
+                                chain: destinationChain,
+                                address: toUniversal(destinationChain, destinationAddress)
+                            };
+
+                            // Get signer for the source chain
+                            const signer = await getSigner(ctx, signerType);
+
+                            console.log(`Signer Address: ${chalk.yellow(signer.address.address.toString())}`);
+                            console.log("\n" + chalk.blue("Executing transfer transaction..."));
+
+                            // Call transfer on the NTT instance (it returns an AsyncGenerator)
+                            const transferTxs = ntt.transfer(
+                                signer.address.address,
+                                amount,
+                                destinationChainAddress,
+                                { queue }
+                            );
+
+                            // Create sign-send-wait function (no special owner for manual operations)
+                            const signSendWaitFunc = newSignSendWaiter(undefined);
+
+                            // Execute the transaction(s)
+
+                            try {
+                                const results = await signSendWaitFunc(ctx, transferTxs, signer.signer);
+
+                                // Display transaction results
+                                console.log(`Transaction Hash: ${chalk.green(results[0]?.txid || results[0] || "Transaction completed")}`);
+
+                            } catch (transferError) {
+                                console.error("DEBUG: Error occurred in transfer:");
+                                console.error("DEBUG: transferError:", transferError instanceof Error ? transferError.message : String(transferError));
+
+                                if (transferError instanceof Error) {
+                                    console.error("DEBUG: transferError stack:");
+                                    console.error(transferError.stack);
+                                }
+
+                                throw transferError;
+                            }
+
+                            console.log(chalk.green("\n✅ Transfer operation completed successfully!"));
+                            console.log(`Transfer sent: ${sourceChain} → ${destinationChain}`);
+                            console.log(`Amount: ${amount.toString()} tokens`);
+
+                        } catch (error) {
+                            console.error(chalk.red("\n❌ Transfer operation failed:"));
+                            console.error("ERROR: Main error message:", error instanceof Error ? error.message : String(error));
+
+                            if (error instanceof Error && error.stack) {
+                                console.error("ERROR: Error stack trace:");
+                                console.error(error.stack);
+                            }
+
+                            process.exit(1);
                         }
                     })
                 .demandCommand()
@@ -1472,8 +1832,9 @@ async function deploy<N extends Network, C extends Chain>(
     solanaBinaryPath?: string,
     solanaPriorityFee?: number,
     suiGasBudget?: number,
-    suiPackagePath?: string
-): Promise<ChainAddress<C>> {
+    suiPackagePath?: string,
+    suiWormholeState?: string
+): Promise<ChainAddress<C> | SuiDeploymentResult<C>> {
     if (version === null) {
         await warnLocalDeployment(yes);
     }
@@ -1491,7 +1852,7 @@ async function deploy<N extends Network, C extends Chain>(
             return await deploySolana(worktree, version, mode, solanaCtx, token, solanaPayer, true, solanaProgramKeyPath, solanaBinaryPath, solanaPriorityFee) as ChainAddress<C>;
         case "Sui":
             const suiCtx = ch as ChainContext<N, Chain>; // TODO: Use proper SuiChains type
-            return await deploySui(worktree, version, mode, suiCtx, token, signerType, true, evmVerify, suiGasBudget, suiPackagePath) as ChainAddress<C>;
+            return await deploySui(worktree, version, mode, suiCtx, token, signerType, true, evmVerify, suiGasBudget, suiPackagePath, suiWormholeState) as any;
         default:
             throw new Error("Unsupported platform");
     }
@@ -1852,8 +2213,9 @@ async function deploySui<N extends Network, C extends Chain>(
     initialize: boolean,
     skipVerify?: boolean,
     gasBudget?: number,
-    packagePath?: string
-): Promise<ChainAddress<C>> {
+    packagePath?: string,
+    wormholeStateId?: string
+): Promise<SuiDeploymentResult<C>> {
     const finalPackagePath = packagePath || "sui";
     const finalGasBudget = gasBudget || 100000000;
 
@@ -1862,6 +2224,11 @@ async function deploySui<N extends Network, C extends Chain>(
     console.log(`Gas budget: ${finalGasBudget}`);
     console.log(`Target chain: ${ch.chain}`);
     console.log(`Token: ${token}`);
+
+    // Set SUI_CONFIG_DIR environment variable to use project's .sui directory
+    const suiConfigDir = `${pwd}/.sui`;
+    process.env.SUI_CONFIG_DIR = suiConfigDir;
+    console.log(`Using SUI_CONFIG_DIR: ${suiConfigDir}`);
 
     const signer = await getSigner(ch, signerType);
     const rpc = await ch.getRpc();
@@ -1988,6 +2355,7 @@ async function deploySui<N extends Network, C extends Chain>(
         throw new Error("Could not find Wormhole Transceiver DeployerCap object ID");
     }
 
+
     // 2. Get the upgrade cap from NTT deployment
     const nttUpgradeCapId = nttDeploy.objectChanges.find(
         (change: any) => change.type === "created" &&
@@ -1999,88 +2367,209 @@ async function deploySui<N extends Network, C extends Chain>(
     }
 
     // 3. Get Wormhole core bridge state
-    const wormholeCoreBridge = ch.config.contracts.coreBridge;
-    if (!wormholeCoreBridge) {
-        throw new Error("Wormhole core bridge not found in chain config");
+    let wormholeStateObjectId: string | undefined;
+    if (wormholeStateId) {
+        wormholeStateObjectId = wormholeStateId;
+        console.log(`Using provided Wormhole State ID: ${wormholeStateObjectId}`);
+    } else {
+        console.log("No wormhole state ID provided, will skip wormhole transceiver setup");
     }
 
     // 4. Call setup::complete to initialize the NTT manager state
     const chainId = ch.config.chainId; // Get numeric chain ID from config
-    const modeArg = mode === "locking" ? "locking" : "burning";
+    const modeArg = mode === "locking" ? "Locking" : "Burning";
 
     console.log(`Completing NTT setup with mode: ${modeArg}, chain ID: ${chainId}`);
 
-    const setupResult = execSync(
-        `sui client call ` +
-        `--package ${nttPackageId} ` +
-        `--module setup ` +
-        `--function complete ` +
-        `--type-args ${token} ` +
-        `--args ${nttDeployerCapId} ${nttUpgradeCapId} ${chainId} ${modeArg} vector[] ` +
-        `--gas-budget ${finalGasBudget} ` +
-        `--json`,
-        { encoding: "utf8" }
-    );
+    // Build the transaction using Sui SDK
+    const tx = new Transaction();
 
-    const setupDeploy = JSON.parse(setupResult);
+    // Call setup::complete with simplified bool parameter
+    console.log("Attempting to call setup::complete...");
+    console.log("Package ID:", nttPackageId);
+    console.log("Function target:", `${nttPackageId}::setup::complete`);
+    console.log("Token type:", token);
+    console.log("Mode (burning):", mode === "burning");
+
+    tx.moveCall({
+        target: `${nttPackageId}::setup::complete`,
+        typeArguments: [token], // Use the original token format
+        arguments: [
+            tx.object(nttDeployerCapId),
+            tx.object(nttUpgradeCapId),
+            tx.pure.u16(chainId),
+            tx.pure.bool(mode === "burning") // Use actual mode from CLI parameter
+        ],
+    });
+
+    // Set gas budget
+    tx.setGasBudget(finalGasBudget);
+
+    // Execute the transaction using the signer's client
+    // TODO: clean this up
+    const suiSigner = signer.signer as any; // Cast to access internal client
+    const setupResult = await suiSigner.client.signAndExecuteTransaction({
+        signer: suiSigner._signer, // Access the underlying Ed25519Keypair
+        transaction: tx,
+        options: {
+            showEffects: true,
+            showObjectChanges: true,
+        },
+    });
+
+    const setupDeploy = setupResult;
     if (!setupDeploy.objectChanges) {
         throw new Error("Failed to complete NTT setup");
     }
+
+    // Log all object changes and effects to debug
+    console.log("Transaction effects:", JSON.stringify(setupDeploy.effects, null, 2));
+    console.log("Object changes:", JSON.stringify(setupDeploy.objectChanges, null, 2));
 
     // Find the shared State object
     const nttStateId = setupDeploy.objectChanges.find(
         (change: any) => change.type === "created" &&
                         change.objectType?.includes("state::State") &&
-                        change.owner === "Shared"
+                        change.owner?.Shared
     )?.objectId;
 
     if (!nttStateId) {
+        console.log("Looking for any shared objects...");
+        const sharedObjects = setupDeploy.objectChanges.filter(
+            (change: any) => change.owner === "Shared"
+        );
+        console.log("Shared objects:", JSON.stringify(sharedObjects, null, 2));
         throw new Error("Could not find NTT State object ID");
+    }
+
+    // Find the NTT AdminCap object ID for future reference
+    const nttAdminCapId = setupDeploy.objectChanges.find(
+        (change: any) => change.type === "created" &&
+                        change.objectType?.includes("state::AdminCap")
+    )?.objectId;
+
+    if (nttAdminCapId) {
+        console.log(`NTT AdminCap created at: ${nttAdminCapId}`);
     }
 
     console.log(`NTT State created at: ${nttStateId}`);
 
     // 5. Complete wormhole transceiver setup
-    console.log("Completing Wormhole Transceiver setup...");
+    let transceiverStateId: string | undefined;
+    let whTransceiverAdminCapId: string | undefined;
 
-    const transceiverSetupResult = execSync(
-        `sui client call ` +
-        `--package ${whTransceiverPackageId} ` +
-        `--module wormhole_transceiver ` +
-        `--function complete ` +
-        `--type-args "ntt::contract_auth::ManagerAuth" ` +
-        `--args ${whTransceiverDeployerCapId} ${wormholeCoreBridge} ` +
-        `--gas-budget ${finalGasBudget} ` +
-        `--json`,
-        { encoding: "utf8" }
-    );
+    if (wormholeStateObjectId) {
+        console.log("Completing Wormhole Transceiver setup...");
 
-    const transceiverSetupDeploy = JSON.parse(transceiverSetupResult);
-    if (!transceiverSetupDeploy.objectChanges) {
-        throw new Error("Failed to complete Wormhole Transceiver setup");
-    }
+        // Build the transceiver setup transaction
+        const transceiverTx = new Transaction();
 
-    // Find the transceiver state
-    const transceiverStateId = transceiverSetupDeploy.objectChanges.find(
+        console.log(`  Package: ${whTransceiverPackageId}`);
+        console.log(`  Module: wormhole_transceiver`);
+        console.log(`  Function: complete`);
+        console.log(`  Type args: ${nttPackageId}::auth::ManagerAuth`);
+        console.log(`  Deployer cap: ${whTransceiverDeployerCapId}`);
+        console.log(`  Wormhole state: ${wormholeStateObjectId}`);
+
+        // Call wormhole_transceiver::complete and transfer the returned AdminCap
+        const [adminCap] = transceiverTx.moveCall({
+            target: `${whTransceiverPackageId}::wormhole_transceiver::complete`,
+            typeArguments: [`${nttPackageId}::auth::ManagerAuth`],
+            arguments: [
+                transceiverTx.object(whTransceiverDeployerCapId),
+                transceiverTx.object(wormholeStateObjectId),
+            ],
+        });
+
+        // Transfer the AdminCap to the signer to avoid UnusedValueWithoutDrop
+        transceiverTx.transferObjects([adminCap], signer.address.address.toString());
+
+        transceiverTx.setGasBudget(finalGasBudget);
+
+        // Execute the transceiver setup transaction using the same method as NTT setup
+        try {
+            // Wait a moment to allow the network to settle after NTT setup
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            const suiSigner = signer.signer as any; // Cast to access internal client
+            const transceiverSetupResult = await suiSigner.client.signAndExecuteTransaction({
+                signer: suiSigner._signer, // Access the underlying Ed25519Keypair
+                transaction: transceiverTx,
+                options: {
+                    showEffects: true,
+                    showObjectChanges: true,
+                },
+            });
+
+            const transceiverSetupDeploy = transceiverSetupResult;
+            if (!transceiverSetupDeploy.objectChanges) {
+                throw new Error("Failed to complete Wormhole Transceiver setup");
+            }
+
+            console.log(JSON.stringify(transceiverSetupDeploy.objectChanges, null, 2));
+
+            // Find the transceiver state - look for State object that is shared
+            transceiverStateId = transceiverSetupDeploy.objectChanges.find(
+                (change: any) => change.type === "created" &&
+                                change.objectType?.includes("::wormhole_transceiver::State") &&
+                                change.owner?.Shared
+            )?.objectId;
+
+            if (!transceiverStateId) {
+                console.log("Looking for any State object (not just shared)...");
+                const stateObject = transceiverSetupDeploy.objectChanges.find(
+                    (change: any) => change.type === "created" &&
+                                    change.objectType?.includes("State")
+                );
+                if (stateObject) {
+                    console.log("Found State object:", JSON.stringify(stateObject, null, 2));
+                }
+                throw new Error("Could not find Wormhole Transceiver State object ID");
+            }
+
+            console.log(`Wormhole Transceiver State created at: ${transceiverStateId}`);
+
+    // Find the AdminCap object ID for future reference
+    whTransceiverAdminCapId = transceiverSetupDeploy.objectChanges.find(
         (change: any) => change.type === "created" &&
-                        change.objectType?.includes("wormhole_transceiver::State") &&
-                        change.owner === "Shared"
+                        change.objectType?.includes("::wormhole_transceiver::AdminCap")
     )?.objectId;
 
-    if (!transceiverStateId) {
-        throw new Error("Could not find Wormhole Transceiver State object ID");
+    if (whTransceiverAdminCapId) {
+        console.log(`Wormhole Transceiver AdminCap created at: ${whTransceiverAdminCapId}`);
     }
 
-    console.log(`Wormhole Transceiver State created at: ${transceiverStateId}`);
+        } catch (error) {
+            console.error("Wormhole Transceiver setup failed:", error);
+            console.error("Error details:", JSON.stringify(error, null, 2));
+            throw error;
+        }
+    } else {
+        console.log("Skipping Wormhole Transceiver setup (no wormhole state ID provided)...");
+        console.log("Note: To use wormhole transceivers, provide --sui-wormhole-state parameter.");
+    }
 
     console.log(chalk.green("Sui NTT deployment completed successfully!"));
     console.log(`NTT Package ID: ${nttPackageId}`);
     console.log(`NTT State ID: ${nttStateId}`);
     console.log(`Wormhole Transceiver Package ID: ${whTransceiverPackageId}`);
-    console.log(`Wormhole Transceiver State ID: ${transceiverStateId}`);
+    console.log(`Wormhole Transceiver State ID: ${transceiverStateId || "Not deployed (skipped)"}`);
 
-    // Return the NTT state object ID as the manager address
-    return { chain: ch.chain, address: toUniversal(ch.chain, nttStateId) };
+    // Return the deployment information including AdminCaps and package IDs
+    return {
+        chain: ch.chain,
+        address: toUniversal(ch.chain, nttStateId),
+        adminCaps: {
+            ntt: nttAdminCapId,
+            wormholeTransceiver: whTransceiverAdminCapId
+        },
+        packageIds: {
+            ntt: nttPackageId,
+            nttCommon: nttCommonPackageId,
+            wormholeTransceiver: whTransceiverPackageId
+        },
+        signerAddress: signer.address.address.toString()
+    };
 }
 
 async function missingConfigs(
@@ -2312,7 +2801,9 @@ async function pullDeployments(deployments: Config, network: Network, verbose: b
         const [remote, ctx, ntt, decimals] = await pullChainConfig(
             network,
             { chain, address: toUniversal(chain, managerAddress) },
-            overrides
+            overrides,
+            deployment.adminCaps,
+            deployment.packageIds
         );
         const local = deployments.chains[chain];
 
@@ -2347,15 +2838,17 @@ async function pullDeployments(deployments: Config, network: Network, verbose: b
 async function pullChainConfig<N extends Network, C extends Chain>(
     network: N,
     manager: ChainAddress<C>,
-    overrides?: WormholeConfigOverrides<N>
+    overrides?: WormholeConfigOverrides<N>,
+    adminCaps?: { ntt?: string; wormholeTransceiver?: string },
+    packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string }
 ): Promise<[ChainConfig, ChainContext<typeof network, C>, Ntt<typeof network, C>, number]> {
-    const wh = new Wormhole(network, [solana.Platform, evm.Platform], overrides); // TODO: Add sui.Platform
+    const wh = new Wormhole(network, [solana.Platform, evm.Platform, sui.Platform], overrides);
     const ch = wh.getChain(manager.chain);
 
     const nativeManagerAddress = canonicalAddress(manager);
 
     const { ntt, addresses }: { ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts>; } =
-    await nttFromManager<N, C>(ch, nativeManagerAddress);
+    await nttFromManager<N, C>(ch, nativeManagerAddress, adminCaps, packageIds);
 
     const mode = await ntt.getMode();
     const outboundLimit = await ntt.getOutboundLimit();
@@ -2458,6 +2951,9 @@ function getVersion<N extends Network, C extends Chain>(chain: C, ntt: Ntt<N, C>
             return (ntt as EvmNtt<N, EvmChains>).version
         case "Solana":
             return (ntt as SolanaNtt<N, SolanaChains>).version
+        case "Sui":
+            // For Sui, return a default version since version property is not implemented yet
+            return "dev";
         default:
             throw new Error("Unsupported platform");
     }
@@ -2468,19 +2964,51 @@ function getVersion<N extends Network, C extends Chain>(chain: C, ntt: Ntt<N, C>
 // finally reconstructing the "real" NTT object from that
 async function nttFromManager<N extends Network, C extends Chain>(
     ch: ChainContext<N, C>,
-    nativeManagerAddress: string
+    nativeManagerAddress: string,
+    adminCaps?: { ntt?: string; wormholeTransceiver?: string },
+    packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string }
 ): Promise<{ ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts> }> {
+    // For Sui, we need to set the token type to enable proper functionality
+    let token: string | null = null;
+    if (ch.chain === "Sui") {
+        // For this implementation, we're using SUI token
+        // In a full implementation, this should be detected from the NTT state
+        token = "0x2::sui::SUI";
+    }
+
     const onlyManager = await ch.getProtocol("Ntt", {
         ntt: {
             manager: nativeManagerAddress,
-            token: null,
+            token: token,
             transceiver: {},
         }
     });
     const diff = await onlyManager.verifyAddresses();
 
-    const addresses: Partial<Ntt.Contracts> = { manager: nativeManagerAddress, ...diff };
+    const addresses: Partial<Ntt.Contracts> = {
+        manager: nativeManagerAddress,
+        token: token || undefined,
+        ...diff
+    };
 
+    // For Sui, create SuiNtt directly with AdminCap information
+    if (ch.chain === "Sui" && adminCaps?.ntt) {
+        const sui = await import("@wormhole-foundation/sdk-sui-ntt");
+        const { SuiClient } = await import("@mysten/sui/client");
+        const provider = new SuiClient({ url: ch.config.rpc });
+
+        const suiNtt = new sui.SuiNtt(
+            ch.network,
+            ch.chain,
+            provider,
+            { ntt: addresses },
+            adminCaps.ntt,
+            packageIds?.ntt
+        );
+        return { ntt: suiNtt as unknown as Ntt<N, C>, addresses };
+    }
+
+    // For other chains, use the standard protocol creation
     const ntt = await ch.getProtocol("Ntt", {
         ntt: addresses
     });
