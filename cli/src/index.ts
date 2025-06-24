@@ -73,6 +73,9 @@ export type SuiDeploymentResult<C extends Chain> = ChainAddress<C> & {
         ntt?: string,
         wormholeTransceiver?: string
     },
+    transceiverStateIds?: {
+        wormhole?: string
+    },
     packageIds?: {
         ntt?: string,
         nttCommon?: string,
@@ -103,13 +106,17 @@ export type ChainConfig = {
         ntt?: string,
         wormholeTransceiver?: string
     },
+    // Transceiver state IDs for Sui deployments
+    transceiverStateIds?: {
+        wormhole?: string
+    },
     // Package IDs for Sui deployments
     packageIds?: {
         ntt?: string,
         nttCommon?: string,
         wormholeTransceiver?: string
     },
-    signerAddress?: string // TODO: do we need this?
+    signerAddress?: string
 }
 
 export type Config = {
@@ -436,7 +443,7 @@ yargs(hideBin(process.argv))
             const deployedManager = await deploy(version, mode, ch, token, signerType, !argv["skip-verify"], argv["yes"], argv["payer"], argv["program-key"], argv["binary"], argv["solana-priority-fee"], argv["sui-gas-budget"], argv["sui-package-path"], argv["sui-wormhole-state"]);
 
             const [config, _ctx, _ntt, decimals] =
-                await pullChainConfig(network, deployedManager, overrides, (deployedManager as any).adminCaps, (deployedManager as any).packageIds);
+                await pullChainConfig(network, deployedManager, overrides, (deployedManager as any).adminCaps, (deployedManager as any).packageIds, (deployedManager as any).transceiverStateIds);
 
             console.log("token decimals:", chalk.yellow(decimals));
 
@@ -445,6 +452,10 @@ yargs(hideBin(process.argv))
                 config.adminCaps = (deployedManager as any).adminCaps;
                 config.signerAddress = (deployedManager as any).signerAddress;
                 console.log("AdminCaps stored:", chalk.yellow(JSON.stringify((deployedManager as any).adminCaps, null, 2)));
+            }
+            if ((deployedManager as any).transceiverStateIds) {
+                config.transceiverStateIds = (deployedManager as any).transceiverStateIds;
+                console.log("Transceiver State IDs stored:", chalk.yellow(JSON.stringify((deployedManager as any).transceiverStateIds, null, 2)));
             }
             if ((deployedManager as any).packageIds) {
                 config.packageIds = (deployedManager as any).packageIds;
@@ -526,7 +537,8 @@ yargs(hideBin(process.argv))
                 { chain, address: toUniversal(chain, chainConfig.manager) },
                 overrides,
                 chainConfig.adminCaps,
-                chainConfig.packageIds
+                chainConfig.packageIds,
+                chainConfig.transceiverStateIds
             );
 
             await upgrade(
@@ -601,7 +613,7 @@ yargs(hideBin(process.argv))
             const ntts: Partial<{ [C in Chain]: Ntt<Network, C> }> = {};
 
             const [config, _ctx, ntt, _decimals] =
-                await pullChainConfig(network, { chain, address: universalManager }, overrides);
+                await pullChainConfig(network, { chain, address: universalManager }, overrides, undefined, undefined, undefined);
 
             ntts[chain] = ntt as any;
 
@@ -623,7 +635,7 @@ yargs(hideBin(process.argv))
                     continue;
                 }
                 const address: UniversalAddress = peer.address.address.toUniversalAddress()
-                const [peerConfig, _ctx, peerNtt] = await pullChainConfig(network, { chain: c, address }, overrides);
+                const [peerConfig, _ctx, peerNtt] = await pullChainConfig(network, { chain: c, address }, overrides, undefined, undefined, undefined);
                 ntts[c] = peerNtt as any;
                 configs[c] = peerConfig;
             }
@@ -1070,7 +1082,8 @@ yargs(hideBin(process.argv))
                           { chain, address: toUniversal(chain, chainConfig.manager) },
                           overrides,
                           chainConfig.adminCaps,
-                          chainConfig.packageIds
+                          chainConfig.packageIds,
+                          chainConfig.transceiverStateIds
                         );
                         const solanaNtt = ntt as SolanaNtt<typeof network, SolanaChains>;
                         const tokenAuthority = NTT.pdas(chainConfig.manager).tokenAuthority();
@@ -1166,7 +1179,8 @@ yargs(hideBin(process.argv))
                           { chain, address: toUniversal(chain, chainConfig.manager) },
                           overrides,
                           chainConfig.adminCaps,
-                          chainConfig.packageIds
+                          chainConfig.packageIds,
+                          chainConfig.transceiverStateIds
                         );
                         const solanaNtt = ntt as SolanaNtt<typeof network, SolanaChains>;
                         const major = Number(solanaNtt.version.split(".")[0]);
@@ -1416,7 +1430,8 @@ yargs(hideBin(process.argv))
                                 sourceManager,
                                 overrides,
                                 sourceConfig.adminCaps,
-                                sourceConfig.packageIds
+                                sourceConfig.packageIds,
+                                sourceConfig.transceiverStateIds
                             );
 
                             console.log(`\nSource NTT Manager: ${chalk.yellow(sourceConfig.manager)}`);
@@ -1579,7 +1594,8 @@ yargs(hideBin(process.argv))
                                 sourceManager,
                                 overrides,
                                 sourceConfig.adminCaps,
-                                sourceConfig.packageIds
+                                sourceConfig.packageIds,
+                                sourceConfig.transceiverStateIds
                             );
 
                             console.log(`\nSource NTT Manager: ${chalk.yellow(sourceConfig.manager)}`);
@@ -2563,6 +2579,9 @@ async function deploySui<N extends Network, C extends Chain>(
             ntt: nttAdminCapId,
             wormholeTransceiver: whTransceiverAdminCapId
         },
+        transceiverStateIds: {
+            wormhole: transceiverStateId
+        },
         packageIds: {
             ntt: nttPackageId,
             nttCommon: nttCommonPackageId,
@@ -2803,7 +2822,8 @@ async function pullDeployments(deployments: Config, network: Network, verbose: b
             { chain, address: toUniversal(chain, managerAddress) },
             overrides,
             deployment.adminCaps,
-            deployment.packageIds
+            deployment.packageIds,
+            deployment.transceiverStateIds
         );
         const local = deployments.chains[chain];
 
@@ -2840,7 +2860,8 @@ async function pullChainConfig<N extends Network, C extends Chain>(
     manager: ChainAddress<C>,
     overrides?: WormholeConfigOverrides<N>,
     adminCaps?: { ntt?: string; wormholeTransceiver?: string },
-    packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string }
+    packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string },
+    transceiverStateIds?: { wormhole?: string }
 ): Promise<[ChainConfig, ChainContext<typeof network, C>, Ntt<typeof network, C>, number]> {
     const wh = new Wormhole(network, [solana.Platform, evm.Platform, sui.Platform], overrides);
     const ch = wh.getChain(manager.chain);
@@ -2848,7 +2869,7 @@ async function pullChainConfig<N extends Network, C extends Chain>(
     const nativeManagerAddress = canonicalAddress(manager);
 
     const { ntt, addresses }: { ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts>; } =
-    await nttFromManager<N, C>(ch, nativeManagerAddress, adminCaps, packageIds);
+    await nttFromManager<N, C>(ch, nativeManagerAddress, adminCaps, packageIds, transceiverStateIds);
 
     const mode = await ntt.getMode();
     const outboundLimit = await ntt.getOutboundLimit();
@@ -2966,7 +2987,8 @@ async function nttFromManager<N extends Network, C extends Chain>(
     ch: ChainContext<N, C>,
     nativeManagerAddress: string,
     adminCaps?: { ntt?: string; wormholeTransceiver?: string },
-    packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string }
+    packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string },
+    transceiverStateIds?: { wormhole?: string }
 ): Promise<{ ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts> }> {
     // For Sui, we need to set the token type to enable proper functionality
     let token: string | null = null;
@@ -3003,7 +3025,8 @@ async function nttFromManager<N extends Network, C extends Chain>(
             provider,
             { ntt: addresses },
             adminCaps.ntt,
-            packageIds?.ntt
+            packageIds?.ntt,
+            transceiverStateIds
         );
         return { ntt: suiNtt as unknown as Ntt<N, C>, addresses };
     }

@@ -2,6 +2,7 @@ import {
   AccountAddress,
   ChainAddress,
   UnsignedTransaction,
+  toUniversal,
 } from "@wormhole-foundation/sdk-definitions";
 import type { Chain, Network } from "@wormhole-foundation/sdk-base";
 import {
@@ -19,6 +20,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   readonly contracts: Ntt.Contracts;
   readonly adminCapId?: string; // NTT AdminCap object ID
   readonly packageId?: string; // NTT package ID for move calls (TODO: do we need this? or just infer from the admincap)
+  readonly transceiverStateIds?: { wormhole?: string };
 
   constructor(
     network: N,
@@ -26,7 +28,8 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     provider: SuiClient,
     contracts: any, // TODO: Fix type - should be platform contracts + ntt
     adminCapId?: string,
-    packageId?: string
+    packageId?: string,
+    transceiverStateIds?: { wormhole?: string }
   ) {
     if (!contracts.ntt) {
       throw new Error("NTT contracts not found");
@@ -38,6 +41,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     this.contracts = contracts.ntt;
     this.adminCapId = adminCapId;
     this.packageId = packageId;
+    this.transceiverStateIds = transceiverStateIds;
   }
 
   static async fromRpc<N extends Network>(
@@ -422,8 +426,8 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     let coinMetadataId: string;
     if (this.contracts.token === "0x2::sui::SUI") {
       try {
-        const coinMetadata = await this.provider.getCoinMetadata({ 
-          coinType: this.contracts.token 
+        const coinMetadata = await this.provider.getCoinMetadata({
+          coinType: this.contracts.token
         });
         if (!coinMetadata?.id) {
           throw new Error("CoinMetadata not found for SUI");
@@ -709,17 +713,46 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   // Transceiver Management
   async getTransceiver(ix: number): Promise<NttTransceiver<N, C, Ntt.Attestation> | null> {
-    // In Sui, transceivers are registered in the TransceiverRegistry
-    // We would need to:
-    // 1. Query the registry to get the transceiver at index ix
-    // 2. Create a transceiver instance based on the type
+    // For now, only support index 0 which is the wormhole transceiver
+    if (ix !== 0) {
+      return null;
+    }
 
-    // For now, return null indicating transceiver not found
-    // In a full implementation:
-    // const transceiverInfo = await getTransceiverAtIndex(ix);
-    // if (transceiverInfo.type === "wormhole") {
-    //   return new SuiWormholeTransceiver(...);
-    // }
+    // Return a wormhole transceiver if we have the state ID
+    if (this.transceiverStateIds?.wormhole) {
+      const chain = this.chain;
+      const wormholeStateId = this.transceiverStateIds.wormhole;
+
+      // Create a basic transceiver stub that implements the required interface
+      // This is primarily for status/push operations
+      return {
+        async getTransceiverType(): Promise<string> {
+          return "wormhole";
+        },
+        getAddress(): ChainAddress<C> {
+          return {
+            chain: chain,
+            address: toUniversal(chain, wormholeStateId)
+          } as ChainAddress<C>;
+        },
+        async *setPeer(): AsyncGenerator<UnsignedTransaction<N, C>> {
+          throw new Error("setPeer not implemented for Sui transceiver stub");
+        },
+        async getPeer(): Promise<ChainAddress<Chain> | null> {
+          return null;
+        },
+        async *setPauser(): AsyncGenerator<UnsignedTransaction<N, C>> {
+          throw new Error("setPauser not implemented for Sui transceiver stub");
+        },
+        async getPauser(): Promise<AccountAddress<C> | null> {
+          return null;
+        },
+        async *receive(): AsyncGenerator<UnsignedTransaction<N, C>> {
+          throw new Error("receive not implemented for Sui transceiver stub");
+        }
+      } as NttTransceiver<N, C, Ntt.Attestation>;
+    }
+
     return null;
   }
 
@@ -736,11 +769,20 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         return null;
       }
 
-      // Return the verified addresses
-      return {
+      // Return the verified addresses including transceivers
+      const result: Partial<Ntt.Contracts> = {
         manager: this.contracts.manager,
         transceiver: this.contracts.transceiver,
       };
+
+      // Add wormhole transceiver if available
+      if (this.transceiverStateIds?.wormhole) {
+        result.transceiver = {
+          wormhole: this.transceiverStateIds.wormhole,
+        };
+      }
+
+      return result;
     } catch {
       return null;
     }
