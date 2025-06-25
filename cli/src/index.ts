@@ -70,7 +70,6 @@ export type Deployment<C extends Chain> = {
 // Extended ChainAddress type for Sui deployments that includes additional metadata
 export type SuiDeploymentResult<C extends Chain> = ChainAddress<C> & {
     adminCaps?: {
-        ntt?: string,
         wormholeTransceiver?: string
     },
     transceiverStateIds?: {
@@ -81,7 +80,6 @@ export type SuiDeploymentResult<C extends Chain> = ChainAddress<C> & {
         nttCommon?: string,
         wormholeTransceiver?: string
     },
-    signerAddress?: string
 }
 
 // TODO: rename
@@ -101,9 +99,8 @@ export type ChainConfig = {
         outbound: string,
         inbound: Partial<{ [C in Chain]: string }>,
     },
-    // AdminCap tracking for Sui deployments
+    // AdminCap tracking for Sui deployments (only wormhole transceiver, NTT reads from state)
     adminCaps?: {
-        ntt?: string,
         wormholeTransceiver?: string
     },
     // Transceiver state IDs for Sui deployments
@@ -116,7 +113,6 @@ export type ChainConfig = {
         nttCommon?: string,
         wormholeTransceiver?: string
     },
-    signerAddress?: string
 }
 
 export type Config = {
@@ -450,7 +446,6 @@ yargs(hideBin(process.argv))
             // Add AdminCap and package ID information to config if available (for Sui)
             if ((deployedManager as any).adminCaps) {
                 config.adminCaps = (deployedManager as any).adminCaps;
-                config.signerAddress = (deployedManager as any).signerAddress;
                 console.log("AdminCaps stored:", chalk.yellow(JSON.stringify((deployedManager as any).adminCaps, null, 2)));
             }
             if ((deployedManager as any).transceiverStateIds) {
@@ -2555,6 +2550,57 @@ async function deploySui<N extends Network, C extends Chain>(
         console.log(`Wormhole Transceiver AdminCap created at: ${whTransceiverAdminCapId}`);
     }
 
+            // 6. Register the wormhole transceiver with the NTT manager
+            if (nttAdminCapId && transceiverStateId) {
+                console.log("Registering wormhole transceiver with NTT manager...");
+
+                const registerTx = new Transaction();
+
+                console.log(`  NTT State: ${nttStateId}`);
+                console.log(`  NTT AdminCap: ${nttAdminCapId}`);
+                console.log(`  Transceiver Type: ${whTransceiverPackageId}::wormhole_transceiver::TransceiverAuth`);
+
+                // Call state::register_transceiver to register the wormhole transceiver
+                registerTx.moveCall({
+                    target: `${nttPackageId}::state::register_transceiver`,
+                    typeArguments: [
+                        `${whTransceiverPackageId}::wormhole_transceiver::TransceiverAuth`, // Transceiver type
+                        token // Token type
+                    ],
+                    arguments: [
+                        registerTx.object(nttStateId), // NTT state (mutable)
+                        registerTx.object(nttAdminCapId), // AdminCap for authorization
+                    ],
+                });
+
+                registerTx.setGasBudget(finalGasBudget);
+
+                try {
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for network
+
+                    const registerResult = await suiSigner.client.signAndExecuteTransaction({
+                        signer: suiSigner._signer,
+                        transaction: registerTx,
+                        options: {
+                            showEffects: true,
+                            showObjectChanges: true,
+                        },
+                    });
+
+                    if (registerResult.effects?.status?.status !== "success") {
+                        throw new Error(`Registration failed: ${JSON.stringify(registerResult.effects?.status)}`);
+                    }
+
+                    console.log("✅ Wormhole transceiver successfully registered with NTT manager");
+                } catch (error) {
+                    console.error("❌ Failed to register wormhole transceiver with NTT manager:", error);
+                    // Don't throw here, let deployment continue, but warn the user
+                    console.warn("⚠️  Deployment completed but transceiver registration failed. You may need to register it manually.");
+                }
+            } else {
+                console.warn("⚠️  Skipping transceiver registration: missing NTT AdminCap or transceiver state ID");
+            }
+
         } catch (error) {
             console.error("Wormhole Transceiver setup failed:", error);
             console.error("Error details:", JSON.stringify(error, null, 2));
@@ -2576,7 +2622,6 @@ async function deploySui<N extends Network, C extends Chain>(
         chain: ch.chain,
         address: toUniversal(ch.chain, nttStateId),
         adminCaps: {
-            ntt: nttAdminCapId,
             wormholeTransceiver: whTransceiverAdminCapId
         },
         transceiverStateIds: {
@@ -2587,7 +2632,6 @@ async function deploySui<N extends Network, C extends Chain>(
             nttCommon: nttCommonPackageId,
             wormholeTransceiver: whTransceiverPackageId
         },
-        signerAddress: signer.address.address.toString()
     };
 }
 
@@ -2859,7 +2903,7 @@ async function pullChainConfig<N extends Network, C extends Chain>(
     network: N,
     manager: ChainAddress<C>,
     overrides?: WormholeConfigOverrides<N>,
-    adminCaps?: { ntt?: string; wormholeTransceiver?: string },
+    adminCaps?: { wormholeTransceiver?: string },
     packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string },
     transceiverStateIds?: { wormhole?: string }
 ): Promise<[ChainConfig, ChainContext<typeof network, C>, Ntt<typeof network, C>, number]> {
@@ -2986,7 +3030,7 @@ function getVersion<N extends Network, C extends Chain>(chain: C, ntt: Ntt<N, C>
 async function nttFromManager<N extends Network, C extends Chain>(
     ch: ChainContext<N, C>,
     nativeManagerAddress: string,
-    adminCaps?: { ntt?: string; wormholeTransceiver?: string },
+    adminCaps?: { wormholeTransceiver?: string },
     packageIds?: { ntt?: string; nttCommon?: string; wormholeTransceiver?: string },
     transceiverStateIds?: { wormhole?: string }
 ): Promise<{ ntt: Ntt<N, C>; addresses: Partial<Ntt.Contracts> }> {
@@ -3013,8 +3057,8 @@ async function nttFromManager<N extends Network, C extends Chain>(
         ...diff
     };
 
-    // For Sui, create SuiNtt directly with AdminCap information
-    if (ch.chain === "Sui" && adminCaps?.ntt) {
+    // For Sui, create SuiNtt directly (AdminCap ID read from state object)
+    if (ch.chain === "Sui") {
         const sui = await import("@wormhole-foundation/sdk-sui-ntt");
         const { SuiClient } = await import("@mysten/sui/client");
         const provider = new SuiClient({ url: ch.config.rpc });
@@ -3024,7 +3068,7 @@ async function nttFromManager<N extends Network, C extends Chain>(
             ch.chain,
             provider,
             { ntt: addresses },
-            adminCaps.ntt,
+            undefined, // AdminCap ID will be read from state object
             packageIds?.ntt,
             transceiverStateIds
         );
