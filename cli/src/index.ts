@@ -2569,6 +2569,7 @@ async function deploySui<N extends Network, C extends Chain>(
                     ],
                     arguments: [
                         registerTx.object(nttStateId), // NTT state (mutable)
+                        registerTx.object(transceiverStateId),
                         registerTx.object(nttAdminCapId), // AdminCap for authorization
                     ],
                 });
