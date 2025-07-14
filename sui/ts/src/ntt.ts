@@ -16,7 +16,90 @@ import { SuiChains, SuiPlatform, SuiPlatformType, SuiUnsignedTransaction } from 
 import { SuiClient } from "@mysten/sui/client";
 import { Transaction } from "@mysten/sui/transactions";
 
+// TypeScript types matching the Move structs
+interface SuiMoveObject {
+  dataType: "moveObject";
+  type: string;
+  fields: any;
+  hasPublicTransfer: boolean;
+}
+
+interface SuiMode {
+  variant: "Locking" | "Burning";
+}
+
+interface SuiRateLimitState {
+  limit: string;
+  capacity_at_last_tx: string;
+  last_tx_timestamp: string;
+}
+
+interface SuiTransceiverRegistry {
+  id: { id: string };
+  next_id: string;
+  enabled_bitmap: any;
+}
+
+interface SuiTable {
+  id: { id: string };
+  size: string;
+}
+
+interface SuiOutbox {
+  entries: SuiTable;
+  rate_limit: SuiRateLimitState;
+}
+
+interface SuiInbox {
+  entries: SuiTable;
+}
+
+interface SuiNttState {
+  id: { id: string };
+  mode: SuiMode;
+  balance: any; // Balance<T>
+  threshold: string;
+  treasury_cap: any; // Option<TreasuryCap<T>>
+  peers: SuiTable;
+  outbox: SuiOutbox;
+  inbox: SuiInbox;
+  transceivers: SuiTransceiverRegistry;
+  chain_id: string;
+  next_sequence: string;
+  version: string;
+  admin_cap_id: string;
+}
+
 export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C> {
+
+  // Helper method to fetch and validate NTT state object with proper typing
+  private async getNttState(): Promise<SuiNttState> {
+    const response = await this.provider.getObject({
+      id: this.contracts.ntt!["manager"],
+      options: { showContent: true },
+    });
+
+    if (!response.data?.content || response.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    const content = response.data.content as SuiMoveObject;
+    return content.fields as SuiNttState;
+  }
+
+  // Helper method to fetch and validate any Sui object with proper typing
+  private async getSuiObject(objectId: string, errorMessage?: string): Promise<SuiMoveObject> {
+    const response = await this.provider.getObject({
+      id: objectId,
+      options: { showContent: true },
+    });
+
+    if (!response.data?.content || response.data.content.dataType !== "moveObject") {
+      throw new Error(errorMessage || `Failed to fetch object ${objectId}`);
+    }
+
+    return response.data.content as SuiMoveObject;
+  }
   readonly network: N;
   readonly chain: C;
   readonly provider: SuiClient;
@@ -66,20 +149,8 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   // State & Configuration Methods
   async getMode(): Promise<Ntt.Mode> {
-    const state = await this.provider.getObject({
-      id: this.contracts.ntt!["manager"],
-      options: {
-        showContent: true,
-      },
-    });
-
-    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
-      throw new Error("Failed to fetch NTT state object");
-    }
-
-    const fields = (state.data.content as any).fields;
-    const modeField = fields.mode;
-
+    const state = await this.getNttState();
+    const modeField = state.mode;
 
     // Mode is an enum with a variant field: { variant: "Locking" } or { variant: "Burning" }
     if (modeField.variant === "Locking") {
@@ -103,22 +174,12 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       return this.adminCapId;
     }
 
-    // Read the AdminCap ID from the NTT state object
-    const state = await this.provider.getObject({
-      id: this.contracts.ntt!["manager"],
-      options: { showContent: true },
-    });
-
-    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
-      throw new Error("Failed to fetch NTT state object");
-    }
-
-    const fields = (state.data.content as any).fields;
-    if (!fields.admin_cap_id) {
+    const state = await this.getNttState();
+    if (!state.admin_cap_id) {
       throw new Error("AdminCap ID not found in NTT state");
     }
 
-    this.adminCapId = fields.admin_cap_id;
+    this.adminCapId = state.admin_cap_id;
     return this.adminCapId!;
   }
 
@@ -135,17 +196,10 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   }
 
   async getPackageIdFromObject(objectId: string): Promise<string> {
-    const state = await this.provider.getObject({
-      id: objectId,
-      options: { showContent: true },
-    });
-
-    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
-      throw new Error("Failed to fetch state object");
-    }
+    const object = await this.getSuiObject(objectId, "Failed to fetch state object");
 
     // The package ID can be inferred from the object type
-    const objectType = state.data.content.type;
+    const objectType = object.type;
     // Object type format: "packageId::module::Type<...>"
     const packageId = objectType.split("::")[0];
     if (!packageId || !packageId.startsWith("0x")) {
@@ -192,19 +246,8 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   }
 
   async getThreshold(): Promise<number> {
-    const state = await this.provider.getObject({
-      id: this.contracts.ntt!["manager"],
-      options: {
-        showContent: true,
-      },
-    });
-
-    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
-      throw new Error("Failed to fetch NTT state object");
-    }
-
-    const fields = (state.data.content as any).fields;
-    return parseInt(fields.threshold, 10);
+    const state = await this.getNttState();
+    return parseInt(state.threshold, 10);
   }
 
   async *setThreshold(threshold: number, payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>> {
@@ -341,7 +384,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       throw new Error("Failed to fetch NTT state object");
     }
 
-    const fields = (state.data.content as any).fields;
+    const fields = (state.data.content as SuiMoveObject).fields;
     const peersTable = fields.peers;
 
     // Convert chain name to chain ID and look up in peers table
@@ -362,7 +405,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         return null;
       }
 
-      const peerData = (peerField.data.content as any).fields.value.fields;
+      const peerData = (peerField.data.content as SuiMoveObject).fields.value.fields;
 
       // Extract address bytes from ExternalAddress
       const externalAddress = peerData.address;
@@ -424,7 +467,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       throw new Error("Failed to fetch transceiver state object");
     }
 
-    const transceiverFields = (transceiverState.data.content as any).fields;
+    const transceiverFields = (transceiverState.data.content as SuiMoveObject).fields;
     const transceiverAdminCapId = transceiverFields.admin_cap_id;
 
     // Build transaction to set transceiver peer
@@ -680,7 +723,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       throw new Error("Failed to fetch NTT state object");
     }
 
-    const fields = (state.data.content as any).fields;
+    const fields = (state.data.content as SuiMoveObject).fields;
     const outboxRateLimit = fields.outbox.fields.rate_limit.fields;
 
     // Get current timestamp (this would ideally come from Clock object)
@@ -714,7 +757,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       throw new Error("Failed to fetch NTT state object");
     }
 
-    const fields = (state.data.content as any).fields;
+    const fields = (state.data.content as SuiMoveObject).fields;
     const outboxRateLimit = fields.outbox.fields.rate_limit.fields;
 
     return BigInt(outboxRateLimit.limit);
@@ -959,7 +1002,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         return null;
       }
 
-      const fields = (transceiverState.data.content as any).fields;
+      const fields = (transceiverState.data.content as SuiMoveObject).fields;
       const peersTable = fields.peers;
 
       // Convert target chain to chain ID
@@ -980,7 +1023,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       }
 
       // Extract the ExternalAddress from the peer field
-      const externalAddress = (peerField.data.content as any).fields.value;
+      const externalAddress = (peerField.data.content as SuiMoveObject).fields.value;
       const addressBytes = externalAddress.fields.value.fields.data;
 
       // Convert address bytes to ChainAddress
@@ -1012,7 +1055,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         return null;
       }
 
-      const fields = (state.data.content as any).fields;
+      const fields = (state.data.content as SuiMoveObject).fields;
 
       // Look up registered transceivers in the transceiver registry
       const transceiverRegistry = fields.transceivers;
@@ -1041,7 +1084,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
             });
 
             if (transceiverInfo.data?.content && transceiverInfo.data.content.dataType === "moveObject") {
-              const infoFields = (transceiverInfo.data.content as any).fields.value.fields;
+              const infoFields = (transceiverInfo.data.content as SuiMoveObject).fields.value.fields;
               const transceiverStateId = infoFields.state_object_id;
               const transceiverIndex = infoFields.id;
 
