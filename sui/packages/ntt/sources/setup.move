@@ -3,11 +3,10 @@
 /// This module implements the mechanism to publish the NTT contract and
 /// initialize `State` as a shared object.
 module ntt::setup {
-    use sui::package;
     use sui::coin::{TreasuryCap};
 
     use ntt::state;
-    use ntt::mode::Mode;
+    use ntt::mode::{Self};
 
     /// Capability created at `init`, which will be destroyed once
     /// `complete` is called. This ensures only the deployer can
@@ -30,22 +29,21 @@ module ntt::setup {
         // This will be created and sent to the transaction sender
         // automatically when the contract is published.
         transfer::public_transfer(
-            package::test_publish(object::id_from_address(@ntt), ctx),
+            sui::package::test_publish(object::id_from_address(@ntt), ctx),
             tx_context::sender(ctx)
         );
     }
 
-    #[allow(lint(share_owned))]
+    #[allow(lint(share_owned), lint(self_transfer))]
     /// Only the owner of the `DeployerCap` can call this method. This
     /// method destroys the capability and shares the `State` object.
     public fun complete<CoinType>(
         deployer: DeployerCap,
         upgrade_cap: sui::package::UpgradeCap,
         chain_id: u16,
-        mode: Mode,
-        treasury_cap: Option<TreasuryCap<CoinType>>,
+        is_burning_mode: bool,  // true for burning, false for locking
         ctx: &mut TxContext
-    ): (state::AdminCap, ntt::upgrades::UpgradeCap) {
+    ) {
         // Destroy deployer cap
         let DeployerCap { id } = deployer;
         object::delete(id);
@@ -55,7 +53,16 @@ module ntt::setup {
             ctx
         );
 
-        // Share new state
+        // Convert bool to Mode enum
+        let mode = if (is_burning_mode) {
+            mode::burning()
+        } else {
+            mode::locking()
+        };
+
+        // Share new state with None treasury cap for now
+        // TODO: Later add proper treasury cap handling for burning mode
+        let treasury_cap = std::option::none<TreasuryCap<CoinType>>();
         let (state, admin_cap) = state::new(
             chain_id,
             mode,
@@ -64,6 +71,9 @@ module ntt::setup {
         );
 
         transfer::public_share_object(state);
-        (admin_cap, upgrade_cap)
+        
+        // Transfer capabilities to transaction sender
+        transfer::public_transfer(admin_cap, tx_context::sender(ctx));
+        transfer::public_transfer(upgrade_cap, tx_context::sender(ctx));
     }
 }

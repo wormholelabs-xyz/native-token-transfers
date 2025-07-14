@@ -3,13 +3,15 @@ import {
   ChainAddress,
   UnsignedTransaction,
   toUniversal,
+  Contracts,
+  ChainsConfig,
 } from "@wormhole-foundation/sdk-definitions";
 import type { Chain, Network } from "@wormhole-foundation/sdk-base";
 import {
   Ntt,
   NttTransceiver,
 } from "@wormhole-foundation/sdk-definitions-ntt";
-import { SuiChains, SuiUnsignedTransaction } from "@wormhole-foundation/sdk-sui";
+import { SuiChains, SuiPlatform, SuiPlatformType, SuiUnsignedTransaction } from "@wormhole-foundation/sdk-sui";
 import { SuiClient } from "@mysten/sui/client";
 import { Transaction } from "@mysten/sui/transactions";
 
@@ -17,7 +19,6 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   readonly network: N;
   readonly chain: C;
   readonly provider: SuiClient;
-  readonly contracts: Ntt.Contracts;
   readonly adminCapId?: string; // NTT AdminCap object ID
   readonly packageId?: string; // NTT package ID for move calls (TODO: do we need this? or just infer from the admincap)
   readonly transceiverStateIds?: { wormhole?: string };
@@ -26,7 +27,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     network: N,
     chain: C,
     provider: SuiClient,
-    contracts: any, // TODO: Fix type - should be platform contracts + ntt
+    readonly contracts: Contracts & { ntt?: Ntt.Contracts },
     adminCapId?: string,
     packageId?: string,
     transceiverStateIds?: { wormhole?: string }
@@ -35,10 +36,13 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       throw new Error("NTT contracts not found");
     }
 
+    if (!contracts.coreBridge) {
+      throw new Error("Core Bridge contract not found");
+    }
+
     this.network = network;
     this.chain = chain;
     this.provider = provider;
-    this.contracts = contracts.ntt;
     this.adminCapId = adminCapId;
     this.packageId = packageId;
     this.transceiverStateIds = transceiverStateIds;
@@ -46,36 +50,35 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   static async fromRpc<N extends Network>(
     provider: SuiClient,
-    config: any
+    config: ChainsConfig<N, SuiPlatformType>
   ): Promise<SuiNtt<N, SuiChains>> {
-    // Determine network and chain from RPC
-    const network = "Mainnet" as N; // TODO: Detect network from RPC
-    const chain = "Sui" as SuiChains;
+    const [network, chain] = await SuiPlatform.chainFromRpc(provider);
+    const conf = config[chain]!;
 
-    // Extract NTT configuration from the config
-    const nttConfig = config.Sui?.contracts?.ntt;
-    if (!nttConfig) {
-      throw new Error("NTT configuration not found");
-    }
+    if (conf.network !== network)
+      throw new Error(`Network mismatch: ${conf.network} != ${network}`);
 
-    // Create contracts configuration
-    const contracts: Ntt.Contracts = {
-      token: nttConfig.token || "",
-      manager: nttConfig.manager,
-      transceiver: nttConfig.transceiver || {},
-    };
+    if (!("ntt" in conf.contracts)) throw new Error("Ntt contracts not found");
 
-    // Extract AdminCap ID and package ID if available
-    const adminCapId = config.Sui?.adminCaps?.ntt;
-    const packageId = config.Sui?.packageIds?.ntt;
+    const ntt = conf.contracts["ntt"];
 
-    return new SuiNtt(network, chain, provider, { ntt: contracts }, adminCapId, packageId);
+    // For fromRpc, we don't have access to Sui-specific properties
+    // These will be queried from the chain when needed
+    return new SuiNtt(
+      network as N,
+      chain,
+      provider,
+      { ...conf.contracts, ntt },
+      undefined, // adminCapId - will be read from state object when needed
+      undefined, // packageId - will be read from state object when needed
+      undefined  // transceiverStateIds - not needed as transceiver address comes from contracts
+    );
   }
 
   // State & Configuration Methods
   async getMode(): Promise<Ntt.Mode> {
     const state = await this.provider.getObject({
-      id: this.contracts.manager,
+      id: this.contracts.ntt!["manager"],
       options: {
         showContent: true,
       },
@@ -106,15 +109,76 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     return false;
   }
 
-  async getOwner(): Promise<AccountAddress<C>> {
-    // Owner is determined by who holds the AdminCap
-    if (!this.adminCapId) {
-      throw new Error("AdminCap ID not provided - cannot determine owner");
+  async getAdminCapId(): Promise<string> {
+    // Read the AdminCap ID from the NTT state object
+    const state = await this.provider.getObject({
+      id: this.contracts.ntt!["manager"],
+      options: { showContent: true },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
     }
+
+    const fields = (state.data.content as any).fields;
+    if (!fields.admin_cap_id) {
+      throw new Error("AdminCap ID not found in NTT state");
+    }
+
+    return fields.admin_cap_id;
+  }
+
+  async getPackageId(): Promise<string> {
+    // Read the package ID from the NTT state object
+    const state = await this.provider.getObject({
+      id: this.contracts.ntt!["manager"],
+      options: { showContent: true },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    // The package ID can be inferred from the object type
+    const objectType = state.data.content.type;
+    // Object type format: "packageId::module::Type<...>"
+    const packageId = objectType.split("::")[0];
+    if (!packageId || !packageId.startsWith("0x")) {
+      throw new Error("Could not extract package ID from state object type");
+    }
+
+    return packageId;
+  }
+
+  async getPackageIdFromObject(objectId: string): Promise<string> {
+    // Read the package ID from any state object
+    const state = await this.provider.getObject({
+      id: objectId,
+      options: { showContent: true },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch state object");
+    }
+
+    // The package ID can be inferred from the object type
+    const objectType = state.data.content.type;
+    // Object type format: "packageId::module::Type<...>"
+    const packageId = objectType.split("::")[0];
+    if (!packageId || !packageId.startsWith("0x")) {
+      throw new Error("Could not extract package ID from state object type");
+    }
+
+    return packageId;
+  }
+
+  async getOwner(): Promise<AccountAddress<C>> {
+    // Get the AdminCap ID from the state object if not provided
+    const adminCapId = this.adminCapId || await this.getAdminCapId();
 
     try {
       const adminCap = await this.provider.getObject({
-        id: this.adminCapId,
+        id: adminCapId,
         options: {
           showOwner: true,
         },
@@ -148,7 +212,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   async getThreshold(): Promise<number> {
     const state = await this.provider.getObject({
-      id: this.contracts.manager,
+      id: this.contracts.ntt!["manager"],
       options: {
         showContent: true,
       },
@@ -195,19 +259,19 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   async getTokenDecimals(): Promise<number> {
 
     // For SUI token, decimals are always 9
-    if (this.contracts.token === "0x2::sui::SUI") {
+    if (this.contracts.ntt!["token"] === "0x2::sui::SUI") {
       return 9;
     }
 
     // For other tokens, we'd need to fetch from coin metadata
     // This requires knowing the token type parameter and querying the CoinMetadata object
-    throw new Error(`getTokenDecimals not yet implemented for token: ${this.contracts.token}`);
+    throw new Error(`getTokenDecimals not yet implemented for token: ${this.contracts.ntt!["token"]}`);
   }
 
   async getCustodyAddress(): Promise<string> {
     // In Sui, custody is managed by the State object itself
     // Return the state object ID as the custody address
-    return this.contracts.manager;
+    return this.contracts.ntt!["manager"];
   }
 
   // Admin Methods
@@ -234,13 +298,11 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     inboundLimit: bigint
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
 
-    if (!this.adminCapId) {
-      throw new Error("AdminCap ID required for setPeer operation");
-    }
+    // Get the AdminCap ID from the state object if not provided
+    const adminCapId = this.adminCapId || await this.getAdminCapId();
 
-    if (!this.packageId) {
-      throw new Error("Package ID required for setPeer operation");
-    }
+    // Get package ID from state object if not provided
+    const packageId = this.packageId || await this.getPackageId();
 
     // Import chainToChainId from SDK
     const { chainToChainId } = await import("@wormhole-foundation/sdk-base");
@@ -298,10 +360,8 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
     try {
 
-      // Create ExternalAddress from the peer address bytes
-      // First create Bytes32 from the bytes, then create ExternalAddress from Bytes32
-      // TODO: Get this dynamically from deployment config instead of hardcoding
-      const wormholePackageId = "0xcb2d4a43e35a73835fa21ff381b105f699b8265355fab733bd7c5971f1caeeb0";
+      // Query the wormhole package ID from the state object
+      const wormholePackageId = await this.getPackageIdFromObject(this.contracts.coreBridge!);
 
       const bytes32 = txb.moveCall({
         target: `${wormholePackageId}::bytes32::from_bytes`,
@@ -314,11 +374,11 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       });
 
       txb.moveCall({
-        target: `${this.packageId}::state::set_peer`,
-        typeArguments: [this.contracts.token], // Use the token type from contracts
+        target: `${packageId}::state::set_peer`,
+        typeArguments: [this.contracts.ntt!["token"]], // Use the token type from contracts
         arguments: [
-          txb.object(this.adminCapId), // AdminCap
-          txb.object(this.contracts.manager), // NTT state
+          txb.object(adminCapId), // AdminCap
+          txb.object(this.contracts.ntt!["manager"]), // NTT state
           txb.pure.u16(wormholeChainId), // Chain ID
           externalAddress, // ExternalAddress object (properly created)
           txb.pure.u8(tokenDecimals), // Token decimals
@@ -342,7 +402,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   async getPeer<PC extends Chain>(chain: PC): Promise<Ntt.Peer<PC> | null> {
     const state = await this.provider.getObject({
-      id: this.contracts.manager,
+      id: this.contracts.ntt!["manager"],
       options: {
         showContent: true,
       },
@@ -352,26 +412,62 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       throw new Error("Failed to fetch NTT state object");
     }
 
-    // const fields = (state.data.content as any).fields;
-    // const peersTable = fields.peers.fields;
+    // Import chainToChainId from SDK
+    const { chainToChainId } = await import("@wormhole-foundation/sdk-base");
 
-    // TODO: Convert chain name to chain ID and look up in peers table
-    // The peers table is keyed by chain ID (u16)
-    // We'd need a chain name to chain ID mapping
+    const fields = (state.data.content as any).fields;
+    const peersTable = fields.peers;
 
-    // For now, return null indicating peer not found
-    // In a full implementation:
-    // const chainId = chainToChainId(chain);
-    // const peerData = peersTable[chainId];
-    // if (!peerData) return null;
-    //
-    // return {
-    //   address: peerData.fields.address,
-    //   tokenDecimals: peerData.fields.token_decimals,
-    //   inboundLimit: BigInt(peerData.fields.inbound_rate_limit.fields.limit)
-    // };
+    // Convert chain name to chain ID and look up in peers table
+    const chainId = chainToChainId(chain);
 
-    return null;
+    try {
+      // Query the dynamic field for this chain ID in the peers table
+      const peerField = await this.provider.getDynamicFieldObject({
+        parentId: peersTable.fields.id.id,
+        name: {
+          type: "u16",
+          value: chainId,
+        },
+      });
+
+      if (!peerField.data?.content || peerField.data.content.dataType !== "moveObject") {
+        // Peer not found for this chain
+        return null;
+      }
+
+      const peerData = (peerField.data.content as any).fields.value.fields;
+
+      // Extract address bytes from ExternalAddress
+      const externalAddress = peerData.address;
+      const addressBytes = externalAddress.fields.value.fields.data;
+
+      // Convert address bytes to ChainAddress
+      // The address bytes are stored as a vector of u8, we need to convert to the appropriate format
+      const addressUint8Array = new Uint8Array(addressBytes);
+      const chainAddress = {
+        chain: chain,
+        address: toUniversal(chain, addressUint8Array)
+      } as ChainAddress<PC>;
+
+      // Extract token decimals
+      const tokenDecimals = parseInt(peerData.token_decimals, 10);
+
+      // Extract inbound limit from rate limit state
+      const inboundRateLimit = peerData.inbound_rate_limit.fields;
+      const inboundLimit = BigInt(inboundRateLimit.limit);
+
+      return {
+        address: chainAddress,
+        tokenDecimals: tokenDecimals,
+        inboundLimit: inboundLimit
+      } as Ntt.Peer<PC>;
+
+    } catch (error) {
+      // If we get an error (like object not found), the peer doesn't exist
+      console.error(error)
+      return null;
+    }
   }
 
   async *setTransceiverPeer(
@@ -379,28 +475,97 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     peer: ChainAddress,
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
+    // For now, only support index 0 which is the wormhole transceiver
+    if (ix !== 0) {
+      throw new Error("Only transceiver index 0 (wormhole) is currently supported");
+    }
+
+    const wormholeTransceiverStateId = this.contracts.ntt!["transceiver"]?.["wormhole"];
+    if (!wormholeTransceiverStateId) {
+      throw new Error("Wormhole transceiver not found in contracts");
+    }
+
+    // Import chainToChainId from SDK
+    const { chainToChainId } = await import("@wormhole-foundation/sdk-base");
+
+    // Get the transceiver package ID and admin cap ID
+    const transceiverPackageId = await this.getPackageIdFromObject(wormholeTransceiverStateId);
+
+    // Query the transceiver admin cap ID from the state object
+    const transceiverState = await this.provider.getObject({
+      id: wormholeTransceiverStateId,
+      options: { showContent: true },
+    });
+
+    if (!transceiverState.data?.content || transceiverState.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch transceiver state object");
+    }
+
+    const transceiverFields = (transceiverState.data.content as any).fields;
+    const transceiverAdminCapId = transceiverFields.admin_cap_id;
+
     // Build transaction to set transceiver peer
     const txb = new Transaction();
 
-    // TODO: This would call the transceiver's set_peer function
-    // We need:
-    // 1. Transceiver state object ID (based on ix)
-    // 2. Admin cap for the transceiver
-    // 3. Package ID for the transceiver contract
+    // Convert chain to wormhole chain ID
+    const chainId = chainToChainId(peer.chain);
 
-    // const chainId = chainToChainId(peer.chain);
-    // const peerAddress = peer.address; // Convert to ExternalAddress
+    // Convert peer address to ExternalAddress format
+    const peerAddressBytes: Uint8Array = peer.address.toUint8Array();
 
-    // txb.moveCall({
-    //   target: `${transceiverPackageId}::wormhole_transceiver::set_peer`,
-    //   typeArguments: [managerAuthType],
-    //   arguments: [
-    //     transceiverAdminCap,
-    //     transceiverState,
-    //     chainId,
-    //     peerAddress
-    //   ]
-    // });
+    // Convert Uint8Array to regular array
+    const peerAddressBytesArray = Array.from(peerAddressBytes);
+
+    try {
+      // Query the wormhole package ID from the core bridge state object
+      const wormholePackageId = await this.getPackageIdFromObject(this.contracts.coreBridge!);
+
+      // Create ExternalAddress from the peer address bytes
+      const bytes32 = txb.moveCall({
+        target: `${wormholePackageId}::bytes32::from_bytes`,
+        arguments: [txb.pure.vector("u8", peerAddressBytesArray)],
+      });
+
+      const externalAddress = txb.moveCall({
+        target: `${wormholePackageId}::external_address::new`,
+        arguments: [bytes32],
+      });
+
+      // Get the NTT package ID for the manager auth type
+      const nttPackageId = this.packageId || await this.getPackageId();
+
+      // Call the transceiver's set_peer function which returns a MessageTicket
+      const messageTicket = txb.moveCall({
+        target: `${transceiverPackageId}::wormhole_transceiver::set_peer`,
+        typeArguments: [`${nttPackageId}::auth::ManagerAuth`], // Fully qualified manager auth type
+        arguments: [
+          txb.object(transceiverAdminCapId), // Transceiver AdminCap
+          txb.object(wormholeTransceiverStateId), // Transceiver state
+          txb.pure.u16(chainId), // Chain ID
+          externalAddress, // ExternalAddress object
+        ],
+      });
+
+      // Get the wormhole state ID from the core bridge
+      const wormholeStateId = this.contracts.coreBridge!;
+
+      // Create a zero coin for the message fee (0 SUI)
+      const [messageFee] = txb.splitCoins(txb.gas, [0]);
+
+      // Publish the message to emit the WormholeMessage event
+      txb.moveCall({
+        target: `${wormholePackageId}::publish_message::publish_message`,
+        arguments: [
+          txb.object(wormholeStateId), // Wormhole state
+          messageFee, // Message fee (0 SUI)
+          messageTicket, // MessageTicket from set_peer
+          txb.object("0x6"), // Clock
+        ],
+      });
+
+    } catch (error) {
+      throw new Error(`Failed to create setTransceiverPeer transaction: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     const unsignedTx = new SuiUnsignedTransaction(
       txb,
@@ -420,9 +585,8 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     options: Ntt.TransferOptions
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
 
-    if (!this.packageId) {
-      throw new Error("Package ID required for transfer operation");
-    }
+    // Get package ID from state object if not provided
+    const packageId = this.packageId || await this.getPackageId();
 
     // Import chainToChainId from SDK
     const { chainToChainId } = await import("@wormhole-foundation/sdk-base");
@@ -434,6 +598,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     const destinationChainId = chainToChainId(destination.chain);
 
     // Convert destination address to bytes
+    // TODO: do this address handling stuff properly
     let destinationAddressBytes: Uint8Array;
     try {
       if (typeof destination.address.toUint8Array === 'function') {
@@ -454,20 +619,20 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
     // Query the CoinMetadata object ID dynamically
     let coinMetadataId: string;
-    if (this.contracts.token === "0x2::sui::SUI") {
+    if (this.contracts.ntt!["token"] === "0x2::sui::SUI") {
       try {
         const coinMetadata = await this.provider.getCoinMetadata({
-          coinType: this.contracts.token
+          coinType: this.contracts.ntt!["token"]
         });
         if (!coinMetadata?.id) {
           throw new Error("CoinMetadata not found for SUI");
         }
         coinMetadataId = coinMetadata.id;
       } catch (error) {
-        throw new Error(`Failed to get CoinMetadata for ${this.contracts.token}: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Failed to get CoinMetadata for ${this.contracts.ntt!["token"]}: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else {
-      throw new Error(`Transfer not yet implemented for token: ${this.contracts.token}`);
+      throw new Error(`Transfer not yet implemented for token: ${this.contracts.ntt!["token"]}`);
     }
 
 
@@ -476,7 +641,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
     // 2. Create VersionGated object
     const versionGated = txb.moveCall({
-      target: `${this.packageId}::upgrades::new_version_gated`,
+      target: `${packageId}::upgrades::new_version_gated`,
       arguments: [],
     });
 
@@ -484,10 +649,10 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     // extract the individual elements. In Sui's transaction builder, we can access tuple elements
     // using array-like indexing on the result.
     const prepareResult = txb.moveCall({
-      target: `${this.packageId}::ntt::prepare_transfer`,
-      typeArguments: [this.contracts.token],
+      target: `${packageId}::ntt::prepare_transfer`,
+      typeArguments: [this.contracts.ntt!["token"]],
       arguments: [
-        txb.object(this.contracts.manager), // state
+        txb.object(this.contracts.ntt!["manager"]), // state
         coin, // coins
         txb.object(coinMetadataId), // coin_meta
         txb.pure.u16(destinationChainId), // recipient_chain
@@ -506,10 +671,10 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
     // Now call transfer_tx_sender with just the ticket
     txb.moveCall({
-      target: `${this.packageId}::ntt::transfer_tx_sender`,
-      typeArguments: [this.contracts.token],
+      target: `${packageId}::ntt::transfer_tx_sender`,
+      typeArguments: [this.contracts.ntt!["token"]],
       arguments: [
-        txb.object(this.contracts.manager), // state (mutable)
+        txb.object(this.contracts.ntt!["manager"]), // state (mutable)
         versionGated, // version_gated
         txb.object(coinMetadataId), // coin_meta
         ticket as any, // Just the TransferTicket from the tuple
@@ -541,7 +706,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
     // TODO: This would call ntt::redeem for each attestation
     // We need:
-    // 1. NTT state object ID (this.contracts.manager)
+    // 1. NTT state object ID (this.contracts.ntt!["manager"])
     // 2. Coin metadata object ID
     // 3. Clock object ID (usually 0x6)
     // 4. Package ID for the NTT contracts
@@ -586,7 +751,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   // Rate Limiting
   async getCurrentOutboundCapacity(): Promise<bigint> {
     const state = await this.provider.getObject({
-      id: this.contracts.manager,
+      id: this.contracts.ntt!["manager"],
       options: {
         showContent: true,
       },
@@ -620,7 +785,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
   async getOutboundLimit(): Promise<bigint> {
     const state = await this.provider.getObject({
-      id: this.contracts.manager,
+      id: this.contracts.ntt!["manager"],
       options: {
         showContent: true,
       },
@@ -643,7 +808,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     // TODO: This would call state::set_outbound_rate_limit
     // We need:
     // 1. AdminCap object ID
-    // 2. NTT state object ID (this.contracts.manager)
+    // 2. NTT state object ID (this.contracts.ntt!["manager"])
     // 3. Clock object ID (usually 0x6)
     // 4. Package ID for the NTT contracts
 
@@ -681,7 +846,99 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     limit: bigint,
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
-    throw new Error("Not implemented");
+    // Get the AdminCap ID from the state object if not provided
+    const adminCapId = this.adminCapId || await this.getAdminCapId();
+
+    // Get package ID from state object if not provided
+    const packageId = this.packageId || await this.getPackageId();
+
+    // Import chainToChainId from SDK
+    const { chainToChainId } = await import("@wormhole-foundation/sdk-base");
+
+    // Get the existing peer to preserve its address and token decimals
+    const existingPeer = await this.getPeer(fromChain);
+    if (!existingPeer) {
+      throw new Error(`No peer found for chain ${fromChain}. Set up the peer first using setPeer.`);
+    }
+
+    // Build transaction to set inbound limit by updating the existing peer
+    const txb = new Transaction();
+
+    // Convert chain to wormhole chain ID
+    const wormholeChainId = chainToChainId(fromChain);
+
+    // Convert peer address to ExternalAddress format (reuse the existing address)
+    let peerAddressBytes: Uint8Array;
+    try {
+      if (!existingPeer.address?.address) {
+        throw new Error("existingPeer.address.address is null or undefined");
+      }
+
+      // Check if existingPeer.address.address is already a UniversalAddress
+      if (typeof existingPeer.address.address.toUint8Array === 'function') {
+        peerAddressBytes = existingPeer.address.address.toUint8Array();
+      } else if (typeof existingPeer.address.address.toUniversalAddress === 'function') {
+        const universalAddr = existingPeer.address.address.toUniversalAddress();
+        if (!universalAddr) {
+          throw new Error("toUniversalAddress() returned null or undefined");
+        }
+        peerAddressBytes = universalAddr.toUint8Array();
+      } else {
+        throw new Error(`existingPeer.address.address does not have expected methods. Type: ${typeof existingPeer.address.address}, value: ${existingPeer.address.address}, constructor: ${existingPeer.address.address?.constructor?.name}`);
+      }
+
+      if (!peerAddressBytes || !(peerAddressBytes instanceof Uint8Array)) {
+        throw new Error(`Address conversion failed: ${typeof peerAddressBytes}, expected Uint8Array`);
+      }
+
+    } catch (error) {
+      throw new Error(`Failed to convert peer address to bytes: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // Convert Uint8Array to regular array
+    const peerAddressBytesArray = Array.from(peerAddressBytes);
+
+    try {
+      // Query the wormhole package ID from the state object
+      const wormholePackageId = await this.getPackageIdFromObject(this.contracts.coreBridge!);
+
+      // Create ExternalAddress from the peer address bytes
+      const bytes32 = txb.moveCall({
+        target: `${wormholePackageId}::bytes32::from_bytes`,
+        arguments: [txb.pure.vector("u8", peerAddressBytesArray)],
+      });
+
+      const externalAddress = txb.moveCall({
+        target: `${wormholePackageId}::external_address::new`,
+        arguments: [bytes32],
+      });
+
+      // Call set_peer with the existing address and token decimals but new inbound limit
+      txb.moveCall({
+        target: `${packageId}::state::set_peer`,
+        typeArguments: [this.contracts.ntt!["token"]], // Use the token type from contracts
+        arguments: [
+          txb.object(adminCapId), // AdminCap
+          txb.object(this.contracts.ntt!["manager"]), // NTT state
+          txb.pure.u16(wormholeChainId), // Chain ID
+          externalAddress, // ExternalAddress object (reuse existing address)
+          txb.pure.u8(existingPeer.tokenDecimals), // Keep existing token decimals
+          txb.pure.u64(limit.toString()), // New inbound limit
+          txb.object("0x6"), // Clock object (standard Sui clock)
+        ],
+      });
+    } catch (error) {
+      throw new Error(`Failed to create setInboundLimit transaction: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    const unsignedTx = new SuiUnsignedTransaction(
+      txb,
+      this.network,
+      this.chain,
+      "Set Inbound Limit"
+    );
+
+    yield unsignedTx;
   }
 
   async getRateLimitDuration(): Promise<bigint> {
@@ -748,13 +1005,13 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       return null;
     }
 
-    // Return a wormhole transceiver if we have the state ID
-    if (this.transceiverStateIds?.wormhole) {
+    // Return a wormhole transceiver if we have the state ID from contracts
+    const wormholeTransceiverStateId = this.contracts.ntt!["transceiver"]?.["wormhole"];
+    if (wormholeTransceiverStateId) {
       const chain = this.chain;
-      const wormholeStateId = this.transceiverStateIds.wormhole;
 
-      // Create a basic transceiver stub that implements the required interface
-      // This is primarily for status/push operations
+      // Create a transceiver implementation that supports getPeer and setPeer
+      const suiNtt = this;
       return {
         async getTransceiverType(): Promise<string> {
           return "wormhole";
@@ -762,23 +1019,23 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         getAddress(): ChainAddress<C> {
           return {
             chain: chain,
-            address: toUniversal(chain, wormholeStateId)
+            address: toUniversal(chain, wormholeTransceiverStateId)
           } as ChainAddress<C>;
         },
-        async *setPeer(): AsyncGenerator<UnsignedTransaction<N, C>> {
-          throw new Error("setPeer not implemented for Sui transceiver stub");
+        async *setPeer(peer: ChainAddress, payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>> {
+          yield* suiNtt.setTransceiverPeer(0, peer, payer);
         },
-        async getPeer(): Promise<ChainAddress<Chain> | null> {
-          return null;
+        async getPeer<PC extends Chain>(targetChain: PC): Promise<ChainAddress<PC> | null> {
+          return await suiNtt.getTransceiverPeer(0, targetChain);
         },
         async *setPauser(): AsyncGenerator<UnsignedTransaction<N, C>> {
-          throw new Error("setPauser not implemented for Sui transceiver stub");
+          throw new Error("setPauser not implemented for Sui transceiver");
         },
         async getPauser(): Promise<AccountAddress<C> | null> {
           return null;
         },
         async *receive(): AsyncGenerator<UnsignedTransaction<N, C>> {
-          throw new Error("receive not implemented for Sui transceiver stub");
+          throw new Error("receive not implemented for Sui transceiver");
         }
       } as NttTransceiver<N, C, Ntt.Attestation>;
     }
@@ -786,12 +1043,77 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     return null;
   }
 
+  async getTransceiverPeer<PC extends Chain>(ix: number, targetChain: PC): Promise<ChainAddress<PC> | null> {
+    // For now, only support index 0 which is the wormhole transceiver
+    if (ix !== 0) {
+      return null;
+    }
+
+    const wormholeTransceiverStateId = this.contracts.ntt!["transceiver"]?.["wormhole"];
+    if (!wormholeTransceiverStateId) {
+      return null;
+    }
+
+    // Import chainToChainId from SDK
+    const { chainToChainId } = await import("@wormhole-foundation/sdk-base");
+
+    try {
+      // Get the transceiver state object
+      const transceiverState = await this.provider.getObject({
+        id: wormholeTransceiverStateId,
+        options: { showContent: true },
+      });
+
+      if (!transceiverState.data?.content || transceiverState.data.content.dataType !== "moveObject") {
+        return null;
+      }
+
+      const fields = (transceiverState.data.content as any).fields;
+      const peersTable = fields.peers;
+
+      // Convert target chain to chain ID
+      const chainId = chainToChainId(targetChain);
+
+      // Query the dynamic field for this chain ID in the transceiver peers table
+      const peerField = await this.provider.getDynamicFieldObject({
+        parentId: peersTable.fields.id.id,
+        name: {
+          type: "u16",
+          value: chainId,
+        },
+      });
+
+      if (!peerField.data?.content || peerField.data.content.dataType !== "moveObject") {
+        // Peer not found for this chain
+        return null;
+      }
+
+      // Extract the ExternalAddress from the peer field
+      const externalAddress = (peerField.data.content as any).fields.value;
+      const addressBytes = externalAddress.fields.value.fields.data;
+
+      // Convert address bytes to ChainAddress
+      const addressUint8Array = new Uint8Array(addressBytes);
+      const chainAddress = {
+        chain: targetChain,
+        address: toUniversal(targetChain, addressUint8Array)
+      } as ChainAddress<PC>;
+
+      return chainAddress;
+
+    } catch (error) {
+      console.error(error)
+      // If we get an error (like object not found), the peer doesn't exist
+      return null;
+    }
+  }
+
   async verifyAddresses(): Promise<Partial<Ntt.Contracts> | null> {
     // Verify that the addresses in the contracts configuration are valid
     try {
       // Check if manager address exists and is a valid NTT state object
       const state = await this.provider.getObject({
-        id: this.contracts.manager,
+        id: this.contracts.ntt!["manager"],
         options: { showContent: true },
       });
 
@@ -799,21 +1121,74 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         return null;
       }
 
-      // Return the verified addresses including transceivers
+      const fields = (state.data.content as any).fields;
+
+      // Look up registered transceivers in the transceiver registry
+      const transceiverRegistry = fields.transceivers;
+      const registryId = transceiverRegistry.fields.id.id;
+
+      // Query the registry's dynamic fields to find registered transceivers
+      const dynamicFields = await this.provider.getDynamicFields({
+        parentId: registryId,
+      });
+
       const result: Partial<Ntt.Contracts> = {
-        manager: this.contracts.manager,
-        transceiver: this.contracts.transceiver,
+        manager: this.contracts.ntt!["manager"],
+        token: this.contracts.ntt!["token"],
+        transceiver: {},
       };
 
-      // Add wormhole transceiver if available
-      if (this.transceiverStateIds?.wormhole) {
-        result.transceiver = {
-          wormhole: this.transceiverStateIds.wormhole,
-        };
+      // For now, we only look for the wormhole transceiver at index 0
+      // The dynamic field key structure is based on the Move code in transceiver_registry.move
+      for (const field of dynamicFields.data) {
+        if (field.name?.type?.includes("transceiver_registry::Key")) {
+          // This is a transceiver registration
+          try {
+            const transceiverInfo = await this.provider.getObject({
+              id: field.objectId,
+              options: { showContent: true },
+            });
+
+            if (transceiverInfo.data?.content && transceiverInfo.data.content.dataType === "moveObject") {
+              const infoFields = (transceiverInfo.data.content as any).fields.value.fields;
+              const transceiverStateId = infoFields.state_object_id;
+              const transceiverIndex = infoFields.id;
+
+              // For index 0, assume it's the wormhole transceiver
+              if (transceiverIndex === 0) {
+                result.transceiver!["wormhole"] = transceiverStateId;
+              }
+            }
+          } catch (e) {
+            // Skip this transceiver if we can't read it
+            console.warn(`Failed to read transceiver info: ${e}`);
+          }
+        }
       }
 
-      return result;
-    } catch {
+      // Compare with what we have locally
+      const local: Partial<Ntt.Contracts> = {
+        manager: this.contracts.ntt!["manager"],
+        token: this.contracts.ntt!["token"],
+        transceiver: this.contracts.ntt!["transceiver"] || {},
+      };
+
+      const deleteMatching = (a: any, b: any) => {
+        for (const k in a) {
+          if (typeof a[k] === "object" && a[k] !== null && typeof b[k] === "object" && b[k] !== null) {
+            deleteMatching(a[k], b[k]);
+            if (Object.keys(a[k]).length === 0) delete a[k];
+          } else if (a[k] === b[k]) {
+            delete a[k];
+          }
+        }
+      };
+
+      deleteMatching(result, local);
+
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (e) {
+      console.warn(`Failed to verify addresses: ${e}`);
       return null;
     }
   }

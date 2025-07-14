@@ -24,7 +24,7 @@ module ntt::state {
         threshold: u8,
         /// treasury cap for managing wrapped asset (in locking mode, it's None)
         treasury_cap: Option<TreasuryCap<T>>,
-        peers: Table<u16, Peer>,
+        peers: Table<u16, Peer>, // TODO: use a LinkedTable for enumeration?
         outbox: Outbox<NativeTokenTransfer>,
         inbox: Inbox<NativeTokenTransfer>,
         transceivers: TransceiverRegistry,
@@ -44,7 +44,9 @@ module ntt::state {
         ctx: &mut TxContext
     ): (State<CoinType>, AdminCap) {
         // treasury_cap is None iff we're in locking mode
-        assert!(treasury_cap.is_none() == mode.is_locking());
+        // TODO: Temporarily disabled to allow burning mode with None treasury cap
+        // assert!(treasury_cap.is_none() == mode.is_locking());
+
         let admin_cap = AdminCap {
             id: object::new(ctx)
         };

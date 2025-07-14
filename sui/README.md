@@ -26,3 +26,77 @@ In the other direction, the NTT manager receives messages by consuming [`Validat
 These inbound/outbound permissioned structs are passed between the manager and transceivers in a programmable transaction block, meaning that the contracts don't directly call each other. As such, care has been taken to restrict the capabilities of these structs sufficiently to ensure that the client constructing the PTB can not do the wrong thing.
 
 The intention is for a single `ntt_common` module to be deployed, and shared between all NTT manager & transceiver instances.
+
+---
+
+## Development and Testing
+
+This implementation includes comprehensive testing infrastructure for local development and CI/CD.
+
+### Prerequisites
+- [Sui CLI](https://docs.sui.io/guides/developer/getting-started/sui-install) installed
+- Node.js 18+ and npm
+- Docker (optional, for containerized testing)
+
+### Quick Start
+
+1. **Start local Sui network:**
+   ```bash
+   make start-local        # Full featured with test wallets
+   # OR
+   make start-local-simple # Minimal setup for quick testing
+   ```
+
+2. **Test the network:**
+   ```bash
+   make test-network  # Validate running network functionality
+   ```
+
+3. **Build and test Move packages:**
+   ```bash
+   make build-packages
+   make test
+   ```
+
+4. **Test TypeScript SDK:**
+   ```bash
+   make test-ts
+   ```
+
+5. **Run integration tests:**
+   ```bash
+   make test-integration
+   ```
+
+### Available Make Targets
+
+- `make test` - Run Move contract tests
+- `make test-ts` - Run TypeScript SDK tests  
+- `make test-build` - Test build infrastructure (recommended)
+- `make test-integration` - Run deployment integration tests
+- `make test-docker` - Run tests in Docker environment
+- `make start-local` - Start local Sui network (full featured)
+- `make start-local-simple` - Start simple local Sui network
+- `make test-network` - Test running local network functionality
+- `make stop-local` - Stop local Sui network and cleanup
+- `make build-packages` - Build all Move packages
+- `make clean` - Clean all build artifacts
+- `make help` - Show all available targets
+
+### Directory Structure
+
+```
+sui/
+├── packages/                    # Move contracts
+│   ├── ntt/                    # Core NTT implementation
+│   ├── ntt_common/             # Shared utilities and types
+│   └── wormhole_transceiver/   # Wormhole message passing
+├── ts/                         # TypeScript SDK
+│   ├── src/ntt.ts             # Main SDK implementation
+│   └── __tests__/             # Unit and integration tests
+├── scripts/                    # Development and testing scripts
+├── docker/                     # Docker testing environment
+└── Makefile                    # Build and test automation
+```
+
+See `TESTING_PLAN.md` for comprehensive testing documentation.
