@@ -162,6 +162,36 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     return parseInt(fields.threshold, 10);
   }
 
+  async *setThreshold(threshold: number, payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>> {
+    // Get the AdminCap ID from the state object if not provided
+    const adminCapId = this.adminCapId || await this.getAdminCapId();
+
+    // Get package ID from state object if not provided
+    const packageId = this.packageId || await this.getPackageId();
+
+    // Build transaction to set threshold
+    const txb = new Transaction();
+
+    txb.moveCall({
+      target: `${packageId}::state::set_threshold`,
+      typeArguments: [this.contracts.ntt!["token"]], // Use the token type from contracts
+      arguments: [
+        txb.object(adminCapId), // AdminCap
+        txb.object(this.contracts.ntt!["manager"]), // NTT state
+        txb.pure.u8(threshold), // New threshold
+      ],
+    });
+
+    const unsignedTx = new SuiUnsignedTransaction(
+      txb,
+      this.network,
+      this.chain,
+      "Set Threshold"
+    );
+
+    yield unsignedTx;
+  }
+
   async getTokenDecimals(): Promise<number> {
 
     // For SUI token, decimals are always 9

@@ -303,6 +303,11 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     return Number(await this.manager.getThreshold());
   }
 
+  async *setThreshold(threshold: number, payer?: AccountAddress<EvmChains>) {
+    const tx = await this.manager.setThreshold.populateTransaction(threshold);
+    yield this.createUnsignedTx(tx, "Ntt.setThreshold");
+  }
+
   async isRelayingAvailable(destination: Chain): Promise<boolean> {
     const enabled = await Promise.all(
       this.xcvrs.map(async (x) => {

@@ -2816,7 +2816,12 @@ async function pushDeployment<C extends Chain>(deployment: Deployment<C>,
             // transceivers.wormhole.pauser), and have a top-level mapping of
             // these entries to how they should be handled
             for (const j of Object.keys(diff[k] as object)) {
-                if (j === "wormhole") {
+                if (j === "threshold") {
+                    const newThreshold = diff[k]![j]!.push;
+                    if (newThreshold !== undefined) {
+                        txs.push(deployment.ntt.setThreshold(newThreshold, signer.address.address));
+                    }
+                } else if (j === "wormhole") {
                     for (const l of Object.keys(diff[k]![j] as object)) {
                         if (l === "pauser") {
                             const newTransceiverPauser = toUniversal(deployment.manager.chain, diff[k]![j]![l]!.push!);

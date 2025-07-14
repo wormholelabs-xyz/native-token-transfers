@@ -499,6 +499,25 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
     return config.threshold;
   }
 
+  async *setThreshold(threshold: number, payer?: AccountAddress<C>) {
+    const sender = new SolanaAddress(payer!).unwrap();
+    const ix = await this.createSetThresholdInstruction(sender, threshold);
+    const tx = new Transaction();
+    tx.feePayer = sender;
+    tx.add(ix);
+    yield this.createUnsignedTx({ transaction: tx }, "Ntt.SetThreshold");
+  }
+
+  private async createSetThresholdInstruction(owner: PublicKey, threshold: number) {
+    return await this.program.methods
+      .setThreshold(threshold)
+      .accountsStrict({
+        owner: owner,
+        config: this.pdas.configAccount(),
+      })
+      .instruction();
+  }
+
   async getOwner(): Promise<AccountAddress<C>> {
     const config = await this.getConfig();
     return new SolanaAddress(config.owner) as AccountAddress<C>;

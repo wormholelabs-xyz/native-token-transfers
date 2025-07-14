@@ -186,6 +186,11 @@ export interface Ntt<N extends Network, C extends Chain> {
 
   getThreshold(): Promise<number>;
 
+  setThreshold(
+    threshold: number,
+    payer?: AccountAddress<C>
+  ): AsyncGenerator<UnsignedTransaction<N, C>>;
+
   setPeer(
     peer: ChainAddress,
     tokenDecimals: number,
