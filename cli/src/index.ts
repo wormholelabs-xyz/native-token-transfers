@@ -28,11 +28,13 @@ import "@wormhole-foundation/sdk-definitions-ntt";
 import type { Ntt, NttTransceiver } from "@wormhole-foundation/sdk-definitions-ntt";
 
 import { type SolanaChains, SolanaAddress } from "@wormhole-foundation/sdk-solana";
+import { type SuiChains } from "@wormhole-foundation/sdk-sui";
 
 import { colorizeDiff, diffObjects } from "./diff";
 import { forgeSignerArgs, getSigner, type SignerType } from "./getSigner";
 import { NTT, SolanaNtt } from "@wormhole-foundation/sdk-solana-ntt";
 import type { EvmNtt, EvmNttWormholeTranceiver } from "@wormhole-foundation/sdk-evm-ntt";
+import type { SuiNtt } from "@wormhole-foundation/sdk-sui-ntt";
 import type { EvmChains, EvmNativeSigner, EvmUnsignedTransaction } from "@wormhole-foundation/sdk-evm";
 import { getAvailableVersions, getGitTagName } from "./tag";
 import * as configuration from "./configuration";
@@ -1718,6 +1720,10 @@ async function upgrade<N extends Network, C extends Chain>(
             const solanaNtt = ntt as SolanaNtt<N, SolanaChains>;
             const solanaCtx = ctx as ChainContext<N, SolanaChains>;
             return upgradeSolana(worktree, toVersion, solanaNtt, solanaCtx, solanaPayer, solanaProgramKeyPath, solanaBinaryPath);
+        case "Sui":
+            const suiNtt = ntt as SuiNtt<N, SuiChains>;
+            const suiCtx = ctx as ChainContext<N, SuiChains>;
+            return upgradeSui(worktree, toVersion, suiNtt, suiCtx, signerType);
         default:
             throw new Error("Unsupported platform");
     }
@@ -1785,6 +1791,186 @@ async function upgradeSolana<N extends Network, C extends SolanaChains>(
     const mint = (await (ntt.getConfig())).mint;
     await deploySolana(pwd, version, await ntt.getMode(), ctx, mint.toBase58(), payer, false, programKeyPath, binaryPath);
     // TODO: call initializeOrUpdateLUT. currently it's done in the following 'ntt push' step.
+}
+
+async function upgradeSui<N extends Network, C extends SuiChains>(
+    pwd: string,
+    version: string | null,
+    ntt: SuiNtt<N, C>,
+    ctx: ChainContext<N, C>,
+    signerType: SignerType
+): Promise<void> {
+    ensureNttRoot(pwd);
+
+    console.log("Upgrading Sui chain", ctx.chain);
+
+    // Set SUI_CONFIG_DIR environment variable
+    // process.env["SUI_CONFIG_DIR"] = ".sui";
+
+    // Build the updated packages
+    console.log("Building updated packages...");
+    const packagesToBuild = ["ntt_common", "ntt", "wormhole_transceiver"];
+
+    for (const packageName of packagesToBuild) {
+        const packagePath = `${pwd}/sui/packages/${packageName}`;
+        console.log(`Building package: ${packageName}`);
+
+        try {
+            execSync(`sui move build`, {
+                cwd: packagePath,
+                stdio: "inherit"
+            });
+        } catch (error) {
+            console.error(`Failed to build package ${packageName}:`, error);
+            throw error;
+        }
+    }
+
+    // Get the current NTT manager address and retrieve upgrade capabilities
+    const managerAddress = ntt.contracts.ntt?.manager;
+    if (!managerAddress) {
+        throw new Error("NTT manager address not found");
+    }
+
+    console.log("Retrieving upgrade capabilities...");
+
+    // Get the upgrade cap ID from the NTT state
+    let upgradeCapId: string;
+    try {
+        upgradeCapId = await ntt.getUpgradeCapId();
+        console.log(`Found upgrade cap ID: ${upgradeCapId}`);
+    } catch (error) {
+        console.error("Failed to retrieve upgrade cap ID:", error);
+        throw error;
+    }
+
+    // Only upgrade the NTT package (other packages don't have upgrade logic)
+    const packagesToUpgrade = [
+        { name: "Ntt", path: "sui/packages/ntt" }
+    ];
+
+    console.log("Upgrading packages using pure JavaScript...");
+
+    // Get signer for transactions
+    const signer = await getSigner(ctx, signerType);
+
+    for (const pkg of packagesToUpgrade) {
+        console.log(`Upgrading package: ${pkg.name}`);
+
+        try {
+            // Build the package first
+            const packagePath = `${pwd}/${pkg.path}`;
+            console.log(`Building package at: ${packagePath}`);
+
+            execSync(`sui move build`, {
+                cwd: packagePath,
+                stdio: "pipe"
+            });
+
+            // Perform all upgrade steps in a single PTB
+            console.log(`Performing upgrade for ${pkg.name}...`);
+            const upgradeTxs = (async function* () {
+                const upgradeTx = await performPackageUpgradeInPTB(
+                    ctx,
+                    packagePath,
+                    upgradeCapId,
+                    ntt
+                );
+                yield upgradeTx;
+            })();
+            await signSendWait(ctx, upgradeTxs, signer.signer);
+
+            console.log(`Successfully upgraded ${pkg.name}`);
+
+        } catch (error) {
+            console.error(`Failed to upgrade package ${pkg.name}:`, error);
+            throw error;
+        }
+    }
+
+    console.log("Upgrade process completed for Sui chain", ctx.chain);
+}
+
+// Helper function to perform complete package upgrade in a single PTB
+async function performPackageUpgradeInPTB<N extends Network, C extends SuiChains>(
+    ctx: ChainContext<N, C>,
+    packagePath: string,
+    upgradeCapId: string,
+    ntt: SuiNtt<N, C>
+): Promise<any> {
+    // Get the package name from the path
+    const packageName = packagePath.split('/').pop();
+    let buildPackageName: string;
+
+    // Map directory names to build package names
+    switch (packageName) {
+        case "ntt_common":
+            buildPackageName = "NttCommon";
+            break;
+        case "ntt":
+            buildPackageName = "Ntt";
+            break;
+        case "wormhole_transceiver":
+            buildPackageName = "WormholeTransceiver";
+            break;
+        default:
+            throw new Error(`Unknown package: ${packageName}`);
+    }
+
+    // Get build output with dependencies using the correct sui command
+    console.log(`Running sui move build --dump-bytecode-as-base64 for ${packagePath}...`);
+
+    const buildOutput = execSync(`sui move build --dump-bytecode-as-base64 --path ${packagePath}`, {
+        encoding: 'utf-8',
+        // env: { ...process.env, SUI_CONFIG_DIR: process.env.SUI_CONFIG_DIR || ".sui" }
+    });
+
+    const { modules, dependencies, digest } = JSON.parse(buildOutput);
+
+    console.log(`Found ${modules.length} modules and ${dependencies.length} dependencies to upgrade`);
+    console.log(`Build digest: ${digest}`);
+
+    // Create a single PTB that performs all upgrade steps
+    const tx = new Transaction();
+    const packageId = await ntt.getPackageId();
+
+    // Step 1: Authorize the upgrade - this returns an UpgradeTicket
+    const upgradeTicket = tx.moveCall({
+        target: `${packageId}::upgrades::authorize_upgrade`,
+        arguments: [
+            tx.object(upgradeCapId),
+            tx.pure.vector("u8", Array.from(Buffer.from(digest, "hex")))
+        ]
+    });
+
+    // Step 2: Perform the upgrade using the ticket
+    const upgradeReceipt = tx.upgrade({
+        modules,
+        dependencies,
+        package: packageId,
+        ticket: upgradeTicket
+    });
+
+    // Step 3: Commit the upgrade
+    tx.moveCall({
+        target: `${packageId}::upgrades::commit_upgrade`,
+        typeArguments: [ntt.contracts.ntt!["token"]], // Token type parameter
+        arguments: [
+            tx.object(upgradeCapId),
+            tx.object(ntt.contracts.ntt!["manager"]), // state
+            upgradeReceipt
+        ]
+    });
+
+    // Set gas budget
+    tx.setGasBudget(1000000000);
+
+    // Return the unsigned transaction
+    return {
+        chainId: ctx.chain,
+        transaction: tx,
+        description: "Package Upgrade PTB"
+    };
 }
 
 async function deploy<N extends Network, C extends Chain>(

@@ -68,6 +68,7 @@ interface SuiNttState {
   next_sequence: string;
   version: string;
   admin_cap_id: string;
+  upgrade_cap_id: string;
 }
 
 export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C> {
@@ -204,6 +205,13 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     const packageId = objectType.split("::")[0];
     if (!packageId || !packageId.startsWith("0x")) {
       throw new Error("Could not extract package ID from state object type");
+    }
+
+    // If we find an upgrade cap id, fetch it and grab the latest package id from there
+    if (object.fields.upgrade_cap_id) {
+      const upgradeCap = await this.getSuiObject(object.fields.upgrade_cap_id, "Failed to fetch upgrade cap object");
+
+      return upgradeCap.fields.cap.fields.package;
     }
 
     return packageId;
@@ -1068,7 +1076,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
 
       const result: Partial<Ntt.Contracts> = {
         manager: this.contracts.ntt!["manager"],
-        token: this.contracts.ntt!["token"],
+        token: this.contracts.ntt!["token"], // TODO: parse this from the state object generic parameter (that's the remote version)
         transceiver: {},
       };
 
@@ -1125,5 +1133,13 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
       console.warn(`Failed to verify addresses: ${e}`);
       return null;
     }
+  }
+
+  async getUpgradeCapId(): Promise<string> {
+    const state = await this.getNttState();
+    if (!state.upgrade_cap_id) {
+      throw new Error("UpgradeCap ID not found in NTT state");
+    }
+    return state.upgrade_cap_id;
   }
 }
