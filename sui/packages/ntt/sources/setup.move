@@ -67,11 +67,12 @@ module ntt::setup {
             chain_id,
             mode,
             treasury_cap,
+            object::id(&upgrade_cap),
             ctx
         );
 
         transfer::public_share_object(state);
-        
+
         // Transfer capabilities to transaction sender
         transfer::public_transfer(admin_cap, tx_context::sender(ctx));
         transfer::public_transfer(upgrade_cap, tx_context::sender(ctx));
