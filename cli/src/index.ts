@@ -3002,12 +3002,13 @@ async function missingConfigs(
             }
 
             const transceiverPeer = await retryWithExponentialBackoff(() => from.whTransceiver.getPeer(toChain), 5, 5000);
+            const transceiverAddress = await to.whTransceiver.getAddress();
             if (transceiverPeer === null) {
                 count++;
-                missing.transceiverPeers.push(to.whTransceiver.getAddress());
+                missing.transceiverPeers.push(transceiverAddress);
             } else {
                 // @ts-ignore TODO
-                if (!Buffer.from(transceiverPeer.address.address).equals(Buffer.from(to.whTransceiver.getAddress().address.address))) {
+                if (!Buffer.from(transceiverPeer.address.address).equals(Buffer.from(transceiverAddress.address.address))) {
                     console.error(`Transceiver peer address mismatch for ${fromChain} -> ${toChain}`);
                 }
             }

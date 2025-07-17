@@ -374,7 +374,7 @@ export interface NttTransceiver<
   /**
    * Returns transceiver contract address on EVM and `emitterAccount` PDA address on Solana
    */
-  getAddress(): ChainAddress<C>;
+  getAddress(): Promise<ChainAddress<C>>;
 
   /** setPeer sets a peer address for a given chain
    * Note: Admin only

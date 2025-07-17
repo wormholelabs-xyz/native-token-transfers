@@ -66,7 +66,7 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
     return "wormhole";
   }
 
-  getAddress(): ChainAddress<C> {
+  async getAddress(): Promise<ChainAddress<C>> {
     return {
       chain: this.manager.chain,
       address: toUniversal(this.manager.chain, this.address),

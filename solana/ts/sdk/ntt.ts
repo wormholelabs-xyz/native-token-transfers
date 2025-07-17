@@ -172,7 +172,7 @@ export class SolanaNttWormholeTransceiver<
     }
   }
 
-  getAddress(): ChainAddress<C> {
+  async getAddress(): Promise<ChainAddress<C>> {
     return {
       chain: this.manager.chain,
       address: toUniversal(

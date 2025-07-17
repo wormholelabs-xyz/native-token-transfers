@@ -197,6 +197,7 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
   }
 
   async getPackageIdFromObject(objectId: string): Promise<string> {
+    // TODO: replace with getOriginalPackageId from our sdk?
     const object = await this.getSuiObject(objectId, "Failed to fetch state object");
 
     // The package ID can be inferred from the object type
@@ -958,10 +959,11 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
         async getTransceiverType(): Promise<string> {
           return "wormhole";
         },
-        getAddress(): ChainAddress<C> {
+        async getAddress(): Promise<ChainAddress<C>> {
+          const state = await suiNtt.getSuiObject(wormholeTransceiverStateId);
           return {
             chain: chain,
-            address: toUniversal(chain, wormholeTransceiverStateId)
+            address: toUniversal(chain, state.fields.emitter_cap.fields.id.id)
           } as ChainAddress<C>;
         },
         async *setPeer(peer: ChainAddress, payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>> {
