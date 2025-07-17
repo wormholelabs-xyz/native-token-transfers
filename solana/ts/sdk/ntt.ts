@@ -432,6 +432,16 @@ export class SolanaNtt<N extends Network, C extends SolanaChains>
     this.pdas = NTT.pdas(this.program.programId);
   }
 
+  async getAddress(): Promise<ChainAddress<C>> {
+    return {
+      chain: this.chain,
+      address: toUniversal(
+        this.chain,
+        this.managerAddress
+      ),
+    };
+  }
+
   async getTransceiver<T extends number>(
     ix: T
   ): Promise<

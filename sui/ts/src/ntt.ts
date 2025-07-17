@@ -148,6 +148,14 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     );
   }
 
+  async getAddress(): Promise<ChainAddress<C>> {
+    // Return the NTT manager address as ChainAddress
+    return {
+      chain: this.chain,
+      address: toUniversal(this.chain, await this.getPackageId()),
+    } as ChainAddress<C>;
+  }
+
   // State & Configuration Methods
   async getMode(): Promise<Ntt.Mode> {
     const state = await this.getNttState();

@@ -170,6 +170,8 @@ export interface Ntt<N extends Network, C extends Chain> {
 
   unpause(payer?: AccountAddress<C>): AsyncGenerator<UnsignedTransaction<N, C>>;
 
+  getAddress(): Promise<ChainAddress<C>>;
+
   getOwner(): Promise<AccountAddress<C>>;
 
   getPauser(): Promise<AccountAddress<C> | null>;
