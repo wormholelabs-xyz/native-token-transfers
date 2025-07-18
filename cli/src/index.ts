@@ -2961,7 +2961,7 @@ async function missingConfigs(
                 const configLimit = from.config.local?.limits?.inbound?.[toChain]?.replace(".", "");
                 count++;
                 missing.managerPeers.push({
-                    address: await to.ntt.getAddress(),
+                    address: to.manager,
                     tokenDecimals: to.decimals,
                     inboundLimit: BigInt(configLimit ?? 0),
                 });

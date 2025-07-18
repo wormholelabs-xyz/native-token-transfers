@@ -251,13 +251,6 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     }
   }
 
-  async getAddress(): Promise<ChainAddress<C>> {
-    return {
-      chain: this.chain,
-      address: toUniversal(this.chain, this.managerAddress),
-    };
-  }
-
   async getTransceiver(ix: number): Promise<NttTransceiver<N, C, any> | null> {
     // TODO: should we make an RPC call here, or just trust that the xcvrs are set up correctly?
     return this.xcvrs[ix] || null;
