@@ -100,7 +100,8 @@ contract DeployWormholeNttBase is ParseNttConfig {
         }
 
         // Hardcoded to one since these scripts handle Wormhole-only deployments.
-        INttManager(nttManager).setThreshold(1);
+        // TODO: We need the sourceChainId to set the threshold. Also need to enable sending and receiving.
+        // INttManager(nttManager).setThreshold(1);
         console2.log("Threshold set on NttManager: %d", uint256(1));
     }
 

@@ -68,7 +68,6 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
     function _initialize() internal virtual override {
         __NttManager_init();
-        _checkThresholdInvariants();
         _checkTransceiversInvariants();
     }
 
@@ -192,7 +191,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         // Compute manager message digest and record transceiver attestation.
         bytes32 nttManagerMessageHash = _recordTransceiverAttestation(sourceChainId, payload);
 
-        if (isMessageApproved(nttManagerMessageHash)) {
+        if (isMessageApproved(sourceChainId, nttManagerMessageHash)) {
             executeMsg(sourceChainId, sourceNttManagerAddress, payload);
         }
     }

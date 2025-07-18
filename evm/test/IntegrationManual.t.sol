@@ -7,6 +7,7 @@ import {WormholeRelayerBasicTest} from "wormhole-solidity-sdk/testing/WormholeRe
 import "./libraries/IntegrationHelpers.sol";
 import "wormhole-solidity-sdk/testing/helpers/WormholeSimulator.sol";
 import "../src/NttManager/NttManager.sol";
+import "./libraries/TransceiverHelpers.sol";
 import "./mocks/MockNttManager.sol";
 import "./mocks/MockTransceivers.sol";
 
@@ -67,7 +68,9 @@ contract TestRelayerEndToEndManual is IntegrationHelpers, IRateLimiterEvents {
         );
         wormholeTransceiverChain1.initialize();
 
-        nttManagerChain1.setTransceiver(address(wormholeTransceiverChain1));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain1, chainId2, address(wormholeTransceiverChain1)
+        );
         nttManagerChain1.setOutboundLimit(type(uint64).max);
         nttManagerChain1.setInboundLimit(type(uint64).max, chainId2);
 
@@ -94,7 +97,9 @@ contract TestRelayerEndToEndManual is IntegrationHelpers, IRateLimiterEvents {
         );
         wormholeTransceiverChain2.initialize();
 
-        nttManagerChain2.setTransceiver(address(wormholeTransceiverChain2));
+        TransceiverHelpersLib.setAndEnableTransceiver(
+            nttManagerChain2, chainId1, address(wormholeTransceiverChain2)
+        );
         nttManagerChain2.setOutboundLimit(type(uint64).max);
         nttManagerChain2.setInboundLimit(type(uint64).max, chainId1);
 
