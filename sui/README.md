@@ -27,6 +27,32 @@ These inbound/outbound permissioned structs are passed between the manager and t
 
 The intention is for a single `ntt_common` module to be deployed, and shared between all NTT manager & transceiver instances.
 
+## Transceiver Interface Standard
+
+All transceiver implementations must follow a standard interface to ensure compatibility and discoverability. Specifically:
+
+### Required Module: `transceiver`
+
+Every transceiver package must expose a module called `transceiver` that contains a public function:
+
+```move
+public fun get_transceiver_type(): vector<u8>
+```
+
+This function returns a unique identifier for the transceiver type as a UTF-8 encoded byte vector. For example, the wormhole transceiver returns `b"wormhole"`.
+
+### Example Implementation
+
+```move
+module my_transceiver::transceiver {
+    public fun get_transceiver_type(): vector<u8> {
+        b"my_transceiver_type"
+    }
+}
+```
+
+This standardized interface allows the SDK and other tools to query the transceiver type for any arbitrary transceiver implementation by calling `<packageId>::transceiver::get_transceiver_type`.
+
 ---
 
 ## Development and Testing
@@ -71,7 +97,7 @@ This implementation includes comprehensive testing infrastructure for local deve
 ### Available Make Targets
 
 - `make test` - Run Move contract tests
-- `make test-ts` - Run TypeScript SDK tests  
+- `make test-ts` - Run TypeScript SDK tests
 - `make test-build` - Test build infrastructure (recommended)
 - `make test-integration` - Run deployment integration tests
 - `make test-docker` - Run tests in Docker environment

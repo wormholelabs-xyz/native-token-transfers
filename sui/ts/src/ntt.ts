@@ -1052,6 +1052,63 @@ export class SuiNtt<N extends Network, C extends SuiChains> implements Ntt<N, C>
     }
   }
 
+  async getTransceiverType(transceiverIndex: number = 0): Promise<string> {
+    // For now, only support index 0 which is the wormhole transceiver
+    if (transceiverIndex !== 0) {
+      throw new Error(`Transceiver index ${transceiverIndex} not supported`);
+    }
+
+    const wormholeTransceiverStateId = this.contracts.ntt!["transceiver"]?.["wormhole"];
+    if (!wormholeTransceiverStateId) {
+      throw new Error('Wormhole transceiver not found in contracts');
+    }
+
+    // Get the transceiver state object
+    const transceiverState = await this.provider.getObject({
+      id: wormholeTransceiverStateId,
+      options: { showType: true },
+    });
+
+    if (!transceiverState.data?.type) {
+      throw new Error('Unable to determine transceiver object type');
+    }
+
+    // Extract package ID from the object type
+    // Type format: "packageId::module::Type<...>"
+    const packageId = transceiverState.data.type.split('::')[0];
+
+    // Build transaction to call get_transceiver_type from the standard transceiver module
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${packageId}::transceiver::get_transceiver_type`,
+      arguments: [],
+    });
+
+    // Use devInspectTransactionBlock to call the view function
+    const response = await this.provider.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    });
+
+    // Parse the response
+    if (response.results && response.results.length > 0) {
+      const result = response.results[0];
+      if (result && result.returnValues && result.returnValues.length > 0) {
+        const returnValue = result.returnValues[0];
+        if (returnValue && Array.isArray(returnValue) && returnValue.length > 0) {
+          // The return value should be [bytes, type] where bytes is an array of numbers
+          const bytesData = returnValue[0];
+          if (Array.isArray(bytesData)) {
+            const transceiverType = new TextDecoder().decode(new Uint8Array(bytesData));
+            return transceiverType;
+          }
+        }
+      }
+    }
+
+    throw new Error('Failed to get transceiver info from response');
+  }
+
   async verifyAddresses(): Promise<Partial<Ntt.Contracts> | null> {
     // Verify that the addresses in the contracts configuration are valid
     try {
