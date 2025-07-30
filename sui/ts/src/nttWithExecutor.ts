@@ -1,0 +1,446 @@
+import type { Chain, Network } from "@wormhole-foundation/sdk-base";
+import { chainToChainId, chainToPlatform } from "@wormhole-foundation/sdk-base";
+import {
+  Contracts,
+  UnsignedTransaction,
+  type AccountAddress,
+  type ChainAddress,
+  type ChainsConfig,
+} from "@wormhole-foundation/sdk-definitions";
+import { Ntt, NttWithExecutor } from "@wormhole-foundation/sdk-definitions-ntt";
+import {
+  SuiAddress,
+  SuiChains,
+  SuiPlatform,
+  type SuiPlatformType,
+  SuiUnsignedTransaction,
+} from "@wormhole-foundation/sdk-sui";
+import { SuiClient } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+import { isValidSuiAddress } from "@mysten/sui/utils";
+import { SuiNtt } from "./ntt.js";
+
+// TODO: Add Mainnet addresses when available
+const SUI_ADDRESSES = {
+  Testnet: {
+    executorId:
+      "0x4000cfe2955d8355b3d3cf186f854fea9f787a457257056926fde1ec977670eb",
+    executorRequestsId:
+      "0x8e5ec98738885325294060fd067fde47e10313bedc531d0500b24a752be41788",
+    coreBridgeStateId:
+      "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790",
+  },
+};
+
+export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
+  implements NttWithExecutor<N, C>
+{
+  readonly executorId: string;
+  readonly executorRequestsId: string;
+  readonly coreBridgeStateId: string;
+
+  constructor(
+    readonly network: N,
+    readonly chain: C,
+    readonly provider: SuiClient,
+    readonly contracts: Contracts & { ntt?: Ntt.Contracts }
+  ) {
+    if (!SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES]) {
+      throw new Error(`Network ${network} not supported`);
+    }
+
+    this.executorId =
+      SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES].executorId;
+    this.executorRequestsId =
+      SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES].executorRequestsId;
+    this.coreBridgeStateId =
+      SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES].coreBridgeStateId;
+  }
+
+  static async fromRpc<N extends Network>(
+    provider: SuiClient,
+    config: ChainsConfig<N, SuiPlatformType>
+  ): Promise<SuiNttWithExecutor<N, SuiChains>> {
+    const [network, chain] = await SuiPlatform.chainFromRpc(provider as any);
+    const conf = config[chain]!;
+    if (conf.network !== network)
+      throw new Error(`Network mismatch: ${conf.network} != ${network}`);
+
+    return new SuiNttWithExecutor(
+      network as N,
+      chain,
+      provider,
+      conf.contracts
+    );
+  }
+
+  async *transfer(
+    sender: AccountAddress<C>,
+    destination: ChainAddress,
+    amount: bigint,
+    quote: NttWithExecutor.Quote,
+    ntt: SuiNtt<N, C>,
+    wrapNative: boolean = false
+  ): AsyncGenerator<UnsignedTransaction<N, C>> {
+    // Validate the quote hasn't expired
+    if (new Date() > quote.expires) {
+      throw new Error("Quote has expired");
+    }
+
+    // Validate destination chain is supported (Solana only for executor)
+    if (chainToPlatform(destination.chain) !== "Solana") {
+      throw new Error("Executor only supports Solana destination chains");
+    }
+
+    // Create a single transaction following executeSuiNttTransfer pattern
+    const tx = await this.createSuiNttTransferWithExecutor(
+      sender,
+      destination,
+      amount,
+      quote,
+      ntt
+    );
+
+    // Create and yield the complete transaction
+    const executorTx = new SuiUnsignedTransaction(
+      tx as any,
+      this.network,
+      this.chain,
+      "NTT Transfer with Executor"
+    );
+
+    yield executorTx;
+  }
+
+  private async createSuiNttTransferWithExecutor(
+    sender: AccountAddress<C>,
+    destination: ChainAddress,
+    amount: bigint,
+    quote: NttWithExecutor.Quote,
+    ntt: SuiNtt<N, C>
+  ): Promise<Transaction> {
+    const tx = new Transaction();
+    const destinationChainId = chainToChainId(destination.chain);
+
+    // Get required package and object IDs
+    const managerStateId = ntt.contracts.ntt!["manager"];
+    const token = ntt.contracts.ntt!["token"];
+    const tokenAddress = new SuiAddress(
+      typeof token === "string" && token === "native"
+        ? SuiPlatform.nativeTokenId(this.network, this.chain).address
+        : token
+    );
+    const coinType: string = tokenAddress.getCoinType();
+    const packageId = await this.getPackageId(ntt.provider, managerStateId);
+
+    // Convert destination address to bytes
+    let destinationAddressBytes: Uint8Array;
+    try {
+      if (destination.address.toUniversalAddress) {
+        destinationAddressBytes = destination.address
+          .toUniversalAddress()
+          .toUint8Array();
+      } else {
+        destinationAddressBytes = destination.address.toUint8Array();
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to convert destination address to bytes: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+
+    // Get coin metadata
+    const coinMetadata = await ntt.provider.getCoinMetadata({
+      coinType,
+    });
+    if (!coinMetadata?.id) {
+      throw new Error(`CoinMetadata not found for ${coinType}`);
+    }
+    const coinMetadataId = coinMetadata.id;
+
+    // Split coins for transfer amount
+    const [coin] = await (async () => {
+      if (typeof token === "string" && token === "native") {
+        return tx.splitCoins(tx.gas, [tx.pure.u64(amount)]);
+      } else {
+        const coins = await SuiPlatform.getCoins(
+          this.provider,
+          sender,
+          coinType
+        );
+        const [primaryCoin, ...mergeCoins] = coins.filter(
+          (coin) => coin.coinType === coinType
+        );
+        if (primaryCoin === undefined) {
+          throw new Error(
+            `Coins array doesn't contain any coins of type ${coinType}`
+          );
+        }
+        const primaryCoinInput = tx.object(primaryCoin.coinObjectId);
+        if (mergeCoins.length) {
+          tx.mergeCoins(
+            primaryCoinInput,
+            mergeCoins.map((coin) => tx.object(coin.coinObjectId))
+          );
+        }
+        return tx.splitCoins(primaryCoinInput, [tx.pure.u64(amount)]);
+      }
+    })();
+
+    // Create VersionGated object
+    const [versionGated] = tx.moveCall({
+      target: `${packageId}::upgrades::new_version_gated`,
+      arguments: [],
+    });
+
+    // Prepare the transfer
+    const [ticket, dust] = tx.moveCall({
+      target: `${packageId}::ntt::prepare_transfer`,
+      typeArguments: [coinType],
+      arguments: [
+        tx.object(managerStateId),
+        coin,
+        tx.object(coinMetadataId),
+        tx.pure.u16(destinationChainId),
+        tx.pure.vector("u8", Array.from(destinationAddressBytes)),
+        tx.pure.option("vector<u8>", null),
+        tx.pure.bool(false),
+      ],
+    });
+
+    // Get sequence info
+    const [sourceChain] = tx.moveCall({
+      target: `${packageId}::state::get_chain_id`,
+      typeArguments: [coinType],
+      arguments: [tx.object(managerStateId)],
+    });
+
+    const [sequenceBytes32] = tx.moveCall({
+      target: `${packageId}::state::get_next_sequence`,
+      typeArguments: [coinType],
+      arguments: [tx.object(managerStateId)],
+    });
+
+    const coreBridgePackageId = await this.getWormholePackageId(
+      this.provider,
+      this.coreBridgeStateId
+    );
+
+    // Convert sequence bytes32 to Sui object
+    const [sequence] = tx.moveCall({
+      target: `${coreBridgePackageId}::bytes32::to_bytes`,
+      arguments: [sequenceBytes32 as any],
+    });
+
+    // Execute the transfer
+    tx.moveCall({
+      target: `${packageId}::ntt::transfer_tx_sender`,
+      typeArguments: [coinType],
+      arguments: [
+        tx.object(managerStateId),
+        versionGated as any,
+        tx.object(coinMetadataId),
+        ticket as any,
+        tx.object("0x6"), // clock
+      ],
+    });
+
+    // TODO: Implement transceiver operations when we have proper transceiver info
+    // For now, we'll skip the transceiver message creation and publishing
+    // since we don't have transceiver state ID and package ID
+
+    // Handle dust by converting back to coin and merging with gas
+    const [dustCoin] = tx.moveCall({
+      target: `0x2::coin::from_balance`,
+      typeArguments: [coinType],
+      arguments: [dust as any],
+    });
+    tx.mergeCoins(tx.gas, [dustCoin as any]);
+
+    // Handle referrer fee if present
+    if (quote.referrerFee > 0n) {
+      // Convert referrer address to Sui address format
+      const referrerAddress = `0x${Buffer.from(
+        quote.referrer.address.toUint8Array()
+      ).toString("hex")}`;
+
+      // Split coins for referrer fee from gas
+      const [referrerCoin] = tx.splitCoins(tx.gas, [
+        quote.referrerFee.toString(),
+      ]);
+
+      // Transfer the referrer fee
+      tx.transferObjects([referrerCoin], referrerAddress);
+    }
+
+    // Convert manager state ID to bytes
+    const managerStateBytes = Buffer.from(managerStateId.substring(2), "hex");
+
+    // Make NTT v1 request
+    const [requestBytes] = tx.moveCall({
+      target: `${this.executorRequestsId}::executor_requests::make_ntt_v1_request`,
+      arguments: [
+        sourceChain as any,
+        tx.pure.vector("u8", managerStateBytes),
+        sequence as any,
+      ],
+    });
+
+    // Split coins for executor fee (always paid in native gas token - SUI)
+    const [executorCoin] = tx.splitCoins(tx.gas, [
+      quote.estimatedCost.toString(),
+    ]);
+
+    // Convert destination address to Sui address format for executor
+    const destinationAddress = `0x${Buffer.from(
+      destination.address.toUint8Array()
+    ).toString("hex")}`;
+
+    // Determine executor destination address
+    let executorDestAddress: string;
+    if (destination.chain === "Solana") {
+      // For Solana destination, we'd need the manager address
+      // For now, use the destination address
+      executorDestAddress = destinationAddress;
+    } else {
+      executorDestAddress = destinationAddress;
+    }
+
+    // Call request_execution on the executor
+    tx.moveCall({
+      target: `${this.executorId}::executor::request_execution`,
+      arguments: [
+        executorCoin, // payment for execution
+        tx.object("0x6"), // clock
+        tx.pure.u16(destinationChainId), // destination chain
+        tx.pure.address(executorDestAddress), // destination manager address
+        tx.pure.address(
+          typeof sender === "string"
+            ? sender
+            : `0x${Array.from(sender.address || [])
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join("")}`
+        ), // payer address
+        tx.pure.vector("u8", Array.from(quote.signedQuote)), // signed quote
+        requestBytes as any, // request bytes from make_ntt_v1_request
+        tx.pure.vector("u8", Array.from(quote.relayInstructions)), // relay instructions
+      ],
+    });
+
+    return tx;
+  }
+
+  async estimateMsgValueAndGasLimit(
+    recipient: ChainAddress | undefined
+  ): Promise<{ msgValue: bigint; gasLimit: bigint }> {
+    let msgValue = 0n;
+
+    // Base cost for Sui transaction execution
+    msgValue += 1_000_000n; // Base transaction fee (~0.001 SUI)
+
+    // Cost for Move calls (multiple function calls)
+    msgValue += 3_000_000n; // NTT transfer operations (~0.003 SUI)
+    msgValue += 2_000_000n; // Executor operations (~0.002 SUI)
+
+    // Cost for object operations
+    msgValue += 500_000n; // Object reads and writes (~0.0005 SUI)
+
+    // Additional cost if recipient might need account creation
+    if (recipient) {
+      // In Sui, accounts are created automatically, but we might need
+      // to account for dynamic field creation or other setup costs
+      msgValue += 1_000_000n; // Account setup buffer (~0.001 SUI)
+    }
+
+    // Buffer for gas price fluctuations (10% extra)
+    msgValue = (msgValue * 110n) / 100n;
+
+    // Gas limit is conceptually different in Sui (computation units)
+    // This is an estimate based on the complexity of our operations
+    const gasLimit = 10_000_000n; // 10M computation units
+
+    return { msgValue, gasLimit };
+  }
+
+  // Utility method to get supported destination chains
+  async getSupportedDestinationChains(): Promise<Chain[]> {
+    // Sui executor supports Solana only
+    return ["Solana"] as Chain[];
+  }
+
+  private getFieldsFromObjectResponse(object: any) {
+    const content = object.data?.content;
+    return content && content.dataType === "moveObject" ? content.fields : null;
+  }
+
+  private async getObjectFields(
+    provider: SuiClient,
+    objectId: string
+  ): Promise<Record<string, any> | null> {
+    if (!isValidSuiAddress(objectId)) {
+      throw new Error(`Invalid object ID: ${objectId}`);
+    }
+
+    const res = await provider.getObject({
+      id: objectId,
+      options: {
+        showContent: true,
+      },
+    });
+    return this.getFieldsFromObjectResponse(res);
+  }
+
+  private async getWormholePackageId(
+    provider: SuiClient,
+    coreBridgeStateId: string
+  ): Promise<string> {
+    let currentPackage;
+    let nextCursor;
+    do {
+      const dynamicFields = await provider.getDynamicFields({
+        parentId: coreBridgeStateId,
+        cursor: nextCursor,
+      });
+      currentPackage = dynamicFields.data.find((field) =>
+        field.name.type.endsWith("CurrentPackage")
+      );
+      nextCursor = dynamicFields.hasNextPage ? dynamicFields.nextCursor : null;
+    } while (nextCursor && !currentPackage);
+
+    if (!currentPackage) {
+      throw new Error("CurrentPackage not found");
+    }
+
+    const fields = await this.getObjectFields(
+      provider,
+      currentPackage.objectId
+    );
+    const packageId = fields?.["value"]?.fields?.package;
+    if (!packageId) {
+      throw new Error("Unable to get current package");
+    }
+
+    return packageId;
+  }
+
+  private async getPackageId(provider: SuiClient, managerStateId: string) {
+    const state = await provider.getObject({
+      id: managerStateId,
+      options: { showContent: true },
+    });
+
+    if (!state.data?.content || state.data.content.dataType !== "moveObject") {
+      throw new Error("Failed to fetch NTT state object");
+    }
+
+    const objectType = state.data.content.type;
+    const packageId = objectType.split("::")[0];
+    if (!packageId || !packageId.startsWith("0x")) {
+      throw new Error("Could not extract package ID from state object type");
+    }
+
+    return packageId;
+  }
+}
