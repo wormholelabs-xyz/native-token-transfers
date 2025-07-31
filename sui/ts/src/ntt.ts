@@ -237,22 +237,6 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     return this.packageId!;
   }
 
-  private async getWormholePackageId(): Promise<string> {
-    // For Sui, we need to get the Wormhole package ID
-    // This would typically be extracted from the transceiver configuration
-    // For now, we'll use a placeholder that would need to be configured
-    // In a real implementation, this should be derived from the transceiver registry
-    const wormholeTransceiver = this.contracts.ntt?.transceiver?.["wormhole"];
-    if (!wormholeTransceiver) {
-      throw new Error("Wormhole transceiver not configured");
-    }
-
-    // Extract package ID from the transceiver object ID
-    // This is a simplified approach - in practice, we'd query the transceiver object
-    // and extract its package ID similar to how we do it for the NTT package
-    return await this.getPackageIdFromObject(wormholeTransceiver);
-  }
-
   async getPackageIdFromObject(objectId: string): Promise<string> {
     // TODO: replace with getOriginalPackageId from our sdk?
     const object = await this.getSuiObject(
@@ -780,119 +764,31 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     // Build transaction to redeem attestations
     const txb = new Transaction();
 
-    try {
-      // Get required objects and IDs
-      const packageId = await this.getPackageId();
-      const stateObjectId = this.contracts.ntt!["manager"];
-      const tokenType = this.contracts.ntt!["token"];
+    // TODO: This would call ntt::redeem for each attestation
+    // We need:
+    // 1. NTT state object ID (this.contracts.ntt!["manager"])
+    // 2. Coin metadata object ID
+    // 3. Clock object ID (usually 0x6)
+    // 4. Package ID for the NTT contracts
+    // 5. Validated transceiver messages from attestations
 
-      // Get coin metadata for the token type
-      let coinMetadataId: string;
-      if (tokenType === "0x2::sui::SUI") {
-        // For SUI, coin metadata is at a well-known address
-        coinMetadataId = "0x9"; // Standard SUI coin metadata object ID
-      } else {
-        // For other tokens, we'd need to query the coin metadata
-        // This is a limitation - we don't currently support other tokens
-        throw new Error(`Redeem not yet implemented for token: ${tokenType}`);
-      }
-
-      // Process each attestation
-      for (let i = 0; i < attestations.length; i++) {
-        const attestation = attestations[i];
-        if (!attestation) {
-          throw new Error(`Attestation at index ${i} is undefined`);
-        }
-
-        // Validate attestation type
-        if (attestation.payloadName !== "WormholeTransfer") {
-          throw new Error(
-            `Unsupported attestation type: ${attestation.payloadName}`
-          );
-        }
-
-        // Extract NTT manager payload from Wormhole attestation
-        const nttManagerPayload = attestation.payload["nttManagerPayload"];
-        const sourceChain = attestation.emitterChain;
-
-        // Convert source chain to chain ID
-        const sourceChainId = chainToChainId(sourceChain);
-
-        // Extract message details
-        const messageId = nttManagerPayload.id;
-        const senderAddress = nttManagerPayload.sender;
-
-        // For Sui, we need to create a ValidatedTransceiverMessage object
-        // This would typically be done by the transceiver (Wormhole) program
-        // For now, we'll simulate the process by constructing the message data
-
-        // Create the raw message bytes that would come from the transceiver
-        const messageIdBytes =
-          messageId instanceof Uint8Array
-            ? messageId
-            : new Uint8Array(messageId);
-        const senderBytes = senderAddress.toUint8Array();
-        const messageBytes = new Uint8Array([
-          ...messageIdBytes,
-          ...senderBytes,
-          // The payload would be encoded according to the NTT message format
-          // This is a simplified representation
-        ]);
-
-        // Create version gated object (this controls which version of the contract can be called)
-        const versionGated = txb.moveCall({
-          target: `${packageId}::version_control::new_version_gated`,
-          arguments: [],
-        });
-
-        // For the first implementation, we'll assume this is a Wormhole transceiver (index 0)
-        const wormholePackageId = await this.getWormholePackageId();
-
-        // Create a validated transceiver message
-        // This would normally be created by calling the transceiver's receive function first
-        // For this implementation, we'll construct it directly
-        const validatedMessage = txb.moveCall({
-          target: `${wormholePackageId}::transceiver::create_validated_message`,
-          typeArguments: [
-            `${wormholePackageId}::wormhole_transceiver::WormholeTransceiver`,
-            "vector<u8>",
-          ],
-          arguments: [
-            txb.pure.u16(sourceChainId),
-            txb.pure.vector(
-              "u8",
-              Array.from(attestation.emitterAddress.toUint8Array())
-            ),
-            txb.pure.vector("u8", Array.from(messageBytes)),
-          ],
-        });
-
-        // Call the main redeem function
-        txb.moveCall({
-          target: `${packageId}::ntt::redeem`,
-          typeArguments: [
-            tokenType, // CoinType
-            `${wormholePackageId}::wormhole_transceiver::WormholeTransceiver`, // Transceiver type
-          ],
-          arguments: [
-            txb.object(stateObjectId), // &mut State<CoinType>
-            versionGated, // VersionGated
-            txb.object(coinMetadataId), // &CoinMetadata<CoinType>
-            validatedMessage, // ValidatedTransceiverMessage<Transceiver, vector<u8>>
-            txb.object("0x6"), // &Clock (standard Sui clock object)
-          ],
-        });
-      }
-    } catch (error) {
-      throw new Error(
-        `Failed to create redeem transaction: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
+    // For each attestation:
+    // const validatedMessage = parseAttestation(attestation);
+    //
+    // txb.moveCall({
+    //   target: `${nttPackageId}::ntt::redeem`,
+    //   typeArguments: [tokenType, transceiverType],
+    //   arguments: [
+    //     state,
+    //     versionGated,
+    //     coinMetadata,
+    //     validatedMessage,
+    //     clock
+    //   ]
+    // });
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "Redeem NTT Transfer"
