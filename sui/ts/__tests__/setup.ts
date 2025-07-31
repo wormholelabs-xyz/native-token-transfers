@@ -11,3 +11,8 @@ global.console = {
   // Keep error for debugging
   error: console.error,
 };
+
+// Handle BigInt serialization for Jest
+(BigInt.prototype as any).toJSON = function() {
+  return this.toString() + 'n';
+};

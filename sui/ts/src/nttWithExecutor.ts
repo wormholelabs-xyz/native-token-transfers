@@ -95,7 +95,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       throw new Error("Executor only supports Solana destination chains");
     }
 
-    // Create a single transaction following executeSuiNttTransfer pattern
+    // Create a single transaction following executor pattern
     const tx = await this.createSuiNttTransferWithExecutor(
       sender,
       destination,
@@ -149,6 +149,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       throw new Error("No transceiver state ID found");
     }
 
+    // Get package ID for transceiver
     const { packageId: transceiverId } = await this.getPackageId(
       ntt.provider,
       transceiverStateId
@@ -182,6 +183,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
     const coinMetadataId = coinMetadata.id;
 
     // Split coins for transfer amount
+    // Handle separate cases for native vs. non-native tokens
     const [coin] = await (async () => {
       if (typeof token === "string" && token === "native") {
         return tx.splitCoins(tx.gas, [tx.pure.u64(amount)]);
@@ -231,13 +233,14 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       ],
     });
 
-    // Get sequence info
+    // Get source chain info
     const [sourceChain] = tx.moveCall({
       target: `${packageId}::state::get_chain_id`,
       typeArguments: [coinType],
       arguments: [tx.object(managerStateId)],
     });
 
+    // Get next sequence number
     const [sequenceBytes32] = tx.moveCall({
       target: `${packageId}::state::get_next_sequence`,
       typeArguments: [coinType],
