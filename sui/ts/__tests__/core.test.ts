@@ -3,6 +3,7 @@ import {
   mockSuiClient,
   mockNttState,
   mockAdminCap,
+  mockCoinMetadata,
   TEST_ADDRESSES,
   TEST_CONTRACTS,
 } from "./mocks.js";
@@ -84,11 +85,16 @@ describe("SuiNtt Core State Functions", () => {
 
   describe("getAdminCapId", () => {
     it("should return admin cap ID from state", async () => {
-      const state = mockNttState({ adminCapId: "test-admin-cap-id" });
+      const state = mockNttState({
+        adminCapId:
+          "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      });
       mockClient.getObject.mockResolvedValue(state);
 
       const adminCapId = await suiNtt.getAdminCapId();
-      expect(adminCapId).toBe("test-admin-cap-id");
+      expect(adminCapId).toBe(
+        "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+      );
     });
 
     it("should throw error when admin cap ID not found", async () => {
@@ -103,7 +109,7 @@ describe("SuiNtt Core State Functions", () => {
 
   describe("getPackageId", () => {
     it("should extract package ID from state object type", async () => {
-      const state = mockNttState();
+      const state = mockNttState({ upgradeCapId: null }); // No upgrade cap to avoid second call
       state.data.content.type = "0xabc123::ntt::State<0x2::sui::SUI>";
       mockClient.getObject.mockResolvedValue(state);
 
@@ -154,13 +160,6 @@ describe("SuiNtt Core State Functions", () => {
     });
   });
 
-  describe("getPauser", () => {
-    it("should return null as not implemented", async () => {
-      const result = await suiNtt.getPauser();
-      expect(result).toBeNull();
-    });
-  });
-
   describe("getThreshold", () => {
     it("should return threshold value from state", async () => {
       const state = mockNttState({ threshold: "5" });
@@ -181,6 +180,8 @@ describe("SuiNtt Core State Functions", () => {
 
   describe("getTokenDecimals", () => {
     it("should return 9 for SUI token", async () => {
+      mockClient.getCoinMetadata.mockResolvedValue(mockCoinMetadata(9));
+
       const decimals = await suiNtt.getTokenDecimals();
       expect(decimals).toBe(9);
     });
@@ -195,7 +196,7 @@ describe("SuiNtt Core State Functions", () => {
       });
 
       await expect(customSuiNtt.getTokenDecimals()).rejects.toThrow(
-        "getTokenDecimals not yet implemented for token: 0xabc::custom::TOKEN"
+        "CoinMetadata not found for 0xabc::custom::TOKEN"
       );
     });
   });

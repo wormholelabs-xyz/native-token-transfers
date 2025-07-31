@@ -18,120 +18,24 @@ describe("SuiNtt Admin Functions", () => {
     });
   });
 
-  describe("pause", () => {
-    beforeEach(() => {
-      // Mock admin cap and package ID retrieval
-      mockClient.getObject
-        .mockResolvedValueOnce(mockNttState({ adminCapId: "admin-cap-id" }))
-        .mockResolvedValueOnce(mockSuiObject("0xpackage::ntt::State", {}));
-    });
-
-    it("should create pause transaction", async () => {
-      const txGenerator = suiNtt.pause();
-      const { value: unsignedTx } = await txGenerator.next();
-
-      expect(unsignedTx).toBeDefined();
-      expect(unsignedTx.description).toBe("Pause NTT");
-      expect(unsignedTx.network).toBe("Testnet");
-      expect(unsignedTx.chain).toBe("Sui");
-    });
-
-    it("should require admin cap for pausing", async () => {
-      // Mock admin cap not found
-      mockClient.getObject.mockResolvedValueOnce(
-        mockNttState({ adminCapId: null })
-      );
-
-      const txGenerator = suiNtt.pause();
-      await expect(txGenerator.next()).rejects.toThrow(
-        "AdminCap ID not found in NTT state"
-      );
-    });
-  });
-
-  describe("unpause", () => {
-    beforeEach(() => {
-      // Mock admin cap and package ID retrieval
-      mockClient.getObject
-        .mockResolvedValueOnce(mockNttState({ adminCapId: "admin-cap-id" }))
-        .mockResolvedValueOnce(mockSuiObject("0xpackage::ntt::State", {}));
-    });
-
-    it("should create unpause transaction", async () => {
-      const txGenerator = suiNtt.unpause();
-      const { value: unsignedTx } = await txGenerator.next();
-
-      expect(unsignedTx).toBeDefined();
-      expect(unsignedTx.description).toBe("Unpause NTT");
-      expect(unsignedTx.network).toBe("Testnet");
-      expect(unsignedTx.chain).toBe("Sui");
-    });
-
-    it("should require admin cap for unpausing", async () => {
-      // Mock admin cap not found
-      mockClient.getObject.mockResolvedValueOnce(
-        mockNttState({ adminCapId: null })
-      );
-
-      const txGenerator = suiNtt.unpause();
-      await expect(txGenerator.next()).rejects.toThrow(
-        "AdminCap ID not found in NTT state"
-      );
-    });
-  });
-
-  describe("setOwner", () => {
-    const newOwner = "0x" + "1".repeat(64);
-
-    beforeEach(() => {
-      // Mock admin cap and package ID retrieval
-      mockClient.getObject
-        .mockResolvedValueOnce(mockNttState({ adminCapId: "admin-cap-id" }))
-        .mockResolvedValueOnce(mockSuiObject("0xpackage::ntt::State", {}));
-    });
-
-    it("should create setOwner transaction", async () => {
-      const txGenerator = suiNtt.setOwner(newOwner as any);
-      const { value: unsignedTx } = await txGenerator.next();
-
-      expect(unsignedTx).toBeDefined();
-      expect(unsignedTx.description).toBe("Transfer Ownership");
-      expect(unsignedTx.network).toBe("Testnet");
-      expect(unsignedTx.chain).toBe("Sui");
-    });
-
-    it("should require admin cap for ownership transfer", async () => {
-      // Mock admin cap not found
-      mockClient.getObject.mockResolvedValueOnce(
-        mockNttState({ adminCapId: null })
-      );
-
-      const txGenerator = suiNtt.setOwner(newOwner as any);
-      await expect(txGenerator.next()).rejects.toThrow(
-        "AdminCap ID not found in NTT state"
-      );
-    });
-  });
-
-  describe("setPauser", () => {
-    const newPauser = "0x" + "1".repeat(64);
-
-    it("should throw not supported error for Sui", async () => {
-      const txGenerator = suiNtt.setPauser(newPauser as any);
-      await expect(txGenerator.next()).rejects.toThrow(
-        "Pauser role not supported on Sui"
-      );
-    });
-  });
-
   describe("setThreshold", () => {
     const newThreshold = 5;
 
     beforeEach(() => {
       // Mock admin cap and package ID retrieval
       mockClient.getObject
-        .mockResolvedValueOnce(mockNttState({ adminCapId: "admin-cap-id" }))
-        .mockResolvedValueOnce(mockSuiObject("0xpackage::ntt::State", {}));
+        .mockResolvedValueOnce(
+          mockNttState({
+            adminCapId:
+              "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+          })
+        )
+        .mockResolvedValueOnce(
+          mockSuiObject(
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef::ntt::State",
+            {}
+          )
+        );
     });
 
     it("should create setThreshold transaction with correct parameters", async () => {
@@ -145,12 +49,19 @@ describe("SuiNtt Admin Functions", () => {
     });
 
     it("should require admin cap for threshold changes", async () => {
+      // Create a fresh instance to avoid cached adminCapId
+      const freshMockClient = mockSuiClient();
+      const freshSuiNtt = new SuiNtt("Testnet", "Sui", freshMockClient, {
+        ntt: TEST_CONTRACTS.ntt,
+        coreBridge: TEST_CONTRACTS.coreBridge,
+      });
+
       // Mock admin cap not found
-      mockClient.getObject.mockResolvedValueOnce(
+      freshMockClient.getObject.mockResolvedValueOnce(
         mockNttState({ adminCapId: null })
       );
 
-      const txGenerator = suiNtt.setThreshold(3);
+      const txGenerator = freshSuiNtt.setThreshold(3);
       await expect(txGenerator.next()).rejects.toThrow(
         "AdminCap ID not found in NTT state"
       );

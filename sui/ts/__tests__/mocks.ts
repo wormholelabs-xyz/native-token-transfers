@@ -23,9 +23,12 @@ export const mockSuiClient = (): jest.Mocked<SuiClient> => {
 // Mock SuiMoveObject structure for NTT state
 export const mockNttState = (overrides: any = {}) => ({
   data: {
+    digest: 'mockDigest123',
+    objectId: 'mockObjectId123',
+    version: '1',
     content: {
-      dataType: 'moveObject',
-      type: '0x123::ntt::State<0x2::sui::SUI>',
+      dataType: 'moveObject' as const,
+      type: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef::ntt::State<0x2::sui::SUI>',
       hasPublicTransfer: false,
       fields: {
         id: { id: 'mock-state-id' },
@@ -76,8 +79,8 @@ export const mockNttState = (overrides: any = {}) => ({
         chain_id: '21', // Sui chain ID
         next_sequence: '0',
         version: '1',
-        admin_cap_id: overrides.adminCapId || 'mock-admin-cap-id',
-        upgrade_cap_id: overrides.upgradeCapId || 'mock-upgrade-cap-id',
+        admin_cap_id: overrides.adminCapId !== undefined ? overrides.adminCapId : '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        upgrade_cap_id: overrides.upgradeCapId !== undefined ? overrides.upgradeCapId : '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
         paused: overrides.paused || false,
         ...overrides.fields
       }
@@ -86,9 +89,9 @@ export const mockNttState = (overrides: any = {}) => ({
 });
 
 // Mock AdminCap Object
-export const mockAdminCap = (owner: string = '0x123') => ({
+export const mockAdminCap = (owner: string = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef') => ({
   data: {
-    objectId: 'mock-admin-cap-id',
+    objectId: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
     owner: {
       AddressOwner: owner
     }
@@ -159,7 +162,7 @@ export const mockTransceiverState = () => ({
       dataType: 'moveObject',
       type: '0x456::wormhole_transceiver::State',
       fields: {
-        admin_cap_id: 'mock-transceiver-admin-cap-id',
+        admin_cap_id: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
         peers: {
           fields: {
             id: { id: 'mock-transceiver-peers-table-id' },
@@ -168,7 +171,7 @@ export const mockTransceiverState = () => ({
         },
         emitter_cap: {
           fields: {
-            id: { id: 'mock-emitter-cap-id' }
+            id: { id: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890' }
           }
         }
       }
@@ -292,6 +295,9 @@ export const mockAttestation = (sourceChain: any = 'Ethereum') => ({
 // Mock standard Sui object response
 export const mockSuiObject = (type: string, fields: any) => ({
   data: {
+    digest: 'mockDigest',
+    objectId: 'mockObjectId',
+    version: '1',
     content: {
       dataType: 'moveObject' as const,
       type,

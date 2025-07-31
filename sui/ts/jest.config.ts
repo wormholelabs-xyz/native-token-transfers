@@ -3,13 +3,16 @@ import type { Config } from 'jest';
 const config: Config = {
   preset: 'ts-jest',
   testEnvironment: 'node',
+  extensionsToTreatAsEsm: ['.ts'],
   roots: ['<rootDir>/src', '<rootDir>/__tests__'],
   testMatch: [
     '**/__tests__/**/*.test.ts',
     '**/?(*.)+(spec|test).ts'
   ],
   transform: {
-    '^.+\\.ts$': 'ts-jest',
+    '^.+\\.ts$': ['ts-jest', {
+      useESM: true
+    }],
   },
   collectCoverageFrom: [
     'src/**/*.ts',
@@ -22,7 +25,8 @@ const config: Config = {
   testTimeout: 30000,
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
-    '^@wormhole-foundation/sdk-definitions-ntt$': '<rootDir>/__tests__/mock-ntt-definitions.ts'
+    '^@wormhole-foundation/sdk-definitions-ntt$': '<rootDir>/__tests__/mock-ntt-definitions.ts',
+    '^(\\.{1,2}/.*)\\.js$': '$1'
   }
 };
 

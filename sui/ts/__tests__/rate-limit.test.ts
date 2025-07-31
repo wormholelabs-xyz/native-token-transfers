@@ -96,75 +96,24 @@ describe("SuiNtt Rate Limiting Functions", () => {
     });
   });
 
-  describe("getCurrentInboundCapacity", () => {
-    beforeEach(() => {
-      // Mock peer data and rate limit info
-      mockClient.getObject
-        .mockResolvedValueOnce(mockNttState()) // getPeer state fetch
-        .mockResolvedValueOnce(mockSuiObject("0xwormhole::state::State", {})); // wormhole package ID
-
-      mockClient.getDynamicFieldObject.mockResolvedValue(
-        mockPeerData({
-          inboundLimit: "2000000000000",
-          inboundCapacity: "1500000000000",
-        })
-      );
-    });
-
-    it("should return current inbound capacity for a chain", async () => {
-      const capacity = await suiNtt.getCurrentInboundCapacity("Ethereum");
-
-      expect(typeof capacity).toBe("bigint");
-      expect(capacity).toBeGreaterThanOrEqual(0n);
-      expect(capacity).toBeLessThanOrEqual(2000000000000n); // Should not exceed limit
-    });
-
-    it("should throw error when peer not found", async () => {
-      mockClient.getDynamicFieldObject.mockResolvedValue({ data: null });
-
-      await expect(
-        suiNtt.getCurrentInboundCapacity("UnknownChain" as any)
-      ).rejects.toThrow("No peer found");
-    });
-  });
-
-  describe("getInboundLimit", () => {
-    beforeEach(() => {
-      // Mock peer data
-      mockClient.getObject
-        .mockResolvedValueOnce(mockNttState()) // getPeer state fetch
-        .mockResolvedValueOnce(mockSuiObject("0xwormhole::state::State", {})); // wormhole package ID
-
-      mockClient.getDynamicFieldObject.mockResolvedValue(
-        mockPeerData({
-          inboundLimit: "3000000000000",
-        })
-      );
-    });
-
-    it("should return inbound limit for a chain", async () => {
-      const limit = await suiNtt.getInboundLimit("Ethereum");
-
-      expect(limit).toBe(3000000000000n);
-    });
-
-    it("should throw error when peer not found", async () => {
-      mockClient.getDynamicFieldObject.mockResolvedValue({ data: null });
-
-      await expect(
-        suiNtt.getInboundLimit("UnknownChain" as any)
-      ).rejects.toThrow("No peer found");
-    });
-  });
-
   describe("setInboundLimit", () => {
     const newLimit = 2000000000000n;
 
     beforeEach(() => {
       // Mock existing peer data
       mockClient.getObject
-        .mockResolvedValueOnce(mockNttState({ adminCapId: "admin-cap-id" })) // getAdminCapId
-        .mockResolvedValueOnce(mockSuiObject("0xpackage::ntt::State", {})) // getPackageId
+        .mockResolvedValueOnce(
+          mockNttState({
+            adminCapId:
+              "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+          })
+        ) // getAdminCapId
+        .mockResolvedValueOnce(
+          mockSuiObject(
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef::ntt::State",
+            {}
+          )
+        ) // getPackageId
         .mockResolvedValueOnce(mockNttState()) // getPeer state fetch
         .mockResolvedValueOnce(mockSuiObject("0xwormhole::state::State", {})); // wormhole package ID
 

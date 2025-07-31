@@ -805,6 +805,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
   }
 
   async isRelayingAvailable(destination: Chain): Promise<boolean> {
+    // We don't have a quoter in Sui NTT, so relaying is currently not available
     return false;
   }
 
