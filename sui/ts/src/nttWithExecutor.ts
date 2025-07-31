@@ -15,9 +15,10 @@ import {
   type SuiPlatformType,
   SuiUnsignedTransaction,
 } from "@wormhole-foundation/sdk-sui";
+import { PublicKey } from "@solana/web3.js";
 import { SuiClient } from "@mysten/sui/client";
 import { Transaction } from "@mysten/sui/transactions";
-import { isValidSuiAddress } from "@mysten/sui/utils";
+import { isValidSuiAddress, SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 import { SuiNtt } from "./ntt.js";
 
 // TODO: Add Mainnet addresses when available
@@ -38,6 +39,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
   readonly executorId: string;
   readonly executorRequestsId: string;
   readonly coreBridgeStateId: string;
+  readonly nttContracts: Ntt.Contracts | undefined;
 
   constructor(
     readonly network: N,
@@ -55,6 +57,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES].executorRequestsId;
     this.coreBridgeStateId =
       SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES].coreBridgeStateId;
+    this.nttContracts = contracts.ntt;
   }
 
   static async fromRpc<N extends Network>(
@@ -131,7 +134,25 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
         : token
     );
     const coinType: string = tokenAddress.getCoinType();
-    const packageId = await this.getPackageId(ntt.provider, managerStateId);
+    const { packageId, fields } = await this.getPackageId(
+      ntt.provider,
+      managerStateId
+    );
+
+    // Get transceiver info
+    const [transceiverStateId] = await this.getTransceivers(
+      ntt.provider,
+      fields.transceivers.fields.id.id
+    );
+
+    if (!transceiverStateId) {
+      throw new Error("No transceiver state ID found");
+    }
+
+    const { packageId: transceiverId } = await this.getPackageId(
+      ntt.provider,
+      transceiverStateId
+    );
 
     // Convert destination address to bytes
     let destinationAddressBytes: Uint8Array;
@@ -243,13 +264,44 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
         versionGated as any,
         tx.object(coinMetadataId),
         ticket as any,
-        tx.object("0x6"), // clock
+        tx.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
 
-    // TODO: Implement transceiver operations when we have proper transceiver info
-    // For now, we'll skip the transceiver message creation and publishing
-    // since we don't have transceiver state ID and package ID
+    // Create transceiver message
+    const [transceiverMessage] = tx.moveCall({
+      target: `${packageId}::state::create_transceiver_message`,
+      typeArguments: [
+        `${transceiverId}::wormhole_transceiver::TransceiverAuth`,
+        coinType,
+      ],
+      arguments: [
+        tx.object(managerStateId),
+        sequenceBytes32 as any,
+        tx.object(SUI_CLOCK_OBJECT_ID),
+      ],
+    });
+
+    // Release outbound message
+    const [messageTicket] = tx.moveCall({
+      target: `${transceiverId}::wormhole_transceiver::release_outbound`,
+      typeArguments: [`${packageId}::auth::ManagerAuth`],
+      arguments: [tx.object(transceiverStateId), transceiverMessage as any],
+    });
+
+    // Split fee coin for publishing message
+    const [feeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(0n)]);
+
+    // Publish message to Wormhole
+    tx.moveCall({
+      target: `${coreBridgePackageId}::publish_message::publish_message`,
+      arguments: [
+        tx.object(this.coreBridgeStateId),
+        feeCoin,
+        messageTicket as any,
+        tx.object(SUI_CLOCK_OBJECT_ID),
+      ],
+    });
 
     // Handle dust by converting back to coin and merging with gas
     const [dustCoin] = tx.moveCall({
@@ -293,17 +345,32 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       quote.estimatedCost.toString(),
     ]);
 
-    // Convert destination address to Sui address format for executor
-    const destinationAddress = `0x${Buffer.from(
-      destination.address.toUint8Array()
-    ).toString("hex")}`;
-
-    // Determine executor destination address
-    let executorDestAddress: string;
+    // Handle destination address for Solana and other chains
+    let destinationAddress: string;
     if (destination.chain === "Solana") {
-      // For Solana destination, we'd need the manager address
-      // For now, use the destination address
-      executorDestAddress = destinationAddress;
+      const destAddrString = destination.address.toString();
+      const pubkey = new PublicKey(destAddrString);
+      destinationAddress = `0x${pubkey.toBuffer().toString("hex")}`;
+    } else {
+      destinationAddress = destination.address.toString();
+      if (!destinationAddress.startsWith("0x")) {
+        destinationAddress = `0x${destinationAddress}`;
+      }
+    }
+
+    // Get destination manager address from NTT peer
+    let destinationManagerAddress: string | undefined;
+    const destPlatform = chainToPlatform(destination.chain);
+    if (destPlatform === "Solana" || destPlatform === "Evm") {
+      const peer = (await ntt.getPeer(destination.chain))?.address;
+      if (peer) {
+        destinationManagerAddress = peer.address.toString();
+      }
+    }
+
+    let executorDestAddress: string;
+    if (destinationManagerAddress) {
+      executorDestAddress = destinationManagerAddress;
     } else {
       executorDestAddress = destinationAddress;
     }
@@ -313,7 +380,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       target: `${this.executorId}::executor::request_execution`,
       arguments: [
         executorCoin, // payment for execution
-        tx.object("0x6"), // clock
+        tx.object(SUI_CLOCK_OBJECT_ID),
         tx.pure.u16(destinationChainId), // destination chain
         tx.pure.address(executorDestAddress), // destination manager address
         tx.pure.address(
@@ -323,9 +390,9 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
                 .map((b) => b.toString(16).padStart(2, "0"))
                 .join("")}`
         ), // payer address
-        tx.pure.vector("u8", Array.from(quote.signedQuote)), // signed quote
-        requestBytes as any, // request bytes from make_ntt_v1_request
-        tx.pure.vector("u8", Array.from(quote.relayInstructions)), // relay instructions
+        tx.pure.vector("u8", Array.from(quote.signedQuote)),
+        requestBytes as any,
+        tx.pure.vector("u8", Array.from(quote.relayInstructions)),
       ],
     });
 
@@ -425,14 +492,17 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
     return packageId;
   }
 
-  private async getPackageId(provider: SuiClient, managerStateId: string) {
+  private async getPackageId(
+    provider: SuiClient,
+    stateId: string
+  ): Promise<{ packageId: string; fields?: any }> {
     const state = await provider.getObject({
-      id: managerStateId,
+      id: stateId,
       options: { showContent: true },
     });
 
     if (!state.data?.content || state.data.content.dataType !== "moveObject") {
-      throw new Error("Failed to fetch NTT state object");
+      throw new Error("Failed to fetch state object");
     }
 
     const objectType = state.data.content.type;
@@ -441,6 +511,44 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       throw new Error("Could not extract package ID from state object type");
     }
 
-    return packageId;
+    const fields = state.data.content.fields;
+
+    return { packageId, fields };
+  }
+
+  private async getTransceivers(
+    provider: SuiClient,
+    transceiverRegistryId: string
+  ): Promise<string[]> {
+    const dynamicFields = await provider.getDynamicFields({
+      parentId: transceiverRegistryId,
+    });
+
+    for (const field of dynamicFields.data) {
+      if (field.name?.type?.includes("transceiver_registry::Key")) {
+        try {
+          const transceiverInfo = await provider.getObject({
+            id: field.objectId,
+            options: { showContent: true },
+          });
+
+          if (
+            transceiverInfo.data?.content &&
+            transceiverInfo.data.content.dataType === "moveObject"
+          ) {
+            const infoFields = (transceiverInfo.data.content.fields as any)
+              .value.fields;
+            const transceiverIndex = infoFields.id;
+
+            if (transceiverIndex === 0) {
+              return [infoFields.state_object_id as string];
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to read transceiver info: ${e}`);
+        }
+      }
+    }
+    throw new Error("Unable to find transceivers");
   }
 }
