@@ -405,31 +405,11 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
   async estimateMsgValueAndGasLimit(
     recipient: ChainAddress | undefined
   ): Promise<{ msgValue: bigint; gasLimit: bigint }> {
+    // Message value should be 0 for Sui executor
     let msgValue = 0n;
 
-    // Base cost for Sui transaction execution
-    msgValue += 1_000_000n; // Base transaction fee (~0.001 SUI)
-
-    // Cost for Move calls (multiple function calls)
-    msgValue += 3_000_000n; // NTT transfer operations (~0.003 SUI)
-    msgValue += 2_000_000n; // Executor operations (~0.002 SUI)
-
-    // Cost for object operations
-    msgValue += 500_000n; // Object reads and writes (~0.0005 SUI)
-
-    // Additional cost if recipient might need account creation
-    if (recipient) {
-      // In Sui, accounts are created automatically, but we might need
-      // to account for dynamic field creation or other setup costs
-      msgValue += 1_000_000n; // Account setup buffer (~0.001 SUI)
-    }
-
-    // Buffer for gas price fluctuations (10% extra)
-    msgValue = (msgValue * 110n) / 100n;
-
-    // Gas limit is conceptually different in Sui (computation units)
-    // This is an estimate based on the complexity of our operations
-    const gasLimit = 10_000_000n; // 10M computation units
+    // Gas limit here is an estimate based on the complexity of our operations
+    const gasLimit = 10_000_000n;
 
     return { msgValue, gasLimit };
   }
