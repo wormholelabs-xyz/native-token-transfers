@@ -201,9 +201,9 @@ describe("SuiNttWithExecutor", () => {
       await expect(txGenerator.next()).rejects.toThrow("Quote has expired");
     });
 
-    it("should throw error for non-Solana destination chains", async () => {
-      const ethereumDestination = {
-        chain: "Ethereum" as const,
+    it("should throw error for non-Solana/EVM destination chains", async () => {
+      const nearDestination = {
+        chain: "Near" as const,
         address: {
           toUint8Array: () => new Uint8Array(32).fill(1),
         },
@@ -211,14 +211,14 @@ describe("SuiNttWithExecutor", () => {
 
       const txGenerator = suiNttWithExecutor.transfer(
         sender as any,
-        ethereumDestination,
+        nearDestination,
         transferAmount,
         mockQuote,
         suiNtt
       );
 
       await expect(txGenerator.next()).rejects.toThrow(
-        "Executor only supports Solana destination chains"
+        "Executor only supports Solana and EVM destination chains"
       );
     });
   });
@@ -236,11 +236,18 @@ describe("SuiNttWithExecutor", () => {
   });
 
   describe("getSupportedDestinationChains", () => {
-    it("should return supported Solana chain", async () => {
+    it("should return supported Solana and EVM chains", async () => {
       const chains = await suiNttWithExecutor.getSupportedDestinationChains();
 
       expect(chains).toContain("Solana");
-      expect(chains).toHaveLength(1);
+      expect(chains).toContain("Ethereum");
+      expect(chains).toContain("Bsc");
+      expect(chains).toContain("Polygon");
+      expect(chains).toContain("Avalanche");
+      expect(chains).toContain("Arbitrum");
+      expect(chains).toContain("Optimism");
+      expect(chains).toContain("Base");
+      expect(chains).toHaveLength(8);
     });
   });
 });

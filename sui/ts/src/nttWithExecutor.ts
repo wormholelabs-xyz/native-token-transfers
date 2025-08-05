@@ -90,9 +90,12 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       throw new Error("Quote has expired");
     }
 
-    // Validate destination chain is supported (Solana only for executor)
-    if (chainToPlatform(destination.chain) !== "Solana") {
-      throw new Error("Executor only supports Solana destination chains");
+    // Validate destination chain is supported (Solana and Evm only for executor)
+    const platform = chainToPlatform(destination.chain);
+    if (platform !== "Solana" && platform !== "Evm") {
+      throw new Error(
+        "Executor only supports Solana and EVM destination chains"
+      );
     }
 
     // Create a single transaction following executor pattern
@@ -128,8 +131,9 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
     // Get required package and object IDs
     const managerStateId = ntt.contracts.ntt!["manager"];
     const token = ntt.contracts.ntt!["token"];
+    const isNativeToken = typeof token === "string" && token === "native";
     const tokenAddress = new SuiAddress(
-      typeof token === "string" && token === "native"
+      isNativeToken
         ? SuiPlatform.nativeTokenId(this.network, this.chain).address
         : token
     );
@@ -306,13 +310,21 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       ],
     });
 
-    // Handle dust by converting back to coin and merging with gas
+    // Handle dust by converting back to coin and merging with gas if native or back to sender otherwise
     const [dustCoin] = tx.moveCall({
       target: `0x2::coin::from_balance`,
       typeArguments: [coinType],
       arguments: [dust as any],
     });
-    tx.mergeCoins(tx.gas, [dustCoin as any]);
+
+    if (isNativeToken) {
+      tx.mergeCoins(tx.gas, [dustCoin as any]);
+    } else {
+      tx.transferObjects(
+        [dustCoin as any],
+        `0x${Buffer.from(sender.address).toString("hex")}`
+      );
+    }
 
     // Handle referrer fee if present
     if (quote.referrerFee > 0n) {
@@ -343,9 +355,9 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       ],
     });
 
-    // Split coins for executor fee (always paid in native gas token - SUI)
+    // Split coins for executor fee
     const [executorCoin] = tx.splitCoins(tx.gas, [
-      quote.estimatedCost.toString(),
+      tx.pure.u64(quote.estimatedCost),
     ]);
 
     // Handle destination address for Solana and other chains
@@ -416,8 +428,17 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
 
   // Utility method to get supported destination chains
   async getSupportedDestinationChains(): Promise<Chain[]> {
-    // Sui executor supports Solana only
-    return ["Solana"] as Chain[];
+    // Sui executor supports Solana and EVM chains
+    return [
+      "Solana",
+      "Ethereum",
+      "Bsc",
+      "Polygon",
+      "Avalanche",
+      "Arbitrum",
+      "Optimism",
+      "Base",
+    ] as Chain[];
   }
 
   private getFieldsFromObjectResponse(object: any) {

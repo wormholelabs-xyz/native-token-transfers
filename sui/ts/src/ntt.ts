@@ -172,7 +172,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     provider: SuiClient,
     config: ChainsConfig<N, SuiPlatformType>
   ): Promise<SuiNtt<N, SuiChains>> {
-    const [network, chain] = await SuiPlatform.chainFromRpc(provider as any);
+    const [network, chain] = await SuiPlatform.chainFromRpc(provider);
     const conf = config[chain]!;
 
     if (conf.network !== network)
@@ -334,7 +334,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     });
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "Set Threshold"
@@ -442,7 +442,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     }
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "Set Peer"
@@ -630,7 +630,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     }
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "Set Transceiver Peer"
@@ -727,8 +727,8 @@ export class SuiNtt<N extends Network, C extends SuiChains>
 
     // Extract the TransferTicket (first element) from the tuple result
     // Use type assertions to bypass TypeScript's strict checking for tuple access
-    const ticket = (prepareResult as any)[0];
-    // const dust = (prepareResult as any)[1]; // Not using dust for now
+    const ticket = prepareResult[0];
+    // const dust = (prepareResult)[1]; // Not using dust for now
 
     // Now call transfer_tx_sender with just the ticket
     txb.moveCall({
@@ -749,7 +749,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     // - Transferring it back to the sender or handling it appropriately
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "NTT Transfer"
@@ -888,7 +888,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     // });
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "Set Outbound Limit"
@@ -976,7 +976,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     }
 
     const unsignedTx = new SuiUnsignedTransaction(
-      txb as any,
+      txb,
       this.network,
       this.chain,
       "Set Inbound Limit"
