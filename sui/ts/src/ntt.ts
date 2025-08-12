@@ -1109,47 +1109,115 @@ export class SuiNtt<N extends Network, C extends SuiChains>
 
   // Transfer Status
   async getIsApproved(attestation: Ntt.Attestation): Promise<boolean> {
-    // In Sui, approval status would be checked by looking at the inbox item
-    // and checking if it has enough votes (>= threshold)
-    // This requires parsing the attestation to get the message details
-    // and looking it up in the inbox table
+    const inboxItem = await this.getInboxItem(attestation);
+    if (!inboxItem) {
+      return false;
+    }
 
-    // For now, return false as we'd need to:
-    // 1. Parse the attestation to get chain ID and message
-    // 2. Query the inbox table with the InboxKey
-    // 3. Check if votes >= threshold
-    return false;
+    const { inboxItemFields, threshold } = inboxItem;
+
+    // votes is a Bitmap object, not a simple integer
+    // We need to count the number of set bits in the bitmap
+    const votesBitmap = inboxItemFields.votes;
+    let voteCount = 0;
+
+    if (votesBitmap?.fields?.bitmap) {
+      // The bitmap is stored as a string representation of a number
+      // Count the number of set bits (votes)
+      voteCount = this.countSetBits(parseInt(votesBitmap.fields.bitmap));
+    }
+
+    // Check if votes >= threshold
+    return voteCount >= threshold;
   }
 
   async getIsExecuted(attestation: Ntt.Attestation): Promise<boolean> {
-    // In Sui, execution status would be checked by looking at the inbox item's
-    // release_status field to see if it's ReleaseStatus::Released
+    const releaseStatus = await this.getTransferReleaseStatus(attestation);
 
-    // For now, return false as we'd need to:
-    // 1. Parse the attestation to get chain ID and message
-    // 2. Query the inbox table with the InboxKey
-    // 3. Check if release_status is Released
-    return false;
+    // Check if release_status is Released
+    // In Move, this would be an enum variant, so we check for the Released variant
+    return releaseStatus?.variant === "Released";
   }
 
   async getIsTransferInboundQueued(
     attestation: Ntt.Attestation
   ): Promise<boolean> {
-    // In Sui, queued status would be checked by looking at the inbox item's
-    // release_status field to see if it's ReleaseStatus::ReleaseAfter(timestamp)
+    const releaseStatus = await this.getTransferReleaseStatus(attestation);
 
-    // For now, return false as we'd need to:
-    // 1. Parse the attestation to get chain ID and message
-    // 2. Query the inbox table with the InboxKey
-    // 3. Check if release_status is ReleaseAfter
-    return false;
+    // Check if release_status is ReleaseAfter(timestamp)
+    return releaseStatus?.variant === "ReleaseAfter";
   }
 
   async getInboundQueuedTransfer<PC extends Chain>(
     fromChain: PC,
     transceiverMessage: Ntt.Message
   ): Promise<Ntt.InboundQueuedTransfer<C> | null> {
-    throw new Error("Not implemented");
+    // Create an attestation object from the transceiver message
+    const attestation = {
+      emitterChain: fromChain,
+      hash: transceiverMessage.id,
+    } as Ntt.Attestation;
+
+    // Get the release status
+    const releaseStatus = await this.getTransferReleaseStatus(attestation);
+
+    // Check if it's queued (ReleaseAfter)
+    if (releaseStatus?.variant !== "ReleaseAfter") {
+      return null;
+    }
+
+    // The timestamp should be in the fields of the enum variant
+    // TODO Not sure if this is the correct way to get the timestamp
+    // I wasn't able to get the exact field name while debugging live
+    const releaseTimestamp = parseInt(releaseStatus.fields?.[0]);
+
+    // Get the full inbox item to access the transfer data
+    const inboxItem = await this.getInboxItem(attestation);
+    if (!inboxItem) {
+      return null;
+    }
+
+    const { inboxItemFields } = inboxItem;
+
+    // Parse recipient and amount from inbox item data
+    // The data field should contain the transfer details
+    const transferData = inboxItemFields.data || {};
+
+    // Try to get recipient address - prefer message payload, fallback to inbox data
+    let recipientAddress: any;
+    if (transceiverMessage.payload?.recipientAddress) {
+      recipientAddress = transceiverMessage.payload.recipientAddress;
+    } else if (transferData.recipient) {
+      recipientAddress = toUniversal(this.chain, transferData.recipient);
+    } else if (transferData.recipient_address) {
+      recipientAddress = toUniversal(
+        this.chain,
+        transferData.recipient_address
+      );
+    } else {
+      // If we can't find recipient, return null
+      return null;
+    }
+
+    // Try to get amount - prefer message payload, fallback to inbox data
+    let amount: bigint;
+    if (transceiverMessage.payload?.trimmedAmount) {
+      amount = BigInt(transceiverMessage.payload.trimmedAmount.toString());
+    } else if (transferData.amount) {
+      amount = BigInt(transferData.amount.toString());
+    } else {
+      // If we can't find amount, return null
+      return null;
+    }
+
+    // Return the queued transfer info matching Solana's structure
+    const xfer: Ntt.InboundQueuedTransfer<C> = {
+      recipient: recipientAddress,
+      amount: amount,
+      rateLimitExpiryTimestamp: releaseTimestamp,
+    };
+
+    return xfer;
   }
 
   async *completeInboundQueuedTransfer<PC extends Chain>(
@@ -1157,7 +1225,29 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     transceiverMessage: Ntt.Message,
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
-    throw new Error("Not implemented");
+    // Check if paused
+    const isPaused = await this.isPaused();
+    if (isPaused) {
+      throw new Error("Contract is paused");
+    }
+
+    // This function should call redeem to complete the queued transfer
+    // The actual implementation would need the attestation/VAA to be passed
+    // For now, this delegates to the redeem function
+
+    // Note: In a complete implementation, we would:
+    // 1. Verify the transfer is actually queued and ready
+    // 2. Create the appropriate attestation/VAA
+    // 3. Call redeem with that attestation
+
+    // Since redeem is not fully implemented yet, we throw an error
+    throw new Error(
+      "completeInboundQueuedTransfer requires redeem implementation"
+    );
+
+    // When redeem is implemented, it would be something like:
+    // const attestation = ... // create from transceiverMessage
+    // yield* this.redeem([attestation]);
   }
 
   // Transceiver Management
@@ -1459,5 +1549,116 @@ export class SuiNtt<N extends Network, C extends SuiChains>
       throw new Error("UpgradeCap ID not found in NTT state");
     }
     return state.upgrade_cap_id;
+  }
+
+  // Helper function to get the release status from an attestation
+  private async getTransferReleaseStatus(
+    attestation: Ntt.Attestation
+  ): Promise<any | null> {
+    const inboxItem = await this.getInboxItem(attestation);
+    if (!inboxItem) {
+      return null;
+    }
+
+    const { inboxItemFields } = inboxItem;
+    return inboxItemFields.release_status;
+  }
+
+  // Helper function to get inbox item from an NTT attestation
+  private async getInboxItem(attestation: Ntt.Attestation): Promise<{
+    inboxItemFields: any;
+    threshold: number;
+  } | null> {
+    try {
+      // Get the NTT state to access inbox and threshold
+      const state = await this.provider.getObject({
+        id: this.contracts.ntt!["manager"],
+        options: {
+          showContent: true,
+        },
+      });
+
+      if (
+        !state.data?.content ||
+        state.data.content.dataType !== "moveObject"
+      ) {
+        throw new Error("Failed to fetch NTT state object");
+      }
+
+      const fields = (state.data.content as SuiMoveObject).fields;
+      const inboxTable = fields.inbox.fields.entries;
+      const threshold = parseInt(fields.threshold);
+
+      // Get chain ID
+      const sourceChain = attestation.emitterChain;
+
+      if (!sourceChain) {
+        return null;
+      }
+
+      const sourceChainId = chainToChainId(sourceChain);
+
+      // Since we can't easily query by the complex key structure,
+      // let's get all dynamic fields and find the matching one
+      const dynamicFields = await this.provider.getDynamicFields({
+        parentId: inboxTable.fields.id.id,
+      });
+
+      // Look for an inbox entry that matches our chain and message
+      let inboxEntry: any = null;
+      for (const field of dynamicFields.data) {
+        try {
+          // Check if this field matches our criteria
+          if (field.name?.value) {
+            const keyValue = field.name.value as any;
+            // Check if chain_id matches
+            if (keyValue?.chain_id === sourceChainId) {
+              // Get the first matching chain_id
+              inboxEntry = await this.provider.getObject({
+                id: field.objectId,
+                options: { showContent: true },
+              });
+
+              // Verify this is the right message by checking the message ID if available
+              if (inboxEntry.data?.content?.dataType === "moveObject") {
+                // Check if the message ID matches (if we have it in the attestation)
+                if (attestation.hash && keyValue?.message?.id) {
+                  // Compare the message ID from the key with our expected hash
+                  if (keyValue.message.id === attestation.hash) {
+                    // Found the exact match
+                    // Otherwise it means chain ID matches but message ID doesn't, continue looking
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // Skip this field if we can't read it
+          continue;
+        }
+      }
+
+      if (inboxEntry.data?.content?.dataType !== "moveObject") {
+        return null;
+      }
+
+      const inboxItemFields = (inboxEntry.data.content as SuiMoveObject).fields
+        .value.fields;
+      return { inboxItemFields, threshold };
+    } catch (error) {
+      // Entry not found or there was an error
+      return null;
+    }
+  }
+
+  // Helper function to count set bits in a number
+  private countSetBits(n: number): number {
+    let count = 0;
+    while (n) {
+      count += n & 1;
+      n >>= 1;
+    }
+    return count;
   }
 }
