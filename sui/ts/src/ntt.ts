@@ -5,6 +5,7 @@ import {
   toUniversal,
   Contracts,
   ChainsConfig,
+  serialize,
 } from "@wormhole-foundation/sdk-definitions";
 import type { Chain, Network } from "@wormhole-foundation/sdk-base";
 import { chainToChainId } from "@wormhole-foundation/sdk-base";
@@ -75,9 +76,21 @@ interface SuiNttState {
   upgrade_cap_id: string;
 }
 
+const SUI_ADDRESSES = {
+  Mainnet: {
+    coreBridgeStateId:
+      "0xaeab97f96cf9877fee2883315d459552b2b921edc16d7ceac6eab944dd88919c",
+  },
+  Testnet: {
+    coreBridgeStateId:
+      "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790",
+  },
+};
+
 export class SuiNtt<N extends Network, C extends SuiChains>
   implements Ntt<N, C>
 {
+  readonly coreBridgeStateId: string;
   // Helper function to extract token type from Sui state object
   static async extractTokenTypeFromSuiState(
     provider: SuiClient,
@@ -145,6 +158,7 @@ export class SuiNtt<N extends Network, C extends SuiChains>
 
     return response.data.content as SuiMoveObject;
   }
+
   readonly network: N;
   readonly chain: C;
   readonly provider: SuiClient;
@@ -168,6 +182,8 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     this.network = network;
     this.chain = chain;
     this.provider = provider;
+    this.coreBridgeStateId =
+      SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES].coreBridgeStateId;
   }
 
   static async fromRpc<N extends Network>(
@@ -803,42 +819,61 @@ export class SuiNtt<N extends Network, C extends SuiChains>
   }
 
   async *redeem(
-    attestations: Ntt.Attestation[]
+    attestations: Ntt.Attestation[],
+    payer: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
-    // Build transaction to redeem attestations
-    const txb = new Transaction();
+    // Check if paused
+    const isPaused = await this.isPaused();
+    if (isPaused) {
+      throw new Error("Contract is paused");
+    }
 
-    // TODO: This would call ntt::redeem for each attestation
-    // We need:
-    // 1. NTT state object ID (this.contracts.ntt!["manager"])
-    // 2. Coin metadata object ID
-    // 3. Clock object ID (usually 0x6)
-    // 4. Package ID for the NTT contracts
-    // 5. Validated transceiver messages from attestations
+    if (attestations.length === 0) {
+      throw new Error("No attestations provided");
+    }
 
-    // For each attestation:
-    // const validatedMessage = parseAttestation(attestation);
-    //
-    // txb.moveCall({
-    //   target: `${nttPackageId}::ntt::redeem`,
-    //   typeArguments: [tokenType, transceiverType],
-    //   arguments: [
-    //     state,
-    //     versionGated,
-    //     coinMetadata,
-    //     validatedMessage,
-    //     clock
-    //   ]
-    // });
+    const packageId = await this.getPackageId();
 
-    const unsignedTx = new SuiUnsignedTransaction(
-      txb,
-      this.network,
-      this.chain,
-      "Redeem NTT Transfer"
-    );
+    // Get coin metadata
+    const coinMetadata = await this.provider.getCoinMetadata({
+      coinType: this.contracts.ntt!["token"],
+    });
+    if (!coinMetadata?.id) {
+      throw new Error(
+        `CoinMetadata not found for ${this.contracts.ntt!["token"]}`
+      );
+    }
 
-    yield unsignedTx;
+    // Process each attestation separately (like Circle Bridge and Solana NTT)
+    for (const attestation of attestations) {
+      // Build transaction for this attestation
+      const txb = new Transaction();
+
+      // Create VersionGated object
+      const versionGated = txb.moveCall({
+        target: `${packageId}::upgrades::new_version_gated`,
+        arguments: [],
+      });
+
+      // Add redeem calls for this attestation
+      await this.addRedeemCall(
+        txb,
+        attestation,
+        packageId,
+        versionGated,
+        coinMetadata.id,
+        payer
+      );
+
+      const unsignedTx = new SuiUnsignedTransaction(
+        txb,
+        this.network,
+        this.chain,
+        "Redeem NTT Transfer"
+      );
+
+      yield unsignedTx;
+    }
   }
 
   async quoteDeliveryPrice(
@@ -1551,6 +1586,83 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     return state.upgrade_cap_id;
   }
 
+  // Helper function to add redeem call for a single attestation
+  private async addRedeemCall(
+    txb: Transaction,
+    attestation: Ntt.Attestation,
+    packageId: string,
+    versionGated: any,
+    coinMetadataId: string,
+    payer: AccountAddress<C>
+  ): Promise<void> {
+    // Get the transceiver
+    const wormholeTransceiverStateId =
+      this.contracts.ntt!["transceiver"]?.["wormhole"];
+    if (!wormholeTransceiverStateId) {
+      throw new Error("Wormhole transceiver not found in contracts");
+    }
+
+    const transceiverPackageId = await this.getPackageIdFromObject(
+      wormholeTransceiverStateId
+    );
+
+    // Get wormhole core package ID
+    const coreBridgePackageId = await this.getWormholePackageId(
+      this.provider,
+      this.coreBridgeStateId
+    );
+
+    // Serialize the attestation to get VAA bytes
+    const vaa = serialize(attestation);
+
+    // First parse the VAA bytes into a VAA struct using Wormhole core
+    const [parsedVAA] = txb.moveCall({
+      target: `${coreBridgePackageId}::vaa::parse_and_verify`,
+      arguments: [
+        txb.object(this.coreBridgeStateId), // wormhole core state
+        txb.pure.vector("u8", Array.from(vaa)), // VAA bytes
+        txb.object(SUI_CLOCK_OBJECT_ID), // clock
+      ],
+    });
+
+    if (!parsedVAA) {
+      throw new Error("Failed to parse VAA");
+    }
+
+    // Get the NTT package ID for the manager auth type
+    const nttPackageId = await this.getPackageId();
+
+    // Then pass the parsed VAA struct to validate_message
+    const [validatedMessage] = txb.moveCall({
+      target: `${transceiverPackageId}::wormhole_transceiver::validate_message`,
+      typeArguments: [`${nttPackageId}::auth::ManagerAuth`], // Fully qualified manager auth type
+      arguments: [
+        txb.object(wormholeTransceiverStateId), // transceiver_state
+        parsedVAA, // VAA struct from parse_and_verify
+      ],
+    });
+
+    if (!validatedMessage) {
+      throw new Error("Failed to validate VAA through transceiver");
+    }
+
+    // Now call redeem function with the validated message
+    txb.moveCall({
+      target: `${packageId}::ntt::redeem`,
+      typeArguments: [
+        this.contracts.ntt!["token"], // CoinType
+        `${transceiverPackageId}::wormhole_transceiver::TransceiverAuth`, // Transceiver type
+      ],
+      arguments: [
+        txb.object(this.contracts.ntt!["manager"]), // state
+        versionGated, // version_gated
+        txb.object(coinMetadataId), // coin_meta
+        validatedMessage, // validated_message
+        txb.object(SUI_CLOCK_OBJECT_ID),
+      ],
+    });
+  }
+
   // Helper function to get the release status from an attestation
   private async getTransferReleaseStatus(
     attestation: Ntt.Attestation
@@ -1614,19 +1726,29 @@ export class SuiNtt<N extends Network, C extends SuiChains>
             // Check if chain_id matches
             if (keyValue?.chain_id === sourceChainId) {
               // Get the first matching chain_id
-              inboxEntry = await this.provider.getObject({
+              const inboxEntryObject = await this.provider.getObject({
                 id: field.objectId,
                 options: { showContent: true },
               });
 
               // Verify this is the right message by checking the message ID if available
-              if (inboxEntry.data?.content?.dataType === "moveObject") {
+              if (inboxEntryObject.data?.content?.dataType === "moveObject") {
                 // Check if the message ID matches (if we have it in the attestation)
-                if (attestation.hash && keyValue?.message?.id) {
+                if (
+                  (attestation.payload as any).nttManagerPayload?.id &&
+                  keyValue?.message?.id?.data
+                ) {
                   // Compare the message ID from the key with our expected hash
-                  if (keyValue.message.id === attestation.hash) {
+                  // Convert both Uint8Arrays to hex strings for proper comparison
+                  const msgIdStr = Buffer.from(
+                    keyValue.message.id.data
+                  ).toString("hex");
+                  const attestationMsgIdStr = Buffer.from(
+                    (attestation.payload as any).nttManagerPayload?.id
+                  ).toString("hex");
+                  if (msgIdStr === attestationMsgIdStr) {
                     // Found the exact match
-                    // Otherwise it means chain ID matches but message ID doesn't, continue looking
+                    inboxEntry = inboxEntryObject;
                     break;
                   }
                 }
@@ -1639,7 +1761,8 @@ export class SuiNtt<N extends Network, C extends SuiChains>
         }
       }
 
-      if (inboxEntry.data?.content?.dataType !== "moveObject") {
+      // Check if we found a matching inbox entry
+      if (!inboxEntry) {
         return null;
       }
 
@@ -1660,5 +1783,48 @@ export class SuiNtt<N extends Network, C extends SuiChains>
       n >>= 1;
     }
     return count;
+  }
+
+  private async getWormholePackageId(
+    provider: SuiClient,
+    coreBridgeStateId: string
+  ): Promise<string> {
+    let currentPackage;
+    let nextCursor;
+    do {
+      const dynamicFields = await provider.getDynamicFields({
+        parentId: coreBridgeStateId,
+        cursor: nextCursor,
+      });
+      currentPackage = dynamicFields.data.find((field) =>
+        field.name.type.endsWith("CurrentPackage")
+      );
+      nextCursor = dynamicFields.hasNextPage ? dynamicFields.nextCursor : null;
+    } while (nextCursor && !currentPackage);
+
+    if (!currentPackage) {
+      throw new Error("Unable to get current package");
+    }
+
+    const res = await provider.getObject({
+      id: currentPackage.objectId,
+      options: {
+        showContent: true,
+      },
+    });
+    const content = res.data?.content;
+    const fields =
+      content && content.dataType === "moveObject"
+        ? (content as any).fields
+        : null;
+    if (!fields) {
+      throw new Error("Unable to get fields from current package");
+    }
+    const packageId = fields?.["value"]?.fields?.package;
+    if (!packageId) {
+      throw new Error("Unable to get package ID from current package");
+    }
+
+    return packageId;
   }
 }
