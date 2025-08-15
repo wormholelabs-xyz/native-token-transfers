@@ -1635,14 +1635,23 @@ export class SuiNtt<N extends Network, C extends SuiChains>
 
     // Get NTT object
     // We need this to create the manager message (see ntt_manager_message::new)
+    let payloadBytes: Uint8Array;
+    try {
+      payloadBytes = serializeLayout(
+        nativeTokenTransferLayout,
+        nttPayload.payload
+      );
+    } catch (error) {
+      throw new Error(
+        `Failed to serialize native token transfer payload: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+
     const [native_token_transfer] = txb.moveCall({
       target: `${nttCommonPackageId}::native_token_transfer::parse`,
-      arguments: [
-        txb.pure.vector(
-          "u8",
-          serializeLayout(nativeTokenTransferLayout, nttPayload.payload)
-        ),
-      ],
+      arguments: [txb.pure.vector("u8", payloadBytes)],
     });
 
     if (!native_token_transfer) {
