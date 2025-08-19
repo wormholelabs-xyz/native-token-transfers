@@ -396,28 +396,17 @@ export class SuiNtt<N extends Network, C extends SuiChains>
     newOwner: AccountAddress<C>,
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>> {
-    // Validate newOwner
-    if (!newOwner) {
-      throw new Error("newOwner is required");
-    }
-
-    const newOwnerAddress = newOwner.toString();
-    if (!newOwnerAddress || newOwnerAddress.trim() === "") {
-      throw new Error("Invalid newOwner address");
-    }
-
-    // Transfer the AdminCap object to the new owner
-    const adminCapId = await this.getAdminCapId();
-
-    // Validate adminCapId
-    if (!adminCapId || adminCapId.trim() === "") {
-      throw new Error("AdminCap ID not found or invalid");
-    }
-
     const txb = new Transaction();
 
-    // Transfer AdminCap to new owner
-    txb.transferObjects([txb.object(adminCapId)], newOwnerAddress);
+    // Get Admin and Upgrade cap IDs
+    const adminCapId = await this.getAdminCapId();
+    const upgradeCapId = await this.getUpgradeCapId();
+
+    // Transfer AdminCap and UpgradeCap to new owner
+    txb.transferObjects(
+      [txb.object(adminCapId), txb.object(upgradeCapId)],
+      newOwner.toString()
+    );
 
     const unsignedTx = new SuiUnsignedTransaction(
       txb,
