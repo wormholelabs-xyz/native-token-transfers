@@ -1,0 +1,39 @@
+name: Sui CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Cancel in-progress runs on new commits to same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: ./sui
+
+jobs:
+  test:
+    name: sui move test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Sui CLI via suiup
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/MystenLabs/suiup/main/install.sh | sh
+          export PATH="$HOME/.suiup/bin:$PATH"
+          suiup install sui@1.63.2
+          suiup default sui@1.63.2
+          echo "$HOME/.suiup/bin" >> $GITHUB_PATH
+        working-directory: .
+
+      - name: Check Sui version
+        run: sui --version
+
+      - name: Run Move tests
+        run: make test
