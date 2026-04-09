@@ -18,6 +18,7 @@ import { AddressLookupTableAccount, Connection, Keypair, PublicKey, SendTransact
 import * as spl from "@solana/spl-token";
 import fs from "fs";
 import path from "path";
+import { U64_MAX } from "./constants.js";
 import readline from "readline";
 import { ChainContext, UniversalAddress, Wormhole, assertChain, canonicalAddress, chainToPlatform, chains, isNetwork, networks, platforms, signSendWait, toUniversal, type AccountAddress, type Chain, type ChainAddress, type Network, type Platform } from "@wormhole-foundation/sdk";
 import { Transaction } from "@mysten/sui/transactions";
@@ -2827,7 +2828,7 @@ async function deploySolana<N extends Network, C extends SolanaChains>(
             {
                 mint: new PublicKey(token),
                 mode,
-                outboundLimit: 100000000n,
+                outboundLimit: U64_MAX,
                 ...(mode === "burning" && !mint.mintAuthority!.equals(tokenAuthority) && {
                     multisigTokenAuthority: mint.mintAuthority!,
                 }),
