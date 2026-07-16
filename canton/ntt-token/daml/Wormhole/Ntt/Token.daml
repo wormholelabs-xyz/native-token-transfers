@@ -1,0 +1,110 @@
+-- | The token effect seam. 'NttManager' never references a concrete token; it
+-- holds an 'NttToken' interface reference and drives two effects through it:
+-- outbound 'LockOrBurn' (lock into custody, or burn) and inbound 'MintOrUnlock'
+-- (release from custody, or mint). This isolates all CIP-56 (Canton Network Token
+-- Standard) detail behind one interface, the way 'Wormhole.Core.VAA' isolates the
+-- crypto builtins; concrete implementations (a test mock; the real CIP-56 wiring
+-- in ../ntt-cip56) supply the effect bodies.
+--
+-- The interface choices are controlled by the 'manager' party (the NTT operator),
+-- available inside every 'NttManager' choice because the manager contract is
+-- signed by it. The token mutations the bodies perform are authorized by the
+-- implementing contract being signed by the token administrator — so a choice on
+-- an admin-signed token hook carries the admin's authority without the submitter
+-- being the admin. Both choices are 'nonconsuming' so the hook's cid is stable.
+--
+-- The choices carry the CIP-56 runtime handles a real registry needs:
+-- @inputHoldingCids@ (holdings to spend on a lock/burn; empty for a mint) and
+-- @extraArgs@ (the registry's choice context / metadata, whose disclosed
+-- contracts the submitter attaches off-ledger). Implementations that don't need
+-- them (the test mock) ignore them.
+module Wormhole.Ntt.Token where
+
+import Splice.Api.Token.HoldingV1 (Holding)
+import Splice.Api.Token.MetadataV1 (ExtraArgs (..), emptyChoiceContext, emptyMetadata)
+
+-- | Whether a deployment custodies its token (lock on send / unlock on receive)
+-- or destroys and recreates it (burn on send / mint on receive). One mode per
+-- deployment, chosen at creation.
+data TokenMode
+  = LockUnlock
+  | BurnMint
+  deriving (Eq, Show)
+
+-- | The NTT "trimmed amount": an amount normalized to at most 8 decimals, with
+-- @decimals@ recording the (possibly reduced) scale so the receiving chain can
+-- rescale to its own token precision. See 'trimAmount' / 'untrimAmount'.
+data TrimmedAmount = TrimmedAmount with
+    decimals : Int
+    amount   : Int
+  deriving (Eq, Show)
+
+-- | NTT trims amounts to at most this many decimals on the wire.
+maxTrimmedDecimals : Int
+maxTrimmedDecimals = 8
+
+-- | @10 ^ n@ for @n >= 0@ (Daml has no total Int exponentiation in scope here).
+tenPow : Int -> Int
+tenPow n = if n <= 0 then 1 else 10 * tenPow (n - 1)
+
+-- | Trim @rawAmount@ (denominated at @fromDecimals@) to the wire form. If the
+-- token has more than 8 decimals the low digits are dropped (NTT dust handling
+-- is deferred; see README §11 rate-limiting/queue follow-ups).
+trimAmount : Int -> Int -> TrimmedAmount
+trimAmount rawAmount fromDecimals =
+  if fromDecimals <= maxTrimmedDecimals
+    then TrimmedAmount with decimals = fromDecimals, amount = rawAmount
+    else TrimmedAmount with
+           decimals = maxTrimmedDecimals
+           amount = rawAmount / tenPow (fromDecimals - maxTrimmedDecimals)
+
+-- | Rescale a received trimmed amount to the local token's @toDecimals@.
+untrimAmount : TrimmedAmount -> Int -> Int
+untrimAmount ta toDecimals =
+  if toDecimals >= ta.decimals
+    then ta.amount * tenPow (toDecimals - ta.decimals)
+    else ta.amount / tenPow (ta.decimals - toDecimals)
+
+-- | The view of an 'NttToken' hook: the token administrator (whose authority the
+-- hook carries), the manager party allowed to drive it, and the mode.
+data NttTokenView = NttTokenView with
+    admin   : Party
+    manager : Party
+    mode    : TokenMode
+  deriving (Eq, Show)
+
+-- | Convenience empty 'ExtraArgs' (empty choice context + metadata), for callers
+-- and implementations that need no registry context (e.g. the test mock).
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+
+-- | The token effect seam. Implementations supply 'lockOrBurnImpl' /
+-- 'mintOrUnlockImpl'; the manager calls the 'LockOrBurn' / 'MintOrUnlock'
+-- choices.
+interface NttToken where
+  viewtype NttTokenView
+
+  -- | Outbound effect: custody (lock) or destroy (burn) @amount@ from @sender@,
+  -- spending @inputHoldingCids@ under the registry @extraArgs@.
+  lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+  -- | Inbound effect: release (unlock, spending custody @inputHoldingCids@) or
+  -- create (mint) @amount@ to @recipient@ under the registry @extraArgs@.
+  mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+
+  nonconsuming choice LockOrBurn : ()
+    with
+      sender           : Party
+      amount           : TrimmedAmount
+      inputHoldingCids : [ContractId Holding]
+      extraArgs        : ExtraArgs
+    controller (view this).manager
+    do lockOrBurnImpl this sender amount inputHoldingCids extraArgs
+
+  nonconsuming choice MintOrUnlock : ()
+    with
+      recipient        : Party
+      amount           : TrimmedAmount
+      inputHoldingCids : [ContractId Holding]
+      extraArgs        : ExtraArgs
+    controller (view this).manager
+    do mintOrUnlockImpl this recipient amount inputHoldingCids extraArgs

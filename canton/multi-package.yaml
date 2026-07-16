@@ -1,0 +1,12 @@
+# Multi-package project for the Canton NTT layer. The production packages
+# (`ntt-token`, `ntt`, `ntt-cip56`) build on top of the vendored `wormhole-core`
+# DAR (see dars/README.md — core is NOT built here, it is consumed as a pinned
+# artifact), and a separate `ntt-test` package carries the Daml Scripts.
+# Splitting keeps daml-script — and the test code — out of the uploadable
+# production DARs. `dpm build --all` builds in dependency order: ntt-token,
+# then ntt / ntt-cip56, then test (which data-depends on them).
+packages:
+  - ./ntt-token
+  - ./ntt
+  - ./ntt-cip56
+  - ./test
