@@ -26,14 +26,13 @@ jobs:
 
       # dpm is Digital Asset's Daml package manager. There is no official
       # published GitHub Action for it yet; the install step below uses the
-      # canonical installer and pins the SDK version declared in every
-      # daml.yaml (sdk-version: 3.5.1). CONFIRM the installer URL/pin with the
-      # toolchain owner before enabling required checks (see the DAR-release
-      # ownership open question, canton/dars/README.md). The Daml source builds
-      # against the vendored wormhole-core DAR — this job never rebuilds core.
+      # same installer as the wormhole repo's canton/Dockerfile and pins the
+      # SDK version declared in every daml.yaml (sdk-version: 3.5.1). The Daml
+      # source builds against the vendored wormhole-core DAR — this job never
+      # rebuilds core.
       - name: Install dpm
         run: |
-          curl -sSfL https://docs.digitalasset.com/dpm/install.sh | sh
+          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
           echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
 
       - name: Install SDK
