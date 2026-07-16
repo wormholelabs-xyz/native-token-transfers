@@ -17,19 +17,9 @@ anchor). It is developed in `wormholelabs-xyz/wormhole` (`canton/core`) and is
 **not** built in this repo — it is consumed as a pinned artifact, exactly as the
 Splice interfaces below are.
 
-> **INTERIM PRE-RELEASE ARTIFACT — read before relying on this.**
-> `wormhole-core-0.2.0.dar` here is an **interim, unofficial** build. It is
-> `wormhole-core` 0.2.0 including the `GetGuardianGovernance` choice on
-> `CoreState` (and the `guardianGovernance` field on `Emitter`/`EmitterRegistry`
-> that the NTT receive-side trust pin depends on). Those changes are **not yet
-> on an official `wormhole-core` GitHub Release** — they are pending
-> `wormholelabs-xyz/wormhole` PR #41. There is no DAR release pipeline for
-> `wormhole-core` yet; this file was copied from a local development build.
->
-> **Action required when PR #41 merges and an official release is cut:** swap
-> this file for the released `wormhole-core-0.2.0.dar` artifact and update the
-> sha256 in the table below. Until then, this package-id is provisional and
-> MUST NOT be treated as a deployed/vetted core identity.
+Provenance: [`canton-core-v0.2.0`](https://github.com/wormholelabs-xyz/wormhole/releases/tag/canton-core-v0.2.0)
+on `wormholelabs-xyz/wormhole`, built from `integration/canton` commit
+`b5f88c38b` (includes the `GetGuardianGovernance` trust-anchor pin, #41).
 
 ## Splice token-standard interfaces (CIP-0056 / Token Standard V1)
 
@@ -52,7 +42,7 @@ packages target LF 2.3, which may data-depend on lower LF 2.x versions.
 
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
-| `wormhole-core-0.2.0.dar` | `ntt`, `ntt-cip56`, `ntt-test` | `91872aad5ab13d788cafd029fd7946daf5b7857c72509009cc3a71c5d9444431` |
+| `wormhole-core-0.2.0.dar` | `ntt`, `ntt-cip56`, `ntt-test` | `2014cc0ba62cdae774030def051bbd77581a86eda45dae5f37507c2a9e191d8a` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt-token`, `ntt`, `ntt-cip56` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar` | `ntt-token`, `ntt`, `ntt-cip56` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
 | `splice-api-token-allocation-v1-1.0.0.dar` | `ntt`, `ntt-test` | `c3f3b447142577ea4fa7d912ca11cd6821de7588e324e8877425932a02fccaa1` |
