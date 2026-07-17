@@ -1,39 +1,32 @@
--- | The token effect seam. 'NttManager' never references a concrete token; it
--- holds an 'NttToken' interface reference and drives two effects through it:
--- outbound 'LockOrBurn' (lock into custody, or burn) and inbound 'MintOrUnlock'
--- (release from custody, or mint). This isolates all CIP-56 (Canton Network Token
--- Standard) detail behind one interface, the way 'Wormhole.Core.VAA' isolates the
--- crypto builtins; concrete implementations (a test mock; the real CIP-56 wiring
--- in ../ntt-cip56) supply the effect bodies.
+-- | The token effect seam. 'NttManager' holds an 'NttToken' interface reference
+-- and drives two effects: outbound 'LockOrBurn' (lock or burn) and inbound
+-- 'MintOrUnlock' (unlock or mint). Isolates all CIP-56 detail behind one
+-- interface; concrete impls (a test mock; the CIP-56 wiring in ../ntt-cip56)
+-- supply the bodies.
 --
--- The interface choices are controlled by the 'manager' party (the NTT operator),
--- available inside every 'NttManager' choice because the manager contract is
--- signed by it. The token mutations the bodies perform are authorized by the
--- implementing contract being signed by the token administrator — so a choice on
--- an admin-signed token hook carries the admin's authority without the submitter
--- being the admin. Both choices are 'nonconsuming' so the hook's cid is stable.
+-- Choices are controlled by the 'manager' party; the token mutations are
+-- authorized by the impl contract being admin-signed, so a choice carries the
+-- admin's authority without the submitter being the admin. Both are 'nonconsuming'
+-- so the hook cid is stable.
 --
--- The choices carry the CIP-56 runtime handles a real registry needs:
--- @inputHoldingCids@ (holdings to spend on a lock/burn; empty for a mint) and
--- @extraArgs@ (the registry's choice context / metadata, whose disclosed
--- contracts the submitter attaches off-ledger). Implementations that don't need
--- them (the test mock) ignore them.
+-- The choices carry the CIP-56 handles a real registry needs: @inputHoldingCids@
+-- (holdings to spend; empty for a mint) and @extraArgs@ (choice context/metadata,
+-- disclosed off-ledger). The test mock ignores them.
 module Wormhole.Ntt.Token where
 
 import Splice.Api.Token.HoldingV1 (Holding)
 import Splice.Api.Token.MetadataV1 (ExtraArgs (..), emptyChoiceContext, emptyMetadata)
 
--- | Whether a deployment custodies its token (lock on send / unlock on receive)
--- or destroys and recreates it (burn on send / mint on receive). One mode per
--- deployment, chosen at creation.
+-- | Custody the token (lock/unlock) or destroy-and-recreate it (burn/mint). One
+-- mode per deployment, chosen at creation.
 data TokenMode
   = LockUnlock
   | BurnMint
   deriving (Eq, Show)
 
--- | The NTT "trimmed amount": an amount normalized to at most 8 decimals, with
--- @decimals@ recording the (possibly reduced) scale so the receiving chain can
--- rescale to its own token precision. See 'trimAmount' / 'untrimAmount'.
+-- | The NTT "trimmed amount": normalized to at most 8 decimals, with @decimals@
+-- recording the scale so the receiving chain can rescale. See 'trimAmount' /
+-- 'untrimAmount'.
 data TrimmedAmount = TrimmedAmount with
     decimals : Int
     amount   : Int
@@ -43,13 +36,12 @@ data TrimmedAmount = TrimmedAmount with
 maxTrimmedDecimals : Int
 maxTrimmedDecimals = 8
 
--- | @10 ^ n@ for @n >= 0@ (Daml has no total Int exponentiation in scope here).
+-- | @10 ^ n@ for @n >= 0@.
 tenPow : Int -> Int
 tenPow n = if n <= 0 then 1 else 10 * tenPow (n - 1)
 
--- | Trim @rawAmount@ (denominated at @fromDecimals@) to the wire form. If the
--- token has more than 8 decimals the low digits are dropped (NTT dust handling
--- is deferred; see README §11 rate-limiting/queue follow-ups).
+-- | Trim @rawAmount@ (at @fromDecimals@) to the wire form. Above 8 decimals the
+-- low digits are dropped (NTT dust handling is deferred, README §11).
 trimAmount : Int -> Int -> TrimmedAmount
 trimAmount rawAmount fromDecimals =
   if fromDecimals <= maxTrimmedDecimals
@@ -65,39 +57,37 @@ untrimAmount ta toDecimals =
     then ta.amount * tenPow (toDecimals - ta.decimals)
     else ta.amount / tenPow (ta.decimals - toDecimals)
 
--- | The view of an 'NttToken' hook: the token administrator (whose authority the
--- hook carries), the manager party allowed to drive it, and the mode.
+-- | The view of an 'NttToken' hook: the token admin (whose authority it carries),
+-- the manager party that drives it, and the mode.
 data NttTokenView = NttTokenView with
     admin   : Party
     manager : Party
     mode    : TokenMode
   deriving (Eq, Show)
 
--- | Convenience empty 'ExtraArgs' (empty choice context + metadata), for callers
--- and implementations that need no registry context (e.g. the test mock).
+-- | Empty 'ExtraArgs', for callers/impls that need no registry context.
 emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
 
--- | The token effect seam. Implementations supply 'lockOrBurnImpl' /
--- 'mintOrUnlockImpl'; the manager calls the 'LockOrBurn' / 'MintOrUnlock'
--- choices.
+-- | The token effect seam. Impls supply 'lockOrBurnImpl' / 'mintOrUnlockImpl';
+-- the manager calls the 'LockOrBurn' / 'MintOrUnlock' choices.
 interface NttToken where
   viewtype NttTokenView
 
-  -- | Outbound effect: custody (lock) or destroy (burn) @amount@ from @sender@,
-  -- spending @inputHoldingCids@ under the registry @extraArgs@.
+  -- | Outbound: lock or burn @amount@ from @sender@, spending @inputHoldingCids@.
   lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
-  -- | Inbound effect: release (unlock, spending custody @inputHoldingCids@) or
-  -- create (mint) @amount@ to @recipient@ under the registry @extraArgs@.
+  -- | Inbound: unlock (spending @inputHoldingCids@) or mint @amount@ to @recipient@.
   mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
 
+  -- Both manager and sender control this choice: the sender's authority must
+  -- reach the seam body so it can spend an owner-signed holding.
   nonconsuming choice LockOrBurn : ()
     with
       sender           : Party
       amount           : TrimmedAmount
       inputHoldingCids : [ContractId Holding]
       extraArgs        : ExtraArgs
-    controller (view this).manager
+    controller (view this).manager, sender
     do lockOrBurnImpl this sender amount inputHoldingCids extraArgs
 
   nonconsuming choice MintOrUnlock : ()

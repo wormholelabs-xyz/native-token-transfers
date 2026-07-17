@@ -1,31 +1,29 @@
--- | CIP-56 (Canton Network Token Standard) implementations of the 'NttToken'
--- seam, built against the vendored token-standard interface DARs. These work for
--- Canton Coin (Amulet) or any conforming token — no per-token code.
+-- | CIP-56 implementations of the 'NttToken' seam, against the vendored
+-- token-standard DARs. Work for Canton Coin (Amulet) or any conforming token.
 --
 --   * lock/unlock ('Cip56CustodyToken') via 'TransferFactory_Transfer': lock =
---     transfer sender -> custody; unlock = transfer custody -> recipient.
+--     sender -> custody; unlock = custody -> recipient.
 --   * burn/mint ('Cip56BurnMintToken') via 'BurnMintFactory_BurnMint': burn =
---     spend @inputHoldingCids@ with no outputs; mint = one output to recipient.
+--     spend @inputHoldingCids@, no outputs; mint = one output to recipient.
 --
--- Each hook stores the registry factory contract-id (obtained off-ledger from the
--- token's registry / scan API) and the token 'InstrumentId'; the per-transfer
--- holdings + choice context arrive through the 'NttToken' seam, with the disclosed
--- contracts referenced by @extraArgs@ attached by the submitter off-ledger (as
--- cn-quickstart's `RegistryApi.getTransferFactory` + `submitWithDisclosures` do).
+-- Each hook stores the registry factory cid and the token 'InstrumentId';
+-- per-transfer holdings + context arrive through the seam, disclosed off-ledger.
 --
--- Amounts: NTT carries an integer 'TrimmedAmount'; CIP-56 holdings are 'Decimal'.
--- 'trimmedToDecimal' converts (value = amount / 10^decimals).
+-- Amounts: NTT carries an integer 'TrimmedAmount'; CIP-56 holdings are 'Decimal'
+-- ('trimmedToDecimal' converts).
 module Wormhole.Ntt.TokenCip56 where
 
 import DA.Time (days, addRelTime)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
-import Splice.Api.Token.TransferInstructionV1 (Transfer (..), TransferFactory, TransferFactory_Transfer (..))
+import Splice.Api.Token.TransferInstructionV1
+  ( Transfer (..), TransferFactory, TransferFactory_Transfer (..)
+  , TransferInstructionResult (..), TransferInstructionResult_Output (..)
+  )
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
 import Wormhole.Ntt.Token
 
--- | Convert an NTT 'TrimmedAmount' to a CIP-56 'Decimal' token amount:
--- value = amount / 10^decimals.
+-- | NTT 'TrimmedAmount' to CIP-56 'Decimal': value = amount / 10^decimals.
 trimmedToDecimal : TrimmedAmount -> Decimal
 trimmedToDecimal ta = intToDecimal ta.amount / intToDecimal (tenPow ta.decimals)
 
@@ -35,9 +33,9 @@ trimmedToDecimal ta = intToDecimal ta.amount / intToDecimal (tenPow ta.decimals)
 
 template Cip56CustodyToken
   with
-    admin              : Party                        -- token registry admin (its authority backs transfers)
-    manager            : Party                        -- the NTT operator that drives the seam
-    custody            : Party                        -- holds locked funds between send and receive
+    admin              : Party                        -- token registry admin (backs transfers)
+    manager            : Party                        -- NTT operator that drives the seam
+    custody            : Party                        -- holds locked funds between send/receive
     instrumentId       : InstrumentId
     transferFactoryCid : ContractId TransferFactory   -- the registry's transfer factory
   where
@@ -47,10 +45,11 @@ template Cip56CustodyToken
     interface instance NttToken for Cip56CustodyToken where
       view = NttTokenView with admin, manager, mode = LockUnlock
 
-      -- Lock: sender -> custody.
+      -- Lock: sender -> custody. Must settle synchronously (Completed); a
+      -- Pending/Failed result means the tokens never reached custody.
       lockOrBurnImpl sender amount inputHoldingCids extraArgs = do
         now <- getTime
-        _ <- exercise transferFactoryCid TransferFactory_Transfer with
+        res <- exercise transferFactoryCid TransferFactory_Transfer with
                expectedAdmin = instrumentId.admin
                transfer = Transfer with
                  sender
@@ -62,12 +61,15 @@ template Cip56CustodyToken
                  inputHoldingCids
                  meta = emptyMetadata
                extraArgs
-        pure ()
+        case res.output of
+          TransferInstructionResult_Completed _ -> pure ()
+          _ -> abort "ntt: transfer did not settle synchronously"
 
-      -- Unlock: custody -> recipient, spending the custody holdings.
+      -- Unlock: custody -> recipient, spending the custody holdings. Same
+      -- synchronous-settle requirement as the lock path.
       mintOrUnlockImpl recipient amount inputHoldingCids extraArgs = do
         now <- getTime
-        _ <- exercise transferFactoryCid TransferFactory_Transfer with
+        res <- exercise transferFactoryCid TransferFactory_Transfer with
                expectedAdmin = instrumentId.admin
                transfer = Transfer with
                  sender = custody
@@ -79,7 +81,9 @@ template Cip56CustodyToken
                  inputHoldingCids
                  meta = emptyMetadata
                extraArgs
-        pure ()
+        case res.output of
+          TransferInstructionResult_Completed _ -> pure ()
+          _ -> abort "ntt: transfer did not settle synchronously"
 
 ----------------------------------------------------------------------
 -- burn / mint via the burn-mint factory
@@ -98,11 +102,28 @@ template Cip56BurnMintToken
     interface instance NttToken for Cip56BurnMintToken where
       view = NttTokenView with admin, manager, mode = BurnMint
 
-      -- Burn: spend the sender's holdings, no outputs.
-      lockOrBurnImpl sender _amount inputHoldingCids extraArgs = do
+      -- Burn: spend the sender's holdings for exactly the wire amount, returning change.
+      lockOrBurnImpl sender amount inputHoldingCids extraArgs = do
+        let target = trimmedToDecimal amount
+        views <- forA inputHoldingCids \cid -> do
+          hv <- view <$> fetch cid
+          assertMsg "ntt: burn holding not owned by sender" (hv.owner == sender)
+          assertMsg "ntt: burn holding instrument mismatch" (hv.instrumentId == instrumentId)
+          assertMsg "ntt: burn holding is locked" (hv.lock == None)
+          pure hv.amount
+        let total = sum views
+        assertMsg "ntt: input holdings do not cover the burn amount" (total >= target)
+        let change = total - target
+            outputs =
+              if change == 0.0
+                then []
+                else [ BurnMintOutput with
+                         owner = sender
+                         amount = change
+                         context = extraArgs.context ]
         _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
                expectedAdmin = instrumentId.admin
-               outputs = []
+               outputs
                instrumentId
                inputHoldingCids
                extraArgs

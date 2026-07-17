@@ -27,6 +27,9 @@ data-dependencies:
   - ../dars/wormhole-core-0.2.0.dar
   - ../ntt-token/.daml/dist/ntt-token-0.1.0.dar
   - ../ntt/.daml/dist/ntt-0.1.0.dar
+  - ../ntt-cip56/.daml/dist/ntt-cip56-0.1.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-allocation-v1-1.0.0.dar
+  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar

@@ -89,13 +89,15 @@ message** (no NTT-specific watcher code). The transceiver `Emitter` and the
 `CoreState` are caller-supplied disclosed cids; the transceiver is fetched and
 bound to the deployment before publishing.
 
-`user` is the **sole** controller — no admin/operator sign-off. Exercising
-`Transfer` consumes `NttManager` (signatories `operator, admin`), so the nested
-`LockOrBurn` (controller = the token's `manager`, i.e. `operator`) and
-`PublishMessage` (controller = the Emitter's `owner`, i.e. `admin`) run on
-inherited signatory authority. The CIP-0056 factory separately asserts the input
-holding's owner matches `user`, so a caller can never lock/burn a holding it
-doesn't control.
+`user` is the **sole** controller of `Transfer` — no admin/operator sign-off.
+Exercising `Transfer` consumes `NttManager` (signatories `operator, admin`), so
+the nested `PublishMessage` (controller = the Emitter's `owner`, i.e. `admin`)
+runs on inherited signatory authority. `LockOrBurn`'s controller is `manager,
+sender`; since `user` (the `Transfer` controller) is passed as `sender`, its
+authority reaches the token seam — so an owner-signed holding can actually be
+spent/burned, not just an admin-signed mock. The CIP-0056 factory separately
+asserts the input holding's owner matches `user`, so a caller can never lock/burn
+a holding it doesn't control.
 
 **The sender pays the message fee itself.** `PublishMessage` charges the
 governance-set `messageFee` to its `payer`, and `Transfer` passes `payer = user`,
@@ -163,7 +165,11 @@ production send/receive is app-orchestrated — the caller submits with the toke
 holder's authority and the registry's disclosed contracts (`extraArgs`). For a
 third-party-executor receive against a real (owner-signed) token, the recipient
 additionally needs a CIP-0056 transfer pre-approval, or must submit itself; the
-mock (admin-signed holdings) proves the on-ledger path without it.
+mock (admin-signed holdings) proves the on-ledger path without it. `Cip56CustodyToken`'s
+lock/unlock also asserts the registry's `TransferFactory_Transfer` settled
+synchronously (`TransferInstructionResult_Completed`); a `Pending`/`Failed`
+result aborts instead of letting the seam continue with tokens not actually
+moved.
 
 ## Follow-ups
 
