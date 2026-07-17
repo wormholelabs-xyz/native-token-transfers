@@ -1,10 +1,7 @@
 -- | NTT wire codec: the three nested structures a Native Token Transfer travels
--- in, mirroring the spec at
--- https://github.com/wormhole-foundation/native-token-transfers/tree/main/docs
--- and the EVM/Solana reference implementations.
+-- in, mirroring the spec and the EVM/Solana reference implementations.
 --
--- Layouts (every width in BYTES; all values big-endian; hex 'Bytes' throughout,
--- matching Wormhole.Core.Bytes):
+-- Layouts (widths in BYTES; big-endian; hex 'Bytes' throughout):
 --
 -- > NativeTokenTransfer:
 -- >   prefix(4) = 0x994E5454 ‖ decimals(1) ‖ amount(8) ‖ sourceToken(32)
@@ -18,16 +15,14 @@
 -- >   prefix(4) = 0x9945FF10 ‖ sourceManager(32) ‖ recipientManager(32)
 -- >   ‖ managerPayloadLen(2) ‖ managerPayload ‖ transceiverPayloadLen(2) ‖ transceiverPayload
 --
--- Decoders 'error' on malformed input (bad prefix / short buffer), matching the
--- abort-on-invalid style of 'Wormhole.Core.VAA.parseVAA'.
+-- Decoders 'error' on malformed input (bad prefix / short buffer).
 module Wormhole.Ntt.Payload where
 
 import Wormhole.Core.Bytes
 
 ----------------------------------------------------------------------
--- Big-endian encoding helpers. The multi-byte builders 'intToBytesN' and
--- 'leftPadTo' live in Wormhole.Core.Bytes (shared with the core address
--- derivation); this module adds only the NTT-specific uint16 length prefix.
+-- Big-endian encoding helpers. 'intToBytesN' / 'leftPadTo' live in
+-- Wormhole.Core.Bytes; this module adds only the NTT uint16 length prefix.
 ----------------------------------------------------------------------
 
 -- | Encode a length-prefixed field: uint16 length ‖ bytes.

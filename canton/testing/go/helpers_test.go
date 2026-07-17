@@ -10,9 +10,8 @@ import (
 )
 
 // findDpm locates the dpm toolchain (PATH or ~/.dpm/bin), skipping the test if
-// it is unavailable. Duplicated (~30 lines) from wormhole's
-// node/pkg/watchers/canton/watcher_integration_test.go — this repo does not
-// depend on that module, so the shared helpers are copied rather than imported.
+// unavailable. Copied from wormhole's watcher_integration_test.go (this repo
+// doesn't depend on that module).
 func findDpm(t *testing.T) string {
 	if p, err := exec.LookPath("dpm"); err == nil {
 		return p

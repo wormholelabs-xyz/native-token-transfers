@@ -1,12 +1,10 @@
--- | Tests for the replay-protection trie ('Wormhole.Core.Replay'), plus the
--- script-side simulation of the DISCLOSURE SERVICE: 'coveringNode' resolves the
+-- | Tests for the replay-protection trie ('Wormhole.Core.Replay'), plus a
+-- script-side simulation of the disclosure service: 'coveringNode' resolves the
 -- unique active node whose prefix covers a digest (asserting the partition
--- invariant on every use — exactly one covering node), and
--- 'coveringDisclosure' packages it for a non-stakeholder submitter. Production
--- runs the same logic off-ledger over an ACS index by (consumer, prefix).
+-- invariant), and 'coveringDisclosure' packages it for a non-stakeholder.
+-- Production runs the same logic off-ledger over an ACS index.
 --
--- Trie tests use tiny thresholds (the threshold is a root-creation parameter
--- precisely so splits are cheap to reach in tests; production uses
+-- Trie tests use tiny thresholds so splits are cheap to reach (production uses
 -- 'defaultSplitThreshold').
 module Test.TestReplay where
 
@@ -29,11 +27,8 @@ pad64 t = t <> mconcat (replicate (64 - T.length t) "0")
 nibbles : [Text]
 nibbles = T.explode "0123456789abcdef"
 
--- | Direct, consumer-submitted root claim: the consumer holds the one static
--- disclosure of the 'ReplayRootRegistry' anchor (served off-ledger by the
--- disclosure service — simulated here by reading as the operator, and
--- cacheable forever since the anchor never churns) and submits alone. No
--- operator crank.
+-- | Consumer-submitted root claim: the consumer holds the static disclosure of
+-- the 'ReplayRootRegistry' anchor and submits alone. No operator crank.
 registerReplayRoot : Party -> Party -> Int -> Script (ContractId ReplayNode)
 registerReplayRoot operator consumer threshold = do
   [(regCid, _)] <- query @ReplayRootRegistry operator
@@ -46,11 +41,8 @@ registerReplayRoot operator consumer threshold = do
       feeAllocation = None
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s trie
--- covering @digest@, queried as @consumer@. The filter matches the trie owner
--- too, because a reader can see nodes of several tries (the operator co-signs
--- all of them). Aborts if coverage is not exactly one — every call doubles as
--- a check of the partition invariant, and this abort is also how the service
--- detects a forked trie (a consumer that minted parallel roots).
+-- covering @digest@. Aborts unless coverage is exactly one — checking the
+-- partition invariant and detecting a forked trie (parallel roots).
 coveringNode : Party -> Text -> Script (ContractId ReplayNode, ReplayNode)
 coveringNode consumer digest = do
   nodes <- query @ReplayNode consumer
@@ -59,9 +51,8 @@ coveringNode consumer digest = do
     [one] -> pure one
     covering -> abort ("partition invariant violated: " <> show (length covering) <> " covering nodes")
 
--- | 'coveringNode' plus the explicit disclosure a non-stakeholder submitter
--- attaches. @reader@ is any party that sees the node (the consumer, or the
--- operator's service).
+-- | 'coveringNode' plus the disclosure a non-stakeholder attaches. @reader@ is
+-- any party that sees the node.
 coveringDisclosure : Party -> Party -> Text -> Script (ContractId ReplayNode, Disclosure)
 coveringDisclosure reader consumer digest = do
   (cid, _) <- coveringNode consumer digest
@@ -87,8 +78,7 @@ setupTrie t = do
   rootCid <- registerReplayRoot operator consumer t
   pure (operator, consumer, rootCid)
 
--- | Inserts land in the root and replays are rejected; the returned cid is the
--- node the disclosure service would resolve next.
+-- | Inserts land in the root and replays are rejected.
 testTrieInsertAndReplay : Script ()
 testTrieInsertAndReplay = do
   (_, consumer, _) <- setupTrie 4
@@ -106,9 +96,8 @@ testTrieInsertAndReplay = do
   consumeMustFail consumer dA
 
 -- | The consume that exceeds the threshold splits the node into exactly 16
--- children — empty ones included — with the suffixes bucketed by (dropped)
--- first nibble; the parent is archived; the returned cid is the child covering
--- the digest.
+-- children (empties included), suffixes bucketed by dropped first nibble; the
+-- parent is archived.
 testTrieSplit : Script ()
 testTrieSplit = do
   (_, consumer, _) <- setupTrie 4
@@ -138,8 +127,7 @@ testTrieSplit = do
   pure ()
 
 -- | Digests sharing a first nibble force an over-threshold child at the first
--- split (all parent entries in one bucket — legal and transient); its next
--- consume splits it again, one level deeper.
+-- split (legal and transient); its next consume splits it one level deeper.
 testMultiLevelSplit : Script ()
 testMultiLevelSplit = do
   (_, consumer, _) <- setupTrie 2
@@ -160,8 +148,8 @@ testMultiLevelSplit = do
   consumeMustFail consumer (pad64 "f0")
   consumeMustFail consumer (pad64 "f3")
 
--- | Input hygiene. Uppercase input is normalized (its lowercase twin is a
--- replay); malformed digests are rejected outright.
+-- | Input hygiene: uppercase is normalized (its lowercase twin replays);
+-- malformed digests are rejected.
 testDigestValidation : Script ()
 testDigestValidation = do
   (_, consumer, rootCid) <- setupTrie 4
@@ -178,9 +166,8 @@ testDigestValidation = do
   -- rootCid is stale after the first consume: distinct failure from hygiene.
   submitMustFail consumer do exerciseCmd rootCid ConsumeDigest with digest = pad64 "cd"
 
--- | A node rejects digests outside its prefix ("does not cover") — the
--- disclosure-service-handed-me-the-wrong-node case; the digest stays
--- consumable via the right node.
+-- | A node rejects digests outside its prefix (the wrong-node case); the digest
+-- stays consumable via the right node.
 testWrongNodeRejected : Script ()
 testWrongNodeRejected = do
   (_, consumer, _) <- setupTrie 4
@@ -191,10 +178,9 @@ testWrongNodeRejected = do
   _ <- consume consumer (pad64 "b9")
   pure ()
 
--- | The retry protocol: a consume against a stale cid is rejected by
--- activeness (someone advanced the node); the retry against the fresh covering
--- node succeeds; and a blind retry of a consume that actually committed fails
--- on membership — never a double consume.
+-- | The retry protocol: a consume against a stale cid fails on activeness; the
+-- retry against the fresh node succeeds; a blind retry of a committed consume
+-- fails on membership — never a double consume.
 testStaleCidAndRetry : Script ()
 testStaleCidAndRetry = do
   (_, consumer, rootCid) <- setupTrie 4
@@ -207,8 +193,8 @@ testStaleCidAndRetry = do
   -- retry hits the membership check, a clean idempotency signal.
   consumeMustFail consumer (pad64 "11")
 
--- | Depth-63 nodes only insert, never split (suffixes are single nibbles,
--- bounded at 16); and the 'ensure' shape invariants reject degenerate nodes.
+-- | Depth-63 nodes only insert, never split (single-nibble suffixes, bounded at
+-- 16); the 'ensure' shape invariants reject degenerate nodes.
 testDepth63NeverSplits : Script ()
 testDepth63NeverSplits = do
   (operator, consumer, _) <- setupTrie 4
@@ -236,8 +222,8 @@ testDepth63NeverSplits = do
     createCmd ReplayNode with
       consumer, operator, prefix = "", splitThreshold = 4, consumed = Set.fromList ["00"]
 
--- | Scopes are independent and authorization is per-consumer: a different
--- party can neither advance another's trie nor is it affected by it.
+-- | Scopes are independent, authorization per-consumer: one party can neither
+-- advance another's trie nor be affected by it.
 testCrossConsumerScopes : Script ()
 testCrossConsumerScopes = do
   (operator, alice, _) <- setupTrie 4
@@ -253,27 +239,22 @@ testCrossConsumerScopes = do
   _ <- consume bob (pad64 "aa")
   pure ()
 
--- | Nodes are co-signed: neither the consumer nor the operator can archive
--- (and so re-create-empty) a node alone.
+-- | Nodes are co-signed: neither consumer nor operator can archive a node alone.
 testNodeArchiveNeedsBoth : Script ()
 testNodeArchiveNeedsBoth = do
   (operator, consumer, rootCid) <- setupTrie 4
   submitMustFail consumer do archiveCmd rootCid
   submitMustFail operator do archiveCmd rootCid
-  -- Both together can (the irreducible signatory remainder) — coverage for the
-  -- auto-generated Archive choices, including the registry anchor.
+  -- Both together can — coverage for the auto-generated Archive choices.
   submit (actAs consumer <> actAs operator) do archiveCmd rootCid
   [(regCid, _)] <- query @ReplayRootRegistry operator
   submit operator do archiveCmd regCid
 
--- | Root claims are free and self-serve; what the registry pins down is WHOSE
--- scope a claim can touch. Claiming a root for a consumer requires that
--- consumer's authority — the load-bearing property: nobody can fork someone
--- ELSE'S replay scope. A consumer duplicating its own root is deliberately
--- possible (pinned below): parallel roots are self-harm, detected off-ledger
--- by the disclosure service ('coveringNode' aborts on more than one covering
--- node). Roots cannot be minted outside the registry — the consumer alone
--- lacks the operator's signature.
+-- | Root claims are free and self-serve; the registry pins WHOSE scope a claim
+-- touches. Claiming for a consumer needs that consumer's authority — nobody can
+-- fork someone else's scope. A consumer duplicating its own root is allowed
+-- (self-harm, detected off-ledger by 'coveringNode'). Roots can't be minted
+-- outside the registry — the consumer alone lacks the operator's signature.
 testRootClaims : Script ()
 testRootClaims = do
   (operator, consumer, rootCid) <- setupTrie 4
@@ -305,11 +286,9 @@ testRootClaims = do
     createCmd ReplayNode with
       consumer, operator, prefix = "", splitThreshold = 4, consumed = Set.empty
 
--- | End-to-end: verify + consume through 'CoreState.VerifyAndConsumeVAA' with
--- the real guardian-signed VAA. The consumer submits with only the CoreState
--- disclosure (it is a stakeholder of its own nodes); replay against the fresh
--- covering node fails on membership; a second consumer has its own scope; and
--- nodes from outside the consumer/operator pairing are rejected.
+-- | End-to-end verify + consume through 'VerifyAndConsumeVAA' with a real
+-- guardian-signed VAA: replay fails on membership; a second consumer has its own
+-- scope; nodes outside the consumer/operator pairing are rejected.
 testVerifyAndConsumeVAA : Script ()
 testVerifyAndConsumeVAA = do
   (operator, _, csId) <- setup

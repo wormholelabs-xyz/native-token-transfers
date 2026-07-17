@@ -1,35 +1,20 @@
 //go:build integration
 
-// Integration test closing the NTT recipient-binding "known test gap" noted in
-// canton/README.md and Wormhole.Ntt.Manager: no automated test exercised the
-// MATCHING-recipient path through a real `Receive` call, because the existing
-// receive fixture is a single, statically pre-signed VAA with a fixed
-// recipientAddress, and a live Party's fingerprint is freshly and
-// unpredictably allocated every run -- so no allocated Party can ever be made
-// to match a value baked into an already-signed VAA ahead of time.
+// Integration test closing the NTT recipient-binding test gap: no automated test
+// exercised the matching-recipient path through a real `Receive`, because the
+// static fixture VAA has a fixed recipientAddress and a live Party's fingerprint
+// is allocated fresh each run. The live two-step harness:
 //
-// This test closes it with the live two-step harness the gap note calls for:
-//
-//  1. Run Test.TestNtt:integrationNttReceiveMatchSetup against a live sandbox.
-//     It allocates the recipient (and everything else Receive needs) and
-//     returns recipientAddressFor(recipient) -- computed ON-LEDGER from the
-//     ACTUAL allocated Party, not guessed.
-//
-//  2. Sign a FRESH NTT transfer VAA against that hash here, in Go, using the
-//     same well-known devnet guardian test key every Daml NTT fixture is
-//     signed with -- exactly the off-chain step a real sender takes.
-//
-//  3. Run Test.TestNtt:integrationNttReceiveMatch against the SAME sandbox
-//     (ledger state persists across both dpm-script calls), relaying the
-//     fresh VAA. Its internal assertions (mint lands on the matching
-//     recipient; a replay of the same VAA is rejected) make `dpm script`
-//     exit non-zero if either fails.
+//  1. integrationNttReceiveMatchSetup allocates the recipient and returns
+//     recipientAddressFor(recipient), computed on-ledger.
+//  2. Sign a fresh VAA against that hash here, with the devnet guardian test key.
+//  3. integrationNttReceiveMatch relays it against the same sandbox (state
+//     persists); its assertions (mint lands; replay rejected) fail the script.
 //
 //     go test -tags integration -run TestCantonNttReceiveMatchIntegration . -v
 //
-// Requires `dpm` (PATH or ~/.dpm/bin) + a JDK; skipped otherwise. Slow (boots a
-// JVM sandbox), so it is excluded from the default build. findDpm/runCmd are
-// defined in helpers_test.go.
+// Requires `dpm` (PATH or ~/.dpm/bin) + a JDK; skipped otherwise. Slow, so
+// excluded from the default build. findDpm/runCmd are in helpers_test.go.
 package canton
 
 import (
@@ -52,7 +37,7 @@ import (
 )
 
 // b32Match returns a 32-byte slice whose last byte is `last` (matching the
-// 0x00..XX peer/manager addresses baked into every NTT Daml test fixture).
+// 0x00..XX peer/manager addresses in the NTT Daml fixtures).
 func b32Match(last byte) []byte {
 	b := make([]byte, 32)
 	b[31] = last
@@ -67,13 +52,10 @@ func lenPrefixedMatch(b []byte) []byte {
 	return append(out, b...)
 }
 
-// signNttTransferVAA builds and signs an NTT transfer VAA -- source chain 2,
-// peer transceiver 0x..cc (the VAA emitter), peer manager 0x..bb, our manager
-// 0x..aa, a transfer of 1_000_000 @ 8 decimals of token 0x..dd -- with a
-// caller-supplied recipientAddress, using the well-known Wormhole devnet
-// guardian key (the same one every Daml NTT fixture in this repo is signed
-// with). This signs a fresh VAA against a Party's ACTUAL, just-allocated hash
-// rather than a value baked in ahead of time.
+// signNttTransferVAA builds and signs an NTT transfer VAA -- source chain 2, peer
+// transceiver 0x..cc, peer manager 0x..bb, our manager 0x..aa, 1_000_000 @ 8
+// decimals of token 0x..dd -- with a caller-supplied recipientAddress, using the
+// devnet guardian key. Signs against a Party's actual just-allocated hash.
 func signNttTransferVAA(recipientAddress [32]byte, sequence uint64) ([]byte, error) {
 	priv, err := crypto.HexToECDSA("cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0")
 	if err != nil {
@@ -90,10 +72,9 @@ func signNttTransferVAA(recipientAddress [32]byte, sequence uint64) ([]byte, err
 	ntt = append(ntt, recipientAddress[:]...) // recipientAddress (caller-supplied)
 	ntt = append(ntt, 0x00, 0x48)             // recipientChain 72
 
-	// NttManagerMessage: id = sequence, left-padded to 32 bytes big-endian;
-	// sender = peer manager 0x..bb; payload = ntt. Receive doesn't check id
-	// against anything, but it must vary across signed VAAs to avoid
-	// accidentally reproducing the static nttTransferVAA fixture's digest.
+	// NttManagerMessage: id = sequence (left-padded to 32B); sender = peer manager
+	// 0x..bb; payload = ntt. id is unchecked but must vary across VAAs so the
+	// digest never collides with the static nttTransferVAA fixture.
 	id := make([]byte, 32)
 	binary.BigEndian.PutUint64(id[24:], sequence)
 	mm := append([]byte{}, id...)

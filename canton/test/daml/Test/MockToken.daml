@@ -1,16 +1,11 @@
--- | A minimal CIP-0056 token for tests: just enough of the standard's
--- 'Holding' and 'Allocation' interfaces for 'Wormhole.Core.Fees.chargeFee' to
--- validate and execute against, without vendoring the splice-amulet
--- dependency closure. Deliberate divergences from a real registry: no
--- deadline enforcement (registry-side by design — the bridge never checks
--- them) and no locking/change semantics (each allocation is minted whole).
--- Fidelity against real amulet belongs to devnet validation (README Open
--- Questions).
+-- | A minimal CIP-0056 token for tests: just enough of 'Holding' and
+-- 'Allocation' for 'Wormhole.Core.Fees.chargeFee', without the splice-amulet
+-- closure. Divergences from a real registry: no deadline enforcement and no
+-- locking/change (each allocation minted whole).
 --
--- 'FakeAllocation' exists to prove the admin-signature pin: its view CLAIMS
--- an arbitrary instrument, but it carries only the sender's signature — a
--- genuine registry allocation is co-signed by the instrument admin, which
--- cannot be forged.
+-- 'FakeAllocation' proves the admin-signature pin: its view claims an arbitrary
+-- instrument but carries only the sender's signature — a genuine allocation is
+-- admin-co-signed, which can't be forged.
 module Test.MockToken where
 
 import Daml.Script
@@ -79,9 +74,8 @@ template MockAllocation
           senderHoldingCids = [cid]
           meta = emptyMetadata
 
--- | A hostile allocation: the view claims whatever instrument it likes, the
--- implementation moves nothing, and — the detectable part — the instrument
--- admin never signed it.
+-- | A hostile allocation: the view claims any instrument, moves nothing, and —
+-- the detectable part — the instrument admin never signed it.
 template FakeAllocation
   with
     allocation : AllocationSpecification
@@ -104,9 +98,8 @@ template FakeAllocation
       allocation_withdrawImpl _self _arg =
         pure Allocation_WithdrawResult with senderHoldingCids = [], meta = emptyMetadata
 
--- | The bridge's allocation convention: @executor = sender = payer@,
--- @receiver@ = the fee recipient. Timestamps are placeholders — the mock does
--- not enforce deadlines.
+-- | The bridge's allocation convention: @executor = sender = payer@, @receiver@ =
+-- fee recipient. Timestamps are placeholders (no deadline enforcement).
 mkAllocationSpec : Party -> Party -> InstrumentId -> Decimal -> Time -> AllocationSpecification
 mkAllocationSpec payer recipient instrument amount now = AllocationSpecification with
   settlement = SettlementInfo with
@@ -124,9 +117,8 @@ mkAllocationSpec payer recipient instrument amount now = AllocationSpecification
     instrumentId = instrument
     meta = emptyMetadata
 
--- | Simulates the wallet+registry side: mint an allocation of @amount@ from
--- @payer@ to @recipient@, co-signed by the instrument admin, packaged with
--- empty 'ExtraArgs' (the mock needs no registry choice context).
+-- | Wallet+registry side: mint an admin-co-signed allocation of @amount@ from
+-- @payer@ to @recipient@, with empty 'ExtraArgs'.
 mintAndAllocate : Party -> Party -> Party -> InstrumentId -> Decimal -> Script (ContractId Allocation, ExtraArgs)
 mintAndAllocate admin payer recipient instrument amount = do
   now <- getTime
@@ -136,8 +128,7 @@ mintAndAllocate admin payer recipient instrument amount = do
       allocation = mkAllocationSpec payer recipient instrument amount now
   pure (toInterfaceContractId @Allocation cid, emptyExtraArgs)
 
--- | The recipient's mock-token balance: the sum of its holdings in the
--- given instrument, as visible to @reader@.
+-- | Sum of @owner@'s holdings in @instrument@, as visible to @reader@.
 mockBalance : Party -> Party -> InstrumentId -> Script Decimal
 mockBalance reader owner instrument = do
   holdings <- query @MockHolding reader
