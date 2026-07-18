@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -24,6 +25,11 @@ type app struct {
 	runDir    string
 	profile   profile.Name
 	verbose   bool
+
+	// stderr is the invoked command's error stream, captured once in PersistentPreRun so
+	// helpers constructed without a *cobra.Command in scope (the script runner and network
+	// managers' Logf closures) narrate to the same stream vlogf writes to.
+	stderr io.Writer
 }
 
 func newRootCmd() *cobra.Command {
@@ -34,6 +40,9 @@ func newRootCmd() *cobra.Command {
 		Short:         "Playground CLI for the Canton NTT contracts (devnet only)",
 		SilenceUsage:  true,
 		SilenceErrors: false,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			a.stderr = cmd.ErrOrStderr()
+		},
 	}
 
 	root.PersistentFlags().StringVar(&a.stateFile, "state-file", state.DefaultFileName, "path to the playground state file")
@@ -77,6 +86,22 @@ func (a *app) vlogf(cmd *cobra.Command, format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "[v] "+format+"\n", args...)
+}
+
+// verboseLogf returns a "[v] "-prefixed logger for the internal packages' nil-safe Logf
+// fields (ledger.Runner, network managers), or nil when --verbose is off -- the packages
+// stay prefix-agnostic and silent by default.
+func (a *app) verboseLogf() func(format string, args ...any) {
+	if !a.verbose {
+		return nil
+	}
+	w := a.stderr
+	if w == nil {
+		w = os.Stderr
+	}
+	return func(format string, args ...any) {
+		fmt.Fprintf(w, "[v] "+format+"\n", args...)
+	}
 }
 
 // resolvedCantonDir returns a.cantonDir if set, else discovers it by walking up from the

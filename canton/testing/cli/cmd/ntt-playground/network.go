@@ -30,7 +30,7 @@ func (a *app) sandboxManager() (*network.SandboxManager, error) {
 			return nil, err
 		}
 	}
-	return &network.SandboxManager{DpmPath: dpmPath, RunDir: a.resolvedRunDir(), Port: profile.SandboxPort()}, nil
+	return &network.SandboxManager{DpmPath: dpmPath, RunDir: a.resolvedRunDir(), Port: profile.SandboxPort(), Logf: a.verboseLogf()}, nil
 }
 
 // vlogNetwork narrates the resolved profile and the environment that shapes it, before a
@@ -49,7 +49,7 @@ func (a *app) localNetManager() (*network.LocalNetManager, error) {
 	if composeDir == "" {
 		return nil, fmt.Errorf("network: LOCALNET_DIR must point at the extracted splice-node/docker-compose/localnet directory")
 	}
-	return &network.LocalNetManager{ComposeDir: composeDir, ImageTag: os.Getenv("IMAGE_TAG")}, nil
+	return &network.LocalNetManager{ComposeDir: composeDir, ImageTag: os.Getenv("IMAGE_TAG"), Logf: a.verboseLogf()}, nil
 }
 
 func newNetworkUpCmd(a *app) *cobra.Command {

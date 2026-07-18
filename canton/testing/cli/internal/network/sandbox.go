@@ -37,6 +37,17 @@ type SandboxManager struct {
 	DpmPath string
 	RunDir  string
 	Port    int // 0 means let dpm sandbox pick its default (6865)
+
+	// Logf, when non-nil, narrates the sandbox lifecycle (reuse/start/wait/kill). The
+	// caller-supplied closure owns any prefix; nil (the default) disables narration.
+	Logf func(format string, args ...any)
+}
+
+// logf forwards to Logf when set -- nil-safe, so instrumentation never needs a guard.
+func (m *SandboxManager) logf(format string, args ...any) {
+	if m.Logf != nil {
+		m.Logf(format, args...)
+	}
 }
 
 func (m *SandboxManager) pidFile() string  { return filepath.Join(m.RunDir, "sandbox.pid") }
@@ -80,6 +91,7 @@ func (m *SandboxManager) Up(ctx context.Context, timeout time.Duration) (Sandbox
 	if running, info, err := m.Status(); err != nil {
 		return SandboxInfo{}, err
 	} else if running {
+		m.logf("sandbox: reusing running instance pid=%d port=%d", info.PID, info.Port)
 		return info, nil
 	}
 
@@ -105,6 +117,8 @@ func (m *SandboxManager) Up(ctx context.Context, timeout time.Duration) (Sandbox
 	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(), fmt.Sprintf("CANTON_SANDBOX_PORT=%d", port))
 
+	m.logf("sandbox: starting dpm sandbox --no-tty port=%d log=%s", port, logPath)
+	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return SandboxInfo{}, fmt.Errorf("network: start dpm sandbox: %w", err)
 	}
@@ -115,11 +129,13 @@ func (m *SandboxManager) Up(ctx context.Context, timeout time.Duration) (Sandbox
 		return SandboxInfo{}, fmt.Errorf("network: write port file: %w", err)
 	}
 
+	m.logf("sandbox: waiting for %q", SandboxReadyLogLine)
 	if err := waitForLogLine(ctx, logPath, SandboxReadyLogLine, timeout); err != nil {
 		_ = killProcessGroup(cmd.Process.Pid)
 		_ = os.Remove(m.pidFile())
 		return SandboxInfo{}, fmt.Errorf("network: sandbox never became ready: %w", err)
 	}
+	m.logf("sandbox: ready (%s)", time.Since(start).Round(time.Second))
 
 	return SandboxInfo{PID: cmd.Process.Pid, Port: port, LogPath: logPath}, nil
 }
@@ -133,6 +149,7 @@ func (m *SandboxManager) Down() error {
 	if !running {
 		return nil
 	}
+	m.logf("sandbox: killing process group pid=%d", info.PID)
 	if err := killProcessGroup(info.PID); err != nil {
 		return fmt.Errorf("network: stop sandbox: %w", err)
 	}

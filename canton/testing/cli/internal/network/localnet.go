@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -59,6 +60,18 @@ type LocalNetManager struct {
 	ComposeDir       string
 	ImageTag         string
 	ValidatorBaseURL string // defaults to http://localhost:3903 if empty
+
+	// Logf, when non-nil, narrates the compose lifecycle (up/down/readiness, plus a
+	// per-service listing after up). The caller-supplied closure owns any prefix; nil (the
+	// default) disables narration.
+	Logf func(format string, args ...any)
+}
+
+// logf forwards to Logf when set -- nil-safe, so instrumentation never needs a guard.
+func (m *LocalNetManager) logf(format string, args ...any) {
+	if m.Logf != nil {
+		m.Logf(format, args...)
+	}
 }
 
 func (m *LocalNetManager) validatorBaseURL() string {
@@ -87,11 +100,13 @@ func (m *LocalNetManager) composeArgs(rest ...string) []string {
 func (m *LocalNetManager) ensurePostgresOverride() error {
 	path := filepath.Join(m.ComposeDir, postgresOverrideFile)
 	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, postgresOverride) {
+		m.logf("localnet: postgres override up-to-date (%s)", path)
 		return nil
 	}
 	if err := os.WriteFile(path, postgresOverride, 0o644); err != nil {
 		return fmt.Errorf("network: writing postgres override: %w", err)
 	}
+	m.logf("localnet: postgres override written (%s)", path)
 	return nil
 }
 
@@ -108,9 +123,16 @@ func (m *LocalNetManager) env() []string {
 // healthchecks (--wait), then polls the validator readyz endpoint as a belt-and-braces
 // check. First boot (DSO bootstrap) is documented at 2-6 minutes; timeout should be generous.
 func (m *LocalNetManager) Up(ctx context.Context, timeout time.Duration) error {
+	tag := m.ImageTag
+	if tag == "" {
+		tag = "default"
+	}
+	m.logf("localnet: compose dir=%s image-tag=%s profiles=[sv app-provider]", m.ComposeDir, tag)
 	if err := m.ensurePostgresOverride(); err != nil {
 		return err
 	}
+	m.logf("localnet: docker compose up -d --wait (first boot's DSO bootstrap takes 2-6 minutes)")
+	start := time.Now()
 	args := m.composeArgs("up", "-d", "--wait")
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = m.env()
@@ -119,7 +141,32 @@ func (m *LocalNetManager) Up(ctx context.Context, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("network: docker compose up failed: %w\n%s", err, out)
 	}
+	m.logf("localnet: docker compose up done (%s)", time.Since(start).Round(time.Second))
+	if m.Logf != nil {
+		m.logComposeServices(ctx)
+	}
 	return m.waitReady(ctx, timeout)
+}
+
+// logComposeServices narrates one line per compose service (name, state, health) after an
+// up -- the "what actually got spun up" answer for verbose runs. Only invoked when Logf is
+// set: it costs an extra docker invocation and is purely informational, so failures are
+// logged and swallowed rather than propagated.
+func (m *LocalNetManager) logComposeServices(ctx context.Context) {
+	args := m.composeArgs("ps", "--format", "{{.Service}} {{.State}} {{.Health}}")
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = m.env()
+	cmd.Dir = m.ComposeDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		m.logf("localnet: docker compose ps failed (informational only): %v", err)
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			m.logf("localnet: service %s", line)
+		}
+	}
 }
 
 // Down tears the stack down and wipes state (parties/DARs/ledger data) with `down -v`, so
@@ -128,6 +175,7 @@ func (m *LocalNetManager) Down(ctx context.Context) error {
 	if err := m.ensurePostgresOverride(); err != nil {
 		return err
 	}
+	m.logf("localnet: docker compose down -v (wipes parties/DARs/ledger state)")
 	args := m.composeArgs("down", "-v")
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = m.env()
@@ -148,11 +196,14 @@ func (m *LocalNetManager) waitReady(ctx context.Context, timeout time.Duration) 
 	if err != nil {
 		return err
 	}
+	m.logf("localnet: polling readyz + scan-proxy (validator %s)", m.validatorBaseURL())
+	start := time.Now()
 	client := &http.Client{Timeout: 10 * time.Second}
 	deadline := time.Now().Add(timeout)
 	for {
 		if ok := probeGET(ctx, client, m.validatorBaseURL()+"/api/validator/readyz", ""); ok {
 			if ok := probeGET(ctx, client, m.validatorBaseURL()+"/api/validator/v0/scan-proxy/dso-party-id", token); ok {
+				m.logf("localnet: validator ready (%s); participant endpoints: ledger-gRPC :3901, JSON-API :3975, validator :3903", time.Since(start).Round(time.Second))
 				return nil
 			}
 		}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/profile"
 )
@@ -47,7 +48,18 @@ type Runner struct {
 	// WorkDir holds the per-call input/output JSON files (a temp dir the caller owns).
 	WorkDir string
 
+	// Logf, when non-nil, narrates each script invocation (target, input, duration). The
+	// caller-supplied closure owns any prefix; nil (the default) disables narration.
+	Logf func(format string, args ...any)
+
 	callCount int
+}
+
+// logf forwards to Logf when set -- nil-safe, so instrumentation never needs a guard.
+func (r *Runner) logf(format string, args ...any) {
+	if r.Logf != nil {
+		r.Logf(format, args...)
+	}
 }
 
 // NewRunner constructs a Runner, resolving dpm from PATH/~/.dpm/bin if dpmPath is empty.
@@ -107,11 +119,28 @@ func (r *Runner) Run(ctx context.Context, scriptName string, input, output any) 
 		args = append(args, "--user-id", r.Profile.UserID)
 	}
 
+	if r.Logf != nil {
+		auth, user := "none", "-"
+		if r.Profile.RequiresAuth {
+			auth = "bearer"
+		}
+		if r.Profile.UserID != "" {
+			user = r.Profile.UserID
+		}
+		r.logf("script %s → dpm script @ %s:%d (upload-dar=%t auth=%s user=%s)",
+			scriptName, r.Profile.LedgerHost, r.Profile.LedgerPort, r.Profile.UploadDAR, auth, user)
+		// Inputs are parties/addresses/VAA hex -- never the guardian private key, which is
+		// signed off-ledger and never crosses this boundary.
+		r.logf("script %s input: %s", scriptName, inputRaw)
+	}
+
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, r.DpmPath, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, err, out)
 	}
+	r.logf("script %s ok (%s)", scriptName, time.Since(start).Round(time.Millisecond))
 
 	outputRaw, err := os.ReadFile(outputPath)
 	if err != nil {

@@ -47,5 +47,6 @@ func (a *app) newScriptRunner(ctx context.Context) (*ledger.Runner, func(), erro
 		cleanup()
 		return nil, nil, err
 	}
+	r.Logf = a.verboseLogf() // nil unless --verbose; narrates every dpm script invocation
 	return r, cleanup, nil
 }
