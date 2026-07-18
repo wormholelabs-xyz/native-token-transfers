@@ -298,6 +298,58 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "emitterChain=72")
 	})
 
+	// The only subtest driving a real production NttToken impl end to end: the CIP-56
+	// burn/mint seam (Cip56BurnMintToken.MintOrUnlock on inbound, LockOrBurn on outbound)
+	// over the local mock registry, exercising the auto-funding path, the Daml Decimal
+	// JSON boundary, and -- via step f -- the suite's only value-conservation assertion.
+	var cip56Total string
+	t.Run("cip56 burn-mint deployment: funded transfer round-trip", func(t *testing.T) {
+		out := h.mustRun("deploy", "--config", testdataPath("deploy-cip56-burnmint.json"))
+		require.Contains(t, out, "[v] set peer chain=2")
+
+		s := h.loadState()
+		d, ok := s.Deployment("cip56bm")
+		require.True(t, ok)
+		require.Equal(t, "cip56-burn-mint-mock", d.TokenKind, "the deployment must use the real CIP-56 burn/mint impl")
+
+		// Inbound: a guardian-signed transfer mints a real owner-signed CIP-56 holding to
+		// Frank through Cip56BurnMintToken.MintOrUnlock (recipient authority threaded from
+		// Manager.Receive; factory disclosed by receiveVaa).
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "750000", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		require.NotEmpty(t, vaaHex)
+
+		out = h.mustRun("receive", "--deployment", "cip56bm",
+			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=750000")
+
+		// The mint landed: 750000 wire units at 8 decimals = 0.0075 CIP-56 units, rendered by
+		// dpm script as a full-scale Daml Numeric 10 literal (pinned to the observed form).
+		out = h.mustRun("balance", "--party", "Frank", "--deployment", "cip56bm")
+		cip56Total = extractField(t, out, "cip56HoldingTotal")
+		require.Equal(t, "0.0075000000", cip56Total, "the receive should have minted 750000 units (0.0075 at 8 decimals)")
+
+		// Outbound: the CLI auto-funds Frank a fresh 0.003 holding, then LockOrBurn burns it
+		// in full (exact cover, no change). Frank's receive-minted 0.0075 is a separate
+		// holding and is untouched.
+		out = h.mustRun("transfer", "--deployment", "cip56bm",
+			"--user", "Frank", "--chain", "2",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "300000", "--sign")
+		require.Equal(t, "72", extractField(t, out, "emitterChain"), "outbound messages are published from Canton (chain 72)")
+		require.True(t, strings.HasPrefix(extractField(t, out, "payload"), "9945ff10"),
+			"recomputed payload should carry the transceiver prefix")
+
+		// Value conservation: the auto-funded 0.003 was burned in full, so Frank's balance is
+		// exactly what the inbound mint left -- unchanged from the pre-transfer reading.
+		out = h.mustRun("balance", "--party", "Frank", "--deployment", "cip56bm")
+		require.Equal(t, cip56Total, extractField(t, out, "cip56HoldingTotal"),
+			"the funded holding must have been consumed in full by the burn, leaving the minted balance intact")
+	})
+
 	t.Run("party list shows allocated parties", func(t *testing.T) {
 		s := h.loadState()
 		require.NotEmpty(t, s.Users["Alice"], "Alice should have been allocated by the inbound transfer step")
@@ -388,8 +440,10 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
 		require.Equal(t, 0, listed.GuardianSetIndex)
-		require.Len(t, listed.Managers, 2, "burnmint + lockunlock managers")
-		require.GreaterOrEqual(t, len(listed.Emitters), 3, "two transceiver emitters + the standalone one")
+		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment", and
+		// "cip56 burn-mint deployment". Bump these counts whenever a deploy subtest is added.
+		require.Len(t, listed.Managers, 3, "burnmint + lockunlock + cip56bm managers")
+		require.GreaterOrEqual(t, len(listed.Emitters), 4, "three transceiver emitters + the standalone one")
 	})
 
 	t.Run("network status reports running localnet services", func(t *testing.T) {
