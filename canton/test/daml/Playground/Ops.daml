@@ -21,12 +21,13 @@ import DA.Map qualified as Map
 import DA.Optional (fromSome, fromSomeNote)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
 import Wormhole.Core.Bytes (leftPadTo, intToBytesN, normalizeHex)
-import Wormhole.Core.State (SubmitGovernanceVAA (..))
+import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Manager (Peer (..), Transfer (..), Receive (..), SetPeer (..))
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Token (trimAmount, emptyExtraArgs)
 import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken, Cip56CustodyToken)
+import Test.TestCore qualified as TestCore
 import Test.TestNtt (MockToken, mkHolding)
 import Test.TestReplay (coveringDisclosure)
 
@@ -201,6 +202,79 @@ transferOut input = do
     nonce = input.nonce
     consistencyLevel = input.consistencyLevel
     payload = recomputedPayload
+
+----------------------------------------------------------------------
+-- registerEmitter
+----------------------------------------------------------------------
+
+data RegisterEmitterInput = RegisterEmitterInput with
+    operator : Party
+    owner    : Party
+  deriving (Eq, Show)
+
+data RegisterEmitterOutput = RegisterEmitterOutput with
+    emitterId      : Int
+    emitterAddress : Text
+  deriving (Eq, Show)
+
+-- | Register a standalone core-bridge 'Emitter' for @owner@, not tied to any NTT
+-- deployment -- the same requester-submitted 'Test.TestCore:registerEmitter' path
+-- 'Playground.Deploy:deployNtt' uses for transceivers (zero-fee registry, so no CoreState
+-- reference needed). The returned identity pair is what the CLI persists; the cid is not.
+registerEmitter : RegisterEmitterInput -> Script RegisterEmitterOutput
+registerEmitter input = do
+  emCid <- TestCore.registerEmitter input.operator input.owner
+  Some em <- queryContractId input.owner emCid
+  pure RegisterEmitterOutput with
+    emitterId = em.emitterId
+    emitterAddress = em.emitterAddress
+
+----------------------------------------------------------------------
+-- publishMessage
+----------------------------------------------------------------------
+
+data PublishMessageInput = PublishMessageInput with
+    operator         : Party
+    owner            : Party
+    emitterId        : Int
+    payload          : Text
+    nonce            : Int
+    consistencyLevel : Int
+  deriving (Eq, Show)
+
+data PublishMessageOutput = PublishMessageOutput with
+    sequence       : Int
+    emitterChain   : Int   -- 72, cantonChainId
+    emitterAddress : Text
+    payload        : Text
+  deriving (Eq, Show)
+
+-- | Publish an arbitrary message from a standalone emitter. Unlike 'transferOut' there is
+-- nothing to recompute: 'PublishMessage''s choice result -- the 'WormholeMessage' a real
+-- watcher decodes from the exercise result -- is directly available here, so its sequence
+-- and payload are returned verbatim (the address comes from the resolved 'Emitter'; the
+-- 'WormholeMessage' carries only the identity components a watcher hashes itself). @owner@
+-- is its own payer, collapsing the choice's @owner, payer@ controller set to one party;
+-- the CoreState is disclosed for the fee read, with @feeAllocation = None@ under the
+-- playground's fee-0 assumption (same as 'transferOut').
+publishMessage : PublishMessageInput -> Script PublishMessageOutput
+publishMessage input = do
+  (emCid, em) <- resolveEmitter input.operator input.emitterId
+  csCid <- resolveCoreState input.operator
+  dCs <- fromSome <$> queryDisclosure input.operator csCid
+  msg <- submit (actAs input.owner <> disclose dCs) do
+    exerciseCmd emCid PublishMessage with
+      nonce = input.nonce
+      payload = normalizeHex input.payload
+      consistencyLevel = input.consistencyLevel
+      coreStateCid = csCid
+      payer = input.owner
+      feeAllocation = None
+  pure PublishMessageOutput with
+    sequence = msg.sequence
+    emitterChain = 72
+    emitterAddress = em.emitterAddress
+    payload = msg.payload
 
 ----------------------------------------------------------------------
 -- applyGovernance

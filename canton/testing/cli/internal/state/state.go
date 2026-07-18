@@ -37,6 +37,16 @@ type Deployment struct {
 	Peers              map[int]Peer `json:"peers"` // keyed by chain id
 }
 
+// Emitter is one standalone core-bridge emitter's stable identity (`emitter register`):
+// the registry-allocated emitterId, the derived 32-byte hex address, and the owning party.
+// The Emitter contract itself churns on every publish (its sequence counter bumps), so --
+// per the package rule -- its cid is never stored; `publish` re-resolves it by emitterId.
+type Emitter struct {
+	EmitterID int    `json:"emitterId"`
+	Address   string `json:"address"`
+	Owner     string `json:"owner"` // full party id
+}
+
 // Guardian is the playground's 1/1 guardian key. PrivateKeyHex is a devnet-only convenience
 // (the whole point of a local playground is not needing an external signer); a real
 // deployment would never persist a guardian key like this -- see the CLI README's MainNet
@@ -55,6 +65,10 @@ type State struct {
 	Guardian           Guardian              `json:"guardian"`
 	Deployments        map[string]Deployment `json:"deployments"`
 
+	// Emitters maps CLI-local names (`emitter register --name`) to standalone emitters,
+	// so `publish --emitter NAME` can re-resolve the live contract by stable identity.
+	Emitters map[string]Emitter `json:"emitters"`
+
 	// Users maps CLI-facing party hints (e.g. "Alice") to the full party id
 	// `Playground.Ops:allocatePlaygroundParty` allocated for that hint, so a hint always
 	// resolves to the same party across separate CLI invocations (see resolveParty in
@@ -72,6 +86,7 @@ type State struct {
 func New() *State {
 	return &State{
 		Deployments:       map[string]Deployment{},
+		Emitters:          map[string]Emitter{},
 		GuardianSequences: map[string]uint64{},
 		Users:             map[string]string{},
 	}
@@ -89,6 +104,9 @@ func Load(path string) (*State, error) {
 	}
 	if s.Deployments == nil {
 		s.Deployments = map[string]Deployment{}
+	}
+	if s.Emitters == nil {
+		s.Emitters = map[string]Emitter{}
 	}
 	if s.GuardianSequences == nil {
 		s.GuardianSequences = map[string]uint64{}
@@ -125,6 +143,13 @@ func (s *State) NextGuardianSequence(kind string, emitterChain uint16) uint64 {
 func (s *State) Deployment(name string) (Deployment, bool) {
 	d, ok := s.Deployments[name]
 	return d, ok
+}
+
+// Emitter looks up a standalone emitter by its CLI-local name, returning ok=false if it
+// doesn't exist.
+func (s *State) Emitter(name string) (Emitter, bool) {
+	e, ok := s.Emitters[name]
+	return e, ok
 }
 
 // Peer looks up a deployment's peer for chain, returning ok=false if none is configured.

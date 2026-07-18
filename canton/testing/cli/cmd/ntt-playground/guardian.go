@@ -9,6 +9,7 @@ import (
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/guardian"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
@@ -348,6 +349,41 @@ func newGuardianVerifyVaaCmd(a *app) *cobra.Command {
 // version(1) + guardianSetIndex(4) + sigCount(1) + guardianIndex(1) + signature(65). The
 // playground always signs 1/1, so len(vaa)-vaaHeaderLen is the signed body's length.
 const vaaHeaderLen = 1 + 4 + 1 + 1 + 65
+
+// signRecomputedVAA signs an observed published message with the playground's 1/1 guardian
+// key, standing in for the off-ledger guardian watcher -- the shared tail of
+// `transfer --sign` and `publish --sign`. The caller supplies exactly the message fields
+// the ledger emitted (or, in `transfer`'s case, bit-exact recomputations of them). Returns
+// the hex-encoded VAA; callers wrap errors with their own command prefix.
+func signRecomputedVAA(s *state.State, emitterChain int, emitterAddressHex string, sequence uint64, nonce, consistencyLevel int, payloadHex string) (string, error) {
+	if s.Guardian.PrivateKeyHex == "" {
+		return "", fmt.Errorf("no guardian private key in state (init with --guardian-key, or without one to generate a fresh key)")
+	}
+	key, err := guardian.KeyFromHex(s.Guardian.PrivateKeyHex)
+	if err != nil {
+		return "", err
+	}
+	payload, err := hex.DecodeString(payloadHex)
+	if err != nil {
+		return "", fmt.Errorf("decode published payload: %w", err)
+	}
+	emitterAddr, err := decodeHex32(emitterAddressHex)
+	if err != nil {
+		return "", fmt.Errorf("decode emitter address: %w", err)
+	}
+	vaa, err := guardian.Sign(key, guardian.VAAParams{
+		Nonce:            uint32(nonce),        //nolint:gosec // playground nonces are small
+		EmitterChain:     uint16(emitterChain), //nolint:gosec // playground chain ids are small
+		EmitterAddress:   emitterAddr,
+		Sequence:         sequence,
+		ConsistencyLevel: uint8(consistencyLevel), //nolint:gosec // playground consistency levels are small
+		Payload:          payload,
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(vaa), nil
+}
 
 func decodeHex32(s string) ([32]byte, error) {
 	var out [32]byte

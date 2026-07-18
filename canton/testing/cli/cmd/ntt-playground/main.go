@@ -58,6 +58,8 @@ func newRootCmd() *cobra.Command {
 		newDeployCmd(a),
 		newPeerCmd(a),
 		newPartyCmd(a),
+		newEmitterCmd(a),
+		newPublishCmd(a),
 		newTransferCmd(a),
 		newReceiveCmd(a),
 		newGuardianCmd(a),

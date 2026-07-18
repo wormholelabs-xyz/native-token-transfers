@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -296,6 +297,27 @@ func TestPlaygroundE2E(t *testing.T) {
 
 		out = h.mustRun("party", "allocate", "--hint", "Eve")
 		require.Equal(t, eve, extractField(t, out, "party"), "re-allocating the same hint must return the same party")
+	})
+
+	t.Run("standalone emitter publishes a verifiable message", func(t *testing.T) {
+		out := h.mustRun("emitter", "register", "--name", "oracle", "--owner", "oracle-admin")
+		require.NotEmpty(t, extractField(t, out, "emitterAddress"))
+
+		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
+		require.Equal(t, "72", extractField(t, out, "emitterChain"), "standalone messages are published from Canton (chain 72)")
+		require.Equal(t, "deadbeef", extractField(t, out, "payload"), "the choice-result payload should round-trip verbatim")
+		firstSeq, err := strconv.Atoi(extractField(t, out, "sequence"))
+		require.NoError(t, err)
+		vaaHex := extractField(t, out, "vaa")
+		require.NotEmpty(t, vaaHex)
+
+		// On-ledger verification of the CLI-signed VAA (operator as default verifier).
+		out = h.mustRun("guardian", "verify-vaa", "--vaa", vaaHex)
+		require.Contains(t, out, "emitterChain=72")
+
+		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
+		require.Equal(t, strconv.Itoa(firstSeq+1), extractField(t, out, "sequence"),
+			"the emitter's sequence must increment on every publish")
 	})
 
 	t.Run("network down", func(t *testing.T) {

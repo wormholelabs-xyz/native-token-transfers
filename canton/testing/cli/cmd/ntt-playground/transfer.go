@@ -1,13 +1,11 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/guardian"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
@@ -123,37 +121,13 @@ func newTransferCmd(a *app) *cobra.Command {
 				out.OutboundSequence, out.EmitterChain, out.EmitterAddress, out.Payload)
 
 			if sign {
-				if s.Guardian.PrivateKeyHex == "" {
-					return fmt.Errorf("transfer --sign: no guardian private key in state (init with --guardian-key, or without one to generate a fresh key)")
-				}
-				key, err := guardian.KeyFromHex(s.Guardian.PrivateKeyHex)
+				vaaHex, err := signRecomputedVAA(s, out.EmitterChain, out.EmitterAddress,
+					uint64(out.OutboundSequence), out.Nonce, out.ConsistencyLevel, out.Payload)
 				if err != nil {
-					return err
+					return fmt.Errorf("transfer --sign: %w", err)
 				}
-				payload, err := hex.DecodeString(out.Payload)
-				if err != nil {
-					return fmt.Errorf("transfer --sign: decode recomputed payload: %w", err)
-				}
-				var emitterAddr [32]byte
-				emitterAddrBytes, err := hex.DecodeString(out.EmitterAddress)
-				if err != nil {
-					return fmt.Errorf("transfer --sign: decode emitter address: %w", err)
-				}
-				copy(emitterAddr[32-len(emitterAddrBytes):], emitterAddrBytes)
-
-				vaa, err := guardian.Sign(key, guardian.VAAParams{
-					Nonce:            uint32(out.Nonce), //nolint:gosec // playground nonces are small
-					EmitterChain:     uint16(out.EmitterChain),
-					EmitterAddress:   emitterAddr,
-					Sequence:         uint64(out.OutboundSequence),
-					ConsistencyLevel: uint8(out.ConsistencyLevel), //nolint:gosec // playground consistency levels are small
-					Payload:          payload,
-				})
-				if err != nil {
-					return err
-				}
-				a.vlogf(cmd, "sign: digest=keccak256(keccak256(body)) over %d-byte body", len(vaa)-vaaHeaderLen)
-				fmt.Fprintf(cmd.OutOrStdout(), "transfer --sign: vaa=%s\n", hex.EncodeToString(vaa))
+				a.vlogf(cmd, "sign: digest=keccak256(keccak256(body)) over %d-byte body", len(vaaHex)/2-vaaHeaderLen)
+				fmt.Fprintf(cmd.OutOrStdout(), "transfer --sign: vaa=%s\n", vaaHex)
 			}
 			return nil
 		},
