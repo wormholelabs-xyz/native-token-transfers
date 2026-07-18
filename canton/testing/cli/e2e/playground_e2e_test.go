@@ -344,6 +344,28 @@ func TestPlaygroundE2E(t *testing.T) {
 		out = h.mustRun("guardian", "verify-vaa", "--deployment", "burnmint", "--vaa", outboundVaaHex)
 		require.Contains(t, out, "emitterChain=72")
 		require.Contains(t, out, "guardianSetIndex=0")
+
+		// observe: confirm the manager's own on-ledger outboundSequence advanced (0 -> 1
+		// from the single transfer above) -- the transfer output's sequence is
+		// recompute-based, so this is the suite's only direct on-ledger check of it. Also
+		// cross-check the reported chain-2 peer against the state file's peer entry (set
+		// from testdata/deploy-burnmint.json at deploy time).
+		out = h.mustRun("observe", "--deployment", "burnmint")
+		var observed struct {
+			OutboundSequence int `json:"outboundSequence"`
+			Peers            []struct {
+				Chain              int    `json:"chain"`
+				ManagerAddress     string `json:"managerAddress"`
+				TransceiverAddress string `json:"transceiverAddress"`
+			} `json:"peers"`
+		}
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
+		require.Equal(t, 1, observed.OutboundSequence,
+			"outboundSequence should have advanced from 0 by the single outbound transfer above")
+		require.Len(t, observed.Peers, 1)
+		require.Equal(t, 2, observed.Peers[0].Chain)
+		require.Equal(t, peer.ManagerAddress, observed.Peers[0].ManagerAddress)
+		require.Equal(t, peer.TransceiverAddress, observed.Peers[0].TransceiverAddress)
 	})
 
 	t.Run("lock-unlock deployment: abbreviated receive + transfer", func(t *testing.T) {
