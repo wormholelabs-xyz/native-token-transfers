@@ -349,10 +349,12 @@ receiveVaa input = do
   dCs <- fromSome <$> queryDisclosure input.operator csCid
   -- The nested MintOrUnlock reaches the token hook AND its admin-signed registry factory;
   -- disclose both (as transferOut does for the outbound leg) so a non-admin executor can
-  -- resolve them.
+  -- resolve them. @recipient@ co-acts because Receive/MintOrUnlock now require its authority
+  -- to create an owner-signed recipient holding.
   dTokens <- resolveTokenDisclosure input.admin (parseTokenKind input.tokenKind)
 
-  let baseOpts = actAs input.executor <> disclose dMgr <> disclose dCs <> disclose nodeDisc
+  let baseOpts = actAs input.executor <> actAs input.recipient
+                   <> disclose dMgr <> disclose dCs <> disclose nodeDisc
   ntt <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
     exerciseCmd mgrCid Receive with
       executor = input.executor

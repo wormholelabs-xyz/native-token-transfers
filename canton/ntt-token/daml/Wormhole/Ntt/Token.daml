@@ -4,7 +4,10 @@
 -- interface; concrete impls (a test mock; the CIP-56 wiring in ../ntt-cip56)
 -- supply the bodies.
 --
--- Choices are controlled by the 'manager' party; the token mutations are
+-- Each choice is co-controlled by the 'manager' party and the transfer's
+-- counterparty ('LockOrBurn' by the sender, 'MintOrUnlock' by the recipient): the
+-- counterparty's authority must reach the seam body so it can spend (burn/lock) or
+-- create (mint/unlock) an owner-signed holding. The token mutations are otherwise
 -- authorized by the impl contract being admin-signed, so a choice carries the
 -- admin's authority without the submitter being the admin. Both are 'nonconsuming'
 -- so the hook cid is stable.
@@ -90,11 +93,14 @@ interface NttToken where
     controller (view this).manager, sender
     do lockOrBurnImpl this sender amount inputHoldingCids extraArgs
 
+  -- Both manager and recipient control this choice: the recipient's authority
+  -- must reach the seam body so it can create an owner-signed holding (the inbound
+  -- mirror of LockOrBurn's sender-spends-an-owner-signed-holding requirement).
   nonconsuming choice MintOrUnlock : ()
     with
       recipient        : Party
       amount           : TrimmedAmount
       inputHoldingCids : [ContractId Holding]
       extraArgs        : ExtraArgs
-    controller (view this).manager
+    controller (view this).manager, recipient
     do mintOrUnlockImpl this recipient amount inputHoldingCids extraArgs

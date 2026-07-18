@@ -67,6 +67,14 @@ template Cip56CustodyToken
 
       -- Unlock: custody -> recipient, spending the custody holdings. Same
       -- synchronous-settle requirement as the lock path.
+      --
+      -- Unlike the burn/mint leg, 'TransferFactory_Transfer' exposes no
+      -- 'extraActors', so the recipient's authority (threaded in via MintOrUnlock's
+      -- recipient controller) cannot be forwarded to the owner-signed receiver
+      -- holding. A registry that requires the receiver's authority therefore yields
+      -- a Pending 'TransferInstruction' (receiver must accept off-ledger, a
+      -- recipient pre-approval; README) which this hook rejects. A synchronous
+      -- unlock to an arbitrary recipient needs that pre-approval in place first.
       mintOrUnlockImpl recipient amount inputHoldingCids extraArgs = do
         now <- getTime
         res <- exercise transferFactoryCid TransferFactory_Transfer with
@@ -130,7 +138,11 @@ template Cip56BurnMintToken
                extraActors = [sender]
         pure ()
 
-      -- Mint: one output to the recipient, no inputs.
+      -- Mint: one output to the recipient, no inputs. The recipient goes in
+      -- extraActors so its authority reaches the owner-signed output holding's
+      -- creation (BurnMintV1 requires each output owner in extraActors); the
+      -- authority is threaded down from Manager.Receive via MintOrUnlock's
+      -- recipient controller (mirrors the burn path's extraActors = [sender]).
       mintOrUnlockImpl recipient amount _inputHoldingCids extraArgs = do
         _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
                expectedAdmin = instrumentId.admin
@@ -143,5 +155,5 @@ template Cip56BurnMintToken
                instrumentId
                inputHoldingCids = []
                extraArgs
-               extraActors = []
+               extraActors = [recipient]
         pure ()

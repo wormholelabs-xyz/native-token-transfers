@@ -603,11 +603,13 @@ setupReceiveManager operator guardianGovernance admin = do
   _ <- registerReplayRoot operator admin defaultSplitThreshold
   pure (mgrId, mockCid)
 
--- | Receive is permissionless: a third-party @relayer@ relays the VAA with only
--- disclosures. It passes verification, replay-consume, peer, and manager-binding,
--- failing only on the recipient binding (a nondeterministic Party can't hash to
--- the fixture's baked-in recipientAddress). Reaching that gate proves the executor
--- carries no authority — only visibility is required.
+-- | Receive stays relayer-permissionless: a third-party @relayer@ supplies the
+-- executor authority with only disclosures (not a stakeholder of anything). The
+-- @recipient@ now co-authorizes (Receive threads its authority into the mint), so it
+-- co-acts here; the transfer still fails only on the recipient binding (a
+-- nondeterministic Party can't hash to the fixture's baked-in recipientAddress).
+-- Reaching that gate proves the executor carries no authority — the recipient's
+-- co-signature plus visibility is all that is required.
 testNttReceiveByExecutorRecipientMismatchFails : Script ()
 testNttReceiveByExecutorRecipientMismatchFails = do
   (operator, guardianGovernance, csId) <- nttSetup
@@ -620,7 +622,7 @@ testNttReceiveByExecutorRecipientMismatchFails = do
   dCs   <- fromSome <$> queryDisclosure operator csId
   dMock <- fromSome <$> queryDisclosure operator mockCid
 
-  res <- trySubmit (actAs relayer <> disclose dMgr <> disclose dCs <> disclose nodeDisc <> disclose dMock) do
+  res <- trySubmit (actAs relayer <> actAs wrongRecipient <> disclose dMgr <> disclose dCs <> disclose nodeDisc <> disclose dMock) do
     exerciseCmd mgrId Receive with
       executor = relayer
       coreStateCid = csId
@@ -658,7 +660,7 @@ testNttReceivePinsGuardianGovernance = do
   (mgrId, _) <- setupReceiveManager operator guardianGovernance admin
   (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
 
-  res <- trySubmit operator do
+  res <- trySubmit (actAs operator <> actAs recipient) do
     exerciseCmd mgrId Receive with
       executor = operator
       coreStateCid = fakeCsId
@@ -732,7 +734,7 @@ data NttReceiveMatchInput = NttReceiveMatchInput with
 -- to 'recipient'; a second relay is rejected (replay).
 integrationNttReceiveMatch : NttReceiveMatchInput -> Script ()
 integrationNttReceiveMatch input = do
-  ntt <- submit input.operator do
+  ntt <- submit (actAs input.operator <> actAs input.recipient) do
     exerciseCmd input.mgrId Receive with
       executor = input.operator
       coreStateCid = input.coreStateCid
@@ -754,7 +756,7 @@ integrationNttReceiveMatch input = do
   -- Replay: digest now consumed. Re-resolve the covering node and relay again —
   -- rejected on membership.
   (freshNode, _) <- coveringDisclosure input.operator input.recipient (parseVAA input.vaaBytes).hash
-  submitMustFail input.operator do
+  submitMustFail (actAs input.operator <> actAs input.recipient) do
     exerciseCmd input.mgrId Receive with
       executor = input.operator
       coreStateCid = input.coreStateCid

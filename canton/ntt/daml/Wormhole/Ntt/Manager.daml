@@ -224,8 +224,12 @@ template NttManager
     --
     -- @executor@ carries no authority: the @nonconsuming@ body inherits
     -- 'NttManager''s signatory authority (@operator, admin@), which the nested
-    -- choices need; the executor only supplies disclosures. (An owner-signed token
-    -- additionally needs a recipient pre-approval — off-ledger, README §11.)
+    -- choices need; the executor only supplies disclosures. @recipient@ co-controls
+    -- so its authority reaches the seam's 'MintOrUnlock' and, for an owner-signed
+    -- token, the creation of the recipient's holding (mirrors 'Transfer''s
+    -- user-controls-'LockOrBurn' side; README §11's "recipient pre-approval"). Still
+    -- relayer-permissionless — the executor needs no authority — but the recipient
+    -- must co-authorize receipt of its own funds.
     --
     -- The disclosed 'CoreState' is authenticated by pinning its
     -- @guardianGovernance@ to the anchor @admin@ committed at deployment. Pinning
@@ -249,7 +253,7 @@ template NttManager
         recipient        : Party
         inputHoldingCids : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
         extraArgs        : ExtraArgs             -- CIP-56 choice context
-      controller executor
+      controller executor, recipient
       do
         -- Authenticate the guardian trust root before verifying against it.
         csGg <- exercise coreStateCid GetGuardianGovernance with reader = executor
