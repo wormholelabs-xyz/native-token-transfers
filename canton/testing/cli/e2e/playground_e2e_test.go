@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -318,6 +319,24 @@ func TestPlaygroundE2E(t *testing.T) {
 		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
 		require.Equal(t, strconv.Itoa(firstSeq+1), extractField(t, out, "sequence"),
 			"the emitter's sequence must increment on every publish")
+	})
+
+	t.Run("contracts list reflects deployments", func(t *testing.T) {
+		out := h.mustRun("contracts", "list")
+		var listed struct {
+			GuardianSetIndex int `json:"guardianSetIndex"`
+			Emitters         []struct {
+				EmitterID      int    `json:"emitterId"`
+				EmitterAddress string `json:"emitterAddress"`
+			} `json:"emitters"`
+			Managers []struct {
+				ManagerID int `json:"managerId"`
+			} `json:"managers"`
+		}
+		require.NoErrorf(t, json.Unmarshal([]byte(out), &listed), "contracts list should print JSON:\n%s", out)
+		require.Equal(t, 0, listed.GuardianSetIndex)
+		require.Len(t, listed.Managers, 2, "burnmint + lockunlock managers")
+		require.GreaterOrEqual(t, len(listed.Emitters), 3, "two transceiver emitters + the standalone one")
 	})
 
 	t.Run("network down", func(t *testing.T) {

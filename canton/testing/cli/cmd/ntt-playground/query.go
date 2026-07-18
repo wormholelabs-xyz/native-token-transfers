@@ -128,6 +128,72 @@ func newObserveCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// listContractsInput/listContractsOutput (and their element records) mirror
+// Playground.Query.daml's ListContractsInput/ListContractsOutput.
+type listContractsInput struct {
+	Operator string `json:"operator"`
+}
+
+type emitterInfo struct {
+	EmitterID      int    `json:"emitterId"`
+	EmitterAddress string `json:"emitterAddress"`
+	Owner          string `json:"owner"`
+}
+
+type managerInfo struct {
+	ManagerID        int    `json:"managerId"`
+	ManagerAddress   string `json:"managerAddress"`
+	Mode             string `json:"mode"`
+	OutboundSequence int    `json:"outboundSequence"`
+}
+
+type listContractsOutput struct {
+	GuardianSetIndex int           `json:"guardianSetIndex"`
+	MessageFee       int           `json:"messageFee"`
+	Emitters         []emitterInfo `json:"emitters"`
+	Managers         []managerInfo `json:"managers"`
+	ReplayNodes      int           `json:"replayNodes"`
+}
+
+func newContractsCmd(a *app) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "contracts",
+		Short: "Inspect the live playground contracts on the ledger",
+	}
+	cmd.AddCommand(newContractsListCmd(a))
+	return cmd
+}
+
+func newContractsListCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "Print every live CoreState/Emitter/NttManager (plus the replay-node count) as JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			s, err := a.loadState()
+			if err != nil {
+				return err
+			}
+			runner, cleanup, err := a.newScriptRunner(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			var out listContractsOutput
+			if err := runner.Run(ctx, "Playground.Query:listContracts", listContractsInput{Operator: s.Operator}, &out); err != nil {
+				return err
+			}
+			raw, err := json.MarshalIndent(out, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+			return nil
+		},
+	}
+}
+
 // balancesInput/balancesOutput mirror Playground.Query.daml's BalancesInput/BalancesOutput.
 type balancesInput struct {
 	Reader string `json:"reader"`

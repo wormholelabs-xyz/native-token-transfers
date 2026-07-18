@@ -64,6 +64,7 @@ func newRootCmd() *cobra.Command {
 		newReceiveCmd(a),
 		newGuardianCmd(a),
 		newStatusCmd(a),
+		newContractsCmd(a),
 		newBalanceCmd(a),
 		newObserveCmd(a),
 	)

@@ -6,6 +6,7 @@ module Playground.Query where
 import Daml.Script
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
+import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State (Emitter, ParseAndVerifyVAA (..))
 import Wormhole.Ntt.Manager (recipientAddressFor)
 import Test.TestNtt (MockHolding, Cip56MockHolding)
@@ -35,6 +36,61 @@ listParties _ = do
   details <- listKnownParties
   pure ListPartiesOutput with
     parties = [ PartyInfo with party = d.party, isLocal = d.isLocal | d <- details ]
+
+----------------------------------------------------------------------
+-- listContracts
+----------------------------------------------------------------------
+
+data ListContractsInput = ListContractsInput with
+    operator : Party
+  deriving (Eq, Show)
+
+data EmitterInfo = EmitterInfo with
+    emitterId      : Int
+    emitterAddress : Text
+    owner          : Party
+  deriving (Eq, Show)
+
+data ManagerInfo = ManagerInfo with
+    managerId        : Int
+    managerAddress   : Text
+    mode             : Text
+    outboundSequence : Int
+  deriving (Eq, Show)
+
+data ListContractsOutput = ListContractsOutput with
+    guardianSetIndex : Int
+    messageFee       : Int
+    emitters         : [EmitterInfo]
+    managers         : [ManagerInfo]
+    replayNodes      : Int
+  deriving (Eq, Show)
+
+-- | One flat snapshot of every live playground contract. Read as @operator@, who is a
+-- signatory on all of them (CoreState/Emitter/NttManager/ReplayNode) -- no disclosure
+-- gymnastics needed. ReplayNodes are only counted, not itemized: their prefix/consumed-set
+-- contents are trie internals with no stable CLI-facing identity.
+listContracts : ListContractsInput -> Script ListContractsOutput
+listContracts input = do
+  csCid <- resolveCoreState input.operator
+  Some cs <- queryContractId input.operator csCid
+  ems <- query @Emitter input.operator
+  mgrs <- allManagers input.operator
+  nodes <- query @ReplayNode input.operator
+  pure ListContractsOutput with
+    guardianSetIndex = cs.guardianSetIndex
+    messageFee = cs.messageFee
+    emitters =
+      [ EmitterInfo with emitterId = e.emitterId, emitterAddress = e.emitterAddress, owner = e.owner
+      | (_, e) <- ems ]
+    managers =
+      [ ManagerInfo with
+          managerId = m.managerId
+          managerAddress = m.managerAddress
+          mode = showTokenMode m.mode
+          outboundSequence = m.outboundSequence
+      | (_, m) <- mgrs ]
+    replayNodes = length nodes
 
 ----------------------------------------------------------------------
 -- queryStatus
