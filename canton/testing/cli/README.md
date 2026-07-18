@@ -194,19 +194,22 @@ Amulet (Canton Coin) does not implement `BurnMintFactory`, so only
 registry client — that client (tap + transfer-factory calls) is not
 implemented here; see [Follow-ups](#follow-ups).
 
-**Verification status:** partially verified. The v0.6.12 release tarball
-(761 MB) and every `sv`+`app-provider` profile image (`canton`, `splice-app`,
-the web UIs, `postgres:14`, `nginx:1.27.0` — several GB total) downloaded and
-pulled successfully in this environment, confirming the pinned release and
-compose configuration are both reachable and correct as documented.
-
-**Verification status: fully verified on both profiles.** The complete e2e
-suite passes against dpm sandbox and against a live Splice LocalNet 0.6.12
-stack (`NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v`, all 8
-subtests), confirming auth, DAR vetting, party rights, and the JSON encoding
-assumptions against a real authenticated participant. Three LocalNet-only
-facts were discovered and fixed during that verification, each impossible to
-observe on the auth-less sandbox:
+**Verification status:** the sandbox profile is continuously verified in CI
+(the `playground CLI (go vet/test + sandbox e2e)` job in
+[`.github/workflows/canton.yml`](../../../.github/workflows/canton.yml)), on
+every push and pull request. The LocalNet profile's distinguishing surface —
+unsafe-JWT auth, DAR vetting against a real DSO topology, `CanActAs` grants —
+is exactly what that job can never exercise, so it is covered separately by
+the `playground CLI (LocalNet e2e)` job in the same workflow (weekly schedule
+plus manual `workflow_dispatch`, not a PR gate: the stack is too heavy to run
+on every push). The full e2e suite has already passed end to end against a
+live Splice LocalNet 0.6.12 stack
+(`NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v`), confirming
+auth, DAR vetting, party rights, and the JSON encoding assumptions against a
+real authenticated participant. The suite has grown since that run; treat
+newly added subtests as unverified against LocalNet until the scheduled job
+covers them. Three LocalNet-only facts were discovered and fixed during
+verification, each impossible to observe on the auth-less sandbox:
 
 - the validator's `v0` API (scan-proxy, unlike `readyz`) requires a bearer
   token, so the readiness poll and `DSOPartyID` send one;
