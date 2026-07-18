@@ -234,9 +234,76 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	t.Run("replay is rejected", func(t *testing.T) {
-		_, err := h.run("receive", "--deployment", "burnmint",
+		out, err := h.run("receive", "--deployment", "burnmint",
 			"--vaa", inboundVaaHex, "--recipient", "Alice", "--pubkey", inboundPubKeyHex)
 		require.Error(t, err, "relaying the same VAA twice must be rejected by the replay trie")
+		// Pin the gate: Wormhole.Core.Replay's ConsumeDigest membership check
+		// (Wormhole.Core.State.VerifyAndConsumeVAA's nested exercise), not some other
+		// incidental failure.
+		require.Contains(t, out, "digest already consumed")
+	})
+
+	// The suite's only systematic negative-path coverage: five ways a relayed/verified VAA
+	// can be adversarial, each pinned to the exact Daml assertMsg/abort text so the test fails
+	// loudly if the wrong gate (or no gate) catches it. Case 3 in particular proves
+	// verification cannot be steered by the untrusted pubKeys hint -- if hint-handling ever
+	// went vacuous, every other (happy-path) test in this suite would stay green.
+	t.Run("adversarial VAAs are rejected on-ledger", func(t *testing.T) {
+		// Fresh VAA (auto-incremented sequence, so it can't collide with the inbound-mint
+		// subtest's already-consumed one): a valid inbound transfer to Alice.
+		out := h.mustRun("guardian", "sign-transfer",
+			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "10000", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		require.NotEmpty(t, vaaHex)
+
+		// 1. Wrong recipient binding: Eve didn't originate the VAA's recipientAddress, so
+		// Manager.Receive's binding check must reject her as the receiving party. Any partial
+		// effect (e.g. the nested VerifyAndConsumeVAA's replay-trie write) rolls back with the
+		// aborted transaction, so this does not burn the VAA for step 5's control receive.
+		out, err := h.run("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Eve", "--pubkey", pubKeyHex)
+		require.Error(t, err, "receiving with a recipient that doesn't match the VAA's bound recipientAddress must be rejected")
+		require.Contains(t, out, "recipient does not match VAA recipientAddress")
+
+		// 2. Tampered payload: flip the final payload byte, leaving the signature
+		// untouched -- the recomputed digest (keccak256(keccak256(body))) no longer matches
+		// what was signed.
+		vaaBytes, err := hex.DecodeString(vaaHex)
+		require.NoError(t, err)
+		tampered := append([]byte(nil), vaaBytes...)
+		tampered[len(tampered)-1] ^= 0xFF
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", hex.EncodeToString(tampered), "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "a tampered VAA payload must fail signature verification")
+		require.Contains(t, out, "invalid signature for guardian index 0")
+
+		// 3. Wrong pubkey hint: a fresh, unrelated keypair's uncompressed public key does not
+		// hash to the guardian address recorded in the guardian set -- proving 'verifyOne'
+		// binds the caller-supplied hint to the stored address rather than trusting it
+		// outright.
+		fakeKey, err := crypto.GenerateKey()
+		require.NoError(t, err)
+		fakePubKeyHex := hex.EncodeToString(crypto.FromECDSAPub(&fakeKey.PublicKey))
+		out, err = h.run("guardian", "verify-vaa", "--vaa", vaaHex, "--pubkey", fakePubKeyHex)
+		require.Error(t, err, "an untrusted pubkey hint that doesn't hash to the stored guardian address must not verify")
+		require.Contains(t, out, "public key does not match guardian address")
+
+		// 4. No peer configured: chain 7 was never configured as a burnmint peer.
+		out, err = h.run("transfer", "--deployment", "burnmint",
+			"--user", "Bob", "--chain", "7",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "1", "--sign")
+		require.Error(t, err, "an outbound transfer to an unconfigured peer chain must be rejected")
+		require.Contains(t, out, "no peer for chain 7")
+
+		// 5. Control: the untampered step-1 VAA, correctly received by Alice, must still
+		// succeed -- proving the four negatives above failed for their stated reasons, not
+		// because the VAA (or the deployment) was globally broken.
+		out = h.mustRun("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=10000")
 	})
 
 	t.Run("outbound transfer recomputes the message and signs it", func(t *testing.T) {
