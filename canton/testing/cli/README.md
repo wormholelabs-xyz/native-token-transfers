@@ -64,13 +64,41 @@ State (parties, the guardian key, deployment addresses/peers) persists in
 command after `init` reads and updates it. Never commit this file; it holds a
 private key (devnet-only, but still a secret).
 
+## Interactive use
+
+Because state persists and the network keeps running between invocations, the
+CLI doubles as an ad-hoc exploration shell against a long-running network —
+list party ids, allocate parties, register a standalone core-bridge `Emitter`
+(no NTT deployment involved), publish and verify an arbitrary message, inspect
+live contracts, and check network health:
+
+```sh
+./ntt-playground --profile localnet network up        # once; stays up between commands
+./ntt-playground --profile localnet init
+./ntt-playground --profile localnet party list        # 1. query party ids present
+./ntt-playground --profile localnet party allocate --hint Eve
+./ntt-playground --profile localnet emitter register --name oracle --owner oracle-admin   # 2. register an emitter
+./ntt-playground --profile localnet publish --emitter oracle --payload deadbeef --sign    # 3. publish arbitrary message
+./ntt-playground --profile localnet guardian verify-vaa --vaa <hex>                       #    ...and verify it on-ledger
+./ntt-playground --profile localnet contracts list
+./ntt-playground --profile localnet network status
+```
+
+Every command above also works on the sandbox profile (drop `--profile
+localnet`), except that `network status` there reports the sandbox process
+instead of per-service compose state.
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `network up\|down\|status [--profile sandbox\|localnet]` | Start/stop/check the backing network. |
+| `network up\|down\|status [--profile sandbox\|localnet]` | Start/stop/check the backing network. `status` on localnet reports each compose service's state/health and exits non-zero when nothing is running. |
 | `init [--guardian-key HEX] [--fee N]` | Bootstrap a fresh `CoreState` + registries with a 1/1 guardian set. Generates a random guardian key unless `--guardian-key` is given. `--fee` self-signs and applies an initial `SetMessageFee` governance VAA. |
+| `party list` | List every party the participant knows (`party=... isLocal=...`), annotating the hints of playground-allocated ones (`hint=Alice`). |
+| `party allocate --hint HINT` | Allocate a party under a hint. Idempotent: an already-known hint returns its existing party. |
 | `deploy --config FILE [--name NAME]` | Deploy an NTT (registers the transceiver `Emitter`, stands up the token seam, registers the `NttManager`, claims a replay-trie root, and pre-sets any peers listed in the config). |
+| `emitter register --name NAME --owner HINT` | Register a standalone core-bridge `Emitter` (not tied to an NTT deployment), keyed under a CLI-local name in state. |
+| `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
 | `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign]` | Outbound `NttManager.Transfer`. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Receive`. A replayed VAA exits non-zero. |
@@ -79,6 +107,7 @@ private key (devnet-only, but still a secret).
 | `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72); `--apply` also submits it via `SubmitGovernanceVAA`. |
 | `guardian verify-vaa --deployment NAME --vaa HEX` | Verify a VAA on-ledger via `CoreState.ParseAndVerifyVAA` (no replay-consume) — cross-checks the CLI's off-chain signature against the live guardian set. |
 | `status` | Print the guardian set, message fee, and every deployment. |
+| `contracts list` | Print every live `CoreState`/`Emitter`/`NttManager` (plus the replay-node count) as JSON. |
 | `observe --deployment NAME` | Print one deployment's current outbound sequence and peers. |
 | `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment. |
 

@@ -339,6 +339,14 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.GreaterOrEqual(t, len(listed.Emitters), 3, "two transceiver emitters + the standalone one")
 	})
 
+	t.Run("network status reports running localnet services", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("network status service listing is localnet-only (the sandbox path is a pid check)")
+		}
+		out := h.mustRun("network", "status")
+		require.Contains(t, out, "localnet: service=", "status should report the running compose services")
+	})
+
 	t.Run("network down", func(t *testing.T) {
 		h.mustRun("network", "down")
 	})

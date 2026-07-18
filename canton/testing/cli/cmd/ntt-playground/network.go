@@ -119,7 +119,24 @@ func newNetworkStatusCmd(a *app) *cobra.Command {
 			a.vlogNetwork(cmd, "status")
 			switch a.profile {
 			case profile.LocalNet:
-				return fmt.Errorf("network status: not implemented for localnet -- check `docker compose ps` in $LOCALNET_DIR")
+				m, err := a.localNetManager()
+				if err != nil {
+					return err
+				}
+				services, err := m.Status(cmd.Context())
+				if err != nil {
+					return err
+				}
+				// Exit non-zero when nothing is up, so scripts can gate on `network status`
+				// the same way they would on the sandbox pid check.
+				if len(services) == 0 {
+					return fmt.Errorf("network status: localnet is not running (no compose services up)")
+				}
+				for _, svc := range services {
+					fmt.Fprintf(cmd.OutOrStdout(), "localnet: service=%s state=%s health=%s\n",
+						svc.Service, svc.State, svc.Health)
+				}
+				return nil
 			default:
 				m, err := a.sandboxManager()
 				if err != nil {

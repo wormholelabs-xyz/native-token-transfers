@@ -187,6 +187,60 @@ func (m *LocalNetManager) Down(ctx context.Context) error {
 	return nil
 }
 
+// ComposeService is the subset of one `docker compose ps --format json` row the CLI
+// reports: service name, run state, and health ("" for services without a healthcheck).
+type ComposeService struct {
+	Service string `json:"Service"`
+	State   string `json:"State"`
+	Health  string `json:"Health"`
+}
+
+// Status lists the stack's compose services via `docker compose ps`. Compose >= 2.21 emits
+// one JSON object per line (NDJSON); older versions emit a single array -- both are handled,
+// since the stack only requires >= 2.24 for the override's `!override` tag, not an exact
+// version. An empty result means the stack is down (`ps` lists nothing after `down`).
+func (m *LocalNetManager) Status(ctx context.Context) ([]ComposeService, error) {
+	if err := m.ensurePostgresOverride(); err != nil {
+		return nil, err
+	}
+	args := m.composeArgs("ps", "--format", "json")
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = m.env()
+	cmd.Dir = m.ComposeDir
+	// Keep stderr out of stdout -- compose logs progress noise there, which would corrupt
+	// the JSON parse below.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("network: docker compose ps failed: %w\n%s", err, stderr.Bytes())
+	}
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	if trimmed[0] == '[' {
+		var services []ComposeService
+		if err := json.Unmarshal(trimmed, &services); err != nil {
+			return nil, fmt.Errorf("network: parse compose ps output: %w", err)
+		}
+		return services, nil
+	}
+	var services []ComposeService
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var svc ComposeService
+		if err := json.Unmarshal(line, &svc); err != nil {
+			return nil, fmt.Errorf("network: parse compose ps line %q: %w", line, err)
+		}
+		services = append(services, svc)
+	}
+	return services, nil
+}
+
 func (m *LocalNetManager) waitReady(ctx context.Context, timeout time.Duration) error {
 	// readyz is unauthenticated, but the v0 scan-proxy endpoint rejects bare requests with
 	// a 401 (verified against a live 0.6.12 stack), so the second probe must carry an
