@@ -64,7 +64,6 @@ func newGuardianSignTransferCmd(a *app) *cobra.Command {
 		Use:   "sign-transfer",
 		Short: "Sign an inbound NTT transfer VAA as if it came from a peer chain",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
 			s, err := a.loadState()
 			if err != nil {
 				return err
@@ -84,17 +83,20 @@ func newGuardianSignTransferCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			recipientParty, err := resolveParty(ctx, a, s, toRecipientHint)
+			recipientParty, err := resolveParty(cmd, a, s, toRecipientHint)
 			if err != nil {
 				return err
 			}
 
+			seqNote := ""
 			if sequence == 0 {
 				sequence = s.NextGuardianSequence("transfer", uint16(sourceChain)) //nolint:gosec // playground chain ids are small
+				seqNote = " (auto)"
 				if err := a.saveState(s); err != nil {
 					return err
 				}
 			}
+			a.vlogf(cmd, "sign-transfer: sequence=%d%s source-chain=%d", sequence, seqNote, sourceChain)
 			if sourceTokenHex == "" {
 				sourceTokenHex = strings.Repeat("00", 32)
 			}
@@ -134,6 +136,7 @@ func newGuardianSignTransferCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.vlogf(cmd, "sign-transfer: signed %d-byte body", len(vaa)-vaaHeaderLen)
 			fmt.Fprintf(cmd.OutOrStdout(), "vaa=%s\npubkey=%s\nrecipient=%s\n",
 				hex.EncodeToString(vaa), hex.EncodeToString(key.PubKeyUncompressed()), recipientParty)
 			return nil
@@ -194,6 +197,7 @@ func newGuardianSignVaaCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.vlogf(cmd, "sign-vaa: sequence=%d, signed %d-byte body", sequence, len(vaa)-vaaHeaderLen)
 			fmt.Fprintf(cmd.OutOrStdout(), "vaa=%s\npubkey=%s\n", hex.EncodeToString(vaa), hex.EncodeToString(key.PubKeyUncompressed()))
 			return nil
 		},
@@ -244,10 +248,12 @@ func newGuardianSignGovernanceSetFeeCmd(a *app) *cobra.Command {
 			if err := a.saveState(s); err != nil {
 				return err
 			}
+			a.vlogf(cmd, "sign-governance set-fee: sequence=%d (auto) fee=%d", seq, fee)
 			vaa, err := guardian.SignSetMessageFee(key, guardian.GovernanceParams{Sequence: seq}, 72, fee)
 			if err != nil {
 				return err
 			}
+			a.vlogf(cmd, "sign-governance set-fee: signed %d-byte body", len(vaa)-vaaHeaderLen)
 			fmt.Fprintf(cmd.OutOrStdout(), "vaa=%s\n", hex.EncodeToString(vaa))
 
 			if apply {
@@ -289,7 +295,7 @@ func newGuardianVerifyVaaCmd(a *app) *cobra.Command {
 			}
 			verifier := s.Operator
 			if verifierHint != "" {
-				verifier, err = resolveParty(ctx, a, s, verifierHint)
+				verifier, err = resolveParty(cmd, a, s, verifierHint)
 				if err != nil {
 					return err
 				}
@@ -298,6 +304,7 @@ func newGuardianVerifyVaaCmd(a *app) *cobra.Command {
 					verifier = d.Admin
 				}
 			}
+			a.vlogf(cmd, "verify-vaa: verifier=%s", verifier)
 			if pubKeyHex == "" {
 				if s.Guardian.PrivateKeyHex == "" {
 					return fmt.Errorf("guardian verify-vaa: --pubkey is required (no guardian key in state to derive it from)")
@@ -336,6 +343,11 @@ func newGuardianVerifyVaaCmd(a *app) *cobra.Command {
 	_ = cmd.MarkFlagRequired("vaa")
 	return cmd
 }
+
+// vaaHeaderLen is the byte length of everything preceding a 1-signature VAA's body:
+// version(1) + guardianSetIndex(4) + sigCount(1) + guardianIndex(1) + signature(65). The
+// playground always signs 1/1, so len(vaa)-vaaHeaderLen is the signed body's length.
+const vaaHeaderLen = 1 + 4 + 1 + 1 + 65
 
 func decodeHex32(s string) ([32]byte, error) {
 	var out [32]byte

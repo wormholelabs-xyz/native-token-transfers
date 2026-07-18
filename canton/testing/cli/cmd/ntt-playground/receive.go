@@ -41,13 +41,13 @@ func newReceiveCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("receive: unknown deployment %q", deployment)
 			}
-			recipientParty, err := resolveParty(ctx, a, s, recipientHint)
+			recipientParty, err := resolveParty(cmd, a, s, recipientHint)
 			if err != nil {
 				return err
 			}
 			executorParty := s.Operator
 			if executorHint != "" {
-				executorParty, err = resolveParty(ctx, a, s, executorHint)
+				executorParty, err = resolveParty(cmd, a, s, executorHint)
 				if err != nil {
 					return err
 				}
@@ -62,6 +62,7 @@ func newReceiveCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
+			a.vlogf(cmd, "receive: relaying %d-byte VAA through NttManager.Receive (replay-trie covering node resolved in-script)", len(vaaHex)/2)
 			var out receiveVaaOutput
 			if err := runner.Run(ctx, "Playground.Ops:receiveVaa", receiveVaaInput{
 				Operator:  s.Operator,

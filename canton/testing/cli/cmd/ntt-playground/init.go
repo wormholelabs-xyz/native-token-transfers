@@ -47,6 +47,8 @@ func newInitCmd(a *app) *cobra.Command {
 			}
 			addr := key.Address()
 			addrHex := hex.EncodeToString(addr[:])
+			// Address only -- the private key never appears in any log, verbose or not.
+			a.vlogf(cmd, "guardian: 1/1 set, address=%s", addrHex)
 
 			runner, cleanup, err := a.newScriptRunner(ctx)
 			if err != nil {
@@ -58,19 +60,20 @@ func newInitCmd(a *app) *cobra.Command {
 			// BEFORE initPlayground submits as them -- see grantActAs.
 			s := state.New()
 			s.Profile = string(a.profile)
-			operator, err := resolveParty(ctx, a, s, "Operator")
+			operator, err := resolveParty(cmd, a, s, "Operator")
 			if err != nil {
 				return err
 			}
-			guardianGovernance, err := resolveParty(ctx, a, s, "GuardianGovernance")
+			guardianGovernance, err := resolveParty(cmd, a, s, "GuardianGovernance")
 			if err != nil {
 				return err
 			}
-			guardianObserver, err := resolveParty(ctx, a, s, "GuardianObserver")
+			guardianObserver, err := resolveParty(cmd, a, s, "GuardianObserver")
 			if err != nil {
 				return err
 			}
 
+			a.vlogf(cmd, "init: creating genesis contracts as operator+guardianGovernance: CoreState (guardian set idx 0), EmitterRegistry, ReplayRootRegistry, NttManagerRegistry")
 			var out initOutput
 			if err := runner.Run(ctx, "Playground.Init:initPlayground", initInput{
 				Operator:           operator,
@@ -87,6 +90,7 @@ func newInitCmd(a *app) *cobra.Command {
 
 			if fee > 0 {
 				seq := s.NextGuardianSequence("governance", guardian.DefaultGovernanceChain)
+				a.vlogf(cmd, "init: signing SetMessageFee governance VAA (fee=%d, seq=%d) and applying via SubmitGovernanceVAA", fee, seq)
 				vaa, err := guardian.SignSetMessageFee(key, guardian.GovernanceParams{Sequence: seq}, 72, fee)
 				if err != nil {
 					return err

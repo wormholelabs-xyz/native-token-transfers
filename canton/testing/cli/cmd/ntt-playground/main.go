@@ -23,6 +23,7 @@ type app struct {
 	cantonDir string
 	runDir    string
 	profile   profile.Name
+	verbose   bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -40,6 +41,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&a.cantonDir, "canton-dir", "", "path to the canton/ directory (default: discovered by walking up from the working directory)")
 	root.PersistentFlags().StringVar(&a.runDir, "run-dir", "", "directory for network run-state and script I/O files (default: alongside the state file)")
 	root.PersistentFlags().StringVar((*string)(&a.profile), "profile", string(profile.Sandbox), "network profile: sandbox|localnet")
+	root.PersistentFlags().BoolVar(&a.verbose, "verbose", false, "narrate every sub-step (network bring-up, party allocation, each dpm script run) on stderr")
 
 	root.AddCommand(
 		newNetworkCmd(a),
@@ -66,6 +68,16 @@ func main() {
 // ----------------------------------------------------------------------
 // Shared app helpers
 // ----------------------------------------------------------------------
+
+// vlogf narrates one verbose sub-step to the command's stderr with the "[v] " prefix. No-op
+// unless --verbose is set, and never writes to stdout -- machine-parseable output (the
+// field=value tokens the e2e suite extracts) stays byte-identical either way.
+func (a *app) vlogf(cmd *cobra.Command, format string, args ...any) {
+	if !a.verbose {
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "[v] "+format+"\n", args...)
+}
 
 // resolvedCantonDir returns a.cantonDir if set, else discovers it by walking up from the
 // working directory looking for multi-package.yaml (the canton/ root's marker file).

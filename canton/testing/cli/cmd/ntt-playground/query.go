@@ -155,7 +155,7 @@ func newBalanceCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("balance: unknown deployment %q", deployment)
 			}
-			party, err := resolveParty(ctx, a, s, partyHint)
+			party, err := resolveParty(cmd, a, s, partyHint)
 			if err != nil {
 				return err
 			}

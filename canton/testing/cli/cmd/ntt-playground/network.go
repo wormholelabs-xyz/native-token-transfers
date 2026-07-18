@@ -33,6 +33,17 @@ func (a *app) sandboxManager() (*network.SandboxManager, error) {
 	return &network.SandboxManager{DpmPath: dpmPath, RunDir: a.resolvedRunDir(), Port: profile.SandboxPort()}, nil
 }
 
+// vlogNetwork narrates the resolved profile and the environment that shapes it, before a
+// network subcommand delegates to the managers.
+func (a *app) vlogNetwork(cmd *cobra.Command, verb string) {
+	switch a.profile {
+	case profile.LocalNet:
+		a.vlogf(cmd, "network %s: profile=localnet LOCALNET_DIR=%s IMAGE_TAG=%s", verb, os.Getenv("LOCALNET_DIR"), os.Getenv("IMAGE_TAG"))
+	default:
+		a.vlogf(cmd, "network %s: profile=sandbox port=%d run-dir=%s", verb, profile.SandboxPort(), a.resolvedRunDir())
+	}
+}
+
 func (a *app) localNetManager() (*network.LocalNetManager, error) {
 	composeDir := os.Getenv("LOCALNET_DIR")
 	if composeDir == "" {
@@ -47,6 +58,7 @@ func newNetworkUpCmd(a *app) *cobra.Command {
 		Short: "Start the network for the selected profile (blocks until ready)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			a.vlogNetwork(cmd, "up")
 			switch a.profile {
 			case profile.LocalNet:
 				m, err := a.localNetManager()
@@ -80,6 +92,7 @@ func newNetworkDownCmd(a *app) *cobra.Command {
 		Short: "Stop the network for the selected profile",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			a.vlogNetwork(cmd, "down")
 			switch a.profile {
 			case profile.LocalNet:
 				m, err := a.localNetManager()
@@ -103,6 +116,7 @@ func newNetworkStatusCmd(a *app) *cobra.Command {
 		Use:   "status",
 		Short: "Report whether the network for the selected profile is running",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			a.vlogNetwork(cmd, "status")
 			switch a.profile {
 			case profile.LocalNet:
 				return fmt.Errorf("network status: not implemented for localnet -- check `docker compose ps` in $LOCALNET_DIR")

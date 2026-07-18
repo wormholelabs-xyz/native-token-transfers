@@ -74,6 +74,8 @@ func newDeployCmd(a *app) *cobra.Command {
 			if adminHint == "" {
 				adminHint = deploymentName + "-admin"
 			}
+			a.vlogf(cmd, "deploy %q: mode=%s tokenKind=%s decimals=%d peers=%d adminHint=%s",
+				deploymentName, cfg.Mode, cfg.TokenKind, cfg.Decimals, len(cfg.Peers), adminHint)
 
 			s, err := a.loadState()
 			if err != nil {
@@ -88,11 +90,13 @@ func newDeployCmd(a *app) *cobra.Command {
 
 			// The admin party is allocated (and granted actAs on auth-enabled profiles)
 			// before deployNtt submits as it -- see grantActAs.
-			admin, err := resolveParty(ctx, a, s, adminHint)
+			admin, err := resolveParty(cmd, a, s, adminHint)
 			if err != nil {
 				return err
 			}
 
+			a.vlogf(cmd, "deploy %q: deployNtt = register transceiver Emitter → create %s token → RegisterManager → claim replay-trie root (consumer=admin)",
+				deploymentName, cfg.TokenKind)
 			var out deployOutput
 			if err := runner.Run(ctx, "Playground.Deploy:deployNtt", deployInput{
 				Operator:           s.Operator,
@@ -118,6 +122,7 @@ func newDeployCmd(a *app) *cobra.Command {
 			}
 
 			for _, p := range cfg.Peers {
+				a.vlogf(cmd, "set peer chain=%d manager=%s transceiver=%s", p.Chain, p.Manager, p.Transceiver)
 				if err := setPeerOnLedger(ctx, a, runner, s.Operator, out.ManagerID, out.Admin, p.Chain, p.Manager, p.Transceiver); err != nil {
 					return fmt.Errorf("deploy: set peer chain %d: %w", p.Chain, err)
 				}

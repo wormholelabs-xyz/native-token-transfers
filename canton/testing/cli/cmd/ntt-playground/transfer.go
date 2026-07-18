@@ -67,10 +67,11 @@ func newTransferCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("transfer: unknown deployment %q", deployment)
 			}
-			userParty, err := resolveParty(ctx, a, s, userHint)
+			userParty, err := resolveParty(cmd, a, s, userHint)
 			if err != nil {
 				return err
 			}
+			a.vlogf(cmd, "transfer: user %q → %s, deployment %q (managerId=%d)", userHint, userParty, deployment, d.ManagerID)
 
 			if sourceTokenHex == "" {
 				sourceTokenHex = strings.Repeat("00", 32)
@@ -87,6 +88,7 @@ func newTransferCmd(a *app) *cobra.Command {
 			holdingCids := []string{}
 			if d.TokenKind != "mock-admin-signed" {
 				decimals := wire.TrimDecimals(d.TokenDecimals)
+				a.vlogf(cmd, "transfer: funding sender with %s via Playground.Ops:fundUser (holding cid feeds transferOut)", formatDecimal(amount, decimals))
 				var fundOut fundUserOutput
 				if err := runner.Run(ctx, "Playground.Ops:fundUser", fundUserInput{
 					Admin:  d.Admin,
@@ -116,6 +118,7 @@ func newTransferCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			a.vlogf(cmd, "transfer: recomputed published message: sequence=%d emitter=%d/%s", out.OutboundSequence, out.EmitterChain, out.EmitterAddress)
 			fmt.Fprintf(cmd.OutOrStdout(), "transfer: sequence=%d emitterChain=%d emitterAddress=%s payload=%s\n",
 				out.OutboundSequence, out.EmitterChain, out.EmitterAddress, out.Payload)
 
@@ -149,6 +152,7 @@ func newTransferCmd(a *app) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				a.vlogf(cmd, "sign: digest=keccak256(keccak256(body)) over %d-byte body", len(vaa)-vaaHeaderLen)
 				fmt.Fprintf(cmd.OutOrStdout(), "transfer --sign: vaa=%s\n", hex.EncodeToString(vaa))
 			}
 			return nil
