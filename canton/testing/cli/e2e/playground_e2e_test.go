@@ -316,6 +316,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Equal(t, eve, extractField(t, out, "party"), "re-allocating the same hint must return the same party")
 	})
 
+	var lastOracleSeq string
 	t.Run("standalone emitter publishes a verifiable message", func(t *testing.T) {
 		out := h.mustRun("emitter", "register", "--name", "oracle", "--owner", "oracle-admin")
 		require.NotEmpty(t, extractField(t, out, "emitterAddress"))
@@ -333,8 +334,44 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "emitterChain=72")
 
 		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
-		require.Equal(t, strconv.Itoa(firstSeq+1), extractField(t, out, "sequence"),
+		lastOracleSeq = extractField(t, out, "sequence")
+		require.Equal(t, strconv.Itoa(firstSeq+1), lastOracleSeq,
 			"the emitter's sequence must increment on every publish")
+	})
+
+	t.Run("governance raises the fee and fee-0 publishes start failing", func(t *testing.T) {
+		// SubmitGovernanceVAA / fee enforcement have no other e2e coverage -- every other
+		// publish in this suite rides the fee-0 path, so Wormhole.Core.Fees:chargeFee's
+		// fee-due branch is otherwise unreachable. Reuses the "oracle" emitter registered
+		// above.
+		out := h.mustRun("guardian", "sign-governance", "set-fee", "--fee", "1000", "--apply")
+		require.Contains(t, out, "applied: messageFee=1000")
+
+		// On-ledger read-back through an independent query path (Playground.Query:listContracts).
+		out = h.mustRun("contracts", "list")
+		var listed struct {
+			MessageFee int `json:"messageFee"`
+		}
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
+		require.Equal(t, 1000, listed.MessageFee)
+
+		// The CLI's publish path always sends feeAllocation=None (the fee-0 assumption noted
+		// in publish.go); with the fee raised, chargeFee's None branch must abort the choice.
+		out, err := h.run("publish", "--emitter", "oracle", "--payload", "cafe", "--sign")
+		require.Error(t, err, "a fee-0 publish must be rejected once the message fee is raised above zero")
+		require.Contains(t, out, "fee required: attach a fee allocation")
+
+		// Restoring fee 0 also implicitly exercises the CLI's governance-sequence
+		// auto-increment: a reused sequence would be rejected by the consumed-governance
+		// replay guard.
+		out = h.mustRun("guardian", "sign-governance", "set-fee", "--fee", "0", "--apply")
+		require.Contains(t, out, "applied: messageFee=0")
+
+		lastSeq, err := strconv.Atoi(lastOracleSeq)
+		require.NoError(t, err)
+		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "cafe", "--sign")
+		require.Equal(t, strconv.Itoa(lastSeq+1), extractField(t, out, "sequence"),
+			"the rejected fee-raised publish must not have consumed a sequence number")
 	})
 
 	t.Run("contracts list reflects deployments", func(t *testing.T) {
