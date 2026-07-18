@@ -6,6 +6,10 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Weekly LocalNet e2e run (see the cli-localnet-e2e job below). Cron is
+    # UTC; this job is the only one that reacts to the schedule trigger.
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -17,6 +21,7 @@ defaults:
 jobs:
   daml:
     name: dpm build & test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -50,6 +55,7 @@ jobs:
 
   cli:
     name: playground CLI (go vet/test + sandbox e2e)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -101,3 +107,85 @@ jobs:
       - name: Playground e2e (sandbox profile)
         working-directory: ./canton/testing/cli
         run: go test -tags e2e ./e2e -v -timeout 15m
+
+  # The sandbox e2e job above never exercises LocalNet's distinguishing surface
+  # (unsafe-JWT auth, CanActAs grants, DAR vetting against a real DSO topology),
+  # so sandbox-green gives no signal for it. This job runs the same e2e suite
+  # against a real Splice LocalNet 0.6.12 stack instead. It's deliberately not a
+  # PR gate: the stack is heavy (761 MB release tarball, several GB of images,
+  # 2-6 minute DSO bootstrap) and not worth the wait on every push, so it only
+  # runs on the weekly schedule above or an explicit manual dispatch.
+  cli-localnet-e2e:
+    name: playground CLI (LocalNet e2e)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5
+        with:
+          go-version-file: ./canton/testing/cli/go.mod
+
+      - name: Install dpm
+        run: |
+          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Install SDK
+        run: dpm install 3.5.1
+
+      - name: Build all Canton packages
+        run: dpm build --all
+
+      # Splice LocalNet release: pinned version, cached across runs since the
+      # tarball is 761 MB and otherwise re-downloaded on every scheduled run.
+      - name: Cache Splice LocalNet release
+        id: splice-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/splice-node
+          key: splice-localnet-0.6.12
+
+      - name: Download Splice LocalNet release
+        if: steps.splice-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -O https://github.com/digital-asset/decentralized-canton-sync/releases/download/v0.6.12/0.6.12_splice-node.tar.gz
+          tar xzf 0.6.12_splice-node.tar.gz
+        working-directory: ${{ github.workspace }}
+
+      - name: Playground e2e (LocalNet profile)
+        working-directory: ./canton/testing/cli
+        env:
+          NTT_PLAYGROUND_PROFILE: localnet
+          LOCALNET_DIR: ${{ github.workspace }}/splice-node/docker-compose/localnet
+          IMAGE_TAG: "0.6.12"
+        run: go test -tags e2e -count=1 ./e2e -v -timeout 30m
+
+      # Belt-and-braces: the suite's final subtest already runs `network down`
+      # (mirrored here -- see internal/network/localnet.go's composeArgs), but
+      # a mid-suite failure must not leak containers/volumes into later jobs
+      # on persistent runners. `|| true`: if the main step never got far
+      # enough to write wormhole-postgres-override.yaml, there's nothing to
+      # tear down and this is expected to no-op.
+      - name: Tear down LocalNet (always)
+        if: always()
+        working-directory: ${{ github.workspace }}/splice-node/docker-compose/localnet
+        env:
+          IMAGE_TAG: "0.6.12"
+        run: |
+          docker compose \
+            --env-file compose.env \
+            --env-file env/common.env \
+            -f compose.yaml \
+            -f resource-constraints.yaml \
+            -f wormhole-postgres-override.yaml \
+            --profile sv --profile app-provider \
+            down -v || true
