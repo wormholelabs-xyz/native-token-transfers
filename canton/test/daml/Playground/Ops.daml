@@ -28,7 +28,7 @@ import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Token (trimAmount, emptyExtraArgs)
 import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken, Cip56CustodyToken)
 import Test.TestCore qualified as TestCore
-import Test.TestNtt (MockToken, mkHolding)
+import Test.TestNtt (MockToken, mkHolding, MockBurnMintFactory, MockTransferFactory)
 import Test.TestReplay (coveringDisclosure)
 
 import Playground.Types
@@ -132,21 +132,34 @@ data TransferOutOutput = TransferOutOutput with
     payload          : Text  -- encoded WormholeTransceiverMessage, hex
   deriving (Eq, Show)
 
--- | Resolve the concrete token contract for disclosure (Transfer's nested LockOrBurn needs it
--- visible to the submitter even though it isn't a choice argument -- Wormhole.Ntt.Manager's
--- NttManager stores the interface cid itself). Mirrors
--- Test.TestNtt:testNttTransferByDifferentUser's `dMock` disclosure, generalized per tokenKind.
-resolveTokenDisclosure : Party -> TokenKind -> Script Disclosure
+-- | Resolve the token-seam contracts a nested LockOrBurn/MintOrUnlock needs visible to the
+-- submitter even though they aren't choice arguments (Wormhole.Ntt.Manager's NttManager
+-- stores only the interface cid). For the Cip56 kinds this is BOTH the token hook AND its
+-- underlying registry factory: the mock factories (Test.TestNtt:MockBurnMintFactory /
+-- MockTransferFactory) are @signatory admin@ with no observer, so a non-admin submitter can't
+-- resolve them without an explicit disclosure -- exactly the gap that made cip56 receive fail
+-- with CONTRACT_NOT_FOUND. Mirrors Test.TestNtt:testLockOrBurnOwnerSignedSucceeds's factory
+-- disclosure, generalized per tokenKind. Read as @admin@ (the sole signatory of both).
+resolveTokenDisclosure : Party -> TokenKind -> Script [Disclosure]
 resolveTokenDisclosure admin kind = case kind of
   MockAdminSigned -> do
     [(cid, _)] <- query @MockToken admin
-    fromSome <$> queryDisclosure admin cid
+    dTok <- fromSome <$> queryDisclosure admin cid
+    pure [dTok]
   Cip56BurnMintMock -> do
     [(cid, _)] <- query @Cip56BurnMintToken admin
-    fromSome <$> queryDisclosure admin cid
+    dTok <- fromSome <$> queryDisclosure admin cid
+    -- The token stores the factory as an interface cid; disclosure needs the concrete
+    -- template cid, so resolve MockBurnMintFactory directly (one per fresh deployment admin).
+    [(facCid, _)] <- query @MockBurnMintFactory admin
+    dFactory <- fromSome <$> queryDisclosure admin facCid
+    pure [dTok, dFactory]
   Cip56CustodyMock -> do
     [(cid, _)] <- query @Cip56CustodyToken admin
-    fromSome <$> queryDisclosure admin cid
+    dTok <- fromSome <$> queryDisclosure admin cid
+    [(facCid, _)] <- query @MockTransferFactory admin
+    dFactory <- fromSome <$> queryDisclosure admin facCid
+    pure [dTok, dFactory]
 
 transferOut : TransferOutInput -> Script TransferOutOutput
 transferOut input = do
@@ -177,10 +190,11 @@ transferOut input = do
 
   dMgr <- fromSome <$> queryDisclosure input.admin mgrCid
   dEmitter <- fromSome <$> queryDisclosure input.admin emCid
-  dToken <- resolveTokenDisclosure input.admin (parseTokenKind input.tokenKind)
+  dTokens <- resolveTokenDisclosure input.admin (parseTokenKind input.tokenKind)
   dCs <- fromSome <$> queryDisclosure input.operator csCid
 
-  _ <- submit (actAs input.user <> disclose dMgr <> disclose dEmitter <> disclose dToken <> disclose dCs) do
+  let baseOpts = actAs input.user <> disclose dMgr <> disclose dEmitter <> disclose dCs
+  _ <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
     exerciseCmd mgrCid Transfer with
       user = input.user
       transceiverEmitterCid = emCid
@@ -312,6 +326,7 @@ data ReceiveVaaInput = ReceiveVaaInput with
     operator  : Party
     managerId : Int
     admin     : Party  -- the deployment's replay-trie consumer (Playground.Deploy:deployNtt)
+    tokenKind : Text   -- selects the token-seam disclosure (see resolveTokenDisclosure)
     executor  : Party
     recipient : Party
     vaaBytes  : Text
@@ -332,8 +347,13 @@ receiveVaa input = do
   (nodeCid, nodeDisc) <- coveringDisclosure input.operator input.admin digest
   dMgr <- fromSome <$> queryDisclosure input.operator mgrCid
   dCs <- fromSome <$> queryDisclosure input.operator csCid
+  -- The nested MintOrUnlock reaches the token hook AND its admin-signed registry factory;
+  -- disclose both (as transferOut does for the outbound leg) so a non-admin executor can
+  -- resolve them.
+  dTokens <- resolveTokenDisclosure input.admin (parseTokenKind input.tokenKind)
 
-  ntt <- submit (actAs input.executor <> disclose dMgr <> disclose dCs <> disclose nodeDisc) do
+  let baseOpts = actAs input.executor <> disclose dMgr <> disclose dCs <> disclose nodeDisc
+  ntt <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
     exerciseCmd mgrCid Receive with
       executor = input.executor
       coreStateCid = csCid

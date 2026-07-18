@@ -13,6 +13,7 @@ type receiveVaaInput struct {
 	Operator  string              `json:"operator"`
 	ManagerID int                 `json:"managerId"`
 	Admin     string              `json:"admin"`
+	TokenKind string              `json:"tokenKind"`
 	Executor  string              `json:"executor"`
 	Recipient string              `json:"recipient"`
 	VaaBytes  string              `json:"vaaBytes"`
@@ -68,6 +69,7 @@ func newReceiveCmd(a *app) *cobra.Command {
 				Operator:  s.Operator,
 				ManagerID: d.ManagerID,
 				Admin:     d.Admin,
+				TokenKind: d.TokenKind,
 				Executor:  executorParty,
 				Recipient: recipientParty,
 				VaaBytes:  vaaHex,
