@@ -57,6 +57,7 @@ func newRootCmd() *cobra.Command {
 		newInitCmd(a),
 		newDeployCmd(a),
 		newPeerCmd(a),
+		newPartyCmd(a),
 		newTransferCmd(a),
 		newReceiveCmd(a),
 		newGuardianCmd(a),

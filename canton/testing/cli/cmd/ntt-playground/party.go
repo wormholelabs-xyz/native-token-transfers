@@ -59,6 +59,112 @@ func resolveParty(cmd *cobra.Command, a *app, s *state.State, hint string) (stri
 	return out.Party, nil
 }
 
+// partyInfo/listPartiesOutput mirror Playground.Query.daml's PartyInfo/ListPartiesOutput.
+type partyInfo struct {
+	Party   string `json:"party"`
+	IsLocal bool   `json:"isLocal"`
+}
+
+type listPartiesOutput struct {
+	Parties []partyInfo `json:"parties"`
+}
+
+func newPartyCmd(a *app) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "party",
+		Short: "List and allocate parties on the playground's participant",
+	}
+	cmd.AddCommand(newPartyListCmd(a), newPartyAllocateCmd(a))
+	return cmd
+}
+
+func newPartyListCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List every party the participant knows, annotating playground-allocated hints",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			s, err := a.loadState()
+			if err != nil {
+				return err
+			}
+			runner, cleanup, err := a.newScriptRunner(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			// listParties takes no parameters; Daml's unit decodes from the `{}` an empty
+			// struct marshals to, satisfying the uniform --input-file plumbing.
+			var out listPartiesOutput
+			if err := runner.Run(ctx, "Playground.Query:listParties", struct{}{}, &out); err != nil {
+				return err
+			}
+			hints := knownHints(s)
+			for _, p := range out.Parties {
+				line := fmt.Sprintf("party=%s isLocal=%t", p.Party, p.IsLocal)
+				if hint, ok := hints[p.Party]; ok {
+					line += " hint=" + hint
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), line)
+			}
+			return nil
+		},
+	}
+}
+
+func newPartyAllocateCmd(a *app) *cobra.Command {
+	var hint string
+	cmd := &cobra.Command{
+		Use:   "allocate",
+		Short: "Allocate a party under a hint (idempotent: an existing hint returns its party)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := a.loadState()
+			if err != nil {
+				return err
+			}
+			party, err := resolveParty(cmd, a, s, hint)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "party=%s\n", party)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&hint, "hint", "", "party hint (e.g. Eve)")
+	_ = cmd.MarkFlagRequired("hint")
+	return cmd
+}
+
+// knownHints maps full party ids back to their CLI-facing hints for `party list`
+// annotation -- on LocalNet, listKnownParties also returns DSO/validator parties, and the
+// annotation is what distinguishes playground-owned ones. state.Users covers every party
+// resolveParty ever allocated (including the operator/governance/observer trio and
+// deployment admins), but the identity fields are also mapped directly, so a state file
+// hand-edited to point at pre-existing parties still annotates; Users entries win on
+// conflict since they carry the caller's chosen hint.
+func knownHints(s *state.State) map[string]string {
+	hints := map[string]string{}
+	for _, id := range []struct{ hint, party string }{
+		{"Operator", s.Operator},
+		{"GuardianGovernance", s.GuardianGovernance},
+		{"GuardianObserver", s.GuardianObserver},
+	} {
+		if id.party != "" {
+			hints[id.party] = id.hint
+		}
+	}
+	for name, d := range s.Deployments {
+		if d.Admin != "" {
+			hints[d.Admin] = name + "-admin"
+		}
+	}
+	for hint, party := range s.Users {
+		hints[party] = hint
+	}
+	return hints
+}
+
 // grantActAs grants the script user actAs rights on parties, on profiles with auth
 // enabled (LocalNet). Allocating a party does NOT confer submission rights on the
 // allocating user there -- without this grant the first submit as the new party fails

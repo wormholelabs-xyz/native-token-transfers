@@ -280,6 +280,24 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "emitterChain=72")
 	})
 
+	t.Run("party list shows allocated parties", func(t *testing.T) {
+		s := h.loadState()
+		require.NotEmpty(t, s.Users["Alice"], "Alice should have been allocated by the inbound transfer step")
+
+		out := h.mustRun("party", "list")
+		require.Contains(t, out, s.Operator, "operator's party id should be listed")
+		require.Contains(t, out, s.Users["Alice"], "Alice's party id should be listed")
+
+		out = h.mustRun("party", "allocate", "--hint", "Eve")
+		eve := extractField(t, out, "party")
+		require.NotEmpty(t, eve)
+		s = h.loadState()
+		require.Equal(t, eve, s.Users["Eve"], "allocate should persist the hint in state")
+
+		out = h.mustRun("party", "allocate", "--hint", "Eve")
+		require.Equal(t, eve, extractField(t, out, "party"), "re-allocating the same hint must return the same party")
+	})
+
 	t.Run("network down", func(t *testing.T) {
 		h.mustRun("network", "down")
 	})

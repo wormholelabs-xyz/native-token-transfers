@@ -13,6 +13,30 @@ import Test.TestNtt (MockHolding, Cip56MockHolding)
 import Playground.Types
 
 ----------------------------------------------------------------------
+-- listParties
+----------------------------------------------------------------------
+
+data PartyInfo = PartyInfo with
+    party   : Party
+    isLocal : Bool
+  deriving (Eq, Show)
+
+data ListPartiesOutput = ListPartiesOutput with
+    parties : [PartyInfo]
+  deriving (Eq, Show)
+
+-- | Every party the participant knows (daml-script's `listKnownParties`), flattened to a
+-- plain record. daml-script 3.5.1's PartyDetails carries only party + isLocal (no display
+-- name field); mapping party ids back to CLI hints is the Go side's job, by reverse-lookup
+-- of the state file. Takes '()' -- Daml's unit decodes from the JSON `{}` the CLI's uniform
+-- --input-file plumbing always writes, and there is genuinely nothing to parameterize.
+listParties : () -> Script ListPartiesOutput
+listParties _ = do
+  details <- listKnownParties
+  pure ListPartiesOutput with
+    parties = [ PartyInfo with party = d.party, isLocal = d.isLocal | d <- details ]
+
+----------------------------------------------------------------------
 -- queryStatus
 ----------------------------------------------------------------------
 
