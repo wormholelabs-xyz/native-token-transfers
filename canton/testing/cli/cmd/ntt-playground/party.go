@@ -88,6 +88,7 @@ func newPartyListCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.vlogf(cmd, "party list: querying the participant's known parties (Playground.Query:listParties), annotating hints from state")
 			runner, cleanup, err := a.newScriptRunner(ctx)
 			if err != nil {
 				return err
@@ -123,6 +124,7 @@ func newPartyAllocateCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.vlogf(cmd, "party allocate: resolving hint %q (allocates + grants actAs on first use, cached thereafter)", hint)
 			party, err := resolveParty(cmd, a, s, hint)
 			if err != nil {
 				return err

@@ -180,6 +180,7 @@ func newContractsListCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
+			a.vlogf(cmd, "contracts list: querying live playground contracts as operator (Playground.Query:listContracts)")
 			var out listContractsOutput
 			if err := runner.Run(ctx, "Playground.Query:listContracts", listContractsInput{Operator: s.Operator}, &out); err != nil {
 				return err

@@ -143,6 +143,22 @@ func extractField(t *testing.T, output, field string) string {
 	return ""
 }
 
+// stripVerbose drops the "[v] "-prefixed narration lines --verbose interleaves into the
+// combined stdout/stderr, leaving only the machine-parseable stdout. Needed where a subtest
+// parses structured output (e.g. `contracts list`'s JSON); the field=value assertions go
+// through extractField, which already tolerates the extra lines by tokenizing.
+func stripVerbose(output string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "[v] ") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func testdataPath(name string) string {
 	return filepath.Join("..", "testdata", name)
 }
@@ -333,7 +349,7 @@ func TestPlaygroundE2E(t *testing.T) {
 				ManagerID int `json:"managerId"`
 			} `json:"managers"`
 		}
-		require.NoErrorf(t, json.Unmarshal([]byte(out), &listed), "contracts list should print JSON:\n%s", out)
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
 		require.Equal(t, 0, listed.GuardianSetIndex)
 		require.Len(t, listed.Managers, 2, "burnmint + lockunlock managers")
 		require.GreaterOrEqual(t, len(listed.Emitters), 3, "two transceiver emitters + the standalone one")

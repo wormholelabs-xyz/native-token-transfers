@@ -49,6 +49,7 @@ func newPublishCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
+			a.vlogf(cmd, "publish: emitter %q (emitterId=%d) → PublishMessage as owner=%s (feeAllocation=None under the fee-0 assumption)", emitterName, em.EmitterID, em.Owner)
 			var out publishMessageOutput
 			if err := runner.Run(ctx, "Playground.Ops:publishMessage", publishMessageInput{
 				Operator:         s.Operator,
@@ -71,6 +72,7 @@ func newPublishCmd(a *app) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("publish --sign: %w", err)
 				}
+				a.vlogf(cmd, "sign: digest=keccak256(keccak256(body)) over %d-byte body", len(vaaHex)/2-vaaHeaderLen)
 				fmt.Fprintf(cmd.OutOrStdout(), "publish --sign: vaa=%s\n", vaaHex)
 			}
 			return nil

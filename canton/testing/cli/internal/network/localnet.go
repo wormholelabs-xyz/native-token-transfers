@@ -203,6 +203,7 @@ func (m *LocalNetManager) Status(ctx context.Context) ([]ComposeService, error) 
 	if err := m.ensurePostgresOverride(); err != nil {
 		return nil, err
 	}
+	m.logf("localnet: docker compose ps --format json (listing running services)")
 	args := m.composeArgs("ps", "--format", "json")
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = m.env()

@@ -57,6 +57,7 @@ func newEmitterRegisterCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
+			a.vlogf(cmd, "emitter register %q: creating a standalone core-bridge Emitter (Test.TestCore:registerEmitter) owner=%s", name, owner)
 			var out registerEmitterOutput
 			if err := runner.Run(ctx, "Playground.Ops:registerEmitter", registerEmitterInput{
 				Operator: s.Operator,
