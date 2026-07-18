@@ -111,11 +111,30 @@ func (m *SandboxManager) Up(ctx context.Context, timeout time.Duration) (Sandbox
 	}
 	defer logFile.Close()
 
-	cmd := newDetachedCommand(m.DpmPath, "sandbox", "--no-tty")
+	// dpm sandbox does NOT honor CANTON_SANDBOX_PORT (verified against dpm 1.0.21 /
+	// Canton 3.5.6: the embedded sandbox.conf pins 6864-6869 regardless of the env), so
+	// the requested port must be forced through canton -C config overrides. All six
+	// listeners are re-derived from the gRPC port -- overriding only ledger-api would
+	// still collide with another sandbox on the five stock ports. The offsets reproduce
+	// the stock layout exactly when port is the 6865 default.
+	args := []string{"sandbox", "--no-tty"}
+	for _, o := range []struct {
+		key  string
+		port int
+	}{
+		{"canton.participants.sandbox.http-ledger-api.port", port - 1},
+		{"canton.participants.sandbox.ledger-api.port", port},
+		{"canton.participants.sandbox.admin-api.port", port + 1},
+		{"canton.sequencers.sequencer1.public-api.port", port + 2},
+		{"canton.sequencers.sequencer1.admin-api.port", port + 3},
+		{"canton.mediators.mediator1.admin-api.port", port + 4},
+	} {
+		args = append(args, "-C", fmt.Sprintf("%s=%d", o.key, o.port))
+	}
+	cmd := newDetachedCommand(m.DpmPath, args...)
 	cmd.Dir = m.RunDir // dpm itself writes a log/canton.log relative to its cwd; keep it contained here
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), fmt.Sprintf("CANTON_SANDBOX_PORT=%d", port))
 
 	m.logf("sandbox: starting dpm sandbox --no-tty port=%d log=%s", port, logPath)
 	start := time.Now()
