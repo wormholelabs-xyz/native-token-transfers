@@ -82,6 +82,13 @@ private key (devnet-only, but still a secret).
 | `observe --deployment NAME` | Print one deployment's current outbound sequence and peers. |
 | `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment. |
 
+Every command accepts `--verbose`: each sub-step — network bring-up details,
+party allocation/actAs grants, every `dpm script` invocation with its input and
+duration, and what the Daml script does on-ledger — is narrated on **stderr**
+with a `[v] ` prefix. stdout is unchanged whether or not the flag is set, so
+`field=value` output stays machine-parseable. The e2e suite always passes
+`--verbose`, so `go test -tags e2e ./e2e -v` shows the full story per step.
+
 Party hints (`--user`, `--recipient`, `--to-recipient`, `--party`, `--executor`)
 are display names the CLI allocates fresh Canton parties for on first use and
 remembers thereafter (`playground.state.json`'s `users` map) — the same hint
