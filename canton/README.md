@@ -51,6 +51,11 @@ A live-sandbox Go integration harness (the recipient-binding match test) lives
 in [`testing/go/`](testing/go/); see its build tag and comments to run it
 against a `dpm sandbox`.
 
+For interactively standing up a network, deploying an NTT, and driving
+transfers end to end — including controlling a 1/1 Wormhole guardian that
+signs VAAs on the fly — see the playground CLI in
+[`testing/cli/`](testing/cli/README.md).
+
 ## Deployment — permissionless and crankless
 
 Anyone stands up a deployment (bring your own token, pick a mode), mirroring core

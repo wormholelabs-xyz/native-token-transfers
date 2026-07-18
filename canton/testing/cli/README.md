@@ -1,0 +1,248 @@
+# ntt-playground
+
+A devnet playground CLI for the Canton NTT contracts in `canton/`. It stands up
+a local Canton network, deploys an NTT (manager + transceiver + token seam),
+controls a 1/1 Wormhole guardian that signs VAAs on demand, and drives
+inbound/outbound transfers end to end — all from the command line, with no
+second real chain involved (outbound transfers are verified by recomputing and
+signing the published message; inbound transfers are signed as if from a
+fictitious peer chain).
+
+This is a development/testing tool. It is not part of the production NTT
+packages (`ntt-token`, `ntt`, `ntt-cip56`) and is never uploaded to a real
+network — see [MainNet path](#mainnet-path) for what porting this to
+production actually requires.
+
+## Prerequisites
+
+- `dpm` (Daml SDK 3.5.1 — `curl -fsSL https://get.digitalasset.com/install/install.sh | sh && dpm install 3.5.1`)
+- A JDK (Daml Script runs on the JVM)
+- Go >= 1.25 (the toolchain directive in `go.mod` triggers an automatic,
+  checksummed download via `GOTOOLCHAIN=auto` if your system Go is older)
+- Docker, only for the `localnet` profile (~10 GB RAM; see [LocalNet](#localnet))
+
+Build the Daml packages first, from `canton/`:
+
+```sh
+dpm build --all
+```
+
+The CLI locates the built DAR at `<canton-dir>/test/.daml/dist/ntt-test-0.1.0.dar`
+and re-uploads it on every ledger operation (idempotent against an
+already-vetted ledger — see [Design notes](#design-notes)).
+
+## Quick start (sandbox profile)
+
+The `sandbox` profile runs a bare `dpm sandbox` — fast, no Docker, and what CI
+uses. It is the default; no `--profile` flag needed.
+
+```sh
+cd canton/testing/cli
+go build -o ntt-playground ./cmd/ntt-playground
+
+./ntt-playground network up                 # starts `dpm sandbox` in the background
+./ntt-playground init                       # generates a fresh 1/1 guardian key
+./ntt-playground deploy --config testdata/deploy-burnmint.json
+
+# Inbound: sign a transfer as if it arrived from a peer chain, then relay it.
+./ntt-playground guardian sign-transfer --deployment burnmint \
+  --to-recipient Alice --amount 1000000 --source-chain 2
+./ntt-playground receive --deployment burnmint \
+  --vaa <vaa-from-above> --recipient Alice --pubkey <pubkey-from-above>
+./ntt-playground balance --party Alice --deployment burnmint
+
+# Outbound: transfer, recompute the published message, and sign the resulting VAA.
+./ntt-playground transfer --deployment burnmint \
+  --user Bob --chain 2 --recipient-address 00..ee --amount 500000 --sign
+
+./ntt-playground status
+./ntt-playground network down
+```
+
+State (parties, the guardian key, deployment addresses/peers) persists in
+`playground.state.json` in the working directory between invocations — every
+command after `init` reads and updates it. Never commit this file; it holds a
+private key (devnet-only, but still a secret).
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `network up\|down\|status [--profile sandbox\|localnet]` | Start/stop/check the backing network. |
+| `init [--guardian-key HEX] [--fee N]` | Bootstrap a fresh `CoreState` + registries with a 1/1 guardian set. Generates a random guardian key unless `--guardian-key` is given. `--fee` self-signs and applies an initial `SetMessageFee` governance VAA. |
+| `deploy --config FILE [--name NAME]` | Deploy an NTT (registers the transceiver `Emitter`, stands up the token seam, registers the `NttManager`, claims a replay-trie root, and pre-sets any peers listed in the config). |
+| `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
+| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign]` | Outbound `NttManager.Transfer`. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. |
+| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Receive`. A replayed VAA exits non-zero. |
+| `guardian sign-transfer --deployment NAME --to-recipient HINT --amount N [--source-chain N] [--sequence N]` | Sign an inbound NTT transfer VAA as if it came from the deployment's configured peer. |
+| `guardian sign-vaa --emitter-chain N --emitter HEX --sequence N --payload HEX` | Sign an arbitrary payload as a VAA (not NTT-specific). |
+| `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72); `--apply` also submits it via `SubmitGovernanceVAA`. |
+| `guardian verify-vaa --deployment NAME --vaa HEX` | Verify a VAA on-ledger via `CoreState.ParseAndVerifyVAA` (no replay-consume) — cross-checks the CLI's off-chain signature against the live guardian set. |
+| `status` | Print the guardian set, message fee, and every deployment. |
+| `observe --deployment NAME` | Print one deployment's current outbound sequence and peers. |
+| `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment. |
+
+Party hints (`--user`, `--recipient`, `--to-recipient`, `--party`, `--executor`)
+are display names the CLI allocates fresh Canton parties for on first use and
+remembers thereafter (`playground.state.json`'s `users` map) — the same hint
+always resolves to the same party across commands.
+
+### Deploy config
+
+```json
+{
+  "name": "burnmint",
+  "mode": "burn-mint",
+  "tokenKind": "mock-admin-signed",
+  "decimals": 8,
+  "peers": [
+    { "chain": 2, "manager": "00..bb", "transceiver": "00..cc" }
+  ]
+}
+```
+
+- `mode`: `"burn-mint"` or `"lock-unlock"`.
+- `tokenKind`: `"mock-admin-signed"` (default choice for testing — `LockOrBurn`
+  always succeeds regardless of the caller's actual holdings, so `transfer`
+  needs no funding step), `"cip56-burn-mint-mock"`, or `"cip56-custody-mock"`
+  (both drive the real production `Cip56BurnMintToken`/`Cip56CustodyToken`
+  implementations over a local mock registry, and DO need `transfer` to fund
+  the sender first — the CLI does this automatically).
+- `peers`: optional; pre-configures peers at deploy time (equivalent to
+  `peer set` calls after the fact).
+
+See `testdata/deploy-burnmint.json` and `testdata/deploy-lockunlock.json`.
+
+## Profiles
+
+### sandbox (default)
+
+A bare `dpm sandbox`, no authentication, no Docker. This is the CI-viable path
+and what `go test -tags e2e ./e2e` exercises by default.
+
+### LocalNet
+
+[Splice LocalNet](https://github.com/canton-network/splice) is the official
+Canton Network docker-compose stack: a real DSO topology and Canton
+Coin/Amulet, as opposed to the sandbox's bare single-participant ledger.
+
+```sh
+curl -fsSL -O https://github.com/digital-asset/decentralized-canton-sync/releases/download/v0.6.12/0.6.12_splice-node.tar.gz
+tar xzf 0.6.12_splice-node.tar.gz
+export LOCALNET_DIR=$PWD/splice-node/docker-compose/localnet
+export IMAGE_TAG=0.6.12
+
+./ntt-playground --profile localnet network up     # first boot: DSO bootstrap, 2-6 minutes
+./ntt-playground --profile localnet init
+# ...same commands as above, with --profile localnet
+./ntt-playground --profile localnet network down    # wipes parties/DARs/state
+```
+
+The CLI applies a compose override on top of the bundle
+(`wormhole-postgres-override.yaml`, written into `LOCALNET_DIR` automatically):
+the bundle hardcodes `container_name: postgres` (colliding with any other
+container of that name, even a stopped one) and publishes the database on host
+port 5432 (colliding with a locally running PostgreSQL). The override renames
+the container to `splice-localnet-postgres` and publishes host port 15432
+instead; set `LOCALNET_POSTGRES_CONTAINER_NAME` / `LOCALNET_POSTGRES_HOST_PORT`
+to change either. In-network connectivity is unaffected — services resolve the
+database by compose service name. Requires docker compose >= 2.24 (`!override`).
+
+The `app-provider` participant is used throughout: gRPC Ledger API 3901, JSON
+Ledger API v2 3975, validator API 3903. Auth is LocalNet's documented
+"unsafe" shared-secret HS256 mode (never valid against a real participant);
+the CLI mints tokens for `ledger-api-user` automatically.
+
+Amulet (Canton Coin) does not implement `BurnMintFactory`, so only
+`cip56-custody-mock`'s lock/unlock path is exercisable against a real Amulet
+registry client — that client (tap + transfer-factory calls) is not
+implemented here; see [Follow-ups](#follow-ups).
+
+**Verification status:** partially verified. The v0.6.12 release tarball
+(761 MB) and every `sv`+`app-provider` profile image (`canton`, `splice-app`,
+the web UIs, `postgres:14`, `nginx:1.27.0` — several GB total) downloaded and
+pulled successfully in this environment, confirming the pinned release and
+compose configuration are both reachable and correct as documented.
+
+**Verification status: fully verified on both profiles.** The complete e2e
+suite passes against dpm sandbox and against a live Splice LocalNet 0.6.12
+stack (`NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v`, all 8
+subtests), confirming auth, DAR vetting, party rights, and the JSON encoding
+assumptions against a real authenticated participant. Three LocalNet-only
+facts were discovered and fixed during that verification, each impossible to
+observe on the auth-less sandbox:
+
+- the validator's `v0` API (scan-proxy, unlike `readyz`) requires a bearer
+  token, so the readiness poll and `DSOPartyID` send one;
+- allocating a party does not grant the allocating user submission rights, so
+  every CLI party allocation is followed by a `CanActAs` grant for
+  `ledger-api-user` (scripts take pre-allocated parties as input rather than
+  calling `allocateParty` before submitting);
+- the `/v2/users/<user>/rights` endpoint requires the user named in the body
+  and the rights `oneOf` wrapped in `value`.
+
+## Design notes
+
+- **No Go gRPC client.** Every ledger operation is a parameterized Daml
+  Script (`canton/test/daml/Playground/*.daml`) invoked via `dpm script
+  --input-file/--output-file`. Disclosures, multi-party `actAs`, and interface
+  exercising are already solved in Daml Script; sandbox and LocalNet differ
+  only in host/port/auth/upload flags.
+- **Never persist contract ids.** `CoreState`, `NttManager`, and `Emitter` all
+  churn on every consuming exercise. `playground.state.json` stores only
+  stable identities (parties, `managerId`) — every script re-resolves
+  contracts from the ACS by identity.
+- **Outbound observation without an event stream.** A `WormholeMessage` is a
+  choice result, not a template, so nothing can query it after `Transfer`
+  returns. `transferOut` instead reads the manager's sequence counter before
+  exercising `Transfer` and recomputes the exact published payload with the
+  same `Wormhole.Ntt.Payload` encoders the manager uses internally.
+- **JSON encoding gotchas**, found by running against a live sandbox rather
+  than assumed: a Daml `(Int, Bytes)` tuple (the `pubKeys` hints
+  `ParseAndVerifyVAA`/`VerifyAndConsumeVAA`/`Receive` take) serializes as a
+  JSON object `{"_1": ..., "_2": ...}`, not a 2-element array
+  (`internal/ledger.PubKeyHint`); a Daml `Decimal` serializes as a bare JSON
+  number (e.g. `0E-10`), not a quoted string
+  (`cmd/ntt-playground.decimalLiteral`); and a Go `nil` slice marshals to
+  JSON `null`, which a Daml list-typed field rejects — every list field must
+  start non-nil.
+
+## MainNet path
+
+Documented, not implemented — this CLI is devnet-only throughout.
+
+- **Profile → real validator.** A production profile would point at your own
+  participant's ledger endpoint, use OAuth client-credentials JWTs instead of
+  the unsafe HS256 mode, and skip `allocateParty` (parties pre-exist, onboarded
+  through the validator).
+- **Genesis/governance.** `initPlayground` stands in for a real ceremony:
+  `guardianGovernance` becomes an external/threshold party via topology
+  transactions, the guardian set is installed at genesis co-signed by
+  operator + guardianGovernance, and evolves only through real guardian-set-
+  upgrade governance VAAs (`SubmitGovernanceVAA`). This CLI's 1/1 signer
+  (`internal/guardian`) never becomes production code — a real guardian set
+  is k-of-n and the keys never touch a CLI.
+- **DARs.** Only the production DARs (`ntt-token`, `ntt`, `ntt-cip56`) are
+  ever uploaded to a real network — never `ntt-test` (it drags in
+  `daml-script`). Playground ops would need to be re-expressed against
+  production package-ids, either via the JSON Ledger API/gRPC directly or a
+  script-only companion DAR with zero templates.
+- **Fees/token.** The fee instrument becomes Canton Coin; a real `Allocation`
+  is drawn from the user's wallet per `Transfer`/`PublishMessage`. The token
+  seam becomes a real Amulet (or other CIP-56) registry client. Only
+  lock/unlock (`Cip56CustodyToken`) works against Amulet directly — burn/mint
+  needs a registry implementing `BurnMintFactory`.
+- **Disclosures.** The operator-as-oracle `queryDisclosure`/`coveringNode`
+  pattern this CLI uses is replaced by an off-ledger disclosure service over
+  an ACS index, as described in the core bridge's README.
+
+## Follow-ups
+
+Out of scope for this CLI, listed here rather than silently dropped:
+
+- A real-Amulet `cip56-custody` client (tap + transfer-factory registry
+  calls) for the LocalNet profile.
+- A true third-party `observe` via the JSON Ledger API v2 event stream,
+  instead of the current recompute-on-send / query-on-demand approach.
+- Guardian-set-upgrade governance signing (only `SetMessageFee` is
+  implemented under `guardian sign-governance`).

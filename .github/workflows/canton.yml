@@ -47,3 +47,57 @@ jobs:
       - name: Run Daml tests
         working-directory: ./canton/test
         run: dpm test
+
+  cli:
+    name: playground CLI (go vet/test + sandbox e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5
+        with:
+          go-version-file: ./canton/testing/cli/go.mod
+
+      - name: Install dpm
+        run: |
+          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Install SDK
+        run: dpm install 3.5.1
+
+      - name: Build all Canton packages
+        run: dpm build --all
+
+      # go vet + unit tests never touch the network -- they run regardless of dpm/docker
+      # availability, mirroring the daml job's unconditional dpm test.
+      - name: go vet + unit tests
+        working-directory: ./canton/testing/cli
+        run: |
+          go vet ./...
+          go test ./...
+
+      # The existing live-sandbox integration test (canton/testing/go) and the playground
+      # e2e suite (sandbox profile: no docker/LocalNet needed) both drive a real `dpm
+      # sandbox`, so they run in this dpm-provisioned job rather than the plain unit-test
+      # step above.
+      #
+      # NOTE: as of this commit, TestCantonNttReceiveMatchIntegration fails independent of
+      # the playground CLI work in this job (reproduced against an unmodified checkout too:
+      # "partition invariant violated: 0 covering nodes") -- a pre-existing issue, not
+      # introduced here. Left enabled per this repo's convention of surfacing failures rather
+      # than silently skipping them; needs its own investigation.
+      - name: Legacy sandbox integration test
+        working-directory: ./canton/testing/go
+        run: go test -tags integration ./... -v -timeout 10m
+
+      - name: Playground e2e (sandbox profile)
+        working-directory: ./canton/testing/cli
+        run: go test -tags e2e ./e2e -v -timeout 15m

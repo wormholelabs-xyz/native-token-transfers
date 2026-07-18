@@ -1,0 +1,184 @@
+package main
+
+import (
+	"encoding/hex"
+	"fmt"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/guardian"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
+)
+
+// fundUserInput/fundUserOutput mirror Playground.Ops.daml's FundUserInput/FundUserOutput.
+type fundUserInput struct {
+	Admin  string         `json:"admin"`
+	Owner  string         `json:"owner"`
+	Amount decimalLiteral `json:"amount"` // Daml Decimal serializes as a bare JSON number, not a quoted string
+}
+
+type fundUserOutput struct {
+	HoldingCid string `json:"holdingCid"`
+}
+
+// transferOutInput/transferOutOutput mirror Playground.Ops.daml's TransferOutInput/Output.
+type transferOutInput struct {
+	Operator         string   `json:"operator"`
+	ManagerID        int      `json:"managerId"`
+	Admin            string   `json:"admin"`
+	TokenKind        string   `json:"tokenKind"`
+	User             string   `json:"user"`
+	RecipientChain   int      `json:"recipientChain"`
+	RecipientAddress string   `json:"recipientAddress"`
+	SourceToken      string   `json:"sourceToken"`
+	RawAmount        int64    `json:"rawAmount"`
+	Nonce            int      `json:"nonce"`
+	ConsistencyLevel int      `json:"consistencyLevel"`
+	InputHoldingCids []string `json:"inputHoldingCids"`
+}
+
+type transferOutOutput struct {
+	OutboundSequence int    `json:"outboundSequence"`
+	EmitterChain     int    `json:"emitterChain"`
+	EmitterAddress   string `json:"emitterAddress"`
+	Nonce            int    `json:"nonce"`
+	ConsistencyLevel int    `json:"consistencyLevel"`
+	Payload          string `json:"payload"`
+}
+
+func newTransferCmd(a *app) *cobra.Command {
+	var deployment, userHint, recipientAddressHex, sourceTokenHex string
+	var chain int
+	var amount int64
+	var nonce, consistencyLevel int
+	var sign bool
+
+	cmd := &cobra.Command{
+		Use:   "transfer",
+		Short: "Send an outbound NTT transfer (Transfer), optionally signing the resulting VAA as the guardian",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			s, err := a.loadState()
+			if err != nil {
+				return err
+			}
+			d, ok := s.Deployment(deployment)
+			if !ok {
+				return fmt.Errorf("transfer: unknown deployment %q", deployment)
+			}
+			userParty, err := resolveParty(ctx, a, s, userHint)
+			if err != nil {
+				return err
+			}
+
+			if sourceTokenHex == "" {
+				sourceTokenHex = strings.Repeat("00", 32)
+			}
+
+			runner, cleanup, err := a.newScriptRunner(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			// Daml's `[ContractId Holding]` needs a JSON array, never `null` -- must start
+			// non-nil (a nil Go slice marshals to `null`).
+			holdingCids := []string{}
+			if d.TokenKind != "mock-admin-signed" {
+				decimals := wire.TrimDecimals(d.TokenDecimals)
+				var fundOut fundUserOutput
+				if err := runner.Run(ctx, "Playground.Ops:fundUser", fundUserInput{
+					Admin:  d.Admin,
+					Owner:  userParty,
+					Amount: decimalLiteral(formatDecimal(amount, decimals)),
+				}, &fundOut); err != nil {
+					return fmt.Errorf("transfer: funding user for a Cip56 deployment: %w", err)
+				}
+				holdingCids = []string{fundOut.HoldingCid}
+			}
+
+			var out transferOutOutput
+			if err := runner.Run(ctx, "Playground.Ops:transferOut", transferOutInput{
+				Operator:         s.Operator,
+				ManagerID:        d.ManagerID,
+				Admin:            d.Admin,
+				TokenKind:        d.TokenKind,
+				User:             userParty,
+				RecipientChain:   chain,
+				RecipientAddress: recipientAddressHex,
+				SourceToken:      sourceTokenHex,
+				RawAmount:        amount,
+				Nonce:            nonce,
+				ConsistencyLevel: consistencyLevel,
+				InputHoldingCids: holdingCids,
+			}, &out); err != nil {
+				return err
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "transfer: sequence=%d emitterChain=%d emitterAddress=%s payload=%s\n",
+				out.OutboundSequence, out.EmitterChain, out.EmitterAddress, out.Payload)
+
+			if sign {
+				if s.Guardian.PrivateKeyHex == "" {
+					return fmt.Errorf("transfer --sign: no guardian private key in state (init with --guardian-key, or without one to generate a fresh key)")
+				}
+				key, err := guardian.KeyFromHex(s.Guardian.PrivateKeyHex)
+				if err != nil {
+					return err
+				}
+				payload, err := hex.DecodeString(out.Payload)
+				if err != nil {
+					return fmt.Errorf("transfer --sign: decode recomputed payload: %w", err)
+				}
+				var emitterAddr [32]byte
+				emitterAddrBytes, err := hex.DecodeString(out.EmitterAddress)
+				if err != nil {
+					return fmt.Errorf("transfer --sign: decode emitter address: %w", err)
+				}
+				copy(emitterAddr[32-len(emitterAddrBytes):], emitterAddrBytes)
+
+				vaa, err := guardian.Sign(key, guardian.VAAParams{
+					Nonce:            uint32(out.Nonce), //nolint:gosec // playground nonces are small
+					EmitterChain:     uint16(out.EmitterChain),
+					EmitterAddress:   emitterAddr,
+					Sequence:         uint64(out.OutboundSequence),
+					ConsistencyLevel: uint8(out.ConsistencyLevel), //nolint:gosec // playground consistency levels are small
+					Payload:          payload,
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "transfer --sign: vaa=%s\n", hex.EncodeToString(vaa))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name")
+	cmd.Flags().StringVar(&userHint, "user", "", "party hint for the sending user")
+	cmd.Flags().IntVar(&chain, "chain", 0, "recipient (peer) chain id")
+	cmd.Flags().StringVar(&recipientAddressHex, "recipient-address", "", "32-byte hex recipient address on the peer chain")
+	cmd.Flags().StringVar(&sourceTokenHex, "source-token", "", "32-byte hex source token address (default: zero)")
+	cmd.Flags().Int64Var(&amount, "amount", 0, "raw amount to transfer")
+	cmd.Flags().IntVar(&nonce, "nonce", 0, "transceiver nonce")
+	cmd.Flags().IntVar(&consistencyLevel, "consistency-level", 0, "transceiver consistency level")
+	cmd.Flags().BoolVar(&sign, "sign", false, "also sign the resulting VAA with the playground's guardian key")
+	_ = cmd.MarkFlagRequired("deployment")
+	_ = cmd.MarkFlagRequired("user")
+	_ = cmd.MarkFlagRequired("chain")
+	_ = cmd.MarkFlagRequired("recipient-address")
+	_ = cmd.MarkFlagRequired("amount")
+	return cmd
+}
+
+// formatDecimal renders rawAmount (an integer at `decimals` scale) as a fixed-point decimal
+// string, e.g. formatDecimal(1_000_000, 8) == "0.01" -- avoiding float64 for exactness.
+func formatDecimal(rawAmount int64, decimals int) string {
+	if decimals <= 0 {
+		return fmt.Sprintf("%d", rawAmount)
+	}
+	s := fmt.Sprintf("%0*d", decimals+1, rawAmount)
+	intPart := s[:len(s)-decimals]
+	fracPart := s[len(s)-decimals:]
+	return intPart + "." + fracPart
+}

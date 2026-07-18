@@ -1,0 +1,279 @@
+//go:build e2e
+
+// Package e2e drives the ntt-playground CLI binary end to end against a real network --
+// sandbox by default (CI-viable, no docker), or Splice LocalNet if
+// NTT_PLAYGROUND_PROFILE=localnet is set (requires docker + LOCALNET_DIR pointing at an
+// extracted Splice LocalNet release; see the CLI README).
+//
+// Every step below shells out to the built CLI binary -- the CLI layer itself is under test,
+// not the internal packages directly (those have their own unit tests). Steps run as
+// sequential subtests sharing one playground.state.json, since each step builds on the
+// previous one's on-ledger state.
+//
+//	go test -tags e2e ./e2e -v -timeout 20m                                  # sandbox
+//	NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v -timeout 20m  # LocalNet
+package e2e
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/stretchr/testify/require"
+
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
+)
+
+var (
+	cliBinPath        string
+	cantonDir         string
+	playgroundProfile string
+)
+
+func TestMain(m *testing.M) {
+	var err error
+	cantonDir, err = filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		fmt.Println("e2e: resolve canton dir:", err)
+		os.Exit(1)
+	}
+	cliDir, err := filepath.Abs("..")
+	if err != nil {
+		fmt.Println("e2e: resolve cli dir:", err)
+		os.Exit(1)
+	}
+
+	playgroundProfile = os.Getenv("NTT_PLAYGROUND_PROFILE")
+	if playgroundProfile == "" {
+		playgroundProfile = "sandbox"
+	}
+
+	binDir, err := os.MkdirTemp("", "ntt-playground-e2e-bin-*")
+	if err != nil {
+		fmt.Println("e2e: create bin dir:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(binDir)
+
+	cliBinPath = filepath.Join(binDir, "ntt-playground")
+	build := exec.Command("go", "build", "-o", cliBinPath, "./cmd/ntt-playground")
+	build.Dir = cliDir
+	if out, err := build.CombinedOutput(); err != nil {
+		fmt.Printf("e2e: build CLI binary failed: %v\n%s\n", err, out)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
+}
+
+// harness runs the CLI binary with a fixed --state-file/--canton-dir/--profile/--run-dir for
+// one test, so every step in a subtest chain shares state.
+type harness struct {
+	t         *testing.T
+	workDir   string
+	stateFile string
+}
+
+func newHarness(t *testing.T) *harness {
+	workDir := t.TempDir()
+	h := &harness{t: t, workDir: workDir, stateFile: filepath.Join(workDir, "playground.state.json")}
+	// Safety net: if a subtest fails before reaching the explicit "network down" step, still
+	// tear down the network we started -- otherwise a leaked `dpm sandbox` holds its port
+	// across test runs and makes the NEXT run's "network up" fail confusingly (a real
+	// failure mode hit once during development).
+	t.Cleanup(func() {
+		out, err := h.run("network", "down")
+		if err != nil {
+			t.Logf("cleanup: network down failed (may be harmless if the network was never up): %v\n%s", err, out)
+		}
+	})
+	return h
+}
+
+func (h *harness) run(args ...string) (string, error) {
+	h.t.Helper()
+	full := append([]string{
+		"--state-file", h.stateFile,
+		"--canton-dir", cantonDir,
+		"--profile", playgroundProfile,
+		"--run-dir", filepath.Join(h.workDir, ".run"),
+	}, args...)
+	cmd := exec.Command(cliBinPath, full...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (h *harness) mustRun(args ...string) string {
+	h.t.Helper()
+	out, err := h.run(args...)
+	require.NoErrorf(h.t, err, "ntt-playground %v failed:\n%s", args, out)
+	return out
+}
+
+func (h *harness) loadState() state.State {
+	h.t.Helper()
+	s, err := state.Load(h.stateFile)
+	require.NoError(h.t, err)
+	return *s
+}
+
+// extractField finds "field=value" among the whitespace-separated tokens of the CLI's
+// stdout/stderr and returns value.
+func extractField(t *testing.T, output, field string) string {
+	t.Helper()
+	prefix := field + "="
+	for _, tok := range strings.Fields(output) {
+		if strings.HasPrefix(tok, prefix) {
+			return strings.TrimPrefix(tok, prefix)
+		}
+	}
+	t.Fatalf("field %q not found in output:\n%s", field, output)
+	return ""
+}
+
+func testdataPath(name string) string {
+	return filepath.Join("..", "testdata", name)
+}
+
+func TestPlaygroundE2E(t *testing.T) {
+	if playgroundProfile == "localnet" && os.Getenv("LOCALNET_DIR") == "" {
+		t.Skip("NTT_PLAYGROUND_PROFILE=localnet requires LOCALNET_DIR (see the CLI README's LocalNet section)")
+	}
+
+	h := newHarness(t)
+
+	t.Run("build and network up", func(t *testing.T) {
+		dpm, err := ledger.FindDpm()
+		require.NoError(t, err, "dpm not found (PATH or ~/.dpm/bin)")
+		build := exec.Command(dpm, "build", "--all")
+		build.Dir = cantonDir
+		out, err := build.CombinedOutput()
+		require.NoErrorf(t, err, "dpm build --all failed:\n%s", out)
+
+		out2 := h.mustRun("network", "up")
+		t.Log(out2)
+	})
+
+	var guardianKeyHex string
+	t.Run("init with a fresh 1/1 guardian", func(t *testing.T) {
+		priv, err := crypto.GenerateKey()
+		require.NoError(t, err)
+		guardianKeyHex = hex.EncodeToString(crypto.FromECDSA(priv))
+
+		out := h.mustRun("init", "--guardian-key", guardianKeyHex)
+		t.Log(out)
+
+		s := h.loadState()
+		require.Equal(t, guardianKeyHex, s.Guardian.PrivateKeyHex)
+		require.NotEmpty(t, s.Operator)
+		require.NotEmpty(t, s.GuardianGovernance)
+		require.Contains(t, s.Operator, "::", "operator should be a full party id")
+	})
+
+	t.Run("deploy burn-mint", func(t *testing.T) {
+		out := h.mustRun("deploy", "--config", testdataPath("deploy-burnmint.json"))
+		t.Log(out)
+
+		s := h.loadState()
+		d, ok := s.Deployment("burnmint")
+		require.True(t, ok)
+		require.NotEmpty(t, d.ManagerAddress)
+		require.NotEmpty(t, d.TransceiverAddress)
+		_, hasPeer := d.Peer(2)
+		require.True(t, hasPeer, "peer chain 2 should have been pre-set from the config file")
+	})
+
+	var inboundVaaHex, inboundPubKeyHex string
+	t.Run("inbound transfer mints to the recipient", func(t *testing.T) {
+		out := h.mustRun("guardian", "sign-transfer",
+			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "1000000", "--source-chain", "2")
+		inboundVaaHex = extractField(t, out, "vaa")
+		inboundPubKeyHex = extractField(t, out, "pubkey")
+		require.NotEmpty(t, inboundVaaHex)
+
+		out = h.mustRun("receive", "--deployment", "burnmint",
+			"--vaa", inboundVaaHex, "--recipient", "Alice", "--pubkey", inboundPubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=1000000")
+
+		out = h.mustRun("balance", "--party", "Alice", "--deployment", "burnmint")
+		require.Contains(t, out, "mockHoldingTotal=1000000")
+	})
+
+	t.Run("replay is rejected", func(t *testing.T) {
+		_, err := h.run("receive", "--deployment", "burnmint",
+			"--vaa", inboundVaaHex, "--recipient", "Alice", "--pubkey", inboundPubKeyHex)
+		require.Error(t, err, "relaying the same VAA twice must be rejected by the replay trie")
+	})
+
+	t.Run("outbound transfer recomputes the message and signs it", func(t *testing.T) {
+		out := h.mustRun("transfer", "--deployment", "burnmint",
+			"--user", "Bob", "--chain", "2",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "500000", "--sign")
+
+		payloadHex := extractField(t, out, "payload")
+		require.True(t, strings.HasPrefix(payloadHex, "9945ff10"), "recomputed payload should carry the transceiver prefix")
+		require.Equal(t, "72", extractField(t, out, "emitterChain"), "outbound messages are published from Canton (chain 72)")
+
+		s := h.loadState()
+		d, ok := s.Deployment("burnmint")
+		require.True(t, ok)
+		peer, ok := d.Peer(2)
+		require.True(t, ok)
+		require.Contains(t, payloadHex, peer.ManagerAddress, "recomputed payload's recipientManager should be the configured peer")
+
+		outboundVaaHex := extractField(t, out, "vaa")
+		require.NotEmpty(t, outboundVaaHex)
+
+		// In-test signature recovery: the guardian's signature over
+		// keccak256(keccak256(body)) must recover to the guardian's own address.
+		vaaBytes, err := hex.DecodeString(outboundVaaHex)
+		require.NoError(t, err)
+		require.Greater(t, len(vaaBytes), 1+4+1+1+65)
+		sig := vaaBytes[7:72]
+		body := vaaBytes[72:]
+		digest := crypto.Keccak256(crypto.Keccak256(body))
+		recoveredPub, err := crypto.SigToPub(digest, sig)
+		require.NoError(t, err)
+		recoveredAddr := crypto.PubkeyToAddress(*recoveredPub)
+		require.True(t, strings.EqualFold(s.Guardian.Address, strings.TrimPrefix(recoveredAddr.Hex(), "0x")),
+			"recovered address %s should match the guardian's own address %s", recoveredAddr.Hex(), s.Guardian.Address)
+
+		// On-ledger verification via Playground.Query:verifyVaa (CoreState.ParseAndVerifyVAA).
+		out = h.mustRun("guardian", "verify-vaa", "--deployment", "burnmint", "--vaa", outboundVaaHex)
+		require.Contains(t, out, "emitterChain=72")
+		require.Contains(t, out, "guardianSetIndex=0")
+	})
+
+	t.Run("lock-unlock deployment: abbreviated receive + transfer", func(t *testing.T) {
+		out := h.mustRun("deploy", "--config", testdataPath("deploy-lockunlock.json"))
+		t.Log(out)
+
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "lockunlock", "--to-recipient", "Carol", "--amount", "250000", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+
+		out = h.mustRun("receive", "--deployment", "lockunlock",
+			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+
+		out = h.mustRun("transfer", "--deployment", "lockunlock",
+			"--user", "Dave", "--chain", "2",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "100000", "--sign")
+		require.Contains(t, out, "emitterChain=72")
+	})
+
+	t.Run("network down", func(t *testing.T) {
+		out := h.mustRun("network", "down")
+		t.Log(out)
+	})
+}
