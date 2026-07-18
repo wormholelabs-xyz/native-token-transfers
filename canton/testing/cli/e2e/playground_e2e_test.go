@@ -98,11 +98,14 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) run(args ...string) (string, error) {
 	h.t.Helper()
+	// --verbose is always on so every step's sub-step narration (stderr, "[v] " prefix)
+	// lands in the combined output mustRun logs -- `go test -v` then shows the full story.
 	full := append([]string{
 		"--state-file", h.stateFile,
 		"--canton-dir", cantonDir,
 		"--profile", playgroundProfile,
 		"--run-dir", filepath.Join(h.workDir, ".run"),
+		"--verbose",
 	}, args...)
 	cmd := exec.Command(cliBinPath, full...)
 	out, err := cmd.CombinedOutput()
@@ -113,6 +116,7 @@ func (h *harness) mustRun(args ...string) string {
 	h.t.Helper()
 	out, err := h.run(args...)
 	require.NoErrorf(h.t, err, "ntt-playground %v failed:\n%s", args, out)
+	h.t.Logf("ntt-playground %v:\n%s", args, out)
 	return out
 }
 
@@ -156,8 +160,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		out, err := build.CombinedOutput()
 		require.NoErrorf(t, err, "dpm build --all failed:\n%s", out)
 
-		out2 := h.mustRun("network", "up")
-		t.Log(out2)
+		h.mustRun("network", "up")
 	})
 
 	var guardianKeyHex string
@@ -167,7 +170,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		guardianKeyHex = hex.EncodeToString(crypto.FromECDSA(priv))
 
 		out := h.mustRun("init", "--guardian-key", guardianKeyHex)
-		t.Log(out)
+
+		// Stable verbose markers only (messages may evolve): a party allocation and the
+		// genesis script invocation must both have been narrated.
+		require.Contains(t, out, "[v] allocated party")
+		require.Contains(t, out, "[v] script Playground.Init:initPlayground")
 
 		s := h.loadState()
 		require.Equal(t, guardianKeyHex, s.Guardian.PrivateKeyHex)
@@ -178,7 +185,9 @@ func TestPlaygroundE2E(t *testing.T) {
 
 	t.Run("deploy burn-mint", func(t *testing.T) {
 		out := h.mustRun("deploy", "--config", testdataPath("deploy-burnmint.json"))
-		t.Log(out)
+
+		// Stable verbose marker: the config's pre-set peer must have been narrated.
+		require.Contains(t, out, "[v] set peer chain=2")
 
 		s := h.loadState()
 		d, ok := s.Deployment("burnmint")
@@ -254,7 +263,6 @@ func TestPlaygroundE2E(t *testing.T) {
 
 	t.Run("lock-unlock deployment: abbreviated receive + transfer", func(t *testing.T) {
 		out := h.mustRun("deploy", "--config", testdataPath("deploy-lockunlock.json"))
-		t.Log(out)
 
 		out = h.mustRun("guardian", "sign-transfer",
 			"--deployment", "lockunlock", "--to-recipient", "Carol", "--amount", "250000", "--source-chain", "2")
@@ -273,7 +281,6 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	t.Run("network down", func(t *testing.T) {
-		out := h.mustRun("network", "down")
-		t.Log(out)
+		h.mustRun("network", "down")
 	})
 }
