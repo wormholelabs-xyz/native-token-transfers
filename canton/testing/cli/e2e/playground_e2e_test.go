@@ -87,8 +87,7 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, workDir: workDir, stateFile: filepath.Join(workDir, "playground.state.json")}
 	// Safety net: if a subtest fails before reaching the explicit "network down" step, still
 	// tear down the network we started -- otherwise a leaked `dpm sandbox` holds its port
-	// across test runs and makes the NEXT run's "network up" fail confusingly (a real
-	// failure mode hit once during development).
+	// across test runs and makes the NEXT run's "network up" fail confusingly
 	t.Cleanup(func() {
 		out, err := h.run("network", "down")
 		if err != nil {
