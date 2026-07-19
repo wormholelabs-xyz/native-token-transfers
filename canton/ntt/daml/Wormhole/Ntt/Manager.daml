@@ -9,7 +9,10 @@
 -- core 'Emitter' published through; the manager address ('nttManagerAddressFor')
 -- has @admin@ in its preimage, so a compromised operator can't forge an existing
 -- manager's address. No contract keys — contracts resolve by disclosed cid, and
--- both churn, so a sender re-resolves cids per send (README §4.7).
+-- both churn, so a sender re-resolves cids per send (README §4.7). The token's
+-- own registry factory cid follows the same rule: 'Transfer'/'Receive' take it
+-- as @registryCid@, resolved and disclosed fresh by the caller every time,
+-- rather than pinned inside the token contract.
 --
 -- Send ('Transfer') publishes an ordinary core message via 'PublishMessage'.
 -- Receive ('Receive') is permissionless: any executor relays an inbound VAA;
@@ -26,7 +29,7 @@ import DA.Optional (fromSomeNote)
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding)
-import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs)
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State
@@ -179,6 +182,7 @@ template NttManager
         consistencyLevel      : Int
         inputHoldingCids      : [ContractId Holding]   -- CIP-56 holdings to lock/burn
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- messageFee; None at fee 0
+        registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
         extraArgs             : ExtraArgs              -- CIP-56 registry choice context
       controller user
       do
@@ -193,7 +197,7 @@ template NttManager
             && transceiver.emitterId == transceiverEmitterId)
         -- Lock (custody) or burn the user's tokens via the token seam.
         exercise tokenCid LockOrBurn with
-          sender = user, amount = trimmed, inputHoldingCids, extraArgs
+          sender = user, amount = trimmed, inputHoldingCids, registryCid, extraArgs
         let ntt = NativeTokenTransfer with
               decimals = trimmed.decimals
               amount = trimmed.amount
@@ -246,6 +250,7 @@ template NttManager
         recipient             : Party
         inputHoldingCids      : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
         depositPreapprovalCid : Optional (ContractId DepositPreapproval)  -- recipient consent (owner-signed kinds)
+        registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
         extraArgs             : ExtraArgs             -- CIP-56 choice context
       controller executor
       do
@@ -275,5 +280,6 @@ template NttManager
           amount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
           inputHoldingCids
           depositPreapprovalCid
+          registryCid
           extraArgs
         pure ntt

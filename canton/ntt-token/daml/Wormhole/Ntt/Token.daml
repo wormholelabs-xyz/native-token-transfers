@@ -13,12 +13,14 @@
 --     scope.
 --
 -- The choices carry the CIP-56 handles a real registry needs: @inputHoldingCids@
--- (holdings to spend; empty for a mint) and @extraArgs@ (choice context/metadata,
--- disclosed off-ledger).
+-- (holdings to spend; empty for a mint), @extraArgs@ (choice context/metadata,
+-- disclosed off-ledger), and @registryCid@ (the registry's own runtime
+-- dependency, e.g. its factory contract — resolved off-ledger and disclosed
+-- per call, the same as every other cid here; never a Daml contract key).
 module Wormhole.Ntt.Token where
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
-import Splice.Api.Token.MetadataV1 (ExtraArgs (..), emptyChoiceContext, emptyMetadata)
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..), emptyChoiceContext, emptyMetadata)
 
 -- | Custody the token (lock/unlock) or destroy-and-recreate it (burn/mint). One
 -- mode per deployment, chosen at creation.
@@ -94,7 +96,9 @@ interface DepositPreapproval where
 
   -- | Deposit @amount@ to the pre-approving owner, spending @inputHoldingCids@
   -- ([] for a mint). Runs with the pre-approval's admin+owner authority.
-  depositImpl : TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+  -- @registryCid@ is the registry's current runtime dependency (e.g. its
+  -- factory), resolved and disclosed fresh by the caller on every call.
+  depositImpl : TrimmedAmount -> [ContractId Holding] -> Optional AnyContractId -> ExtraArgs -> Update ()
 
   -- The owner approves once; that lets the token admin exercise this choice
   -- any number of times afterward, once per incoming transfer, with the owner
@@ -103,9 +107,10 @@ interface DepositPreapproval where
     with
       amount           : TrimmedAmount
       inputHoldingCids : [ContractId Holding]
+      registryCid      : Optional AnyContractId
       extraArgs        : ExtraArgs
     controller (view this).admin
-    do depositImpl this amount inputHoldingCids extraArgs
+    do depositImpl this amount inputHoldingCids registryCid extraArgs
 
   -- The owner alone tears down its standing consent. No expiry; the delivery path
   -- is unaffected until the owner revokes.
@@ -120,11 +125,14 @@ interface NttToken where
   viewtype NttTokenView
 
   -- | Outbound: lock or burn @amount@ from @sender@, spending @inputHoldingCids@.
-  lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+  -- @registryCid@ is the registry's current runtime dependency (e.g. its
+  -- factory), resolved and disclosed fresh by the caller on every call.
+  lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> Optional AnyContractId -> ExtraArgs -> Update ()
   -- | Inbound: unlock (spending @inputHoldingCids@) or mint @amount@ to
   -- @recipient@. @depositPreapprovalCid@ carries the recipient's standing consent
   -- for owner-signed kinds; 'None' is for kinds that need no NTT-level consent.
-  mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> Optional (ContractId DepositPreapproval) -> ExtraArgs -> Update ()
+  -- @registryCid@ is the same per-call registry dependency as 'lockOrBurnImpl'.
+  mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> Optional (ContractId DepositPreapproval) -> Optional AnyContractId -> ExtraArgs -> Update ()
   -- | Create @user@'s standing 'DepositPreapproval' for this token, or 'None' for
   -- kinds that need no NTT-level consent. Runs with the token's admin authority
   -- (admin-signed) plus @user@'s (the choice controller).
@@ -138,9 +146,10 @@ interface NttToken where
       sender           : Party
       amount           : TrimmedAmount
       inputHoldingCids : [ContractId Holding]
+      registryCid      : Optional AnyContractId
       extraArgs        : ExtraArgs
     controller (view this).manager, sender
-    do lockOrBurnImpl this sender amount inputHoldingCids extraArgs
+    do lockOrBurnImpl this sender amount inputHoldingCids registryCid extraArgs
 
   -- Manager-only, so a relayer can drive a receive while the recipient is
   -- offline. The recipient's signature is not supplied here — for owner-signed
@@ -151,9 +160,10 @@ interface NttToken where
       amount                : TrimmedAmount
       inputHoldingCids      : [ContractId Holding]
       depositPreapprovalCid : Optional (ContractId DepositPreapproval)
+      registryCid           : Optional AnyContractId
       extraArgs             : ExtraArgs
     controller (view this).manager
-    do mintOrUnlockImpl this recipient amount inputHoldingCids depositPreapprovalCid extraArgs
+    do mintOrUnlockImpl this recipient amount inputHoldingCids depositPreapprovalCid registryCid extraArgs
 
   -- | Recipient opt-in, done once before the first inbound transfer. @user@
   -- controls the choice (supplying its own signature) and the token contract is

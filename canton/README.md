@@ -175,10 +175,16 @@ live two-step harness (`testing/go/ntt_recipient_match_integration_test.go`).
 `NttManager` never references a concrete token; it holds a `ContractId NttToken`
 and calls `LockOrBurn` / `MintOrUnlock`, isolating the token detail the way
 `VAA.daml` isolates crypto. `TokenMode` selects lock/unlock or burn/mint. The seam
-choices carry the CIP-0056 runtime handles (`[ContractId Holding]`, `ExtraArgs`)
-the manager threads through. Real implementations live in `ntt-cip56`
-(`Cip56CustodyToken`, `Cip56BurnMintToken`); a stdlib `MockToken` in the test
-package exercises the whole protocol under `dpm test`. **Counterparty authority.**
+choices carry the CIP-0056 runtime handles the manager threads through:
+`[ContractId Holding]`, `ExtraArgs`, and `registryCid` — the registry's own
+runtime dependency (e.g. its factory contract), resolved off-ledger and
+disclosed fresh by the caller on every `Transfer`/`Receive`, the same as
+`coreStateCid`/`transceiverEmitterCid`. No contract is ever pinned inside the
+token itself, so a registry can replace its factory without stranding any
+already-created token or `DepositPreapproval`. Real implementations live in
+`ntt-cip56` (`Cip56CustodyToken`, `Cip56BurnMintToken`); the test package
+(`Test.TestNtt`) exercises the whole protocol against them under `dpm test`.
+**Counterparty authority.**
 Each leg reaches the token holder's authority differently. Outbound `LockOrBurn`
 lists the live `sender` as a co-controller, so the sender's authority spends its
 own holdings. Inbound `MintOrUnlock` is `manager`-only; for an owner-signed token
