@@ -14,7 +14,9 @@
 -- Send ('Transfer') publishes an ordinary core message via 'PublishMessage'.
 -- Receive ('Receive') is permissionless: any executor relays an inbound VAA;
 -- replay protection is the core per-consumer trie (scoped to @admin@), guardian
--- root pinned via the disclosed 'CoreState'.
+-- root pinned via the disclosed 'CoreState'. For owner-signed token kinds the
+-- recipient's authority reaches the mint through a standing 'DepositPreapproval'
+-- it created earlier (no live recipient co-signature at relay time).
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -222,10 +224,13 @@ template NttManager
     -- @admin@, so each deployment claims a VAA once), enforces the peer, binds
     -- @recipient@ to the VAA's @recipientAddress@, and mints/unlocks.
     --
-    -- @executor@ carries no authority: the @nonconsuming@ body inherits
-    -- 'NttManager''s signatory authority (@operator, admin@), which the nested
-    -- choices need; the executor only supplies disclosures. (An owner-signed token
-    -- additionally needs a recipient pre-approval — off-ledger, README §11.)
+    -- @executor@ carries no authority and is the sole controller: the @nonconsuming@
+    -- body inherits 'NttManager''s signatory authority (@operator, admin@), which
+    -- the nested choices need; the executor only supplies disclosures. The recipient
+    -- is NOT online — for an owner-signed token, its authority reaches the seam's
+    -- mint through a standing 'DepositPreapproval' it created earlier (passed here as
+    -- @depositPreapprovalCid@ and forwarded to 'MintOrUnlock'); the admin-signed mock
+    -- needs none ('None'). This keeps relaying fully permissionless (README §10).
     --
     -- The disclosed 'CoreState' is authenticated by pinning its
     -- @guardianGovernance@ to the anchor @admin@ committed at deployment. Pinning
@@ -241,14 +246,15 @@ template NttManager
     -- @pubKeys@ are untrusted hints (hint-free verification is a follow-up, §11).
     nonconsuming choice Receive : NativeTokenTransfer
       with
-        executor         : Party                 -- any relayer; carries no authority
-        coreStateCid     : ContractId CoreState   -- disclosed; pinned via guardianGovernance
-        replayNodeCid    : ContractId ReplayNode   -- covering trie node for vaa.hash
-        vaaBytes         : Bytes
-        pubKeys          : [(Int, Bytes)]
-        recipient        : Party
-        inputHoldingCids : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
-        extraArgs        : ExtraArgs             -- CIP-56 choice context
+        executor              : Party                 -- any relayer; carries no authority
+        coreStateCid          : ContractId CoreState   -- disclosed; pinned via guardianGovernance
+        replayNodeCid         : ContractId ReplayNode   -- covering trie node for vaa.hash
+        vaaBytes              : Bytes
+        pubKeys               : [(Int, Bytes)]
+        recipient             : Party
+        inputHoldingCids      : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
+        depositPreapprovalCid : Optional (ContractId DepositPreapproval)  -- recipient consent (owner-signed kinds)
+        extraArgs             : ExtraArgs             -- CIP-56 choice context
       controller executor
       do
         -- Authenticate the guardian trust root before verifying against it.
@@ -276,5 +282,6 @@ template NttManager
           recipient
           amount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
           inputHoldingCids
+          depositPreapprovalCid
           extraArgs
         pure ntt
