@@ -34,7 +34,7 @@ import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Token
 import Wormhole.Ntt.Manager
-import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken(..), Cip56CustodyToken(..))
+import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken(..), Cip56CustodyToken(..), Cip56DepositPreapproval(..))
 import Test.MockToken (mintAndAllocate, mockBalance)
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 import Test.TestCore
@@ -78,6 +78,8 @@ template MockToken
       mintOrUnlockImpl recipient amt _inputHoldingCids _extraArgs = do
         create MockHolding with admin, owner = recipient, amount = amt.amount
         pure ()
+      -- Nothing to consent to (the mint binds only the admin): silent no-op.
+      preApproveImpl _user = pure None
 
 ----------------------------------------------------------------------
 -- Cip56BurnMintToken harness: local mocks of the vendored Holding /
@@ -380,6 +382,121 @@ testBurnMintExactCoverNoChange = do
 
   remaining <- cip56HoldingsOwnedBy admin sender
   remaining === []
+
+----------------------------------------------------------------------
+-- Deposit pre-approval (recipient standing consent)
+----------------------------------------------------------------------
+
+-- | Disclose the (admin-signed) burn/mint token hook to a non-admin @user@, so it
+-- can exercise 'PreApproveDeposit' on it.
+discloseBurnMintToken : Party -> Script Disclosure
+discloseBurnMintToken admin = do
+  [(cid, _)] <- query @Cip56BurnMintToken admin
+  fromSome <$> queryDisclosure admin cid
+
+-- | @user@ pre-approves deposits on a burn/mint token; returns the interface cid
+-- and the standing pre-approval's disclosure.
+preapproveBurnMint : Party -> ContractId NttToken -> Party -> Script (ContractId DepositPreapproval, Disclosure)
+preapproveBurnMint admin tokenCid user = do
+  dTok <- discloseBurnMintToken admin
+  mCid <- submit (actAs user <> disclose dTok) do
+    exerciseCmd tokenCid PreApproveDeposit with user
+  cid <- case mCid of
+    Some c -> pure c
+    None -> abort "expected a deposit pre-approval cid for the burn/mint kind"
+  -- The pre-approval is signed by admin, so admin can resolve its disclosure.
+  [(preCid, _)] <- query @Cip56DepositPreapproval admin
+  dPre <- fromSome <$> queryDisclosure admin preCid
+  pure (cid, dPre)
+
+-- | Pre-approving on a real 'Cip56BurnMintToken' creates a standing, dual-signed
+-- 'Cip56DepositPreapproval' owned by the caller.
+testPreApproveDepositCreatesStanding : Script ()
+testPreApproveDepositCreatesStanding = do
+  admin <- allocateParty "PreApproveAdmin"
+  manager <- allocateParty "PreApproveManager"
+  alice <- allocateParty "PreApproveAlice"
+  let instrumentId = InstrumentId with admin, id = "BURN"
+  tokenCid <- mkBurnMintToken admin manager instrumentId
+  dTok <- discloseBurnMintToken admin
+  mCid <- submit (actAs alice <> disclose dTok) do
+    exerciseCmd tokenCid PreApproveDeposit with user = alice
+  case mCid of
+    Some _ -> pure ()
+    None -> abort "expected a pre-approval cid"
+  pres <- query @Cip56DepositPreapproval admin
+  case [ p | (_, p) <- pres, p.owner == alice ] of
+    [p] -> do
+      p.admin === admin
+      p.instrumentId === instrumentId
+    _ -> abort "expected exactly one pre-approval owned by alice"
+
+-- | The 'Deposit' choice on a standing pre-approval mints the owner-signed holding
+-- with no recipient authority in the submission: @admin@ (the 'Deposit' controller)
+-- submits alone, and @alice@'s signatory authority on the pre-approval reaches the
+-- owner-signed output holding through the choice body — no @actAs alice@.
+testDepositMintsToOwner : Script ()
+testDepositMintsToOwner = do
+  admin <- allocateParty "DepositAdmin"
+  manager <- allocateParty "DepositManager"
+  alice <- allocateParty "DepositAlice"
+  let instrumentId = InstrumentId with admin, id = "BURN"
+  tokenCid <- mkBurnMintToken admin manager instrumentId
+  (preCid, _dPre) <- preapproveBurnMint admin tokenCid alice
+
+  -- admin is the Deposit controller and already sees the factory + pre-approval.
+  _ <- submit admin do
+    exerciseCmd preCid Deposit with
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = []
+      extraArgs = emptyExtraArgs
+
+  holdings <- cip56HoldingsOwnedBy admin alice
+  case holdings of
+    [(_, h)] -> h.amount === 0.01
+    _ -> abort ("expected exactly one holding minted to alice, got: " <> show holdings)
+
+-- | Owner-only 'Revoke' (submitted as alice alone) tears down the standing
+-- consent; a 'Deposit' against the now-stale cid must fail.
+testRevokedPreapprovalFails : Script ()
+testRevokedPreapprovalFails = do
+  admin <- allocateParty "RevokeAdmin"
+  manager <- allocateParty "RevokeManager"
+  alice <- allocateParty "RevokeAlice"
+  let instrumentId = InstrumentId with admin, id = "BURN"
+  tokenCid <- mkBurnMintToken admin manager instrumentId
+  (preCid, _dPre) <- preapproveBurnMint admin tokenCid alice
+
+  -- alice is a signatory of the pre-approval, so she sees it and can Revoke alone.
+  [(preConcrete, _)] <- query @Cip56DepositPreapproval admin
+  submit alice do
+    exerciseCmd (toInterfaceContractId @DepositPreapproval preConcrete) Revoke
+
+  res <- trySubmit admin do
+    exerciseCmd preCid Deposit with
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = []
+      extraArgs = emptyExtraArgs
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "deposit succeeded against a revoked pre-approval"
+
+-- | The mock kind needs no pre-approval: 'PreApproveDeposit' returns 'None' and
+-- creates nothing (silent no-op).
+testPreapproveMockNoOp : Script ()
+testPreapproveMockNoOp = do
+  admin <- allocateParty "MockPreAdmin"
+  manager <- allocateParty "MockPreManager"
+  alice <- allocateParty "MockPreAlice"
+  mockCid <- submit admin do createCmd MockToken with admin, manager, mode = BurnMint
+  let tokenCid = toInterfaceContractId @NttToken mockCid
+  dTok <- fromSome <$> queryDisclosure admin mockCid
+
+  mCid <- submit (actAs alice <> disclose dTok) do
+    exerciseCmd tokenCid PreApproveDeposit with user = alice
+  mCid === None
+  pres <- query @Cip56DepositPreapproval admin
+  assertMsg "the mock kind must create no pre-approval" (null [ p | (_, p) <- pres, p.owner == alice ])
 
 -- | 32-byte hex from a short tail (@b32 "aa"@ = 0x00..aa), matching the fixture.
 b32 : Text -> Bytes32

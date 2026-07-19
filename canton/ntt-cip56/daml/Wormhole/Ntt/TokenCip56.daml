@@ -93,6 +93,13 @@ template Cip56CustodyToken
           TransferInstructionResult_Completed _ -> pure ()
           _ -> abort "ntt: transfer did not settle synchronously"
 
+      -- The custody kind takes no NTT-level deposit pre-approval: settlement to an
+      -- arbitrary recipient depends on registry-level receiver pre-approval, which
+      -- is out of this interface's reach. The abort signals that real dependency
+      -- rather than silently returning None.
+      preApproveImpl _user =
+        abort "ntt: custody kind takes no NTT deposit pre-approval (registry-level pre-approval applies; see module comment)"
+
 ----------------------------------------------------------------------
 -- burn / mint via the burn-mint factory
 ----------------------------------------------------------------------
@@ -156,4 +163,53 @@ template Cip56BurnMintToken
                inputHoldingCids = []
                extraArgs
                extraActors = [recipient]
+        pure ()
+
+      -- Opt-in: create the recipient's standing 'Cip56DepositPreapproval' for this
+      -- token (dual-signed admin + user; the body carries admin's authority because
+      -- the token is admin-signed, and user's as the PreApproveDeposit controller).
+      -- Snapshots @burnMintFactoryCid@; if the registry rotates its factory, existing
+      -- pre-approvals go stale and must be re-issued — the same static-cid limitation
+      -- 'Cip56BurnMintToken' itself has. Acceptable at devnet stage.
+      preApproveImpl user =
+        fmap (Some . toInterfaceContractId @DepositPreapproval) $
+          create Cip56DepositPreapproval with admin, owner = user, instrumentId, burnMintFactoryCid
+
+----------------------------------------------------------------------
+-- burn / mint deposit pre-approval (recipient standing consent)
+----------------------------------------------------------------------
+
+-- | A recipient's standing consent to receive burn/mint deposits of one
+-- instrument. Dual-signed (@admin@, @owner@) so the 'Deposit' body can create the
+-- owner-signed output holding without the owner online; created in one step by
+-- 'Cip56BurnMintToken.PreApproveDeposit'. Copies the token's @burnMintFactoryCid@
+-- at creation (same static-cid caveat as 'Cip56BurnMintToken'); the @owner@ can
+-- tear it down at any time via 'Revoke'.
+template Cip56DepositPreapproval
+  with
+    admin              : Party
+    owner              : Party
+    instrumentId       : InstrumentId
+    burnMintFactoryCid : ContractId BurnMintFactory   -- copied from the token at PreApprove time
+  where
+    signatory admin, owner
+
+    interface instance DepositPreapproval for Cip56DepositPreapproval where
+      view = DepositPreapprovalView with admin, owner, instrumentId
+      -- Body authority = {admin (Deposit controller)} u {admin, owner (signatories)}
+      -- = {admin, owner}: exactly what BurnMintFactory_BurnMint's controller
+      -- @admin :: extraActors@ needs to create the owner-signed output holding.
+      depositImpl amount _inputHoldingCids extraArgs = do
+        _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
+          expectedAdmin = instrumentId.admin
+          outputs =
+            [ BurnMintOutput with
+                owner
+                amount = trimmedToDecimal amount
+                context = extraArgs.context
+            ]
+          instrumentId
+          inputHoldingCids = []
+          extraArgs
+          extraActors = [owner]
         pure ()

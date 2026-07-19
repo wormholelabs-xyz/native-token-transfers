@@ -17,7 +17,7 @@
 -- disclosed off-ledger). The test mock ignores them.
 module Wormhole.Ntt.Token where
 
-import Splice.Api.Token.HoldingV1 (Holding)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (ExtraArgs (..), emptyChoiceContext, emptyMetadata)
 
 -- | Custody the token (lock/unlock) or destroy-and-recreate it (burn/mint). One
@@ -72,8 +72,50 @@ data NttTokenView = NttTokenView with
 emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
 
--- | The token effect seam. Impls supply 'lockOrBurnImpl' / 'mintOrUnlockImpl';
--- the manager calls the 'LockOrBurn' / 'MintOrUnlock' choices.
+-- | The view of a 'DepositPreapproval': the token @admin@ and the pre-approving
+-- @owner@ (both co-signatories of the standing consent) and the @instrumentId@ it
+-- authorizes deposits of. 'MintOrUnlock' reads this view to reject a pre-approval
+-- issued for a different party, registry, or instrument without seeing the impl.
+data DepositPreapprovalView = DepositPreapprovalView with
+    admin        : Party
+    owner        : Party
+    instrumentId : InstrumentId
+  deriving (Eq, Show)
+
+-- | A recipient's standing consent to receive owner-signed deposits of one
+-- instrument (the Canton Coin 'TransferPreapproval' analog). Created dual-signed
+-- (admin + owner) in one step by 'NttToken.PreApproveDeposit'; the mint runs
+-- inside 'Deposit', so the owner's authority reaches the owner-signed holding
+-- without the owner being online. Owner-signed token kinds implement it; the
+-- admin-signed mock does not (its mint binds no owner). See ../ntt-cip56.
+interface DepositPreapproval where
+  viewtype DepositPreapprovalView
+
+  -- | Deposit @amount@ to the pre-approving owner, spending @inputHoldingCids@
+  -- ([] for a mint). Runs with the pre-approval's admin+owner authority.
+  depositImpl : TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+
+  -- Standing consent: the admin (registry/token) deposits to the owner any number
+  -- of times, without the owner online. Controller is the admin; the
+  -- executor/relayer never appears. Nonconsuming: one approval, unlimited
+  -- deliveries.
+  nonconsuming choice Deposit : ()
+    with
+      amount           : TrimmedAmount
+      inputHoldingCids : [ContractId Holding]
+      extraArgs        : ExtraArgs
+    controller (view this).admin
+    do depositImpl this amount inputHoldingCids extraArgs
+
+  -- The owner alone tears down its standing consent. No expiry; the delivery path
+  -- is unaffected until the owner revokes.
+  choice Revoke : ()
+    controller (view this).owner
+    do pure ()
+
+-- | The token effect seam. Impls supply 'lockOrBurnImpl' / 'mintOrUnlockImpl' /
+-- 'preApproveImpl'; the manager calls the 'LockOrBurn' / 'MintOrUnlock' choices,
+-- and a recipient opts in via 'PreApproveDeposit'.
 interface NttToken where
   viewtype NttTokenView
 
@@ -81,6 +123,10 @@ interface NttToken where
   lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
   -- | Inbound: unlock (spending @inputHoldingCids@) or mint @amount@ to @recipient@.
   mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+  -- | Create @user@'s standing 'DepositPreapproval' for this token, or 'None' for
+  -- kinds that need none (the admin-signed mock). Runs with the token's admin
+  -- authority (admin-signed) plus @user@'s (the choice controller).
+  preApproveImpl : Party -> Update (Optional (ContractId DepositPreapproval))
 
   -- Both manager and sender control this choice: the sender's authority must
   -- reach the seam body so it can spend an owner-signed holding.
@@ -104,3 +150,13 @@ interface NttToken where
       extraArgs        : ExtraArgs
     controller (view this).manager, recipient
     do mintOrUnlockImpl this recipient amount inputHoldingCids extraArgs
+
+  -- | Recipient opt-in: @user@ creates its standing 'DepositPreapproval' for this
+  -- token. Controller is @user@ (supplies its own authority); the body also
+  -- carries the token's admin authority, so the dual-signed consent is created in
+  -- one step. Returns 'None' for kinds that need no pre-approval.
+  nonconsuming choice PreApproveDeposit : Optional (ContractId DepositPreapproval)
+    with
+      user : Party
+    controller user
+    do preApproveImpl this user
