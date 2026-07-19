@@ -144,9 +144,7 @@ revoked) pre-approval aborts the whole transaction atomically — the VAA digest
 (`TestNtt:testMintOrUnlockPreapprovedSucceeds` /
 `testMintOrUnlockWithoutPreapprovalFails` / `testRevokedPreapprovalFails`). The
 `Deposit` choice is `nonconsuming` (one approval, unlimited deliveries); the
-recipient alone holds `Revoke` (no expiry, no admin-side cancel). The admin-signed
-mock needs no pre-approval — its mint binds only the `admin` — so `PreApproveDeposit`
-returns `None` there and executor-only delivery works unchanged.
+recipient alone holds `Revoke` (no expiry, no admin-side cancel).
 
 **Guardian trust root — pinned to `guardianGovernance`, not the operator.** The
 disclosed `CoreState` is authenticated by checking its `guardianGovernance`

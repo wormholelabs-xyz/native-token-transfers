@@ -1,10 +1,21 @@
--- | CIP-56 implementations of the 'NttToken' seam, against the vendored
+-- | CIP-56 implementations of the 'NttToken' interface, against the vendored
 -- token-standard DARs. Work for Canton Coin (Amulet) or any conforming token.
 --
---   * lock/unlock ('Cip56CustodyToken') via 'TransferFactory_Transfer': lock =
---     sender -> custody; unlock = custody -> recipient.
---   * burn/mint ('Cip56BurnMintToken') via 'BurnMintFactory_BurnMint': burn =
---     spend @inputHoldingCids@, no outputs; mint = one output to recipient.
+-- Two Cip56 token types, one for each side of the 'MintOrUnlock' choice:
+--
+--   * 'Cip56CustodyToken' is the unlock side. The token's holding already
+--     exists on Canton, sitting with a custody party between send and
+--     receive; unlocking moves it from custody to the recipient via
+--     'TransferFactory_Transfer' (lock = sender -> custody, unlock =
+--     custody -> recipient).
+--   * 'Cip56BurnMintToken' is the mint side. The token's holding does not
+--     exist yet; minting creates it directly for the recipient via
+--     'BurnMintFactory_BurnMint' (burn = spend @inputHoldingCids@, no
+--     outputs; mint = one output to the recipient).
+--
+-- A "factory" is a contract, implemented by the token's registry (e.g.
+-- Amulet), that carries out the registry's own transfer/burn/mint logic --
+-- NTT calls into it rather than moving holdings directly.
 --
 -- Each hook stores the registry factory cid and the token 'InstrumentId';
 -- per-transfer holdings + context arrive through the seam, disclosed off-ledger.
@@ -68,23 +79,15 @@ template Cip56CustodyToken
       -- Unlock: custody -> recipient, spending the custody holdings. Same
       -- synchronous-settle requirement as the lock path.
       --
-      -- @depositPreapprovalCid@ is deliberately ignored here. The NTT
-      -- 'DepositPreapproval' works when NTT itself creates the recipient's
-      -- holding: for a burn-mint token the mint runs directly inside 'Deposit''s
-      -- body, where the recipient's signature from the standing contract is in
-      -- scope. That is not the case here. When Alice receives Canton Coin, the
-      -- coins are controlled by the Amulet registry rather than by an NTT
-      -- burn/mint (which would be the case for a token that does not originate
-      -- on Canton), so delivery means the registry's own code executes
-      -- 'TransferFactory_Transfer' from the custody party to Alice. Authority
-      -- borrowed from an enclosing choice does not extend into that nested
-      -- exercise, and the choice has no field for naming Alice as an extra
-      -- authorizer, so her consent must instead be registered with the registry
-      -- itself -- e.g. Amulet's own 'TransferPreapproval'. With that in place
-      -- the registry settles the transfer synchronously; without it the
-      -- registry returns a Pending 'TransferInstruction' for Alice to accept in
-      -- a later transaction, which the synchronous-settle assert below rejects,
-      -- aborting the receive and leaving the VAA digest unconsumed.
+      -- When the ntt is minting, alice must have given a pre-approval to
+      -- mint tokens to her holdings. We therefore pass in the
+      -- depositPreapproval Cid from alice in order to pass signatory checks.
+      --
+      -- Note that the "depositPreapproval" flow is only for tokens that are
+      -- on the minting side. For the unlocking side, the holding contract
+      -- already exists on Canton and the user will need to call e.g.
+      -- transferPreapproval (as is the case for Canton Coin). If there is no
+      -- transferPreapproval, it will fail with an error message.
       mintOrUnlockImpl recipient amount inputHoldingCids _depositPreapprovalCid extraArgs = do
         now <- getTime
         res <- exercise transferFactoryCid TransferFactory_Transfer with
@@ -103,12 +106,11 @@ template Cip56CustodyToken
           TransferInstructionResult_Completed _ -> pure ()
           _ -> abort "ntt: transfer did not settle synchronously"
 
-      -- There is no NTT-level pre-approval for the custody kind — consent lives
-      -- with the registry instead (see the comment above). Abort rather than
-      -- return None, so a caller cannot mistake "no pre-approval needed" for
-      -- "pre-approval handled".
+      -- This is the unlock case, and there is no NTT-level pre-approval to
+      -- give here -- it always aborts. Alice must instead pre-approve with
+      -- the token's own registry (e.g. Amulet's transferPreapproval).
       preApproveImpl _user =
-        abort "ntt: custody kind takes no NTT deposit pre-approval (registry-level pre-approval applies; see module comment)"
+        abort "ntt: in order to unlock this token, a pre-approval is needed from the registry of the token contract. See transferPreapproval in the amulet implementation"
 
 ----------------------------------------------------------------------
 -- burn / mint via the burn-mint factory
@@ -155,16 +157,19 @@ template Cip56BurnMintToken
                extraActors = [sender]
         pure ()
 
-      -- Mint: one output holding to the recipient, no inputs. The output is
-      -- owner-signed, so the factory requires the recipient's signature
-      -- (BurnMintV1 wants each output owner in @extraActors@) — and this choice
-      -- is manager-only, so that signature is not present here. Instead this
-      -- body fetches the recipient's standing 'DepositPreapproval', checks it
-      -- matches (owner, registry, instrument), and runs the factory inside its
-      -- 'Deposit' choice, where the recipient's signature is in scope. If alice
-      -- never pre-approved, the mint aborts cleanly: the VAA digest stays
-      -- unconsumed and the transfer can be re-relayed after she opts in
-      -- (README §10).
+      -- In the minting case, alice must give approval for token holdings to
+      -- be minted to her. It takes depositPreapprovalCid as an input, which
+      -- alice created in order to allow minting of tokens directly to her
+      -- balance.
+      --
+      -- Alice's DepositPreapproval contract is signed by both alice and the
+      -- admin. Exercising its Deposit choice is therefore authorized by
+      -- both of them, and that authorization carries through to the
+      -- burn-mint factory call made inside Deposit -- which is how the
+      -- factory gets alice's signature for the owner-signed output, even
+      -- though this choice itself is manager-only. If alice never gave a
+      -- pre-approval, the mint aborts and the transfer can be re-relayed
+      -- once she opts in.
       mintOrUnlockImpl recipient amount _inputHoldingCids depositPreapprovalCid extraArgs = do
         cid <- case depositPreapprovalCid of
           Some c -> pure c

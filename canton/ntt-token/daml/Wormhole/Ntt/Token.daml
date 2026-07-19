@@ -1,10 +1,4 @@
--- | The token effect seam. 'NttManager' holds an 'NttToken' interface reference
--- and drives two effects: outbound 'LockOrBurn' (lock or burn) and inbound
--- 'MintOrUnlock' (unlock or mint). Isolates all CIP-56 detail behind one
--- interface; concrete impls (a test mock; the CIP-56 wiring in ../ntt-cip56)
--- supply the bodies.
---
--- The rule that shapes this module: a holding signed by its owner can only be
+-- | The rule that shapes this module: a holding signed by its owner can only be
 -- created or spent in a transaction that carries that owner's signature. The
 -- two directions obtain that signature differently:
 --
@@ -18,14 +12,9 @@
 --     runs inside that contract's 'Deposit' choice, where her signature is in
 --     scope.
 --
--- The admin's signature arrives the same indirect way: the impl contract is
--- admin-signed, so exercising a choice on it puts the admin's authority in the
--- body even though the submitter is not the admin. Both seam choices are
--- 'nonconsuming' so the hook cid is stable.
---
 -- The choices carry the CIP-56 handles a real registry needs: @inputHoldingCids@
 -- (holdings to spend; empty for a mint) and @extraArgs@ (choice context/metadata,
--- disclosed off-ledger). The test mock ignores them.
+-- disclosed off-ledger).
 module Wormhole.Ntt.Token where
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
@@ -99,8 +88,7 @@ data DepositPreapprovalView = DepositPreapprovalView with
 -- then on any relayer can deliver to her while she is offline: each mint runs
 -- inside this contract's 'Deposit' choice, and her signature — stored in the
 -- contract — is what allows her owner-signed holding to be created. Owner-signed
--- token kinds implement it; the admin-signed test mock does not (its holdings
--- carry no owner signature). See ../ntt-cip56.
+-- token kinds implement it.
 interface DepositPreapproval where
   viewtype DepositPreapprovalView
 
@@ -108,9 +96,9 @@ interface DepositPreapproval where
   -- ([] for a mint). Runs with the pre-approval's admin+owner authority.
   depositImpl : TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
 
-  -- One approval, unlimited deliveries: the choice is nonconsuming, and the
-  -- admin (its controller) exercises it once per incoming transfer, with the
-  -- owner offline. The relayer never appears at this layer.
+  -- The owner approves once; that lets the token admin exercise this choice
+  -- any number of times afterward, once per incoming transfer, with the owner
+  -- offline. The relayer never appears at this layer.
   nonconsuming choice Deposit : ()
     with
       amount           : TrimmedAmount
@@ -135,11 +123,11 @@ interface NttToken where
   lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
   -- | Inbound: unlock (spending @inputHoldingCids@) or mint @amount@ to
   -- @recipient@. @depositPreapprovalCid@ carries the recipient's standing consent
-  -- for owner-signed kinds (None for the admin-signed mock, which needs none).
+  -- for owner-signed kinds; 'None' is for kinds that need no NTT-level consent.
   mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> Optional (ContractId DepositPreapproval) -> ExtraArgs -> Update ()
   -- | Create @user@'s standing 'DepositPreapproval' for this token, or 'None' for
-  -- kinds that need none (the admin-signed mock). Runs with the token's admin
-  -- authority (admin-signed) plus @user@'s (the choice controller).
+  -- kinds that need no NTT-level consent. Runs with the token's admin authority
+  -- (admin-signed) plus @user@'s (the choice controller).
   preApproveImpl : Party -> Update (Optional (ContractId DepositPreapproval))
 
   -- Manager and sender both control this choice: alice co-signs her own
