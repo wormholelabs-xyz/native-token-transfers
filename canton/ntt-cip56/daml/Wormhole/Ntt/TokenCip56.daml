@@ -68,14 +68,17 @@ template Cip56CustodyToken
       -- Unlock: custody -> recipient, spending the custody holdings. Same
       -- synchronous-settle requirement as the lock path.
       --
-      -- Unlike the burn/mint leg, 'TransferFactory_Transfer' exposes no
-      -- 'extraActors', so the recipient's authority (threaded in via MintOrUnlock's
-      -- recipient controller) cannot be forwarded to the owner-signed receiver
-      -- holding. A registry that requires the receiver's authority therefore yields
-      -- a Pending 'TransferInstruction' (receiver must accept off-ledger, a
-      -- recipient pre-approval; README) which this hook rejects. A synchronous
-      -- unlock to an arbitrary recipient needs that pre-approval in place first.
-      mintOrUnlockImpl recipient amount inputHoldingCids extraArgs = do
+      -- The NTT 'DepositPreapproval' cannot fix the custody leg, so
+      -- @depositPreapprovalCid@ is ignored here. 'TransferFactory_Transfer' exposes
+      -- no 'extraActors' and its controller is @transfer.sender = custody@, so even
+      -- if the transfer were exercised inside 'Deposit''s body the recipient's
+      -- authority would stop at that node boundary. What settles a custody unlock to
+      -- an arbitrary recipient is *registry-level* receiver pre-approval (e.g.
+      -- Amulet's own 'TransferPreapproval'), which makes the registry's transfer
+      -- impl settle synchronously; without it the registry yields a Pending
+      -- 'TransferInstruction' (receiver must accept off-ledger) which this hook's
+      -- synchronous-settle assert rejects.
+      mintOrUnlockImpl recipient amount inputHoldingCids _depositPreapprovalCid extraArgs = do
         now <- getTime
         res <- exercise transferFactoryCid TransferFactory_Transfer with
                expectedAdmin = instrumentId.admin
@@ -94,9 +97,9 @@ template Cip56CustodyToken
           _ -> abort "ntt: transfer did not settle synchronously"
 
       -- The custody kind takes no NTT-level deposit pre-approval: settlement to an
-      -- arbitrary recipient depends on registry-level receiver pre-approval, which
-      -- is out of this interface's reach. The abort signals that real dependency
-      -- rather than silently returning None.
+      -- arbitrary recipient depends on registry-level receiver pre-approval (above),
+      -- which is out of this interface's reach. The abort signals that real
+      -- dependency rather than silently returning None.
       preApproveImpl _user =
         abort "ntt: custody kind takes no NTT deposit pre-approval (registry-level pre-approval applies; see module comment)"
 
@@ -145,25 +148,22 @@ template Cip56BurnMintToken
                extraActors = [sender]
         pure ()
 
-      -- Mint: one output to the recipient, no inputs. The recipient goes in
-      -- extraActors so its authority reaches the owner-signed output holding's
-      -- creation (BurnMintV1 requires each output owner in extraActors); the
-      -- authority is threaded down from Manager.Receive via MintOrUnlock's
-      -- recipient controller (mirrors the burn path's extraActors = [sender]).
-      mintOrUnlockImpl recipient amount _inputHoldingCids extraArgs = do
-        _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
-               expectedAdmin = instrumentId.admin
-               outputs =
-                 [ BurnMintOutput with
-                     owner = recipient
-                     amount = trimmedToDecimal amount
-                     context = extraArgs.context
-                 ]
-               instrumentId
-               inputHoldingCids = []
-               extraArgs
-               extraActors = [recipient]
-        pure ()
+      -- Mint: one output to the recipient, no inputs. The recipient's authority
+      -- for the owner-signed output holding (BurnMintV1 requires each output owner
+      -- in extraActors) does NOT come from this manager-only choice — it arrives
+      -- through the recipient's standing 'DepositPreapproval', whose 'Deposit' body
+      -- runs the factory with @extraActors = [owner]@. So the mint here is a fetch +
+      -- validate + 'Deposit'; a missing pre-approval aborts cleanly, leaving the VAA
+      -- digest unconsumed (README §10).
+      mintOrUnlockImpl recipient amount _inputHoldingCids depositPreapprovalCid extraArgs = do
+        cid <- case depositPreapprovalCid of
+          Some c -> pure c
+          None -> abort "ntt: deposit pre-approval required to mint an owner-signed holding"
+        vw <- view <$> fetch cid
+        assertMsg "ntt: deposit pre-approval is not for this recipient" (vw.owner == recipient)
+        assertMsg "ntt: deposit pre-approval is not for this registry" (vw.admin == admin)
+        assertMsg "ntt: deposit pre-approval is for a different instrument" (vw.instrumentId == instrumentId)
+        exercise cid Deposit with amount, inputHoldingCids = [], extraArgs
 
       -- Opt-in: create the recipient's standing 'Cip56DepositPreapproval' for this
       -- token (dual-signed admin + user; the body carries admin's authority because

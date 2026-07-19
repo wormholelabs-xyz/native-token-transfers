@@ -4,13 +4,17 @@
 -- interface; concrete impls (a test mock; the CIP-56 wiring in ../ntt-cip56)
 -- supply the bodies.
 --
--- Each choice is co-controlled by the 'manager' party and the transfer's
--- counterparty ('LockOrBurn' by the sender, 'MintOrUnlock' by the recipient): the
--- counterparty's authority must reach the seam body so it can spend (burn/lock) or
--- create (mint/unlock) an owner-signed holding. The token mutations are otherwise
--- authorized by the impl contract being admin-signed, so a choice carries the
--- admin's authority without the submitter being the admin. Both are 'nonconsuming'
--- so the hook cid is stable.
+-- Counterparty authority reaches each leg differently. Outbound: the live
+-- @sender@ co-controls 'LockOrBurn', lending its authority to spend (burn/lock)
+-- its own owner-signed holdings. Inbound: 'MintOrUnlock' is manager-only, so the
+-- recipient need not be online — a recipient that wants an owner-signed holding
+-- first exercises 'PreApproveDeposit', creating a standing dual-signed
+-- 'DepositPreapproval' (recipient + admin), and the mint runs inside that
+-- contract's 'Deposit' choice, borrowing the recipient's signatory authority
+-- without a live co-signature. The token mutations are otherwise authorized by the
+-- impl contract being admin-signed, so a choice carries the admin's authority
+-- without the submitter being the admin. Both seam choices are 'nonconsuming' so
+-- the hook cid is stable.
 --
 -- The choices carry the CIP-56 handles a real registry needs: @inputHoldingCids@
 -- (holdings to spend; empty for a mint) and @extraArgs@ (choice context/metadata,
@@ -121,8 +125,10 @@ interface NttToken where
 
   -- | Outbound: lock or burn @amount@ from @sender@, spending @inputHoldingCids@.
   lockOrBurnImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
-  -- | Inbound: unlock (spending @inputHoldingCids@) or mint @amount@ to @recipient@.
-  mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
+  -- | Inbound: unlock (spending @inputHoldingCids@) or mint @amount@ to
+  -- @recipient@. @depositPreapprovalCid@ carries the recipient's standing consent
+  -- for owner-signed kinds (None for the admin-signed mock, which needs none).
+  mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> Optional (ContractId DepositPreapproval) -> ExtraArgs -> Update ()
   -- | Create @user@'s standing 'DepositPreapproval' for this token, or 'None' for
   -- kinds that need none (the admin-signed mock). Runs with the token's admin
   -- authority (admin-signed) plus @user@'s (the choice controller).
@@ -139,17 +145,18 @@ interface NttToken where
     controller (view this).manager, sender
     do lockOrBurnImpl this sender amount inputHoldingCids extraArgs
 
-  -- Both manager and recipient control this choice: the recipient's authority
-  -- must reach the seam body so it can create an owner-signed holding (the inbound
-  -- mirror of LockOrBurn's sender-spends-an-owner-signed-holding requirement).
+  -- Manager-only: the recipient's authority arrives through a standing
+  -- 'DepositPreapproval' (for owner-signed kinds), not this choice's controller
+  -- set, so a relayer can drive receipt without the recipient online.
   nonconsuming choice MintOrUnlock : ()
     with
-      recipient        : Party
-      amount           : TrimmedAmount
-      inputHoldingCids : [ContractId Holding]
-      extraArgs        : ExtraArgs
-    controller (view this).manager, recipient
-    do mintOrUnlockImpl this recipient amount inputHoldingCids extraArgs
+      recipient             : Party
+      amount                : TrimmedAmount
+      inputHoldingCids      : [ContractId Holding]
+      depositPreapprovalCid : Optional (ContractId DepositPreapproval)
+      extraArgs             : ExtraArgs
+    controller (view this).manager
+    do mintOrUnlockImpl this recipient amount inputHoldingCids depositPreapprovalCid extraArgs
 
   -- | Recipient opt-in: @user@ creates its standing 'DepositPreapproval' for this
   -- token. Controller is @user@ (supplies its own authority); the body also

@@ -101,7 +101,9 @@ instead of per-service compose state.
 | `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
 | `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign]` | Outbound `NttManager.Transfer`. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. |
-| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Receive`. A replayed VAA exits non-zero. |
+| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Receive`. A replayed VAA exits non-zero. For owner-signed token kinds the recipient must have run `preapprove` first, else the mint gate rejects the delivery (the VAA stays deliverable). |
+| `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deposits via `NttToken.PreApproveDeposit` (a standing `DepositPreapproval`). For the admin-signed mock kind this is a ledger-surfaced no-op (`preapproved=false`). |
+| `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing deposit pre-approval (owner-only `DepositPreapproval.Revoke`). |
 | `guardian sign-transfer --deployment NAME --to-recipient HINT --amount N [--source-chain N] [--sequence N]` | Sign an inbound NTT transfer VAA as if it came from the deployment's configured peer. |
 | `guardian sign-vaa --emitter-chain N --emitter HEX --sequence N --payload HEX` | Sign an arbitrary payload as a VAA (not NTT-specific). |
 | `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72); `--apply` also submits it via `SubmitGovernanceVAA`. |

@@ -47,7 +47,8 @@ import Test.TestCore
 
 -- | A minted/custodied balance. Signed by the token @admin@ only, so a mint needs
 -- no recipient authority — which is why a third-party executor can drive 'Receive'
--- against this mock (a real owner-signed token needs a pre-approval; README §10).
+-- against this mock with no live recipient co-signature. A real owner-signed token
+-- needs a standing 'DepositPreapproval' instead (README §10).
 template MockHolding
   with
     admin  : Party
@@ -75,7 +76,9 @@ template MockToken
         -- lock (owner = admin); burn is modelled the same way here
         create MockHolding with admin, owner = admin, amount = amt.amount
         pure ()
-      mintOrUnlockImpl recipient amt _inputHoldingCids _extraArgs = do
+      -- Admin-signed mint: needs no recipient authority, so the pre-approval cid is
+      -- ignored and executor-only delivery works with 'None'.
+      mintOrUnlockImpl recipient amt _inputHoldingCids _depositPreapprovalCid _extraArgs = do
         create MockHolding with admin, owner = recipient, amount = amt.amount
         pure ()
       -- Nothing to consent to (the mint binds only the admin): silent no-op.
@@ -384,7 +387,7 @@ testBurnMintExactCoverNoChange = do
   remaining === []
 
 ----------------------------------------------------------------------
--- Deposit pre-approval (recipient standing consent)
+-- Deposit pre-approval (recipient standing consent) at the mint seam
 ----------------------------------------------------------------------
 
 -- | Disclose the (admin-signed) burn/mint token hook to a non-admin @user@, so it
@@ -394,8 +397,15 @@ discloseBurnMintToken admin = do
   [(cid, _)] <- query @Cip56BurnMintToken admin
   fromSome <$> queryDisclosure admin cid
 
+-- | Disclose the underlying 'MockBurnMintFactory' (admin-signed, no observer) so a
+-- non-admin submitter can drive the nested BurnMintFactory_BurnMint.
+discloseBurnMintFactory : Party -> Script Disclosure
+discloseBurnMintFactory admin = do
+  [(cid, _)] <- query @MockBurnMintFactory admin
+  fromSome <$> queryDisclosure admin cid
+
 -- | @user@ pre-approves deposits on a burn/mint token; returns the interface cid
--- and the standing pre-approval's disclosure.
+-- and the standing pre-approval's disclosure (for the manager-side mint).
 preapproveBurnMint : Party -> ContractId NttToken -> Party -> Script (ContractId DepositPreapproval, Disclosure)
 preapproveBurnMint admin tokenCid user = do
   dTok <- discloseBurnMintToken admin
@@ -431,24 +441,27 @@ testPreApproveDepositCreatesStanding = do
       p.instrumentId === instrumentId
     _ -> abort "expected exactly one pre-approval owned by alice"
 
--- | The 'Deposit' choice on a standing pre-approval mints the owner-signed holding
--- with no recipient authority in the submission: @admin@ (the 'Deposit' controller)
--- submits alone, and @alice@'s signatory authority on the pre-approval reaches the
--- owner-signed output holding through the choice body — no @actAs alice@.
-testDepositMintsToOwner : Script ()
-testDepositMintsToOwner = do
-  admin <- allocateParty "DepositAdmin"
-  manager <- allocateParty "DepositManager"
-  alice <- allocateParty "DepositAlice"
+-- | The design's core positive: executor-side delivery to a pre-approved
+-- owner-signed recipient with zero live recipient authority. Submitted @actAs
+-- manager@ only (+ factory/pre-approval disclosures) — no actAs alice, no actAs
+-- admin — yet the owner-signed holding lands, because alice's authority arrives
+-- through the standing pre-approval's 'Deposit' body.
+testMintOrUnlockPreapprovedSucceeds : Script ()
+testMintOrUnlockPreapprovedSucceeds = do
+  admin <- allocateParty "MintPreAdmin"
+  manager <- allocateParty "MintPreManager"
+  alice <- allocateParty "MintPreAlice"
   let instrumentId = InstrumentId with admin, id = "BURN"
   tokenCid <- mkBurnMintToken admin manager instrumentId
-  (preCid, _dPre) <- preapproveBurnMint admin tokenCid alice
+  (preCid, dPre) <- preapproveBurnMint admin tokenCid alice
+  dFactory <- discloseBurnMintFactory admin
 
-  -- admin is the Deposit controller and already sees the factory + pre-approval.
-  _ <- submit admin do
-    exerciseCmd preCid Deposit with
+  _ <- submit (actAs manager <> disclose dFactory <> disclose dPre) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient = alice
       amount = TrimmedAmount with decimals = 8, amount = 1_000_000
       inputHoldingCids = []
+      depositPreapprovalCid = Some preCid
       extraArgs = emptyExtraArgs
 
   holdings <- cip56HoldingsOwnedBy admin alice
@@ -456,8 +469,60 @@ testDepositMintsToOwner = do
     [(_, h)] -> h.amount === 0.01
     _ -> abort ("expected exactly one holding minted to alice, got: " <> show holdings)
 
+-- | The design's core negative: delivery to a non-pre-approved owner-signed
+-- recipient must abort cleanly (no pre-approval cid supplied).
+testMintOrUnlockWithoutPreapprovalFails : Script ()
+testMintOrUnlockWithoutPreapprovalFails = do
+  admin <- allocateParty "MintNoPreAdmin"
+  manager <- allocateParty "MintNoPreManager"
+  alice <- allocateParty "MintNoPreAlice"
+  let instrumentId = InstrumentId with admin, id = "BURN"
+  tokenCid <- mkBurnMintToken admin manager instrumentId
+  dFactory <- discloseBurnMintFactory admin
+
+  res <- trySubmit (actAs manager <> disclose dFactory) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient = alice
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = []
+      depositPreapprovalCid = None
+      extraArgs = emptyExtraArgs
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected a pre-approval-required failure, got: " <> fs.message)
+        ("deposit pre-approval required" `isInfixOf` fs.message)
+    Left err -> abort ("expected a pre-approval-required failure, got: " <> show err)
+    Right _ -> abort "mint succeeded with no deposit pre-approval"
+
+-- | A pre-approval issued to bob does not authorize a mint to alice: the
+-- owner-mismatch assert must reject it.
+testMintOrUnlockWrongOwnerPreapprovalFails : Script ()
+testMintOrUnlockWrongOwnerPreapprovalFails = do
+  admin <- allocateParty "WrongOwnerAdmin"
+  manager <- allocateParty "WrongOwnerManager"
+  alice <- allocateParty "WrongOwnerAlice"
+  bob <- allocateParty "WrongOwnerBob"
+  let instrumentId = InstrumentId with admin, id = "BURN"
+  tokenCid <- mkBurnMintToken admin manager instrumentId
+  (preCidBob, dPreBob) <- preapproveBurnMint admin tokenCid bob
+  dFactory <- discloseBurnMintFactory admin
+
+  res <- trySubmit (actAs manager <> disclose dFactory <> disclose dPreBob) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient = alice
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = []
+      depositPreapprovalCid = Some preCidBob
+      extraArgs = emptyExtraArgs
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected an owner-mismatch failure, got: " <> fs.message)
+        ("not for this recipient" `isInfixOf` fs.message)
+    Left err -> abort ("expected an owner-mismatch failure, got: " <> show err)
+    Right _ -> abort "mint succeeded with a pre-approval issued to another party"
+
 -- | Owner-only 'Revoke' (submitted as alice alone) tears down the standing
--- consent; a 'Deposit' against the now-stale cid must fail.
+-- consent; a mint with the now-stale cid must fail.
 testRevokedPreapprovalFails : Script ()
 testRevokedPreapprovalFails = do
   admin <- allocateParty "RevokeAdmin"
@@ -465,24 +530,27 @@ testRevokedPreapprovalFails = do
   alice <- allocateParty "RevokeAlice"
   let instrumentId = InstrumentId with admin, id = "BURN"
   tokenCid <- mkBurnMintToken admin manager instrumentId
-  (preCid, _dPre) <- preapproveBurnMint admin tokenCid alice
+  (preCid, dPre) <- preapproveBurnMint admin tokenCid alice
+  dFactory <- discloseBurnMintFactory admin
 
   -- alice is a signatory of the pre-approval, so she sees it and can Revoke alone.
   [(preConcrete, _)] <- query @Cip56DepositPreapproval admin
   submit alice do
     exerciseCmd (toInterfaceContractId @DepositPreapproval preConcrete) Revoke
 
-  res <- trySubmit admin do
-    exerciseCmd preCid Deposit with
+  res <- trySubmit (actAs manager <> disclose dFactory <> disclose dPre) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient = alice
       amount = TrimmedAmount with decimals = 8, amount = 1_000_000
       inputHoldingCids = []
+      depositPreapprovalCid = Some preCid
       extraArgs = emptyExtraArgs
   case res of
     Left _ -> pure ()
-    Right _ -> abort "deposit succeeded against a revoked pre-approval"
+    Right _ -> abort "mint succeeded with a revoked pre-approval"
 
 -- | The mock kind needs no pre-approval: 'PreApproveDeposit' returns 'None' and
--- creates nothing (silent no-op).
+-- creates nothing, and an executor-only ('None') mint still lands.
 testPreapproveMockNoOp : Script ()
 testPreapproveMockNoOp = do
   admin <- allocateParty "MockPreAdmin"
@@ -497,6 +565,19 @@ testPreapproveMockNoOp = do
   mCid === None
   pres <- query @Cip56DepositPreapproval admin
   assertMsg "the mock kind must create no pre-approval" (null [ p | (_, p) <- pres, p.owner == alice ])
+
+  -- Executor-only (manager-driven, None) mint still succeeds against the mock.
+  _ <- submit (actAs manager) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient = alice
+      amount = TrimmedAmount with decimals = 8, amount = 5
+      inputHoldingCids = []
+      depositPreapprovalCid = None
+      extraArgs = emptyExtraArgs
+  hs <- query @MockHolding admin
+  case [ h | (_, h) <- hs, h.owner == alice ] of
+    [h] -> h.amount === 5
+    _ -> abort "expected exactly one mock holding minted to alice"
 
 -- | 32-byte hex from a short tail (@b32 "aa"@ = 0x00..aa), matching the fixture.
 b32 : Text -> Bytes32
@@ -720,13 +801,12 @@ setupReceiveManager operator guardianGovernance admin = do
   _ <- registerReplayRoot operator admin defaultSplitThreshold
   pure (mgrId, mockCid)
 
--- | Receive stays relayer-permissionless: a third-party @relayer@ supplies the
--- executor authority with only disclosures (not a stakeholder of anything). The
--- @recipient@ now co-authorizes (Receive threads its authority into the mint), so it
--- co-acts here; the transfer still fails only on the recipient binding (a
--- nondeterministic Party can't hash to the fixture's baked-in recipientAddress).
--- Reaching that gate proves the executor carries no authority — the recipient's
--- co-signature plus visibility is all that is required.
+-- | Receive is relayer-permissionless: a third-party @relayer@ supplies the
+-- executor authority with only disclosures (not a stakeholder of anything) and is
+-- the sole controller. The recipient is passive — it neither acts nor is disclosed
+-- to — and the transfer fails only on the recipient binding (a nondeterministic
+-- Party can't hash to the fixture's baked-in recipientAddress). Reaching that gate
+-- with executor authority alone proves the relay carries no recipient authority.
 testNttReceiveByExecutorRecipientMismatchFails : Script ()
 testNttReceiveByExecutorRecipientMismatchFails = do
   (operator, guardianGovernance, csId) <- nttSetup
@@ -739,7 +819,7 @@ testNttReceiveByExecutorRecipientMismatchFails = do
   dCs   <- fromSome <$> queryDisclosure operator csId
   dMock <- fromSome <$> queryDisclosure operator mockCid
 
-  res <- trySubmit (actAs relayer <> actAs wrongRecipient <> disclose dMgr <> disclose dCs <> disclose nodeDisc <> disclose dMock) do
+  res <- trySubmit (actAs relayer <> disclose dMgr <> disclose dCs <> disclose nodeDisc <> disclose dMock) do
     exerciseCmd mgrId Receive with
       executor = relayer
       coreStateCid = csId
@@ -748,6 +828,7 @@ testNttReceiveByExecutorRecipientMismatchFails = do
       pubKeys = [(0, devnetGuardianPubKey)]
       recipient = wrongRecipient
       inputHoldingCids = []
+      depositPreapprovalCid = None
       extraArgs = emptyExtraArgs
   case res of
     Left (FailureStatusError fs) ->
@@ -777,7 +858,7 @@ testNttReceivePinsGuardianGovernance = do
   (mgrId, _) <- setupReceiveManager operator guardianGovernance admin
   (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
 
-  res <- trySubmit (actAs operator <> actAs recipient) do
+  res <- trySubmit (actAs operator) do
     exerciseCmd mgrId Receive with
       executor = operator
       coreStateCid = fakeCsId
@@ -786,6 +867,7 @@ testNttReceivePinsGuardianGovernance = do
       pubKeys = [(0, devnetGuardianPubKey)]
       recipient
       inputHoldingCids = []
+      depositPreapprovalCid = None
       extraArgs = emptyExtraArgs
   case res of
     Left (FailureStatusError fs) ->
@@ -847,11 +929,13 @@ data NttReceiveMatchInput = NttReceiveMatchInput with
   deriving (Eq, Show)
 
 -- | Step 2: relay the fresh VAA (as @operator@ here; the third-party path is
--- covered by 'testNttReceiveByExecutorRecipientMismatchFails'). Succeeds and mints
--- to 'recipient'; a second relay is rejected (replay).
+-- covered by 'testNttReceiveByExecutorRecipientMismatchFails'). Submitted with
+-- executor authority alone — the recipient is passive (the admin-signed mock needs
+-- no pre-approval, so @depositPreapprovalCid = None@). Succeeds and mints to
+-- 'recipient'; a second relay is rejected (replay).
 integrationNttReceiveMatch : NttReceiveMatchInput -> Script ()
 integrationNttReceiveMatch input = do
-  ntt <- submit (actAs input.operator <> actAs input.recipient) do
+  ntt <- submit (actAs input.operator) do
     exerciseCmd input.mgrId Receive with
       executor = input.operator
       coreStateCid = input.coreStateCid
@@ -860,6 +944,7 @@ integrationNttReceiveMatch input = do
       pubKeys = [(0, devnetGuardianPubKey)]
       recipient = input.recipient
       inputHoldingCids = []
+      depositPreapprovalCid = None
       extraArgs = emptyExtraArgs
   ntt.recipientChain === 72
 
@@ -873,7 +958,7 @@ integrationNttReceiveMatch input = do
   -- Replay: digest now consumed. Re-resolve the covering node and relay again —
   -- rejected on membership.
   (freshNode, _) <- coveringDisclosure input.operator input.recipient (parseVAA input.vaaBytes).hash
-  submitMustFail (actAs input.operator <> actAs input.recipient) do
+  submitMustFail (actAs input.operator) do
     exerciseCmd input.mgrId Receive with
       executor = input.operator
       coreStateCid = input.coreStateCid
@@ -882,6 +967,7 @@ integrationNttReceiveMatch input = do
       pubKeys = [(0, devnetGuardianPubKey)]
       recipient = input.recipient
       inputHoldingCids = []
+      depositPreapprovalCid = None
       extraArgs = emptyExtraArgs
   pure ()
 

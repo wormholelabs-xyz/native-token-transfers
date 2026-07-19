@@ -258,9 +258,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.NotEmpty(t, vaaHex)
 
 		// 1. Wrong recipient binding: Eve didn't originate the VAA's recipientAddress, so
-		// Manager.Receive's binding check must reject her as the receiving party. Any partial
-		// effect (e.g. the nested VerifyAndConsumeVAA's replay-trie write) rolls back with the
-		// aborted transaction, so this does not burn the VAA for step 5's control receive.
+		// Manager.Receive's binding check must reject her as the receiving party. Receive is
+		// executor-only, so the operator reaches this gate with no recipient authority at all.
+		// Any partial effect (e.g. the nested VerifyAndConsumeVAA's replay-trie write) rolls
+		// back with the aborted transaction, so this does not burn the VAA for step 5's control
+		// receive.
 		out, err := h.run("receive", "--deployment", "burnmint",
 			"--vaa", vaaHex, "--recipient", "Eve", "--pubkey", pubKeyHex)
 		require.Error(t, err, "receiving with a recipient that doesn't match the VAA's bound recipientAddress must be rejected")
@@ -401,19 +403,40 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, "cip56-burn-mint-mock", d.TokenKind, "the deployment must use the real CIP-56 burn/mint impl")
 
-		// Inbound: a guardian-signed transfer mints a real owner-signed CIP-56 holding to
-		// Frank through Cip56BurnMintToken.MintOrUnlock (recipient authority threaded from
-		// Manager.Receive; factory disclosed by receiveVaa).
+		// Inbound arc (owner-signed kind): the recipient must first opt in via a standing
+		// DepositPreapproval, otherwise Cip56BurnMintToken.MintOrUnlock aborts. This proves the
+		// three design invariants at once: (1) a fresh recipient can't be minted to without
+		// consent, (2) opting in makes the SAME VAA deliverable (the failed receive did not burn
+		// the digest -- decision 5's atomicity), (3) the recipient is passive at delivery time.
 		out = h.mustRun("guardian", "sign-transfer",
 			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "750000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
 		pubKeyHex := extractField(t, out, "pubkey")
 		require.NotEmpty(t, vaaHex)
 
+		// (1) No pre-approval yet: the on-ledger mint gate must reject the delivery cleanly.
+		out, err := h.run("receive", "--deployment", "cip56bm",
+			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an owner-signed mint to a recipient with no deposit pre-approval must be rejected")
+		require.Contains(t, out, "deposit pre-approval required")
+
+		// (2) Frank opts in: creates his standing Cip56DepositPreapproval (dual-signed).
+		out = h.mustRun("preapprove", "--deployment", "cip56bm", "--user", "Frank")
+		require.Contains(t, out, "preapproved=true")
+
+		// (3) The SAME VAA now succeeds -- the earlier failure did not consume the digest, and
+		// Frank is not an actor of this submission (executor-only receive).
 		out = h.mustRun("receive", "--deployment", "cip56bm",
 			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 		require.Contains(t, out, "amount=750000")
+
+		// The mock (admin-signed) kind needs no pre-approval: `preapprove` there is a ledger-
+		// surfaced no-op (PreApproveDeposit returns None), proving the CLI reads kind policy
+		// from the ledger rather than gating client-side.
+		out = h.mustRun("preapprove", "--deployment", "burnmint", "--user", "Alice")
+		require.Contains(t, out, "preapproved=false")
+		require.Contains(t, out, "no pre-approval required")
 
 		// The mint landed: 750000 wire units at 8 decimals = 0.0075 CIP-56 units, rendered by
 		// dpm script as a full-scale Daml Numeric 10 literal (pinned to the observed form).
@@ -437,6 +460,31 @@ func TestPlaygroundE2E(t *testing.T) {
 		out = h.mustRun("balance", "--party", "Frank", "--deployment", "cip56bm")
 		require.Equal(t, cip56Total, extractField(t, out, "cip56HoldingTotal"),
 			"the funded holding must have been consumed in full by the burn, leaving the minted balance intact")
+
+		// Revoke arc: the owner tears down its consent, a fresh VAA then fails on the mint gate
+		// (re-pinning that a failed delivery does not burn the digest), and re-approving makes
+		// that same fresh VAA deliverable again -- the full opt-in/opt-out lifecycle end to end.
+		out = h.mustRun("preapprove", "revoke", "--deployment", "cip56bm", "--user", "Frank")
+		require.Contains(t, out, "revoked=true")
+
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "250000", "--source-chain", "2")
+		freshVaaHex := extractField(t, out, "vaa")
+		freshPubKeyHex := extractField(t, out, "pubkey")
+		require.NotEmpty(t, freshVaaHex)
+
+		out, err = h.run("receive", "--deployment", "cip56bm",
+			"--vaa", freshVaaHex, "--recipient", "Frank", "--pubkey", freshPubKeyHex)
+		require.Error(t, err, "after revoke, an owner-signed mint must be rejected again")
+		require.Contains(t, out, "deposit pre-approval required")
+
+		out = h.mustRun("preapprove", "--deployment", "cip56bm", "--user", "Frank")
+		require.Contains(t, out, "preapproved=true")
+
+		out = h.mustRun("receive", "--deployment", "cip56bm",
+			"--vaa", freshVaaHex, "--recipient", "Frank", "--pubkey", freshPubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=250000")
 	})
 
 	t.Run("party list shows allocated parties", func(t *testing.T) {

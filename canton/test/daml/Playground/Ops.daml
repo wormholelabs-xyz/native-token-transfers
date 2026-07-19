@@ -18,15 +18,17 @@ module Playground.Ops where
 
 import Daml.Script
 import DA.Map qualified as Map
-import DA.Optional (fromSome, fromSomeNote)
+import DA.Optional (fromSome, fromSomeNote, isSome)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
 import Wormhole.Core.Bytes (leftPadTo, intToBytesN, normalizeHex)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Manager (Peer (..), Transfer (..), Receive (..), SetPeer (..))
 import Wormhole.Ntt.Payload
-import Wormhole.Ntt.Token (trimAmount, emptyExtraArgs)
-import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken, Cip56CustodyToken)
+import Wormhole.Ntt.Token
+  ( trimAmount, emptyExtraArgs, NttToken, DepositPreapproval
+  , PreApproveDeposit (..), Revoke (..) )
+import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken, Cip56CustodyToken, Cip56DepositPreapproval)
 import Test.TestCore qualified as TestCore
 import Test.TestNtt (MockToken, mkHolding, MockBurnMintFactory, MockTransferFactory)
 import Test.TestReplay (coveringDisclosure)
@@ -140,12 +142,12 @@ data TransferOutOutput = TransferOutOutput with
 -- resolve them without an explicit disclosure -- exactly the gap that made cip56 receive fail
 -- with CONTRACT_NOT_FOUND. Mirrors Test.TestNtt:testLockOrBurnOwnerSignedSucceeds's factory
 -- disclosure, generalized per tokenKind. Read as @admin@ (the sole signatory of both).
-resolveTokenDisclosure : Party -> TokenKind -> Script [Disclosure]
-resolveTokenDisclosure admin kind = case kind of
+resolveTokenSeam : Party -> TokenKind -> Script (ContractId NttToken, [Disclosure])
+resolveTokenSeam admin kind = case kind of
   MockAdminSigned -> do
     [(cid, _)] <- query @MockToken admin
     dTok <- fromSome <$> queryDisclosure admin cid
-    pure [dTok]
+    pure (toInterfaceContractId @NttToken cid, [dTok])
   Cip56BurnMintMock -> do
     [(cid, _)] <- query @Cip56BurnMintToken admin
     dTok <- fromSome <$> queryDisclosure admin cid
@@ -153,13 +155,32 @@ resolveTokenDisclosure admin kind = case kind of
     -- template cid, so resolve MockBurnMintFactory directly (one per fresh deployment admin).
     [(facCid, _)] <- query @MockBurnMintFactory admin
     dFactory <- fromSome <$> queryDisclosure admin facCid
-    pure [dTok, dFactory]
+    pure (toInterfaceContractId @NttToken cid, [dTok, dFactory])
   Cip56CustodyMock -> do
     [(cid, _)] <- query @Cip56CustodyToken admin
     dTok <- fromSome <$> queryDisclosure admin cid
     [(facCid, _)] <- query @MockTransferFactory admin
     dFactory <- fromSome <$> queryDisclosure admin facCid
-    pure [dTok, dFactory]
+    pure (toInterfaceContractId @NttToken cid, [dTok, dFactory])
+
+resolveTokenDisclosure : Party -> TokenKind -> Script [Disclosure]
+resolveTokenDisclosure admin kind = snd <$> resolveTokenSeam admin kind
+
+-- | Resolve @recipient@'s standing 'DepositPreapproval' for an owner-signed kind,
+-- as seen by @admin@ (a signatory). Returns 'Some' cid + its disclosure if one
+-- exists, else 'None' (so the on-ledger mint gate aborts with "pre-approval
+-- required" rather than a script-side shortcut). Only the burn/mint kind carries
+-- one; the mock needs none and the custody kind takes none.
+resolvePreapproval : Party -> TokenKind -> Party -> Script (Optional (ContractId DepositPreapproval), [Disclosure])
+resolvePreapproval admin kind recipient = case kind of
+  Cip56BurnMintMock -> do
+    pres <- query @Cip56DepositPreapproval admin
+    case [ cid | (cid, p) <- pres, p.owner == recipient ] of
+      cid :: _ -> do
+        dPre <- fromSome <$> queryDisclosure admin cid
+        pure (Some (toInterfaceContractId @DepositPreapproval cid), [dPre])
+      [] -> pure (None, [])
+  _ -> pure (None, [])
 
 transferOut : TransferOutInput -> Script TransferOutOutput
 transferOut input = do
@@ -349,13 +370,16 @@ receiveVaa input = do
   dCs <- fromSome <$> queryDisclosure input.operator csCid
   -- The nested MintOrUnlock reaches the token hook AND its admin-signed registry factory;
   -- disclose both (as transferOut does for the outbound leg) so a non-admin executor can
-  -- resolve them. @recipient@ co-acts because Receive/MintOrUnlock now require its authority
-  -- to create an owner-signed recipient holding.
-  dTokens <- resolveTokenDisclosure input.admin (parseTokenKind input.tokenKind)
+  -- resolve them. Receive is executor-only: the recipient is passive. For an owner-signed
+  -- kind its authority arrives through a standing DepositPreapproval, resolved and disclosed
+  -- here; if the recipient has not opted in, pass None and let the on-ledger mint gate abort.
+  let kind = parseTokenKind input.tokenKind
+  dTokens <- resolveTokenDisclosure input.admin kind
+  (preCid, dPre) <- resolvePreapproval input.admin kind input.recipient
 
-  let baseOpts = actAs input.executor <> actAs input.recipient
+  let baseOpts = actAs input.executor
                    <> disclose dMgr <> disclose dCs <> disclose nodeDisc
-  ntt <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
+  ntt <- submit (foldl (\opts d -> opts <> disclose d) baseOpts (dTokens <> dPre)) do
     exerciseCmd mgrCid Receive with
       executor = input.executor
       coreStateCid = csCid
@@ -364,9 +388,62 @@ receiveVaa input = do
       pubKeys = input.pubKeys
       recipient = input.recipient
       inputHoldingCids = []
+      depositPreapprovalCid = preCid
       extraArgs = emptyExtraArgs
 
   pure ReceiveVaaOutput with
     recipientChain = ntt.recipientChain
     amount = ntt.amount
     decimals = ntt.decimals
+
+----------------------------------------------------------------------
+-- preapproveDeposit / revokeDeposit
+----------------------------------------------------------------------
+
+data PreapproveDepositInput = PreapproveDepositInput with
+    admin     : Party  -- the deployment's token admin (co-signatory of the pre-approval)
+    tokenKind : Text   -- selects the token-seam disclosure (see resolveTokenSeam)
+    user      : Party  -- the recipient opting in
+  deriving (Eq, Show)
+
+data PreapproveDepositOutput = PreapproveDepositOutput with
+    preapproved : Bool   -- False when the kind needs no pre-approval (mock no-op)
+  deriving (Eq, Show)
+
+-- | @user@ opts in to receive owner-signed deposits: exercises 'PreApproveDeposit'
+-- on the deployment's token hook (disclosed to @user@), creating a standing,
+-- dual-signed 'DepositPreapproval'. Returns @preapproved = False@ when the choice
+-- returns 'None' (the admin-signed mock, which needs no consent). No cid is
+-- persisted -- the pre-approval is resolved fresh by 'resolvePreapproval' at
+-- receive time. The custody kind's on-ledger 'preApproveImpl' abort surfaces as the
+-- command error.
+preapproveDeposit : PreapproveDepositInput -> Script PreapproveDepositOutput
+preapproveDeposit input = do
+  (tokenCid, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
+  let baseOpts = actAs input.user
+  mCid <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
+    exerciseCmd tokenCid PreApproveDeposit with user = input.user
+  pure PreapproveDepositOutput with preapproved = isSome mCid
+
+data RevokeDepositInput = RevokeDepositInput with
+    admin : Party  -- the pre-approval's admin co-signatory (resolves it)
+    user  : Party  -- the owner tearing down its consent
+  deriving (Eq, Show)
+
+data RevokeDepositOutput = RevokeDepositOutput with
+    revoked : Bool
+  deriving (Eq, Show)
+
+-- | @user@ (owner) tears down its standing 'Cip56DepositPreapproval' via the
+-- owner-only 'Revoke'. Resolved by query as @admin@ (a signatory), filtered by
+-- owner; aborts cleanly if none exists.
+revokeDeposit : RevokeDepositInput -> Script RevokeDepositOutput
+revokeDeposit input = do
+  pres <- query @Cip56DepositPreapproval input.admin
+  case [ cid | (cid, p) <- pres, p.owner == input.user ] of
+    cid :: _ -> do
+      dPre <- fromSome <$> queryDisclosure input.admin cid
+      _ <- submit (actAs input.user <> disclose dPre) do
+        exerciseCmd (toInterfaceContractId @DepositPreapproval cid) Revoke
+      pure RevokeDepositOutput with revoked = True
+    [] -> abort "playground: no deposit pre-approval to revoke for this user"
