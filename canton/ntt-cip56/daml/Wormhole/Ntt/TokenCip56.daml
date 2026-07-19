@@ -68,16 +68,23 @@ template Cip56CustodyToken
       -- Unlock: custody -> recipient, spending the custody holdings. Same
       -- synchronous-settle requirement as the lock path.
       --
-      -- The NTT 'DepositPreapproval' cannot fix the custody leg, so
-      -- @depositPreapprovalCid@ is ignored here. 'TransferFactory_Transfer' exposes
-      -- no 'extraActors' and its controller is @transfer.sender = custody@, so even
-      -- if the transfer were exercised inside 'Deposit''s body the recipient's
-      -- authority would stop at that node boundary. What settles a custody unlock to
-      -- an arbitrary recipient is *registry-level* receiver pre-approval (e.g.
-      -- Amulet's own 'TransferPreapproval'), which makes the registry's transfer
-      -- impl settle synchronously; without it the registry yields a Pending
-      -- 'TransferInstruction' (receiver must accept off-ledger) which this hook's
-      -- synchronous-settle assert rejects.
+      -- @depositPreapprovalCid@ is deliberately ignored here. The NTT
+      -- 'DepositPreapproval' works when NTT itself creates the recipient's
+      -- holding: for a burn-mint token the mint runs directly inside 'Deposit''s
+      -- body, where the recipient's signature from the standing contract is in
+      -- scope. That is not the case here. When Alice receives Canton Coin, the
+      -- coins are controlled by the Amulet registry rather than by an NTT
+      -- burn/mint (which would be the case for a token that does not originate
+      -- on Canton), so delivery means the registry's own code executes
+      -- 'TransferFactory_Transfer' from the custody party to Alice. Authority
+      -- borrowed from an enclosing choice does not extend into that nested
+      -- exercise, and the choice has no field for naming Alice as an extra
+      -- authorizer, so her consent must instead be registered with the registry
+      -- itself -- e.g. Amulet's own 'TransferPreapproval'. With that in place
+      -- the registry settles the transfer synchronously; without it the
+      -- registry returns a Pending 'TransferInstruction' for Alice to accept in
+      -- a later transaction, which the synchronous-settle assert below rejects,
+      -- aborting the receive and leaving the VAA digest unconsumed.
       mintOrUnlockImpl recipient amount inputHoldingCids _depositPreapprovalCid extraArgs = do
         now <- getTime
         res <- exercise transferFactoryCid TransferFactory_Transfer with
