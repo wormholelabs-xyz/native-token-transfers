@@ -4,17 +4,24 @@
 -- interface; concrete impls (a test mock; the CIP-56 wiring in ../ntt-cip56)
 -- supply the bodies.
 --
--- Counterparty authority reaches each leg differently. Outbound: the live
--- @sender@ co-controls 'LockOrBurn', lending its authority to spend (burn/lock)
--- its own owner-signed holdings. Inbound: 'MintOrUnlock' is manager-only, so the
--- recipient need not be online — a recipient that wants an owner-signed holding
--- first exercises 'PreApproveDeposit', creating a standing dual-signed
--- 'DepositPreapproval' (recipient + admin), and the mint runs inside that
--- contract's 'Deposit' choice, borrowing the recipient's signatory authority
--- without a live co-signature. The token mutations are otherwise authorized by the
--- impl contract being admin-signed, so a choice carries the admin's authority
--- without the submitter being the admin. Both seam choices are 'nonconsuming' so
--- the hook cid is stable.
+-- The rule that shapes this module: a holding signed by its owner can only be
+-- created or spent in a transaction that carries that owner's signature. The
+-- two directions obtain that signature differently:
+--
+--   * Outbound: alice is the one sending, so she is present anyway. 'LockOrBurn'
+--     lists the sender as co-controller, and her signature lets the impl spend
+--     her holdings.
+--   * Inbound: alice may be offline; only a relayer is present. 'MintOrUnlock'
+--     is therefore manager-only, and alice's signature comes from a contract
+--     instead: she exercises 'PreApproveDeposit' once, creating a standing
+--     'DepositPreapproval' signed by her and the admin, and every later mint
+--     runs inside that contract's 'Deposit' choice, where her signature is in
+--     scope.
+--
+-- The admin's signature arrives the same indirect way: the impl contract is
+-- admin-signed, so exercising a choice on it puts the admin's authority in the
+-- body even though the submitter is not the admin. Both seam choices are
+-- 'nonconsuming' so the hook cid is stable.
 --
 -- The choices carry the CIP-56 handles a real registry needs: @inputHoldingCids@
 -- (holdings to spend; empty for a mint) and @extraArgs@ (choice context/metadata,
@@ -77,21 +84,23 @@ emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
 
 -- | The view of a 'DepositPreapproval': the token @admin@ and the pre-approving
--- @owner@ (both co-signatories of the standing consent) and the @instrumentId@ it
--- authorizes deposits of. 'MintOrUnlock' reads this view to reject a pre-approval
--- issued for a different party, registry, or instrument without seeing the impl.
+-- @owner@ (its two signatories) plus the @instrumentId@ it covers. Mint impls
+-- read this view to check a pre-approval matches the intended recipient,
+-- registry, and instrument before using it.
 data DepositPreapprovalView = DepositPreapprovalView with
     admin        : Party
     owner        : Party
     instrumentId : InstrumentId
   deriving (Eq, Show)
 
--- | A recipient's standing consent to receive owner-signed deposits of one
--- instrument (the Canton Coin 'TransferPreapproval' analog). Created dual-signed
--- (admin + owner) in one step by 'NttToken.PreApproveDeposit'; the mint runs
--- inside 'Deposit', so the owner's authority reaches the owner-signed holding
--- without the owner being online. Owner-signed token kinds implement it; the
--- admin-signed mock does not (its mint binds no owner). See ../ntt-cip56.
+-- | A recipient's standing consent to receive deposits of one instrument — the
+-- NTT analog of Canton Coin's 'TransferPreapproval'. Alice creates it once via
+-- 'NttToken.PreApproveDeposit' (signed by both her and the token admin). From
+-- then on any relayer can deliver to her while she is offline: each mint runs
+-- inside this contract's 'Deposit' choice, and her signature — stored in the
+-- contract — is what allows her owner-signed holding to be created. Owner-signed
+-- token kinds implement it; the admin-signed test mock does not (its holdings
+-- carry no owner signature). See ../ntt-cip56.
 interface DepositPreapproval where
   viewtype DepositPreapprovalView
 
@@ -99,10 +108,9 @@ interface DepositPreapproval where
   -- ([] for a mint). Runs with the pre-approval's admin+owner authority.
   depositImpl : TrimmedAmount -> [ContractId Holding] -> ExtraArgs -> Update ()
 
-  -- Standing consent: the admin (registry/token) deposits to the owner any number
-  -- of times, without the owner online. Controller is the admin; the
-  -- executor/relayer never appears. Nonconsuming: one approval, unlimited
-  -- deliveries.
+  -- One approval, unlimited deliveries: the choice is nonconsuming, and the
+  -- admin (its controller) exercises it once per incoming transfer, with the
+  -- owner offline. The relayer never appears at this layer.
   nonconsuming choice Deposit : ()
     with
       amount           : TrimmedAmount
@@ -134,8 +142,9 @@ interface NttToken where
   -- authority (admin-signed) plus @user@'s (the choice controller).
   preApproveImpl : Party -> Update (Optional (ContractId DepositPreapproval))
 
-  -- Both manager and sender control this choice: the sender's authority must
-  -- reach the seam body so it can spend an owner-signed holding.
+  -- Manager and sender both control this choice: alice co-signs her own
+  -- outbound transfer, which is what lets the impl spend her owner-signed
+  -- holdings.
   nonconsuming choice LockOrBurn : ()
     with
       sender           : Party
@@ -145,9 +154,9 @@ interface NttToken where
     controller (view this).manager, sender
     do lockOrBurnImpl this sender amount inputHoldingCids extraArgs
 
-  -- Manager-only: the recipient's authority arrives through a standing
-  -- 'DepositPreapproval' (for owner-signed kinds), not this choice's controller
-  -- set, so a relayer can drive receipt without the recipient online.
+  -- Manager-only, so a relayer can drive a receive while the recipient is
+  -- offline. The recipient's signature is not supplied here — for owner-signed
+  -- kinds it comes from the standing 'DepositPreapproval' passed in.
   nonconsuming choice MintOrUnlock : ()
     with
       recipient             : Party
@@ -158,10 +167,10 @@ interface NttToken where
     controller (view this).manager
     do mintOrUnlockImpl this recipient amount inputHoldingCids depositPreapprovalCid extraArgs
 
-  -- | Recipient opt-in: @user@ creates its standing 'DepositPreapproval' for this
-  -- token. Controller is @user@ (supplies its own authority); the body also
-  -- carries the token's admin authority, so the dual-signed consent is created in
-  -- one step. Returns 'None' for kinds that need no pre-approval.
+  -- | Recipient opt-in, done once before the first inbound transfer. @user@
+  -- controls the choice (supplying its own signature) and the token contract is
+  -- admin-signed (supplying the admin's), so the dual-signed consent is created
+  -- in a single step. Returns 'None' for kinds that need no pre-approval.
   nonconsuming choice PreApproveDeposit : Optional (ContractId DepositPreapproval)
     with
       user : Party

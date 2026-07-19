@@ -45,10 +45,10 @@ import Test.TestCore
 -- MockToken: a CIP-56-shaped NttToken (bridged token) for tests
 ----------------------------------------------------------------------
 
--- | A minted/custodied balance. Signed by the token @admin@ only, so a mint needs
--- no recipient authority — which is why a third-party executor can drive 'Receive'
--- against this mock with no live recipient co-signature. A real owner-signed token
--- needs a standing 'DepositPreapproval' instead (README §10).
+-- | A minted/custodied balance. Signed by the token @admin@ only — creating one
+-- needs no signature from the recipient, so any relayer can drive 'Receive'
+-- against this mock with no recipient involvement at all. A real owner-signed
+-- token needs the recipient's standing 'DepositPreapproval' instead (README §10).
 template MockHolding
   with
     admin  : Party
@@ -441,11 +441,11 @@ testPreApproveDepositCreatesStanding = do
       p.instrumentId === instrumentId
     _ -> abort "expected exactly one pre-approval owned by alice"
 
--- | The design's core positive: executor-side delivery to a pre-approved
--- owner-signed recipient with zero live recipient authority. Submitted @actAs
--- manager@ only (+ factory/pre-approval disclosures) — no actAs alice, no actAs
--- admin — yet the owner-signed holding lands, because alice's authority arrives
--- through the standing pre-approval's 'Deposit' body.
+-- | The happy path: alice pre-approved earlier and is now offline. The manager
+-- alone submits the mint — no @actAs alice@, no @actAs admin@, just the token,
+-- factory, and pre-approval disclosures — and alice's owner-signed holding is
+-- still created, because her signature comes from the standing pre-approval's
+-- 'Deposit' body.
 testMintOrUnlockPreapprovedSucceeds : Script ()
 testMintOrUnlockPreapprovedSucceeds = do
   admin <- allocateParty "MintPreAdmin"
@@ -469,8 +469,8 @@ testMintOrUnlockPreapprovedSucceeds = do
     [(_, h)] -> h.amount === 0.01
     _ -> abort ("expected exactly one holding minted to alice, got: " <> show holdings)
 
--- | The design's core negative: delivery to a non-pre-approved owner-signed
--- recipient must abort cleanly (no pre-approval cid supplied).
+-- | The failure path: alice never pre-approved, so a mint to her must abort
+-- cleanly (no pre-approval cid supplied).
 testMintOrUnlockWithoutPreapprovalFails : Script ()
 testMintOrUnlockWithoutPreapprovalFails = do
   admin <- allocateParty "MintNoPreAdmin"
@@ -801,12 +801,13 @@ setupReceiveManager operator guardianGovernance admin = do
   _ <- registerReplayRoot operator admin defaultSplitThreshold
   pure (mgrId, mockCid)
 
--- | Receive is relayer-permissionless: a third-party @relayer@ supplies the
--- executor authority with only disclosures (not a stakeholder of anything) and is
--- the sole controller. The recipient is passive — it neither acts nor is disclosed
--- to — and the transfer fails only on the recipient binding (a nondeterministic
--- Party can't hash to the fixture's baked-in recipientAddress). Reaching that gate
--- with executor authority alone proves the relay carries no recipient authority.
+-- | Anyone can relay: a third party (@relayer@) who is a stakeholder of nothing
+-- submits 'Receive' with only disclosed contracts, and the recipient does not
+-- act at all. The submission gets all the way to the recipient-binding check
+-- before failing — and it fails only because a freshly allocated Party can never
+-- hash to the fixture VAA's baked-in recipientAddress, not for lack of
+-- authority. Getting that far on the relayer's authority alone is the point of
+-- the test: relaying needs nothing from the recipient.
 testNttReceiveByExecutorRecipientMismatchFails : Script ()
 testNttReceiveByExecutorRecipientMismatchFails = do
   (operator, guardianGovernance, csId) <- nttSetup
@@ -928,11 +929,11 @@ data NttReceiveMatchInput = NttReceiveMatchInput with
     vaaBytes      : Bytes
   deriving (Eq, Show)
 
--- | Step 2: relay the fresh VAA (as @operator@ here; the third-party path is
--- covered by 'testNttReceiveByExecutorRecipientMismatchFails'). Submitted with
--- executor authority alone — the recipient is passive (the admin-signed mock needs
--- no pre-approval, so @depositPreapprovalCid = None@). Succeeds and mints to
--- 'recipient'; a second relay is rejected (replay).
+-- | Step 2: relay the fresh VAA (as @operator@ here; the third-party relayer
+-- path is covered by 'testNttReceiveByExecutorRecipientMismatchFails'). The
+-- recipient does nothing: the admin-signed mock needs no pre-approval, so
+-- @depositPreapprovalCid = None@. The relay succeeds and mints to 'recipient';
+-- relaying the same VAA a second time is rejected as a replay.
 integrationNttReceiveMatch : NttReceiveMatchInput -> Script ()
 integrationNttReceiveMatch input = do
   ntt <- submit (actAs input.operator) do

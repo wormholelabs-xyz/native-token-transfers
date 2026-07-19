@@ -103,10 +103,10 @@ template Cip56CustodyToken
           TransferInstructionResult_Completed _ -> pure ()
           _ -> abort "ntt: transfer did not settle synchronously"
 
-      -- The custody kind takes no NTT-level deposit pre-approval: settlement to an
-      -- arbitrary recipient depends on registry-level receiver pre-approval (above),
-      -- which is out of this interface's reach. The abort signals that real
-      -- dependency rather than silently returning None.
+      -- There is no NTT-level pre-approval for the custody kind — consent lives
+      -- with the registry instead (see the comment above). Abort rather than
+      -- return None, so a caller cannot mistake "no pre-approval needed" for
+      -- "pre-approval handled".
       preApproveImpl _user =
         abort "ntt: custody kind takes no NTT deposit pre-approval (registry-level pre-approval applies; see module comment)"
 
@@ -155,13 +155,16 @@ template Cip56BurnMintToken
                extraActors = [sender]
         pure ()
 
-      -- Mint: one output to the recipient, no inputs. The recipient's authority
-      -- for the owner-signed output holding (BurnMintV1 requires each output owner
-      -- in extraActors) does NOT come from this manager-only choice — it arrives
-      -- through the recipient's standing 'DepositPreapproval', whose 'Deposit' body
-      -- runs the factory with @extraActors = [owner]@. So the mint here is a fetch +
-      -- validate + 'Deposit'; a missing pre-approval aborts cleanly, leaving the VAA
-      -- digest unconsumed (README §10).
+      -- Mint: one output holding to the recipient, no inputs. The output is
+      -- owner-signed, so the factory requires the recipient's signature
+      -- (BurnMintV1 wants each output owner in @extraActors@) — and this choice
+      -- is manager-only, so that signature is not present here. Instead this
+      -- body fetches the recipient's standing 'DepositPreapproval', checks it
+      -- matches (owner, registry, instrument), and runs the factory inside its
+      -- 'Deposit' choice, where the recipient's signature is in scope. If alice
+      -- never pre-approved, the mint aborts cleanly: the VAA digest stays
+      -- unconsumed and the transfer can be re-relayed after she opts in
+      -- (README §10).
       mintOrUnlockImpl recipient amount _inputHoldingCids depositPreapprovalCid extraArgs = do
         cid <- case depositPreapprovalCid of
           Some c -> pure c
@@ -172,12 +175,14 @@ template Cip56BurnMintToken
         assertMsg "ntt: deposit pre-approval is for a different instrument" (vw.instrumentId == instrumentId)
         exercise cid Deposit with amount, inputHoldingCids = [], extraArgs
 
-      -- Opt-in: create the recipient's standing 'Cip56DepositPreapproval' for this
-      -- token (dual-signed admin + user; the body carries admin's authority because
-      -- the token is admin-signed, and user's as the PreApproveDeposit controller).
-      -- Snapshots @burnMintFactoryCid@; if the registry rotates its factory, existing
-      -- pre-approvals go stale and must be re-issued — the same static-cid limitation
-      -- 'Cip56BurnMintToken' itself has. Acceptable at devnet stage.
+      -- Opt-in: create the caller's standing 'Cip56DepositPreapproval'. Both
+      -- required signatures are already in scope — the token contract is
+      -- admin-signed and the caller controls 'PreApproveDeposit' — so the
+      -- dual-signed contract is created in one step. It snapshots
+      -- @burnMintFactoryCid@: if the registry ever replaces its factory
+      -- contract, existing pre-approvals go stale and must be re-issued (the
+      -- same static-cid limitation 'Cip56BurnMintToken' itself has; acceptable
+      -- at devnet stage).
       preApproveImpl user =
         fmap (Some . toInterfaceContractId @DepositPreapproval) $
           create Cip56DepositPreapproval with admin, owner = user, instrumentId, burnMintFactoryCid
@@ -186,12 +191,13 @@ template Cip56BurnMintToken
 -- burn / mint deposit pre-approval (recipient standing consent)
 ----------------------------------------------------------------------
 
--- | A recipient's standing consent to receive burn/mint deposits of one
--- instrument. Dual-signed (@admin@, @owner@) so the 'Deposit' body can create the
--- owner-signed output holding without the owner online; created in one step by
--- 'Cip56BurnMintToken.PreApproveDeposit'. Copies the token's @burnMintFactoryCid@
--- at creation (same static-cid caveat as 'Cip56BurnMintToken'); the @owner@ can
--- tear it down at any time via 'Revoke'.
+-- | Alice's standing consent to receive burn/mint deposits of one instrument.
+-- Signed by both @admin@ and @owner@ — which is the whole point: exercising
+-- 'Deposit' puts both signatures in scope, enough to create alice's owner-signed
+-- holding while she is offline. Created in one step by
+-- 'Cip56BurnMintToken.PreApproveDeposit'; alice can 'Revoke' at any time.
+-- Copies the token's @burnMintFactoryCid@ at creation (same static-cid caveat
+-- as 'Cip56BurnMintToken').
 template Cip56DepositPreapproval
   with
     admin              : Party
@@ -203,9 +209,10 @@ template Cip56DepositPreapproval
 
     interface instance DepositPreapproval for Cip56DepositPreapproval where
       view = DepositPreapprovalView with admin, owner, instrumentId
-      -- Body authority = {admin (Deposit controller)} u {admin, owner (signatories)}
-      -- = {admin, owner}: exactly what BurnMintFactory_BurnMint's controller
-      -- @admin :: extraActors@ needs to create the owner-signed output holding.
+      -- The factory call needs two signatures: the admin's (as the burn/mint
+      -- controller) and the owner's (listed in @extraActors@, required for the
+      -- owner-signed output). Both are in scope here because both parties signed
+      -- this contract.
       depositImpl amount _inputHoldingCids extraArgs = do
         _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
           expectedAdmin = instrumentId.admin
