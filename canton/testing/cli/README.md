@@ -100,7 +100,7 @@ instead of per-service compose state.
 | `emitter register --name NAME --owner HINT` | Register a standalone core-bridge `Emitter` (not tied to an NTT deployment), keyed under a CLI-local name in state. |
 | `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
-| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign]` | Outbound `NttManager.Transfer`. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. |
+| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD]` | Outbound `NttManager.Transfer`. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `cip56-custody` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved. |
 | `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Receive`. A replayed VAA exits non-zero. For owner-signed token kinds the recipient must have run `preapprove` first, else the mint gate rejects the delivery (the VAA stays deliverable). |
 | `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deposits via `NttToken.PreApproveDeposit` (a standing `DepositPreapproval`). For the admin-signed mock kind this is a ledger-surfaced no-op (`preapproved=false`). |
 | `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing deposit pre-approval (owner-only `DepositPreapproval.Revoke`). |
@@ -111,7 +111,8 @@ instead of per-service compose state.
 | `status` | Print the guardian set, message fee, and every deployment. |
 | `contracts list` | Print every live `CoreState`/`Emitter`/`NttManager` (plus the replay-node count) as JSON. |
 | `observe --deployment NAME` | Print one deployment's current outbound sequence and peers. |
-| `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment. |
+| `observe stream --deployment NAME [--from-offset N] [--count N] [--timeout DUR] [--print-offset] [--any-emitter]` | LocalNet only. Read the REAL Ledger API v2 update stream as a dedicated `guardian-watcher` reader user (granted only `CanReadAs(guardianObserver)`, never `actAs`) and print every observed `WormholeMessage` as JSON. `--print-offset` prints the current ledger end (`ledgerEnd=<n>`) and exits, for recording a starting point before a transfer. Filters by the deployment's derived transceiver address unless `--any-emitter`. |
+| `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment, or (for `cip56-custody`) its real Amulet holdings (`amuletHoldingTotal=...`). A deployment's own `"<name>-custody"` hint resolves directly (it's a wallet user's real party, not one the CLI allocated). |
 
 Every command accepts `--verbose`: each sub-step — network bring-up details,
 party allocation/actAs grants, every `dpm script` invocation with its input and
@@ -139,17 +140,59 @@ always resolves to the same party across commands.
 }
 ```
 
-- `mode`: `"burn-mint"` or `"lock-unlock"`.
+- `mode`: `"burn-mint"` or `"lock-unlock"` (`"cip56-custody"` only supports
+  `"lock-unlock"` — Amulet has no `BurnMintFactory`).
 - `tokenKind`: `"mock-admin-signed"` (default choice for testing — `LockOrBurn`
   always succeeds regardless of the caller's actual holdings, so `transfer`
-  needs no funding step), `"cip56-burn-mint-mock"`, or `"cip56-custody-mock"`
+  needs no funding step), `"cip56-burn-mint-mock"` or `"cip56-custody-mock"`
   (both drive the real production `Cip56BurnMintToken`/`Cip56CustodyToken`
   implementations over a local mock registry, and DO need `transfer` to fund
-  the sender first — the CLI does this automatically).
+  the sender first — the CLI does this automatically), or `"cip56-custody"`
+  (the same `Cip56CustodyToken` hook against **real Canton Coin (Amulet)** on
+  the LocalNet profile — see [Real Amulet (`cip56-custody`)](#real-amulet-cip56-custody)).
+- `decimals`: Amulet has 10 decimals, so `"cip56-custody"` deploy configs use
+  `10` (the NTT wire still trims to 8, per `internal/wire.TrimDecimals`).
 - `peers`: optional; pre-configures peers at deploy time (equivalent to
   `peer set` calls after the fact).
 
-See `testdata/deploy-burnmint.json` and `testdata/deploy-lockunlock.json`.
+See `testdata/deploy-burnmint.json`, `testdata/deploy-lockunlock.json`, and
+`testdata/deploy-cip56-custody.json`.
+
+### Real Amulet (`cip56-custody`)
+
+`cip56-custody` deploys `Cip56CustodyToken` against the real DSO's live
+Amulet `InstrumentId` on Splice LocalNet — real Canton Coin locks/unlocks,
+not a mock registry. Requires `--profile localnet` (`deploy` rejects it
+otherwise: `"cip56-custody requires a profile with real Amulet (localnet)"`).
+
+- **Party model.** Unlike every other kind, both the custody party and the
+  sending user must be **validator wallet users**, not bare script-allocated
+  parties — only wallet users can be tapped or hold a `TransferPreapproval`.
+  `deploy` onboards the deployment's custody wallet user
+  (`<name>-custody`, e.g. `cc-custody-custody`), taps the validator's own
+  wallet (it pays the `TransferPreapproval`'s creation fee), and creates that
+  preapproval. `transfer --user HINT` onboards the sender the same way and
+  taps it (`--tap-usd`, USD-denominated — the devnet tap divides by the open
+  mining round's Amulet price server-side, so don't assert the resulting CC
+  amount of a tap itself).
+- **Registry resolution happens off-ledger, per call.** `internal/amulet`
+  resolves the real transfer-factory cid, its choice context, and its
+  disclosed contracts (`AmuletRules`, `TransferPreapproval`, `OpenMiningRound`,
+  `ExternalPartyConfigState`, `ExternalPartyAmuletRules`) from the validator's
+  scan-proxy immediately before every `transfer`, asserting `transferKind ==
+  "direct"` (anything else means the receiver's preapproval is missing/expired
+  and would settle `Pending`, which the custody hook rejects).
+- **Receiving is out of scope.** `receive --deployment NAME` hard-errors for
+  this kind (`"receiving network out of scope for real Amulet
+  (cip56-custody)"`) — there is no mock factory to unlock against.
+- **Balances.** `balance --party <name>-custody --deployment NAME` prints
+  `amuletHoldingTotal=<decimal>`, read directly off the token-standard
+  `Holding` interface (`Playground.Query:amuletBalance`), not an HTTP call.
+- **Observing the guardian's actual observation.** `observe stream` (see the
+  Commands table) proves the guardian genuinely observed the outbound
+  transfer — reading the real Ledger API v2 update stream as a reader user
+  with only `CanReadAs(guardianObserver)`, not by recomputing the payload a
+  second time.
 
 ## Profiles
 
@@ -191,27 +234,32 @@ Ledger API v2 3975, validator API 3903. Auth is LocalNet's documented
 "unsafe" shared-secret HS256 mode (never valid against a real participant);
 the CLI mints tokens for `ledger-api-user` automatically.
 
-Amulet (Canton Coin) does not implement `BurnMintFactory`, so only
-`cip56-custody-mock`'s lock/unlock path is exercisable against a real Amulet
-registry client — that client (tap + transfer-factory calls) is not
-implemented here; see [Follow-ups](#follow-ups).
+Amulet (Canton Coin) does not implement `BurnMintFactory`, so only the
+lock/unlock path is exercisable against it directly — see
+[Real Amulet (`cip56-custody`)](#real-amulet-cip56-custody) for the real
+(not mock) registry client this profile enables.
 
 **Verification status:** the sandbox profile is continuously verified in CI
 (the `playground CLI (go vet/test + sandbox e2e)` job in
 [`.github/workflows/canton.yml`](../../../.github/workflows/canton.yml)), on
 every push and pull request. The LocalNet profile's distinguishing surface —
-unsafe-JWT auth, DAR vetting against a real DSO topology, `CanActAs` grants —
-is exactly what that job can never exercise, so it is covered separately by
-the `playground CLI (LocalNet e2e)` job in the same workflow (weekly schedule
-plus manual `workflow_dispatch`, not a PR gate: the stack is too heavy to run
-on every push). The full e2e suite has already passed end to end against a
-live Splice LocalNet 0.6.12 stack
+unsafe-JWT auth, DAR vetting against a real DSO topology, `CanActAs` grants,
+real Amulet (tap, `TransferPreapproval`, the transfer-instruction registry),
+and the real Ledger API v2 update stream — is exactly what that job can never
+exercise, so it is covered separately by the `playground CLI (LocalNet e2e)`
+job in the same workflow (weekly schedule plus manual `workflow_dispatch`, not
+a PR gate: the stack is too heavy to run on every push). The full e2e suite,
+including the real-Amulet `cip56-custody` subtest (deploy against the live
+DSO, tap + `TransferPreapproval` + a real 1 CC lock, and a real update-stream
+observation whose sequence/payload matched the recomputed ones byte-for-byte),
+has already passed end to end against a live Splice LocalNet 0.6.12 stack
 (`NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v`), confirming
-auth, DAR vetting, party rights, and the JSON encoding assumptions against a
-real authenticated participant. The suite has grown since that run; treat
-newly added subtests as unverified against LocalNet until the scheduled job
-covers them. Three LocalNet-only facts were discovered and fixed during
-verification, each impossible to observe on the auth-less sandbox:
+auth, DAR vetting, party rights, real-Amulet wallet/registry calls, the WS
+update stream, and the JSON encoding assumptions against a real authenticated
+participant. The suite has grown since that first run; treat newly added
+subtests as unverified against LocalNet until the scheduled job covers them.
+LocalNet-only facts discovered and fixed during verification, each impossible
+to observe on the auth-less sandbox:
 
 - the validator's `v0` API (scan-proxy, unlike `readyz`) requires a bearer
   token, so the readiness poll and `DSOPartyID` send one;
@@ -220,7 +268,15 @@ verification, each impossible to observe on the auth-less sandbox:
   `ledger-api-user` (scripts take pre-allocated parties as input rather than
   calling `allocateParty` before submitting);
 - the `/v2/users/<user>/rights` endpoint requires the user named in the body
-  and the rights `oneOf` wrapped in `value`.
+  and the rights `oneOf` wrapped in `value`;
+- `dpm script`'s `Disclosure.blob` field is hex, not the registry's base64
+  `createdEventBlob` — the CLI re-encodes it;
+- the documented `daml.ws.auth`/`jwt.token.<jwt>` WebSocket subprotocol pair
+  handshakes but fails the actual request with `UNAUTHENTICATED`; a plain
+  `Authorization: Bearer` header works;
+- tap/onboarding/preapproval/transfer-factory calls can occasionally exceed a
+  naive fixed timeout under validator automation load — the CLI retries
+  transient transport timeouts, not just HTTP-level 503/429 responses.
 
 ## Design notes
 
@@ -247,6 +303,11 @@ verification, each impossible to observe on the auth-less sandbox:
   (`cmd/ntt-playground.decimalLiteral`); and a Go `nil` slice marshals to
   JSON `null`, which a Daml list-typed field rejects — every list field must
   start non-nil.
+- **Hex vs. base64**, found by running against a live LocalNet: `dpm script`'s
+  `Disclosure.blob` field is hex, while the Amulet transfer-instruction
+  registry's `createdEventBlob` is base64 — same bytes, different rendering.
+  `toAmuletSeamJSON` (`transfer.go`) re-encodes before handing the seam to
+  `Playground.Ops:transferOut`.
 
 ## MainNet path
 
@@ -281,9 +342,5 @@ Documented, not implemented — this CLI is devnet-only throughout.
 
 Out of scope for this CLI, listed here rather than silently dropped:
 
-- A real-Amulet `cip56-custody` client (tap + transfer-factory registry
-  calls) for the LocalNet profile.
-- A true third-party `observe` via the JSON Ledger API v2 event stream,
-  instead of the current recompute-on-send / query-on-demand approach.
 - Guardian-set-upgrade governance signing (only `SetMessageFee` is
   implemented under `guardian sign-governance`).
