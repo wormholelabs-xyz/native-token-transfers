@@ -1,0 +1,51 @@
+# ntt-playground test suite. Run from canton/testing/cli:  just <recipe>
+#
+# LocalNet recipes need Docker (>= 24 GB RAM) and LOCALNET_DIR pointing at an
+# extracted splice-node/docker-compose/localnet. Everything else runs with no Docker.
+
+export PATH := env_var("HOME") + "/.dpm/bin:" + env_var("PATH")
+
+image_tag := env_var_or_default("IMAGE_TAG", "0.6.12")
+
+# List recipes.
+default:
+    @just --list
+
+# Go vet + unit tests (no Docker).
+unit:
+    go vet ./...
+    go test ./...
+
+# Daml Script tests (no Docker).
+daml:
+    cd ../../test && dpm test --all
+
+# Build all Daml packages (no Docker).
+build:
+    cd ../.. && dpm build --all
+
+# End-to-end suite on the in-process sandbox ledger (no Docker).
+e2e-sandbox:
+    NTT_PLAYGROUND_PROFILE=sandbox go test -tags e2e ./e2e -run TestPlaygroundE2E -v -count=1 -timeout 20m
+
+# Non-Docker gate: unit + Daml + sandbox e2e.
+check: unit daml e2e-sandbox
+
+# End-to-end suite on real Splice LocalNet (real DSO + Canton Coin/Amulet).
+# Boots and tears down LocalNet itself. Requires Docker + LOCALNET_DIR.
+e2e-localnet:
+    @if [ -z "${LOCALNET_DIR:-}" ]; then echo "ERROR: export LOCALNET_DIR (extracted splice-node/docker-compose/localnet)"; exit 1; fi
+    NTT_PLAYGROUND_PROFILE=localnet IMAGE_TAG={{image_tag}} go test -tags e2e ./e2e -run TestPlaygroundE2E -v -count=1 -timeout 40m
+
+# Boot LocalNet manually (for poking around outside a test run).
+localnet-up:
+    @if [ -z "${LOCALNET_DIR:-}" ]; then echo "ERROR: export LOCALNET_DIR"; exit 1; fi
+    NTT_PLAYGROUND_PROFILE=localnet IMAGE_TAG={{image_tag}} go run ./cmd/ntt-playground --profile localnet network up
+
+# Report running LocalNet services.
+localnet-status:
+    go run ./cmd/ntt-playground --profile localnet network status
+
+# Tear down LocalNet (also cleans up after an interrupted run).
+localnet-down:
+    go run ./cmd/ntt-playground --profile localnet network down
