@@ -35,6 +35,15 @@ type Deployment struct {
 	TokenKind          string       `json:"tokenKind"`
 	TokenDecimals      int          `json:"tokenDecimals"`
 	Peers              map[int]Peer `json:"peers"` // keyed by chain id
+
+	// CustodyParty/CustodyUser/InstrumentAdmin are set only for "cip56-custody" deployments
+	// (real Canton Coin/Amulet): CustodyParty is the wallet user's primary party holding
+	// locked funds between send/receive, CustodyUser is that wallet user's id (for re-tapping/
+	// re-onboarding), and InstrumentAdmin is the real DSO party (InstrumentId.admin for
+	// "Amulet"). Empty for every other token kind.
+	CustodyParty    string `json:"custodyParty,omitempty"`
+	CustodyUser     string `json:"custodyUser,omitempty"`
+	InstrumentAdmin string `json:"instrumentAdmin,omitempty"`
 }
 
 // Emitter is one standalone core-bridge emitter's stable identity (`emitter register`):

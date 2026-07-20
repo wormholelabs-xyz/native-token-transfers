@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/profile"
@@ -52,6 +53,15 @@ type Runner struct {
 	// caller-supplied closure owns any prefix; nil (the default) disables narration.
 	Logf func(format string, args ...any)
 
+	// RetryAttempts is how many EXTRA attempts (beyond the first) to make when `dpm script`
+	// fails with a transient-looking ledger connectivity error (see isTransientLedgerError):
+	// a brief participant gRPC blip, observed live under host resource pressure, not a
+	// script/logic failure. Zero uses the default (3).
+	RetryAttempts int
+
+	// RetryInterval is the pause between retry attempts. Zero uses the default (5s).
+	RetryInterval time.Duration
+
 	callCount int
 }
 
@@ -60,6 +70,41 @@ func (r *Runner) logf(format string, args ...any) {
 	if r.Logf != nil {
 		r.Logf(format, args...)
 	}
+}
+
+func (r *Runner) retryAttempts() int {
+	if r.RetryAttempts > 0 {
+		return r.RetryAttempts
+	}
+	return 3
+}
+
+func (r *Runner) retryInterval() time.Duration {
+	if r.RetryInterval > 0 {
+		return r.RetryInterval
+	}
+	return 5 * time.Second
+}
+
+// isTransientLedgerError reports whether out (a FAILED `dpm script` invocation's combined
+// stdout/stderr) looks like a transient connectivity blip to the participant's gRPC port
+// rather than a genuine script/logic failure. Pinned to the exact signatures observed live
+// (a host under heavy memory pressure caused the participant to drop an in-flight gRPC
+// connection mid-suite): `io.grpc.StatusRuntimeException: UNAVAILABLE` and the underlying
+// `java.net.SocketException: Connection reset`. Never matches on "CoordinatedShutdown" alone
+// -- that line is printed by every daml-script JVM exit, success or failure, and is not by
+// itself evidence of anything.
+func isTransientLedgerError(out []byte) bool {
+	s := string(out)
+	for _, sig := range []string{
+		"UNAVAILABLE: io exception",
+		"SocketException: Connection reset",
+	} {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewRunner constructs a Runner, resolving dpm from PATH/~/.dpm/bin if dpmPath is empty.
@@ -135,10 +180,24 @@ func (r *Runner) Run(ctx context.Context, scriptName string, input, output any) 
 	}
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, r.DpmPath, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, err, out)
+	var out []byte
+	var runErr error
+	for attempt := 0; ; attempt++ {
+		cmd := exec.CommandContext(ctx, r.DpmPath, args...)
+		out, runErr = cmd.CombinedOutput()
+		if runErr == nil {
+			break
+		}
+		if attempt >= r.retryAttempts() || !isTransientLedgerError(out) {
+			return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, runErr, out)
+		}
+		r.logf("script %s: transient ledger connectivity error (attempt %d/%d), retrying in %s",
+			scriptName, attempt+1, r.retryAttempts(), r.retryInterval())
+		select {
+		case <-time.After(r.retryInterval()):
+		case <-ctx.Done():
+			return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, runErr, out)
+		}
 	}
 	r.logf("script %s ok (%s)", scriptName, time.Since(start).Round(time.Millisecond))
 

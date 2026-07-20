@@ -6,11 +6,12 @@
 module Playground.Deploy where
 
 import Daml.Script
-import DA.Optional (fromSome)
+import DA.Optional (fromSome, fromSomeNote)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Wormhole.Core.Replay (defaultSplitThreshold)
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Token (NttToken)
+import Wormhole.Ntt.TokenCip56 (Cip56CustodyToken (..))
 import Test.TestCore (registerEmitter)
 import Test.TestNtt (mkBurnMintToken, mkCustodyToken)
 import Test.TestReplay (registerReplayRoot)
@@ -24,8 +25,13 @@ data DeployInput = DeployInput with
     guardianGovernance : Party
     admin              : Party  -- CLI-allocated (with actAs rights granted; see Playground.Init's note)
     mode               : Text   -- "burn-mint" | "lock-unlock"
-    tokenKind          : Text   -- "mock-admin-signed" | "cip56-burn-mint-mock" | "cip56-custody-mock"
+    tokenKind          : Text   -- "mock-admin-signed" | "cip56-burn-mint-mock" | "cip56-custody-mock" | "cip56-custody"
     tokenDecimals      : Int
+    -- 'Cip56Custody' only: the custody wallet-user party (holds locked funds between
+    -- send/receive) and the real DSO party (the Amulet instrument's admin). 'None' for every
+    -- other kind -- the Go CLI always sends the field, null when unused.
+    custody            : Optional Party
+    instrumentAdmin    : Optional Party
   deriving (Eq, Show)
 
 data DeployOutput = DeployOutput with
@@ -49,6 +55,18 @@ deployNtt input = do
       pure (toInterfaceContractId @NttToken mockCid)
     Cip56BurnMintMock -> fst <$> mkBurnMintToken admin input.operator instrumentId
     Cip56CustodyMock -> fst <$> mkCustodyToken admin input.operator admin instrumentId False -- custody = admin; Completed mode
+    Cip56Custody -> do
+      -- Real Amulet: no mock factory. The registry's real transfer factory cid,
+      -- choice-context, and disclosures arrive per-call from Go (see
+      -- Playground.Ops:transferOut's Cip56Custody branch) -- this deployment step only
+      -- creates the token hook itself, admin-signed as usual.
+      let custody = fromSomeNote "playground: cip56-custody needs a custody party" input.custody
+          dso = fromSomeNote "playground: cip56-custody needs the DSO party" input.instrumentAdmin
+      cid <- submit admin do
+        createCmd Cip56CustodyToken with
+          admin, manager = input.operator, custody
+          instrumentId = InstrumentId with admin = dso, id = "Amulet"
+      pure (toInterfaceContractId @NttToken cid)
 
   [(regCid, _)] <- query @NttManagerRegistry input.operator
   regDisc <- fromSome <$> queryDisclosure input.operator regCid

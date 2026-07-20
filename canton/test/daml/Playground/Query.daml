@@ -6,6 +6,7 @@ module Playground.Query where
 import Daml.Script
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State (Emitter, ParseAndVerifyVAA (..))
 import Wormhole.Ntt.Manager (recipientAddressFor)
@@ -166,6 +167,36 @@ balances input = do
   pure BalancesOutput with
     mockHoldingTotal = sum [ h.amount | (_, h) <- mockHoldings, h.owner == input.owner ]
     cip56HoldingTotal = sum [ h.amount | (_, h) <- cip56Holdings, h.owner == input.owner ]
+
+----------------------------------------------------------------------
+-- amuletBalance (real Canton Coin holdings, cip56-custody kind only)
+----------------------------------------------------------------------
+
+data AmuletBalanceInput = AmuletBalanceInput with
+    owner           : Party
+    instrumentAdmin : Party  -- the real DSO party (InstrumentId.admin for "Amulet")
+  deriving (Eq, Show)
+
+data AmuletBalanceOutput = AmuletBalanceOutput with
+    amuletHoldingTotal : Decimal
+  deriving (Eq, Show)
+
+-- | Sum of @owner@'s unlocked real Amulet holdings, read directly off the token-standard
+-- 'Holding' interface -- not an HTTP call (findings §6: "not an HTTP problem at all"). Locked
+-- holdings (mid-transfer) are excluded; only 'owner' is summed even though 'queryInterface'
+-- may also surface holdings @owner@ merely observes.
+amuletBalance : AmuletBalanceInput -> Script AmuletBalanceOutput
+amuletBalance input = do
+  let instrument = InstrumentId with admin = input.instrumentAdmin, id = "Amulet"
+  holdings <- queryInterface @Holding input.owner
+  let amounts =
+        [ v.amount
+        | (_, Some v) <- holdings
+        , v.instrumentId == instrument
+        , v.lock == None
+        , v.owner == input.owner
+        ]
+  pure AmuletBalanceOutput with amuletHoldingTotal = sum amounts
 
 ----------------------------------------------------------------------
 -- verifyVaa (on-ledger signature-recovery cross-check of `guardian sign-*`)

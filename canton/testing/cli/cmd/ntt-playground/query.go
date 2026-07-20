@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
 
 // decimalLiteral round-trips a Daml `Decimal` value through JSON as a bare number literal
@@ -94,7 +96,7 @@ func newObserveCmd(a *app) *cobra.Command {
 	var deployment string
 	cmd := &cobra.Command{
 		Use:   "observe",
-		Short: "Print a deployment's current outbound sequence and peers",
+		Short: "Print a deployment's current outbound sequence and peers, or stream real guardian observations (`observe stream`)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, err := a.queryStatus(cmd)
 			if err != nil {
@@ -123,6 +125,7 @@ func newObserveCmd(a *app) *cobra.Command {
 			return fmt.Errorf("observe: deployment %q (managerId %d) not found on ledger", deployment, local.ManagerID)
 		},
 	}
+	cmd.AddCommand(newObserveStreamCmd(a))
 	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name")
 	_ = cmd.MarkFlagRequired("deployment")
 	return cmd
@@ -206,12 +209,36 @@ type balancesOutput struct {
 	Cip56HoldingTotal decimalLiteral `json:"cip56HoldingTotal"`
 }
 
+// amuletBalanceInput/amuletBalanceOutput mirror Playground.Query.daml's
+// AmuletBalanceInput/AmuletBalanceOutput.
+type amuletBalanceInput struct {
+	Owner           string `json:"owner"`
+	InstrumentAdmin string `json:"instrumentAdmin"`
+}
+
+type amuletBalanceOutput struct {
+	AmuletHoldingTotal decimalLiteral `json:"amuletHoldingTotal"`
+}
+
+// resolvePartyOrCustody resolves partyHint the normal way (allocate-or-cache under state.Users),
+// EXCEPT for a deployment's own custody hint ("<deployment>-custody"): that party was never
+// allocated by allocatePlaygroundParty -- it is a validator wallet user's already-existing
+// primary party (internal/amulet.OnboardWalletUser, persisted as d.CustodyParty at deploy time)
+// -- so it resolves directly from state rather than through a fresh allocation.
+func resolvePartyOrCustody(cmd *cobra.Command, a *app, s *state.State, d state.Deployment, deployment, partyHint string) (string, error) {
+	if d.CustodyParty != "" && partyHint == deployment+"-custody" {
+		a.vlogf(cmd, "party %q: resolved as deployment %q's custody party → %s", partyHint, deployment, d.CustodyParty)
+		return d.CustodyParty, nil
+	}
+	return resolveParty(cmd, a, s, partyHint)
+}
+
 func newBalanceCmd(a *app) *cobra.Command {
 	var partyHint, deployment string
 
 	cmd := &cobra.Command{
 		Use:   "balance",
-		Short: "Print a party's mock/CIP-56 holdings for a deployment",
+		Short: "Print a party's mock/CIP-56/real-Amulet holdings for a deployment",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			s, err := a.loadState()
@@ -222,7 +249,7 @@ func newBalanceCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("balance: unknown deployment %q", deployment)
 			}
-			party, err := resolveParty(cmd, a, s, partyHint)
+			party, err := resolvePartyOrCustody(cmd, a, s, d, deployment, partyHint)
 			if err != nil {
 				return err
 			}
@@ -232,6 +259,18 @@ func newBalanceCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer cleanup()
+
+			if d.TokenKind == "cip56-custody" {
+				var out amuletBalanceOutput
+				if err := runner.Run(ctx, "Playground.Query:amuletBalance", amuletBalanceInput{
+					Owner:           party,
+					InstrumentAdmin: d.InstrumentAdmin,
+				}, &out); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "party=%s amuletHoldingTotal=%s\n", party, out.AmuletHoldingTotal)
+				return nil
+			}
 
 			var out balancesOutput
 			if err := runner.Run(ctx, "Playground.Query:balances", balancesInput{
@@ -244,7 +283,7 @@ func newBalanceCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&partyHint, "party", "", "party hint to check")
+	cmd.Flags().StringVar(&partyHint, "party", "", "party hint to check (a deployment's own \"<name>-custody\" hint resolves without allocating a new party)")
 	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name (determines whose holdings are visible)")
 	_ = cmd.MarkFlagRequired("party")
 	_ = cmd.MarkFlagRequired("deployment")

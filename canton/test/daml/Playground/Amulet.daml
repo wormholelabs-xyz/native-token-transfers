@@ -1,0 +1,85 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+-- | The script-side seam for a real Canton Coin (Amulet) CIP-56 custody transfer: the shapes
+-- Go's internal/amulet client resolves off-ledger (the registry's transfer-factory cid, its
+-- choice context, and its disclosed contracts), and the plumbing to turn those into the
+-- 'Disclosure' values 'Playground.Ops:transferOut' needs to submit a
+-- 'Wormhole.Ntt.TokenCip56.Cip56CustodyToken' lock against the real Amulet registry.
+--
+-- Vendors 'splice-amulet' (canton/dars/README.md) SOLELY for the concrete template types
+-- 'toDisclosure' needs a 'templateTypeRep' of -- never for creating/exercising anything in
+-- this module. All actual submission still goes through 'Playground.Ops:transferOut'.
+module Playground.Amulet where
+
+import DA.Text (isSuffixOf)
+import Daml.Script
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (ChoiceContext)
+import Splice.AmuletRules qualified as AmuletRules
+import Splice.Round qualified as Round
+import Splice.ExternalPartyAmuletRules qualified as ExternalPartyAmuletRules
+import Splice.ExternalPartyConfigState qualified as ExternalPartyConfigState
+
+-- | One registry-format disclosed contract, as Go's internal/amulet.DisclosedContract sends
+-- it (minus @synchronizerId@, which 'Daml.Script.Disclosure' has no field for).
+data DisclosedContractIn = DisclosedContractIn with
+    templateId : Text          -- registry format: "<packageId>:<Module>:<Entity>"
+    contractId : ContractId () -- the registry's opaque contract-id string, Daml-JSON decoded
+    blob       : Text          -- createdEventBlob (base64) -- see the plan's V5 finding
+  deriving (Eq, Show)
+
+-- | Everything 'Playground.Ops:transferOut''s @Cip56Custody@ branch needs, resolved
+-- off-ledger by Go (internal/amulet.GetTransferFactory) and passed through verbatim.
+data AmuletSeam = AmuletSeam with
+    factoryCid    : ContractId () -- the registry's transfer-factory cid (factoryId)
+    choiceContext : ChoiceContext -- decoded Daml-JSON of choiceContextData (V3: confirmed --
+                                  -- Splice.Api.Token.MetadataV1.ChoiceContext is a plain
+                                  -- {values : TextMap AnyValue} record, and AnyValue's
+                                  -- variant tags Daml-JSON-encode exactly as captured live
+                                  -- ({"tag": "AV_ContractId", "value": "<cid>"}, ...))
+    disclosed     : [DisclosedContractIn]
+  deriving (Eq, Show)
+
+-- | Map a registry @templateId@'s "<Module>:<Entity>" suffix to the vendored splice-amulet
+-- type's 'templateTypeRep', producing a 'Disclosure' for @d@ by record-updating @seed@ (an
+-- already-obtained 'Disclosure' from 'queryDisclosure' -- 'Daml.Script' exports the
+-- 'Disclosure' type but not its constructor, so a record update on a seed is the only route
+-- that needs no extra import; see the plan's V6 finding). Aborts loudly on any unmapped
+-- templateId, so a live registry response naming a contract this table doesn't cover fails
+-- fast instead of silently dropping a disclosure the on-ledger call actually needs.
+toDisclosure : Disclosure -> DisclosedContractIn -> Disclosure
+toDisclosure seed d
+  | "Splice.AmuletRules:AmuletRules" `isSuffixOf` d.templateId =
+      mkDisclosure @AmuletRules.AmuletRules
+  | "Splice.AmuletRules:TransferPreapproval" `isSuffixOf` d.templateId =
+      mkDisclosure @AmuletRules.TransferPreapproval
+  | "Splice.Round:OpenMiningRound" `isSuffixOf` d.templateId =
+      mkDisclosure @Round.OpenMiningRound
+  | "Splice.ExternalPartyAmuletRules:ExternalPartyAmuletRules" `isSuffixOf` d.templateId =
+      mkDisclosure @ExternalPartyAmuletRules.ExternalPartyAmuletRules
+  | "Splice.ExternalPartyConfigState:ExternalPartyConfigState" `isSuffixOf` d.templateId =
+      mkDisclosure @ExternalPartyConfigState.ExternalPartyConfigState
+  | otherwise =
+      error ("playground: unmapped Amulet disclosed-contract templateId " <> d.templateId)
+  where
+    mkDisclosure : forall t. HasTemplateTypeRep t => Disclosure
+    mkDisclosure =
+      seed with
+        templateId = templateTypeRep @t
+        contractId = coerceContractId d.contractId
+        blob = d.blob
+
+-- | Unlocked real Amulet holdings owned by @owner@ under @dso@'s "Amulet" instrument --
+-- findings §6: enumerated directly off the token-standard 'Holding' interface, not an HTTP
+-- call. Mirrors 'Playground.Query:amuletBalance''s filter (unlocked, exact instrument,
+-- exact owner) but returns cids rather than a sum, for use as @inputHoldingCids@.
+amuletHoldings : Party -> Party -> Script [ContractId Holding]
+amuletHoldings owner dso = do
+  let instrument = InstrumentId with admin = dso, id = "Amulet"
+  holdings <- queryInterface @Holding owner
+  pure
+    [ cid
+    | (cid, Some v) <- holdings
+    , v.instrumentId == instrument
+    , v.lock == None
+    , v.owner == owner
+    ]
