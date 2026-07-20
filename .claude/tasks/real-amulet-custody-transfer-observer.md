@@ -665,6 +665,37 @@ still-expected `internal/observer` red state; the FULL sandbox e2e suite re-run 
 (`-count=1`, forcing an actual CLI rebuild+rerun rather than Go's test cache) still passes
 end to end (594s), confirming the `transfer.go` rewrite didn't disturb any mock-kind path.
 
+**Manual live smoke test against LocalNet (init → deploy → transfer → balance), before writing
+Phase 4**: full round-trip succeeded end to end -- `init`, `deploy --config
+deploy-cip56-custody.json` (onboards custody, taps app-provider, creates the preapproval,
+deploys the token), `transfer --deployment cc-custody --user cc-sender --chain 2 --amount
+10000000000 --sign` (onboards+taps sender, resolves the real transfer-factory, locks 1 CC), and
+`balance --party cc-custody-custody --deployment cc-custody` → `amuletHoldingTotal=1.0000000000`
+exactly. The recomputed payload decodes to amount `0x5f5e100` (100,000,000 = 1 CC at 8 wire
+decimals), prefix `9945ff10`, recipient chain `0002`. Two real deviations surfaced and were
+fixed here (not just theoretical -- both reproduced live, not caught by inspection):
+
+- **V5 was WRONG, not "expected identical"**: `dpm script`'s `Disclosure.blob` field is HEX, not
+  base64. Passing the registry's base64 `createdEventBlob` straight through failed with
+  `com.digitalasset.daml.lf.script.converter.ConverterException: cannot parse HexString ...`.
+  Fixed in `toAmuletSeamJSON` (`transfer.go`): base64-decode then hex-encode before handing the
+  blob to the script. `internal/amulet` itself is unaffected -- it still returns the registry's
+  base64 form verbatim; the re-encoding is a `cmd/ntt-playground`-level concern (the Daml-Script
+  boundary), keeping the package layering clean.
+- **Tap/onboard/preapproval/transfer-factory calls can exceed a 30s per-attempt timeout on live
+  LocalNet** (observed both a plain `curl` tap taking 16.5s and the CLI's own tap hitting
+  "context deadline exceeded" at 30s twice in a row) -- these are network/automation latency
+  blips, not the documented "no open mining round"/429 failure shapes the original retry logic
+  covered. Added `isTransientTransportError` (checks `context.DeadlineExceeded` /
+  `net.Error.Timeout()`) to `internal/amulet`, wired into `Tap`, `CreateTransferPreapproval`,
+  `OnboardWalletUser`, and `GetTransferFactory`'s retry loops (all bumped to a 45s per-attempt
+  timeout), so a slow-but-eventually-successful attempt retries instead of failing the whole
+  call. All `internal/amulet` unit tests still pass unchanged after this fix.
+
+The live `Playground.Ops:transferOut` script call itself took 1m25s end to end (five disclosed
+contracts, a large `AmuletRules` blob) -- well within `dpm script`'s own timeout, no separate
+fix needed, but worth noting for anyone tuning a tighter external timeout around it.
+
 1. **`canton/test/daml/Playground/Amulet.daml`** (new module, script-side seam):
    ```daml
    data DisclosedContractIn = DisclosedContractIn with

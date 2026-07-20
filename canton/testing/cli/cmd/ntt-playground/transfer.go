@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -56,13 +58,22 @@ type disclosedContractInJSON struct {
 }
 
 // toAmuletSeamJSON drops SynchronizerID (Daml Script's Disclosure type has no field for it --
-// see the plan's findings §9) from the registry's disclosed-contract shape.
-func toAmuletSeamJSON(f amulet.TransferFactory) *amuletSeamJSON {
+// see the plan's findings §9) from the registry's disclosed-contract shape, and re-encodes
+// createdEventBlob from base64 (the registry's wire format) to hex: verified live against
+// LocalNet that `dpm script`'s Disclosure.blob field is HEX, not base64 -- passing the
+// registry's base64 straight through fails with "cannot parse HexString" (a deviation from
+// the plan's V5 assumption that the two encodings were interchangeable; they carry the same
+// bytes, just rendered differently).
+func toAmuletSeamJSON(f amulet.TransferFactory) (*amuletSeamJSON, error) {
 	disclosed := make([]disclosedContractInJSON, len(f.DisclosedContracts))
 	for i, dc := range f.DisclosedContracts {
-		disclosed[i] = disclosedContractInJSON{TemplateID: dc.TemplateID, ContractID: dc.ContractID, Blob: dc.CreatedEventBlob}
+		raw, err := base64.StdEncoding.DecodeString(dc.CreatedEventBlob)
+		if err != nil {
+			return nil, fmt.Errorf("amulet: decode createdEventBlob (base64) for %s: %w", dc.TemplateID, err)
+		}
+		disclosed[i] = disclosedContractInJSON{TemplateID: dc.TemplateID, ContractID: dc.ContractID, Blob: hex.EncodeToString(raw)}
 	}
-	return &amuletSeamJSON{FactoryCid: f.FactoryID, ChoiceContext: f.ChoiceContextData, Disclosed: disclosed}
+	return &amuletSeamJSON{FactoryCid: f.FactoryID, ChoiceContext: f.ChoiceContextData, Disclosed: disclosed}, nil
 }
 
 type transferOutOutput struct {
@@ -192,7 +203,10 @@ func newTransferCmd(a *app) *cobra.Command {
 					return fmt.Errorf("transfer: resolve transfer-factory: %w", err)
 				}
 				a.vlogf(cmd, "transfer: transfer-factory %s resolved (transferKind=direct, %d disclosed contracts)", factory.FactoryID, len(factory.DisclosedContracts))
-				amuletSeam = toAmuletSeamJSON(factory)
+				amuletSeam, err = toAmuletSeamJSON(factory)
+				if err != nil {
+					return fmt.Errorf("transfer: %w", err)
+				}
 			}
 
 			var out transferOutOutput

@@ -17,8 +17,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -131,6 +133,22 @@ func retryable(status int, body []byte) bool {
 	return strings.Contains(strings.ToLower(string(body)), "no open mining round")
 }
 
+// isTransientTransportError reports whether err looks like a client-side timeout/network
+// hiccup rather than a definitive failure -- observed live against LocalNet: tap/preapproval
+// calls occasionally take noticeably longer than the per-attempt HTTP timeout (validator
+// automation contention, not a real error), so these deserve the same retry treatment as an
+// HTTP-level 503/429 rather than failing the whole call on one slow attempt.
+func isTransientTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 // ----------------------------------------------------------------------
 // OnboardWalletUser
 // ----------------------------------------------------------------------
@@ -141,21 +159,33 @@ type registerResponse struct {
 
 // OnboardWalletUser onboards user as a validator wallet user (POST /v0/register, the new
 // user's own JWT, empty body) and returns its primary party. Idempotent: re-registering an
-// already-onboarded user returns the same party (findings §8).
+// already-onboarded user returns the same party (findings §8). Retries a transient transport
+// timeout once (a cold-start onboarding was observed live to occasionally exceed even the
+// generous per-attempt timeout) for up to RetryTimeout.
 func (c *Client) OnboardWalletUser(ctx context.Context, user string) (string, error) {
-	status, body, err := c.doJSON(ctx, defaultOnboardTimeout, http.MethodPost, "/api/validator/v0/register", user, nil)
-	if err != nil {
-		return "", err
-	}
-	if status < 200 || status >= 300 {
+	deadline := time.Now().Add(c.retryTimeout())
+	for {
+		status, body, err := c.doJSON(ctx, defaultOnboardTimeout, http.MethodPost, "/api/validator/v0/register", user, nil)
+		if err == nil && status >= 200 && status < 300 {
+			var out registerResponse
+			if err := json.Unmarshal(body, &out); err != nil {
+				return "", fmt.Errorf("amulet: parse register response for %s: %w\nraw: %s", user, err, body)
+			}
+			c.logf("amulet: onboarded %s → %s", user, out.PartyID)
+			return out.PartyID, nil
+		}
+		if err != nil && isTransientTransportError(err) && time.Now().Before(deadline) {
+			c.logf("amulet: onboard %s: transient transport error (%v), retrying", user, err)
+			if !sleepOrDone(ctx, c.retryInterval()) {
+				return "", ctx.Err()
+			}
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
 		return "", fmt.Errorf("amulet: onboard %s: HTTP %d: %s", user, status, body)
 	}
-	var out registerResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("amulet: parse register response for %s: %w\nraw: %s", user, err, body)
-	}
-	c.logf("amulet: onboarded %s → %s", user, out.PartyID)
-	return out.PartyID, nil
 }
 
 // ----------------------------------------------------------------------
@@ -177,7 +207,7 @@ type tapResponse struct {
 func (c *Client) Tap(ctx context.Context, user, usdAmount string) (string, error) {
 	deadline := time.Now().Add(c.retryTimeout())
 	for {
-		status, body, err := c.doJSON(ctx, 30*time.Second, http.MethodPost, "/api/validator/v0/wallet/tap", user, tapRequest{Amount: usdAmount})
+		status, body, err := c.doJSON(ctx, 45*time.Second, http.MethodPost, "/api/validator/v0/wallet/tap", user, tapRequest{Amount: usdAmount})
 		if err == nil && status >= 200 && status < 300 {
 			var out tapResponse
 			if err := json.Unmarshal(body, &out); err != nil {
@@ -185,6 +215,13 @@ func (c *Client) Tap(ctx context.Context, user, usdAmount string) (string, error
 			}
 			c.logf("amulet: tapped %s USD for %s → %s", usdAmount, user, out.ContractID)
 			return out.ContractID, nil
+		}
+		if err != nil && isTransientTransportError(err) && time.Now().Before(deadline) {
+			c.logf("amulet: tap %s: transient transport error (%v), retrying", user, err)
+			if !sleepOrDone(ctx, c.retryInterval()) {
+				return "", ctx.Err()
+			}
+			continue
 		}
 		if err == nil && retryable(status, body) && time.Now().Before(deadline) {
 			c.logf("amulet: tap %s: transient failure (HTTP %d: %s), retrying", user, status, body)
@@ -215,7 +252,7 @@ type transferPreapprovalResponse struct {
 func (c *Client) CreateTransferPreapproval(ctx context.Context, user string) (string, error) {
 	deadline := time.Now().Add(c.retryTimeout())
 	for {
-		status, body, err := c.doJSON(ctx, 30*time.Second, http.MethodPost, "/api/validator/v0/wallet/transfer-preapproval", user, nil)
+		status, body, err := c.doJSON(ctx, 45*time.Second, http.MethodPost, "/api/validator/v0/wallet/transfer-preapproval", user, nil)
 		if err == nil && (status == http.StatusOK || status == http.StatusConflict) {
 			var out transferPreapprovalResponse
 			if err := json.Unmarshal(body, &out); err != nil {
@@ -227,6 +264,13 @@ func (c *Client) CreateTransferPreapproval(ctx context.Context, user string) (st
 				c.logf("amulet: created transfer-preapproval for %s → %s", user, out.TransferPreapprovalContractID)
 			}
 			return out.TransferPreapprovalContractID, nil
+		}
+		if err != nil && isTransientTransportError(err) && time.Now().Before(deadline) {
+			c.logf("amulet: transfer-preapproval for %s: transient transport error (%v), retrying", user, err)
+			if !sleepOrDone(ctx, c.retryInterval()) {
+				return "", ctx.Err()
+			}
+			continue
 		}
 		if err == nil && status == http.StatusTooManyRequests && time.Now().Before(deadline) {
 			c.logf("amulet: transfer-preapproval for %s: in flight (429), retrying", user)
@@ -317,9 +361,23 @@ func (c *Client) GetTransferFactory(ctx context.Context, user string, args Trans
 		"excludeDebugFields": true,
 	}
 
-	status, body, err := c.doJSON(ctx, 30*time.Second, http.MethodPost,
-		"/api/validator/v0/scan-proxy/registry/transfer-instruction/v1/transfer-factory", user, reqBody)
-	if err != nil {
+	deadline := time.Now().Add(c.retryTimeout())
+	var status int
+	var body []byte
+	var err error
+	for {
+		status, body, err = c.doJSON(ctx, 45*time.Second, http.MethodPost,
+			"/api/validator/v0/scan-proxy/registry/transfer-instruction/v1/transfer-factory", user, reqBody)
+		if err == nil {
+			break
+		}
+		if isTransientTransportError(err) && time.Now().Before(deadline) {
+			c.logf("amulet: transfer-factory: transient transport error (%v), retrying", err)
+			if !sleepOrDone(ctx, c.retryInterval()) {
+				return TransferFactory{}, ctx.Err()
+			}
+			continue
+		}
 		return TransferFactory{}, err
 	}
 	if status < 200 || status >= 300 {
