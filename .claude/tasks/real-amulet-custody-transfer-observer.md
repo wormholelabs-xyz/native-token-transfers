@@ -756,6 +756,41 @@ Phase-0 subtest still red only on the `observe stream` step.)
 
 ### Phase 4 — Real stream observer (`observe stream`)
 
+**DONE**: `github.com/gorilla/websocket v1.5.3` added (exact pin; it was already a transitive
+requirement of `go-ethereum`'s module graph at v1.4.2 -- never previously imported, hence
+absent from `go.sum` -- so this promotes it to a direct, actually-used dependency rather than
+introducing a brand-new one to the graph). `go get ... @v1.5.3` → `go mod tidy` → `go.sum` diff
+is exactly the two expected lines → `go mod verify` (`all modules verified`) →
+`govulncheck ./...` (via `go run golang.org/x/vuln/cmd/govulncheck@latest`, not installed as a
+dep): 6 pre-existing vulnerabilities reported, all attributed to `go-ethereum@v1.10.21` (already
+a dependency before this work); the only `gorilla/websocket`-attributed call-graph traces are
+`observer.Stream` reaching pre-existing `go-ethereum/crypto/secp256k1` code via the shared
+`internal/wire` import, not a vulnerability in `gorilla/websocket` itself. Zero newer patch
+exists beyond v1.5.3 (checked the module's version list). `go.mod`/`go.sum` committed in the
+same commit as the code using them.
+
+`internal/observer/observer.go`: `DecodeUpdateFrame` (all 5 Phase-0 fixture tests pass
+unmodified once implemented), `LedgerEnd`, `Stream`. `cmd/ntt-playground/observe_stream.go`:
+`observe stream` subcommand, attached to the existing `observe` parent (`query.go`'s
+`newObserveCmd` gained one `cmd.AddCommand(newObserveStreamCmd(a))` line; its own leaf `RunE`
+is untouched, so `observe --deployment X` still works exactly as before -- confirmed by the
+full sandbox e2e suite still passing).
+
+**Manual live smoke test of the full stream, end to end**: `observe stream --print-offset`,
+then a fresh `transfer`, then `observe stream --from-offset <recorded> --count 1 --timeout 30s`
+correctly picked up the new `PublishMessage`, with the streamed `sequence`/`payload` matching
+the `transfer` command's own recomputed `sequence`/`payload` **byte-for-byte**, and
+`emitterAddress` matching the deployment's `TransceiverAddress` exactly. The reader user
+(`guardian-watcher`) was created with only `CanReadAs(guardianObserver)`, no `actAs` --
+confirming the observation works with observer rights alone, the plan's headline claim.
+
+A real, live deviation from the plan's V7 assumption was found and fixed (see the
+Verify-at-implementation table's V7 row below for the full story): the documented
+`daml.ws.auth`/`jwt.token.<jwt>` WebSocket subprotocol pair handshakes but then fails the
+actual request with `UNAUTHENTICATED` on this LocalNet build; a plain `Authorization: Bearer`
+header (reproduced live to work correctly, byte-exact PublishMessage decode) is what
+`internal/observer.Stream` uses instead.
+
 1. **`go.mod`**: add `github.com/gorilla/websocket v1.5.3` (see supply-chain).
 2. **File: `canton/testing/cli/internal/observer/observer.go`** (new package):
    ```go
@@ -910,8 +945,8 @@ pinned by `IMAGE_TAG=0.6.12` per the README's LocalNet instructions.
 | V4 | `POST /v2/users` body shape (`{"user": {"id": ...}, "rights": [...]}`) and the `CanReadAs` wrapper | `curl localhost:3975/v2/users` with the admin token; the 3.5 openapi (`json-api-docs/openapi.yaml`, canton release-line-3.5) documents `CreateUserRequest`. The `value`-wrapper convention is already proven for `CanActAs` (localnet.go:386-396). |
 | V5 | `Disclosure.blob` (daml-script) == registry `createdEventBlob` (both base64 of the created-event blob) | In a script: `queryDisclosure` any contract, print `.blob`; compare format to a registry response's `createdEventBlob`. Both feed `DisclosedContract.created_event_blob`; expected identical. |
 | V6 | `Disclosure` construction route: does `import Daml.Script.Internal.Questions.Commands (Disclosure(..))` compile under 3.5.1? | One-line import + `dpm build`. If not: use the record-update route (findings §9), which needs no constructor. |
-| V7 | WS handshake specifics against LocalNet 3975 (subprotocol echo, first-frame shape) | `wscat` (or a 20-line Go probe) with subprotocols `daml.ws.auth`, `jwt.token.<jwt>`, send the GetUpdatesRequest from findings §7, observe a transfer. Fallback: `POST /v2/updates` blocking list with `endInclusive` (no new dep). |
-| V8 | `sequence`/`emitterId` numeric rendering in `exerciseResult` (number vs string) | Same probe as V7; `json.Number` handles both regardless. |
+| V7 | ~~WS handshake specifics~~ **RESOLVED in Phase 4, DIFFERENTLY THAN DOCUMENTED**: the `daml.ws.auth`/`jwt.token.<jwt>` subprotocol pair (tried first, via a 20-line Go probe -- no `wscat`/`websocat`/python `websockets` available in this sandbox) handshakes successfully but then fails the first request live with `{"grpcCodeValue":16,...}` (UNAUTHENTICATED) before a normal (1000) close. A plain `Authorization: Bearer <token>` header on the dial (a Go client can set this freely, unlike a browser) was confirmed live to work correctly -- two real `PublishMessage` events streamed back, decoding to the exact sequence/payload the preceding `transfer` calls had recomputed. `internal/observer.Stream` uses the header. | (resolved; no further action) |
+| V8 | `sequence`/`emitterId` numeric rendering in `exerciseResult` (number vs string) | Confirmed live: both render as quoted strings (`"emitterId":"0"`, `"sequence":"1"`, etc.) inside `exerciseResult`/`choiceArgument`, unlike the unquoted `"offset":247` elsewhere in the same frame. `flexInt64`'s trim-quotes-then-parse handles both forms regardless, so no code change was needed once the WS auth fix above was in. |
 
 ## Risks / notes
 

@@ -96,7 +96,7 @@ func newObserveCmd(a *app) *cobra.Command {
 	var deployment string
 	cmd := &cobra.Command{
 		Use:   "observe",
-		Short: "Print a deployment's current outbound sequence and peers",
+		Short: "Print a deployment's current outbound sequence and peers, or stream real guardian observations (`observe stream`)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, err := a.queryStatus(cmd)
 			if err != nil {
@@ -125,6 +125,7 @@ func newObserveCmd(a *app) *cobra.Command {
 			return fmt.Errorf("observe: deployment %q (managerId %d) not found on ledger", deployment, local.ManagerID)
 		},
 	}
+	cmd.AddCommand(newObserveStreamCmd(a))
 	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name")
 	_ = cmd.MarkFlagRequired("deployment")
 	return cmd
