@@ -515,6 +515,64 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "amount=250000")
 	})
 
+	// Sandbox-viable coverage of the CIP-56 custody seam's mock kind (Cip56CustodyToken over
+	// Test.TestNtt:MockTransferFactory, cf. the real-Amulet "real amulet cip56-custody" subtest
+	// below, which needs the localnet profile). Playground.Deploy:deployNtt's Cip56CustodyMock
+	// branch hardcodes custody = admin, and the deployment's admin party is cached in state
+	// under the "<name>-admin" hint (deploy.go's default adminHint) -- so that SAME cached hint
+	// doubles as the custody party for both `guardian sign-transfer --to-recipient` and
+	// `receive --recipient`. This isn't incidental: Cip56MockHolding is owner-signed and
+	// `receive` is executor-only (no actAs recipient), so the unlock's receiver-owned holding
+	// create only reaches valid authority when recipient == custody == admin (see
+	// Test.TestNtt:testCustodyUnlockCompletedSucceeds's module-level authority trace).
+	t.Run("cip56 custody deployment (mock): lock-unlock through the custody party", func(t *testing.T) {
+		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-custody-mock.json"))
+		require.Contains(t, out, "[v] set peer chain=2")
+
+		s := h.loadState(t)
+		d, ok := s.Deployment("cip56cumock")
+		require.True(t, ok)
+		require.Equal(t, "cip56-custody-mock", d.TokenKind)
+
+		const custodyHint = "cip56cumock-admin"
+		custodyParty, ok := s.Users[custodyHint]
+		require.True(t, ok, "deploy should have cached the admin/custody party under %q", custodyHint)
+		require.NotEmpty(t, custodyParty)
+
+		// Unlock leg (custody -> recipient): MintOrUnlock via NttManager.Receive, executor-only.
+		// recipient must be the custody hint itself for the reasons above.
+		out = h.mustRun(t, "guardian", "sign-transfer",
+			"--deployment", "cip56cumock", "--to-recipient", custodyHint, "--amount", "500000", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		require.NotEmpty(t, vaaHex)
+
+		out = h.mustRun(t, "receive", "--deployment", "cip56cumock",
+			"--vaa", vaaHex, "--recipient", custodyHint, "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=500000")
+
+		out = h.mustRun(t, "balance", "--party", custodyHint, "--deployment", "cip56cumock")
+		require.Equal(t, "0.0050000000", extractField(t, out, "cip56HoldingTotal"),
+			"the unlock should have moved 500000 units (0.005 at 8 decimals) to the custody party")
+
+		// Lock leg (sender -> custody): LockOrBurn via NttManager.Transfer. The CLI auto-funds
+		// the sender via Playground.Ops:fundUser (any tokenKind other than
+		// mock-admin-signed/cip56-custody), so no separate funding step is needed here.
+		out = h.mustRun(t, "transfer", "--deployment", "cip56cumock",
+			"--user", "cip56cumock-sender", "--chain", "2",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "200000", "--sign")
+		require.Contains(t, out, "emitterChain=72")
+
+		// Value conservation: custody now holds the earlier unlock (0.005) PLUS the freshly
+		// locked funding (0.002) -- proving the lock leg actually moved funds into custody
+		// rather than merely emitting the outbound message.
+		out = h.mustRun(t, "balance", "--party", custodyHint, "--deployment", "cip56cumock")
+		require.Equal(t, "0.0070000000", extractField(t, out, "cip56HoldingTotal"),
+			"custody should hold the unlocked 0.005 plus the newly locked 0.002")
+	})
+
 	t.Run("party list shows allocated parties", func(t *testing.T) {
 		s := h.loadState(t)
 		require.NotEmpty(t, s.Users["Alice"], "Alice should have been allocated by the inbound transfer step")
@@ -605,9 +663,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
 		require.Equal(t, 0, listed.GuardianSetIndex)
-		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment", and
-		// "cip56 burn-mint deployment". Bump these counts whenever a deploy subtest is added.
-		require.Len(t, listed.Managers, 3, "burnmint + lockunlock + cip56bm managers")
+		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment",
+		// "cip56 burn-mint deployment", and "cip56 custody deployment (mock)". Bump these
+		// counts whenever a deploy subtest is added. (The real-Amulet "cip56 custody" deploy
+		// runs after this subtest, and only on localnet, so it is not counted here.)
+		require.Len(t, listed.Managers, 4, "burnmint + lockunlock + cip56bm + cip56cumock managers")
 		require.GreaterOrEqual(t, len(listed.Emitters), 4, "three transceiver emitters + the standalone one")
 	})
 
