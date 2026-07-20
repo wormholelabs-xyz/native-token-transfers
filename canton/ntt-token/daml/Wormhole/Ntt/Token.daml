@@ -133,9 +133,11 @@ interface NttToken where
   -- for owner-signed kinds; 'None' is for kinds that need no NTT-level consent.
   -- @registryCid@ is the same per-call registry dependency as 'lockOrBurnImpl'.
   mintOrUnlockImpl : Party -> TrimmedAmount -> [ContractId Holding] -> Optional (ContractId DepositPreapproval) -> Optional AnyContractId -> ExtraArgs -> Update ()
-  -- | Create @user@'s standing 'DepositPreapproval' for this token, or 'None' for
-  -- kinds that need no NTT-level consent. Runs with the token's admin authority
-  -- (admin-signed) plus @user@'s (the choice controller).
+  -- | Create @user@'s standing 'DepositPreapproval' for this token. A kind with
+  -- nothing to opt into may return 'None' -- or abort outright, if consent
+  -- belongs somewhere else entirely (e.g. a registry-level pre-approval).
+  -- Runs with the token's admin authority (admin-signed) plus @user@'s (the
+  -- choice controller).
   preApproveImpl : Party -> Update (Optional (ContractId DepositPreapproval))
 
   -- Manager and sender both control this choice: alice co-signs her own
@@ -168,7 +170,8 @@ interface NttToken where
   -- | Recipient opt-in, done once before the first inbound transfer. @user@
   -- controls the choice (supplying its own signature) and the token contract is
   -- admin-signed (supplying the admin's), so the dual-signed consent is created
-  -- in a single step. Returns 'None' for kinds that need no pre-approval.
+  -- in a single step. Returns 'None', or aborts, for kinds that need no
+  -- NTT-level pre-approval.
   nonconsuming choice PreApproveDeposit : Optional (ContractId DepositPreapproval)
     with
       user : Party
