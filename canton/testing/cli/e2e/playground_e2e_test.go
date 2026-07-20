@@ -76,21 +76,23 @@ func TestMain(m *testing.M) {
 }
 
 // harness runs the CLI binary with a fixed --state-file/--canton-dir/--profile/--run-dir for
-// one test, so every step in a subtest chain shares state.
+// one test, so every step in a subtest chain shares state. It deliberately holds no
+// *testing.T of its own -- every method that needs one takes the CALLER's, so a failure is
+// always scoped to whichever subtest is actually running (see run/mustRun/loadState below).
 type harness struct {
-	t         *testing.T
 	workDir   string
 	stateFile string
 }
 
 func newHarness(t *testing.T) *harness {
 	workDir := t.TempDir()
-	h := &harness{t: t, workDir: workDir, stateFile: filepath.Join(workDir, "playground.state.json")}
+	h := &harness{workDir: workDir, stateFile: filepath.Join(workDir, "playground.state.json")}
 	// Safety net: if a subtest fails before reaching the explicit "network down" step, still
 	// tear down the network we started -- otherwise a leaked `dpm sandbox` holds its port
-	// across test runs and makes the NEXT run's "network up" fail confusingly
+	// across test runs and makes the NEXT run's "network up" fail confusingly. Bound to the
+	// outer test's own t (the only one still in scope once every subtest has finished).
 	t.Cleanup(func() {
-		out, err := h.run("network", "down")
+		out, err := h.run(t, "network", "down")
 		if err != nil {
 			t.Logf("cleanup: network down failed (may be harmless if the network was never up): %v\n%s", err, out)
 		}
@@ -98,8 +100,17 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-func (h *harness) run(args ...string) (string, error) {
-	h.t.Helper()
+// run/mustRun/loadState all take the CALLER's *testing.T explicitly -- the current subtest's
+// own T, never harness.t (the outer TestPlaygroundE2E's T, retained only for TempDir/Cleanup
+// lifetime in newHarness above). require.* and t.Fatal both call FailNow on whatever *testing.T
+// they're given; calling FailNow on a PARENT test from a child subtest's goroutine aborts the
+// ENTIRE parent immediately ("subtest may have called FailNow on a parent test"), which used to
+// mean one subtest's transient failure silently skipped every later subtest, including
+// "network down" and the real-Amulet subtest. Passing each subtest's own t scopes a failure to
+// that subtest alone, exactly like the harness's own t.Cleanup safety net already does for
+// teardown.
+func (h *harness) run(t *testing.T, args ...string) (string, error) {
+	t.Helper()
 	// --verbose is always on so every step's sub-step narration (stderr, "[v] " prefix)
 	// lands in the combined output mustRun logs -- `go test -v` then shows the full story.
 	full := append([]string{
@@ -114,18 +125,18 @@ func (h *harness) run(args ...string) (string, error) {
 	return string(out), err
 }
 
-func (h *harness) mustRun(args ...string) string {
-	h.t.Helper()
-	out, err := h.run(args...)
-	require.NoErrorf(h.t, err, "ntt-playground %v failed:\n%s", args, out)
-	h.t.Logf("ntt-playground %v:\n%s", args, out)
+func (h *harness) mustRun(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := h.run(t, args...)
+	require.NoErrorf(t, err, "ntt-playground %v failed:\n%s", args, out)
+	t.Logf("ntt-playground %v:\n%s", args, out)
 	return out
 }
 
-func (h *harness) loadState() state.State {
-	h.t.Helper()
+func (h *harness) loadState(t *testing.T) state.State {
+	t.Helper()
 	s, err := state.Load(h.stateFile)
-	require.NoError(h.t, err)
+	require.NoError(t, err)
 	return *s
 }
 
@@ -188,7 +199,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		out, err := build.CombinedOutput()
 		require.NoErrorf(t, err, "dpm build --all failed:\n%s", out)
 
-		h.mustRun("network", "up")
+		h.mustRun(t, "network", "up")
 	})
 
 	var guardianKeyHex string
@@ -197,14 +208,14 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.NoError(t, err)
 		guardianKeyHex = hex.EncodeToString(crypto.FromECDSA(priv))
 
-		out := h.mustRun("init", "--guardian-key", guardianKeyHex)
+		out := h.mustRun(t, "init", "--guardian-key", guardianKeyHex)
 
 		// Stable verbose markers only (messages may evolve): a party allocation and the
 		// genesis script invocation must both have been narrated.
 		require.Contains(t, out, "[v] allocated party")
 		require.Contains(t, out, "[v] script Playground.Init:initPlayground")
 
-		s := h.loadState()
+		s := h.loadState(t)
 		require.Equal(t, guardianKeyHex, s.Guardian.PrivateKeyHex)
 		require.NotEmpty(t, s.Operator)
 		require.NotEmpty(t, s.GuardianGovernance)
@@ -212,12 +223,12 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	t.Run("deploy burn-mint", func(t *testing.T) {
-		out := h.mustRun("deploy", "--config", testdataPath("deploy-burnmint.json"))
+		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-burnmint.json"))
 
 		// Stable verbose marker: the config's pre-set peer must have been narrated.
 		require.Contains(t, out, "[v] set peer chain=2")
 
-		s := h.loadState()
+		s := h.loadState(t)
 		d, ok := s.Deployment("burnmint")
 		require.True(t, ok)
 		require.NotEmpty(t, d.ManagerAddress)
@@ -228,23 +239,23 @@ func TestPlaygroundE2E(t *testing.T) {
 
 	var inboundVaaHex, inboundPubKeyHex string
 	t.Run("inbound transfer mints to the recipient", func(t *testing.T) {
-		out := h.mustRun("guardian", "sign-transfer",
+		out := h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "1000000", "--source-chain", "2")
 		inboundVaaHex = extractField(t, out, "vaa")
 		inboundPubKeyHex = extractField(t, out, "pubkey")
 		require.NotEmpty(t, inboundVaaHex)
 
-		out = h.mustRun("receive", "--deployment", "burnmint",
+		out = h.mustRun(t, "receive", "--deployment", "burnmint",
 			"--vaa", inboundVaaHex, "--recipient", "Alice", "--pubkey", inboundPubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 		require.Contains(t, out, "amount=1000000")
 
-		out = h.mustRun("balance", "--party", "Alice", "--deployment", "burnmint")
+		out = h.mustRun(t, "balance", "--party", "Alice", "--deployment", "burnmint")
 		require.Contains(t, out, "mockHoldingTotal=1000000")
 	})
 
 	t.Run("replay is rejected", func(t *testing.T) {
-		out, err := h.run("receive", "--deployment", "burnmint",
+		out, err := h.run(t, "receive", "--deployment", "burnmint",
 			"--vaa", inboundVaaHex, "--recipient", "Alice", "--pubkey", inboundPubKeyHex)
 		require.Error(t, err, "relaying the same VAA twice must be rejected by the replay trie")
 		// Pin the gate: Wormhole.Core.Replay's ConsumeDigest membership check
@@ -261,7 +272,7 @@ func TestPlaygroundE2E(t *testing.T) {
 	t.Run("adversarial VAAs are rejected on-ledger", func(t *testing.T) {
 		// Fresh VAA (auto-incremented sequence, so it can't collide with the inbound-mint
 		// subtest's already-consumed one): a valid inbound transfer to Alice.
-		out := h.mustRun("guardian", "sign-transfer",
+		out := h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "10000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
 		pubKeyHex := extractField(t, out, "pubkey")
@@ -273,7 +284,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// Any partial effect (e.g. the nested VerifyAndConsumeVAA's replay-trie write) rolls
 		// back with the aborted transaction, so this does not burn the VAA for step 5's control
 		// receive.
-		out, err := h.run("receive", "--deployment", "burnmint",
+		out, err := h.run(t, "receive", "--deployment", "burnmint",
 			"--vaa", vaaHex, "--recipient", "Eve", "--pubkey", pubKeyHex)
 		require.Error(t, err, "receiving with a recipient that doesn't match the VAA's bound recipientAddress must be rejected")
 		require.Contains(t, out, "recipient does not match VAA recipientAddress")
@@ -285,7 +296,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.NoError(t, err)
 		tampered := append([]byte(nil), vaaBytes...)
 		tampered[len(tampered)-1] ^= 0xFF
-		out, err = h.run("receive", "--deployment", "burnmint",
+		out, err = h.run(t, "receive", "--deployment", "burnmint",
 			"--vaa", hex.EncodeToString(tampered), "--recipient", "Alice", "--pubkey", pubKeyHex)
 		require.Error(t, err, "a tampered VAA payload must fail signature verification")
 		require.Contains(t, out, "invalid signature for guardian index 0")
@@ -297,12 +308,12 @@ func TestPlaygroundE2E(t *testing.T) {
 		fakeKey, err := crypto.GenerateKey()
 		require.NoError(t, err)
 		fakePubKeyHex := hex.EncodeToString(crypto.FromECDSAPub(&fakeKey.PublicKey))
-		out, err = h.run("guardian", "verify-vaa", "--vaa", vaaHex, "--pubkey", fakePubKeyHex)
+		out, err = h.run(t, "guardian", "verify-vaa", "--vaa", vaaHex, "--pubkey", fakePubKeyHex)
 		require.Error(t, err, "an untrusted pubkey hint that doesn't hash to the stored guardian address must not verify")
 		require.Contains(t, out, "public key does not match guardian address")
 
 		// 4. No peer configured: chain 7 was never configured as a burnmint peer.
-		out, err = h.run("transfer", "--deployment", "burnmint",
+		out, err = h.run(t, "transfer", "--deployment", "burnmint",
 			"--user", "Bob", "--chain", "7",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
 			"--amount", "1", "--sign")
@@ -312,14 +323,14 @@ func TestPlaygroundE2E(t *testing.T) {
 		// 5. Control: the untampered step-1 VAA, correctly received by Alice, must still
 		// succeed -- proving the four negatives above failed for their stated reasons, not
 		// because the VAA (or the deployment) was globally broken.
-		out = h.mustRun("receive", "--deployment", "burnmint",
+		out = h.mustRun(t, "receive", "--deployment", "burnmint",
 			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 		require.Contains(t, out, "amount=10000")
 	})
 
 	t.Run("outbound transfer recomputes the message and signs it", func(t *testing.T) {
-		out := h.mustRun("transfer", "--deployment", "burnmint",
+		out := h.mustRun(t, "transfer", "--deployment", "burnmint",
 			"--user", "Bob", "--chain", "2",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
 			"--amount", "500000", "--sign")
@@ -328,7 +339,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.True(t, strings.HasPrefix(payloadHex, "9945ff10"), "recomputed payload should carry the transceiver prefix")
 		require.Equal(t, "72", extractField(t, out, "emitterChain"), "outbound messages are published from Canton (chain 72)")
 
-		s := h.loadState()
+		s := h.loadState(t)
 		d, ok := s.Deployment("burnmint")
 		require.True(t, ok)
 		peer, ok := d.Peer(2)
@@ -353,7 +364,7 @@ func TestPlaygroundE2E(t *testing.T) {
 			"recovered address %s should match the guardian's own address %s", recoveredAddr.Hex(), s.Guardian.Address)
 
 		// On-ledger verification via Playground.Query:verifyVaa (CoreState.ParseAndVerifyVAA).
-		out = h.mustRun("guardian", "verify-vaa", "--deployment", "burnmint", "--vaa", outboundVaaHex)
+		out = h.mustRun(t, "guardian", "verify-vaa", "--deployment", "burnmint", "--vaa", outboundVaaHex)
 		require.Contains(t, out, "emitterChain=72")
 		require.Contains(t, out, "guardianSetIndex=0")
 
@@ -362,7 +373,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// recompute-based, so this is the suite's only direct on-ledger check of it. Also
 		// cross-check the reported chain-2 peer against the state file's peer entry (set
 		// from testdata/deploy-burnmint.json at deploy time).
-		out = h.mustRun("observe", "--deployment", "burnmint")
+		out = h.mustRun(t, "observe", "--deployment", "burnmint")
 		var observed struct {
 			OutboundSequence int `json:"outboundSequence"`
 			Peers            []struct {
@@ -381,18 +392,18 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	t.Run("lock-unlock deployment: abbreviated receive + transfer", func(t *testing.T) {
-		out := h.mustRun("deploy", "--config", testdataPath("deploy-lockunlock.json"))
+		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-lockunlock.json"))
 
-		out = h.mustRun("guardian", "sign-transfer",
+		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "lockunlock", "--to-recipient", "Carol", "--amount", "250000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
 		pubKeyHex := extractField(t, out, "pubkey")
 
-		out = h.mustRun("receive", "--deployment", "lockunlock",
+		out = h.mustRun(t, "receive", "--deployment", "lockunlock",
 			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 
-		out = h.mustRun("transfer", "--deployment", "lockunlock",
+		out = h.mustRun(t, "transfer", "--deployment", "lockunlock",
 			"--user", "Dave", "--chain", "2",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
 			"--amount", "100000", "--sign")
@@ -405,10 +416,10 @@ func TestPlaygroundE2E(t *testing.T) {
 	// JSON boundary, and -- via step f -- the suite's only value-conservation assertion.
 	var cip56Total string
 	t.Run("cip56 burn-mint deployment: funded transfer round-trip", func(t *testing.T) {
-		out := h.mustRun("deploy", "--config", testdataPath("deploy-cip56-burnmint.json"))
+		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-burnmint.json"))
 		require.Contains(t, out, "[v] set peer chain=2")
 
-		s := h.loadState()
+		s := h.loadState(t)
 		d, ok := s.Deployment("cip56bm")
 		require.True(t, ok)
 		require.Equal(t, "cip56-burn-mint-mock", d.TokenKind, "the deployment must use the real CIP-56 burn/mint impl")
@@ -418,25 +429,25 @@ func TestPlaygroundE2E(t *testing.T) {
 		// three design invariants at once: (1) a fresh recipient can't be minted to without
 		// consent, (2) opting in makes the SAME VAA deliverable (the failed receive did not burn
 		// the digest -- decision 5's atomicity), (3) the recipient is passive at delivery time.
-		out = h.mustRun("guardian", "sign-transfer",
+		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "750000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
 		pubKeyHex := extractField(t, out, "pubkey")
 		require.NotEmpty(t, vaaHex)
 
 		// (1) No pre-approval yet: the on-ledger mint gate must reject the delivery cleanly.
-		out, err := h.run("receive", "--deployment", "cip56bm",
+		out, err := h.run(t, "receive", "--deployment", "cip56bm",
 			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
 		require.Error(t, err, "an owner-signed mint to a recipient with no deposit pre-approval must be rejected")
 		require.Contains(t, out, "deposit pre-approval required")
 
 		// (2) Frank opts in: creates his standing Cip56DepositPreapproval (dual-signed).
-		out = h.mustRun("preapprove", "--deployment", "cip56bm", "--user", "Frank")
+		out = h.mustRun(t, "preapprove", "--deployment", "cip56bm", "--user", "Frank")
 		require.Contains(t, out, "preapproved=true")
 
 		// (3) The SAME VAA now succeeds -- the earlier failure did not consume the digest, and
 		// Frank is not an actor of this submission (executor-only receive).
-		out = h.mustRun("receive", "--deployment", "cip56bm",
+		out = h.mustRun(t, "receive", "--deployment", "cip56bm",
 			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 		require.Contains(t, out, "amount=750000")
@@ -444,20 +455,20 @@ func TestPlaygroundE2E(t *testing.T) {
 		// The mock (admin-signed) kind needs no pre-approval: `preapprove` there is a ledger-
 		// surfaced no-op (PreApproveDeposit returns None), proving the CLI reads kind policy
 		// from the ledger rather than gating client-side.
-		out = h.mustRun("preapprove", "--deployment", "burnmint", "--user", "Alice")
+		out = h.mustRun(t, "preapprove", "--deployment", "burnmint", "--user", "Alice")
 		require.Contains(t, out, "preapproved=false")
 		require.Contains(t, out, "no pre-approval required")
 
 		// The mint landed: 750000 wire units at 8 decimals = 0.0075 CIP-56 units, rendered by
 		// dpm script as a full-scale Daml Numeric 10 literal (pinned to the observed form).
-		out = h.mustRun("balance", "--party", "Frank", "--deployment", "cip56bm")
+		out = h.mustRun(t, "balance", "--party", "Frank", "--deployment", "cip56bm")
 		cip56Total = extractField(t, out, "cip56HoldingTotal")
 		require.Equal(t, "0.0075000000", cip56Total, "the receive should have minted 750000 units (0.0075 at 8 decimals)")
 
 		// Outbound: the CLI auto-funds Frank a fresh 0.003 holding, then LockOrBurn burns it
 		// in full (exact cover, no change). Frank's receive-minted 0.0075 is a separate
 		// holding and is untouched.
-		out = h.mustRun("transfer", "--deployment", "cip56bm",
+		out = h.mustRun(t, "transfer", "--deployment", "cip56bm",
 			"--user", "Frank", "--chain", "2",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
 			"--amount", "300000", "--sign")
@@ -467,60 +478,60 @@ func TestPlaygroundE2E(t *testing.T) {
 
 		// Value conservation: the auto-funded 0.003 was burned in full, so Frank's balance is
 		// exactly what the inbound mint left -- unchanged from the pre-transfer reading.
-		out = h.mustRun("balance", "--party", "Frank", "--deployment", "cip56bm")
+		out = h.mustRun(t, "balance", "--party", "Frank", "--deployment", "cip56bm")
 		require.Equal(t, cip56Total, extractField(t, out, "cip56HoldingTotal"),
 			"the funded holding must have been consumed in full by the burn, leaving the minted balance intact")
 
 		// Revoke arc: the owner tears down its consent, a fresh VAA then fails on the mint gate
 		// (re-pinning that a failed delivery does not burn the digest), and re-approving makes
 		// that same fresh VAA deliverable again -- the full opt-in/opt-out lifecycle end to end.
-		out = h.mustRun("preapprove", "revoke", "--deployment", "cip56bm", "--user", "Frank")
+		out = h.mustRun(t, "preapprove", "revoke", "--deployment", "cip56bm", "--user", "Frank")
 		require.Contains(t, out, "revoked=true")
 
-		out = h.mustRun("guardian", "sign-transfer",
+		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "250000", "--source-chain", "2")
 		freshVaaHex := extractField(t, out, "vaa")
 		freshPubKeyHex := extractField(t, out, "pubkey")
 		require.NotEmpty(t, freshVaaHex)
 
-		out, err = h.run("receive", "--deployment", "cip56bm",
+		out, err = h.run(t, "receive", "--deployment", "cip56bm",
 			"--vaa", freshVaaHex, "--recipient", "Frank", "--pubkey", freshPubKeyHex)
 		require.Error(t, err, "after revoke, an owner-signed mint must be rejected again")
 		require.Contains(t, out, "deposit pre-approval required")
 
-		out = h.mustRun("preapprove", "--deployment", "cip56bm", "--user", "Frank")
+		out = h.mustRun(t, "preapprove", "--deployment", "cip56bm", "--user", "Frank")
 		require.Contains(t, out, "preapproved=true")
 
-		out = h.mustRun("receive", "--deployment", "cip56bm",
+		out = h.mustRun(t, "receive", "--deployment", "cip56bm",
 			"--vaa", freshVaaHex, "--recipient", "Frank", "--pubkey", freshPubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 		require.Contains(t, out, "amount=250000")
 	})
 
 	t.Run("party list shows allocated parties", func(t *testing.T) {
-		s := h.loadState()
+		s := h.loadState(t)
 		require.NotEmpty(t, s.Users["Alice"], "Alice should have been allocated by the inbound transfer step")
 
-		out := h.mustRun("party", "list")
+		out := h.mustRun(t, "party", "list")
 		require.Contains(t, out, s.Operator, "operator's party id should be listed")
 		require.Contains(t, out, s.Users["Alice"], "Alice's party id should be listed")
 
-		out = h.mustRun("party", "allocate", "--hint", "Eve")
+		out = h.mustRun(t, "party", "allocate", "--hint", "Eve")
 		eve := extractField(t, out, "party")
 		require.NotEmpty(t, eve)
-		s = h.loadState()
+		s = h.loadState(t)
 		require.Equal(t, eve, s.Users["Eve"], "allocate should persist the hint in state")
 
-		out = h.mustRun("party", "allocate", "--hint", "Eve")
+		out = h.mustRun(t, "party", "allocate", "--hint", "Eve")
 		require.Equal(t, eve, extractField(t, out, "party"), "re-allocating the same hint must return the same party")
 	})
 
 	var lastOracleSeq string
 	t.Run("standalone emitter publishes a verifiable message", func(t *testing.T) {
-		out := h.mustRun("emitter", "register", "--name", "oracle", "--owner", "oracle-admin")
+		out := h.mustRun(t, "emitter", "register", "--name", "oracle", "--owner", "oracle-admin")
 		require.NotEmpty(t, extractField(t, out, "emitterAddress"))
 
-		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
+		out = h.mustRun(t, "publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
 		require.Equal(t, "72", extractField(t, out, "emitterChain"), "standalone messages are published from Canton (chain 72)")
 		require.Equal(t, "deadbeef", extractField(t, out, "payload"), "the choice-result payload should round-trip verbatim")
 		firstSeq, err := strconv.Atoi(extractField(t, out, "sequence"))
@@ -529,10 +540,10 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.NotEmpty(t, vaaHex)
 
 		// On-ledger verification of the CLI-signed VAA (operator as default verifier).
-		out = h.mustRun("guardian", "verify-vaa", "--vaa", vaaHex)
+		out = h.mustRun(t, "guardian", "verify-vaa", "--vaa", vaaHex)
 		require.Contains(t, out, "emitterChain=72")
 
-		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
+		out = h.mustRun(t, "publish", "--emitter", "oracle", "--payload", "deadbeef", "--sign")
 		lastOracleSeq = extractField(t, out, "sequence")
 		require.Equal(t, strconv.Itoa(firstSeq+1), lastOracleSeq,
 			"the emitter's sequence must increment on every publish")
@@ -543,11 +554,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		// publish in this suite rides the fee-0 path, so Wormhole.Core.Fees:chargeFee's
 		// fee-due branch is otherwise unreachable. Reuses the "oracle" emitter registered
 		// above.
-		out := h.mustRun("guardian", "sign-governance", "set-fee", "--fee", "1000", "--apply")
+		out := h.mustRun(t, "guardian", "sign-governance", "set-fee", "--fee", "1000", "--apply")
 		require.Contains(t, out, "applied: messageFee=1000")
 
 		// On-ledger read-back through an independent query path (Playground.Query:listContracts).
-		out = h.mustRun("contracts", "list")
+		out = h.mustRun(t, "contracts", "list")
 		var listed struct {
 			MessageFee int `json:"messageFee"`
 		}
@@ -556,25 +567,25 @@ func TestPlaygroundE2E(t *testing.T) {
 
 		// The CLI's publish path always sends feeAllocation=None (the fee-0 assumption noted
 		// in publish.go); with the fee raised, chargeFee's None branch must abort the choice.
-		out, err := h.run("publish", "--emitter", "oracle", "--payload", "cafe", "--sign")
+		out, err := h.run(t, "publish", "--emitter", "oracle", "--payload", "cafe", "--sign")
 		require.Error(t, err, "a fee-0 publish must be rejected once the message fee is raised above zero")
 		require.Contains(t, out, "fee required: attach a fee allocation")
 
 		// Restoring fee 0 also implicitly exercises the CLI's governance-sequence
 		// auto-increment: a reused sequence would be rejected by the consumed-governance
 		// replay guard.
-		out = h.mustRun("guardian", "sign-governance", "set-fee", "--fee", "0", "--apply")
+		out = h.mustRun(t, "guardian", "sign-governance", "set-fee", "--fee", "0", "--apply")
 		require.Contains(t, out, "applied: messageFee=0")
 
 		lastSeq, err := strconv.Atoi(lastOracleSeq)
 		require.NoError(t, err)
-		out = h.mustRun("publish", "--emitter", "oracle", "--payload", "cafe", "--sign")
+		out = h.mustRun(t, "publish", "--emitter", "oracle", "--payload", "cafe", "--sign")
 		require.Equal(t, strconv.Itoa(lastSeq+1), extractField(t, out, "sequence"),
 			"the rejected fee-raised publish must not have consumed a sequence number")
 	})
 
 	t.Run("contracts list reflects deployments", func(t *testing.T) {
-		out := h.mustRun("contracts", "list")
+		out := h.mustRun(t, "contracts", "list")
 		var listed struct {
 			GuardianSetIndex int `json:"guardianSetIndex"`
 			Emitters         []struct {
@@ -607,8 +618,8 @@ func TestPlaygroundE2E(t *testing.T) {
 
 		// 1. deploy: onboards the custody wallet user, creates its TransferPreapproval, and
 		// deploys the real Cip56CustodyToken hook against the real DSO's Amulet instrument.
-		h.mustRun("deploy", "--config", testdataPath("deploy-cip56-custody.json"))
-		s := h.loadState()
+		h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-custody.json"))
+		s := h.loadState(t)
 		d, ok := s.Deployment("cc-custody")
 		require.True(t, ok)
 		require.Equal(t, "cip56-custody", d.TokenKind)
@@ -617,13 +628,13 @@ func TestPlaygroundE2E(t *testing.T) {
 
 		// 2. record the pre-transfer ledger end so the stream read below only sees this
 		// transfer's own publish.
-		out := h.mustRun("observe", "stream", "--deployment", "cc-custody", "--print-offset")
+		out := h.mustRun(t, "observe", "stream", "--deployment", "cc-custody", "--print-offset")
 		fromOffset := extractField(t, out, "ledgerEnd")
 
 		// 3. transfer 1 CC (raw 10^10 at 10 decimals). The CLI auto-onboards + taps the
 		// sender, fetches the real transfer-factory + choice context from the scan-proxy, and
 		// runs Playground.Ops:transferOut with the real seam.
-		out = h.mustRun("transfer", "--deployment", "cc-custody",
+		out = h.mustRun(t, "transfer", "--deployment", "cc-custody",
 			"--user", "cc-sender", "--chain", "2",
 			"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "10000000000", "--sign")
 		payloadHex := extractField(t, out, "payload")
@@ -633,7 +644,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// 4. the observation: read the real update stream as guardian-watcher (readAs
 		// guardianObserver only -- never the operator/admin) and prove the streamed message
 		// matches the recomputed one bit-for-bit.
-		out = h.mustRun("observe", "stream", "--deployment", "cc-custody",
+		out = h.mustRun(t, "observe", "stream", "--deployment", "cc-custody",
 			"--from-offset", fromOffset, "--count", "1", "--timeout", "3m")
 		var observed []struct {
 			EmitterChain     int    `json:"emitterChain"`
@@ -665,7 +676,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Equal(t, uint16(2), ntt.RecipientChain)
 
 		// 5. custody actually holds the locked 1.0 CC.
-		out = h.mustRun("balance", "--party", "cc-custody-custody", "--deployment", "cc-custody")
+		out = h.mustRun(t, "balance", "--party", "cc-custody-custody", "--deployment", "cc-custody")
 		require.Equal(t, "1.0000000000", extractField(t, out, "amuletHoldingTotal"))
 	})
 
@@ -676,7 +687,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		if playgroundProfile == "localnet" {
 			t.Skip("this pins the sandbox gating error; localnet exercises the real path above")
 		}
-		out, err := h.run("deploy", "--config", testdataPath("deploy-cip56-custody.json"), "--name", "cc-custody-rejected")
+		out, err := h.run(t, "deploy", "--config", testdataPath("deploy-cip56-custody.json"), "--name", "cc-custody-rejected")
 		require.Error(t, err, "cip56-custody must be rejected on a profile without real Amulet")
 		require.Contains(t, out, "cip56-custody requires a profile with real Amulet (localnet)")
 	})
@@ -685,11 +696,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		if playgroundProfile != "localnet" {
 			t.Skip("network status service listing is localnet-only (the sandbox path is a pid check)")
 		}
-		out := h.mustRun("network", "status")
+		out := h.mustRun(t, "network", "status")
 		require.Contains(t, out, "localnet: service=", "status should report the running compose services")
 	})
 
 	t.Run("network down", func(t *testing.T) {
-		h.mustRun("network", "down")
+		h.mustRun(t, "network", "down")
 	})
 }
