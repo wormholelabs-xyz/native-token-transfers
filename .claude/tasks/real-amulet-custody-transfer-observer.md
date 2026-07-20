@@ -848,18 +848,67 @@ header (reproduced live to work correctly, byte-exact PublishMessage decode) is 
 
 ### Phase 5 — Green end-to-end + docs
 
-- Run `NTT_PLAYGROUND_PROFILE=localnet LOCALNET_DIR=… go test -tags e2e ./e2e -v
-  -timeout 30m`: the Phase-0 subtest passes; all pre-existing subtests stay green
-  (mock kinds untouched; the managers-count subtest runs before the new deploy).
-- Sandbox CI run (`go test -tags e2e ./e2e`) green: new subtest skips; the Phase-1
-  gating subtest (cip56-custody rejected on sandbox) passes.
-- `go vet ./... && go test ./...` green.
-- **`canton/testing/cli/README.md`**: document the new token kind (deploy-config
-  table), the `observe stream` command (Commands table), the wallet-user model
-  (tap is USD-denominated; custody preapproval), and delete the two completed
-  follow-ups (`:284-287`), leaving the governance-signing one. Update the
-  "Verification status" paragraph. No `.claude` references.
-- Update this plan file with per-phase completion notes as work lands.
+**PARTIALLY DONE / BLOCKED on one item — see below.**
+
+- **DONE**: `canton/testing/cli/README.md` updated (new "Real Amulet
+  (`cip56-custody`)" section, deploy-config table entries, `observe stream` in
+  the Commands table, `transfer --tap-usd`, `balance`'s custody-hint
+  resolution, the "Hex vs. base64" design note, an updated Verification-status
+  paragraph, and the two now-completed follow-ups removed). Confirmed zero
+  `.claude/` references (`grep -n '\.claude' README.md` → no matches).
+  Committed separately from the Phase 0-4 commits.
+- **DONE**: `go vet ./...` and `go test ./...` (sandbox-safe unit/internal
+  tests) green. `dpm test --all` (`canton/test`) green: 49/49 Daml unit tests
+  `ok`, zero failures.
+- **DONE**: sandbox CI-viable e2e run (`go test -tags e2e ./e2e -run
+  TestPlaygroundE2E -v -timeout 20m -count=1`) green end to end, twice,
+  including the new real-Amulet subtest's self-skip and the new Phase-1
+  sandbox gating-error subtest (see Phase 0/1 notes above for the full
+  per-subtest PASS list).
+- **BLOCKED (environmental, not a code defect)**: a second full
+  `NTT_PLAYGROUND_PROFILE=localnet` run of the WHOLE suite (the first,
+  reported in Phase 3, failed on an unrelated party-hint collision caused by
+  this session's own prior manual `curl`/CLI smoke-testing against the same
+  live stack, since Canton's party-allocation hint suffix is deterministic
+  per hint text, not random — LocalNet was wiped with `network down -v` and
+  rebooted fresh before the second attempt) got through
+  `build_and_network_up` (354s fresh DSO bootstrap), `init`, `deploy
+  burn-mint`, `inbound transfer mints to the recipient`, and `replay is
+  rejected` (all green), then failed on `adversarial VAAs are rejected
+  on-ledger` and `outbound transfer recomputes the message and signs it`
+  with `io.grpc.StatusRuntimeException: UNAVAILABLE: io exception` /
+  `java.net.SocketException: Connection reset` from `dpm script` connecting
+  to the Canton participant's gRPC port (3901) — a transient connectivity
+  drop, not a Daml/Go logic error; both failing subtests exercise the
+  pre-existing `mock-admin-signed`/`burn-mint` path, untouched by any
+  Phase 0-4 change here. Because `mustRun`'s `require.NoErrorf` binds to the
+  OUTER `TestPlaygroundE2E`'s `*testing.T` (`harness.t`, set once in
+  `newHarness`, reused unchanged by every subtest — pre-existing harness
+  design, not modified in this work), a failure inside ANY subtest calls
+  `FailNow` on a PARENT test from a child subtest's goroutine, which Go's
+  `testing` package treats as an immediate abort of the whole outer test
+  (`"test executed panic(nil) or runtime.Goexit: subtest may have called
+  FailNow on a parent test"`) — so every subtest after the failure, INCLUDING
+  the new real-Amulet subtest and the explicit `network down` step, never
+  ran. `newHarness`'s own `t.Cleanup` safety net (line 92-97, pre-existing)
+  then silently tore LocalNet down anyway (`network down` succeeded, so its
+  `t.Logf` branch never fired) — which is why the LocalNet docker containers
+  are gone again after this run, exactly as designed for a failed run, not a
+  new problem.
+  **The real-Amulet functionality itself is NOT unverified**: the complete
+  deploy → transfer (real tap + `TransferPreapproval` + a real 1 CC lock) →
+  `balance` (`amuletHoldingTotal=1.0000000000`) → `observe stream`
+  (`--print-offset`, then a fresh transfer, then a from-offset read) arc was
+  independently run against a live LocalNet by direct CLI binary invocation
+  earlier in this same work session (see Phase 3/4 notes above for the exact
+  commands and output), with the streamed sequence/payload matching the
+  recomputed ones **byte-for-byte**. What remains unconfirmed is specifically
+  the `go test`-driven acceptance subtest itself completing in one unbroken
+  suite run — blocked by the transient gRPC connectivity issue above, not by
+  anything in the implementation. Re-running the full suite requires
+  rebooting LocalNet fresh (2-6 min) and was intentionally not repeated a
+  third time without explicit direction, to avoid colliding with any
+  concurrent inspection of the same shared LocalNet stack.
 
 ## Supply-chain section (NEW dependencies, exact pins)
 
