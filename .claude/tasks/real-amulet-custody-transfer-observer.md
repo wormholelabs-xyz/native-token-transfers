@@ -547,6 +547,16 @@ error, which is CI-viable coverage of `AmuletAvailable`).
 
 ### Phase 2 — Go Amulet client (`internal/amulet`, new package)
 
+**DONE** (implemented before Phase 1's Go wiring, since `deploy.go`'s custody onboarding
+depends on this client): `canton/testing/cli/internal/amulet/amulet.go` implements `Client`
+with `OnboardWalletUser`, `Tap` (retries the round-lag failure mode), `CreateTransferPreapproval`
+(409-as-success, 429 retry), and `GetTransferFactory` (fails fast on non-"direct"
+`transferKind`, captures `choiceContextData` as verbatim `json.RawMessage`). All seven
+`internal/amulet/amulet_test.go` cases pass. Also added `network.CreateLedgerUser` to
+`internal/network/localnet.go` (`POST /v2/users`, `CanReadAs`/`CanActAs` rights, 409/already-
+exists idempotent) — its `CanReadAs` wrapper shape was smoke-tested live against the booted
+LocalNet (200 OK), confirming V4 in full (see "Verify-live results" above).
+
 **File: `canton/testing/cli/internal/amulet/amulet.go`** — thin authenticated
 `net/http` client; base URL = the validator (`http://localhost:3903`, override via
 existing `ValidatorBaseURL` conventions); tokens minted per-user via
@@ -786,8 +796,10 @@ pinned by `IMAGE_TAG=0.6.12` per the README's LocalNet instructions.
 - **V4 (`POST /v2/users` shape)**: confirmed live via `GET /v2/users` (list) — user objects carry
   `id`, `primaryParty`, `isDeactivated`, `metadata`, `identityProviderId`,
   `primaryPartyAuthentication`. Rights-grant wrapper convention (`{"kind": {"CanActAs":
-  {"value": {...}}}}`) was already proven in `localnet.go`; `CanReadAs` was not separately
-  re-verified live (same wrapper family, low risk) — flagged for a quick smoke test in Phase 2.
+  {"value": {...}}}}`) was already proven in `localnet.go`. **Now also confirmed for
+  `CanReadAs`** in Phase 2: `POST /v2/users` with body `{"user": {"id": "...", "isDeactivated":
+  false}, "rights": [{"kind": {"CanReadAs": {"value": {"party": "<party>"}}}}]}` returned HTTP
+  200 against the live 0.6.12 stack — the wrapper convention is uniform across right kinds.
 - **V7/V8 (update-stream shapes)**: confirmed live via the `POST /v2/updates` blocking-list
   fallback (chose this over a raw WS probe since no `wscat`/`websocat`/python `websockets` was
   available in this sandbox; the blocking POST uses the identical request/response shapes per

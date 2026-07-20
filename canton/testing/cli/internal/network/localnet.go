@@ -377,6 +377,65 @@ func (m *LocalNetManager) UploadDAR(ctx context.Context, jsonLedgerAPIBaseURL, d
 	return nil
 }
 
+// CreateLedgerUser creates userID on the JSON Ledger API v2 (POST /v2/users) with the given
+// readAs/actAs party rights, treating an already-exists response as success (idempotent, the
+// same convention as GrantLedgerAPIUserRights). Used for the observer's "guardian-watcher"
+// reader user, which must carry ONLY CanReadAs(guardianObserver) -- proving the stream
+// observation works with observer rights alone, never actAs.
+func CreateLedgerUser(ctx context.Context, jsonLedgerAPIBaseURL, adminToken, userID string, readAsParties, actAsParties []string) error {
+	// Same `{"kind": {"CanReadAs": {"value": {"party": ...}}}}` wrapper convention already
+	// proven for CanActAs (verified against 0.6.12; see GrantLedgerAPIUserRights).
+	type right struct {
+		Kind map[string]map[string]map[string]string `json:"kind"`
+	}
+	var rights []right
+	for _, party := range readAsParties {
+		rights = append(rights, right{Kind: map[string]map[string]map[string]string{
+			"CanReadAs": {"value": {"party": party}},
+		}})
+	}
+	for _, party := range actAsParties {
+		rights = append(rights, right{Kind: map[string]map[string]map[string]string{
+			"CanActAs": {"value": {"party": party}},
+		}})
+	}
+	payload, err := json.Marshal(map[string]any{
+		"user": map[string]any{
+			"id":            userID,
+			"isDeactivated": false,
+		},
+		"rights": rights,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, jsonLedgerAPIBaseURL+"/v2/users", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("network: create ledger user %s request: %w", userID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return nil // already exists -- idempotent, matching GrantLedgerAPIUserRights' convention
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		// The user creation itself may already-exist under a different error shape (some
+		// participants report ALREADY_EXISTS as 400/409 with a message rather than a bare
+		// 409); treat that case as success too, and everything else as a real failure.
+		if resp.StatusCode == http.StatusBadRequest && bytes.Contains(bytes.ToLower(body), []byte("already exists")) {
+			return nil
+		}
+		return fmt.Errorf("network: create ledger user %s: HTTP %d: %s", userID, resp.StatusCode, body)
+	}
+	return nil
+}
+
 // GrantLedgerAPIUserRights grants actAs/readAs rights on parties to LocalNetAdminUser, for
 // the case (flagged as an open risk in the playground plan) where daml-script running as
 // ledger-api-user does not automatically get actAs for parties it allocates itself.
