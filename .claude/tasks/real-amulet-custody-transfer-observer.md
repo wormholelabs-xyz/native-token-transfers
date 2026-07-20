@@ -642,6 +642,29 @@ Deliverable: unit tests from Phase 0 (`internal/amulet/amulet_test.go`) green;
 
 ### Phase 3 — Wire real inputs through the transfer path
 
+**DONE**: added `canton/test/daml/Playground/Amulet.daml` (`DisclosedContractIn`, `AmuletSeam`,
+`toDisclosure` -- route 2 from findings §9, the record-update trick on a `queryDisclosure`-
+obtained seed, confirmed compiling with no constructor import needed (V6 resolved: route 2
+works); `amuletHoldings`). `toDisclosure` needed `{-# LANGUAGE AllowAmbiguousTypes #-}` plus a
+`HasTemplateTypeRep t` constraint on its local `mkDisclosure` helper -- `templateTypeRep`'s
+type variable appears only in the constraint, not the return type, which GHC's ambiguity
+check rejects by default. `Playground.Ops.transferOut` now branches on `Cip56Custody`:
+`registryCid = Some seam.factoryCid`, `extraArgs` built from `seam.choiceContext`, disclosures
+= token disclosure `::` mapped registry disclosures, `inputHoldingCids` resolved in-script via
+`amuletHoldings` when Go sends none. `transfer.go` branches on `TokenKind == "cip56-custody"`:
+onboards the sender as a wallet user (cached in `state.Users` like every other hint), taps it
+(new `--tap-usd` flag, default "100", "0" skips), resolves the real transfer-factory per call,
+and sends the seam through untouched (`ChoiceContext` as `json.RawMessage`). `receive.go` hard-
+errors for this kind ("receiving network out of scope for real Amulet (cip56-custody)").
+
+Verified: `dpm build --all` and `dpm test --all` green (V3 also confirmed by inspecting the
+vendored `splice-api-token-metadata-v1` DAR's source -- `ChoiceContext = {values : TextMap
+AnyValue}` with `AV_ContractId`/etc. variant tags -- which matches the live-captured
+`choiceContextData` shape exactly, byte for byte); `go build ./...`/`go vet` clean except the
+still-expected `internal/observer` red state; the FULL sandbox e2e suite re-run fresh
+(`-count=1`, forcing an actual CLI rebuild+rerun rather than Go's test cache) still passes
+end to end (594s), confirming the `transfer.go` rewrite didn't disturb any mock-kind path.
+
 1. **`canton/test/daml/Playground/Amulet.daml`** (new module, script-side seam):
    ```daml
    data DisclosedContractIn = DisclosedContractIn with

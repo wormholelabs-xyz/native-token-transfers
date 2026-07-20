@@ -42,6 +42,9 @@ func newReceiveCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("receive: unknown deployment %q", deployment)
 			}
+			if d.TokenKind == "cip56-custody" {
+				return fmt.Errorf("receive: receiving network out of scope for real Amulet (cip56-custody)")
+			}
 			recipientParty, err := resolveParty(cmd, a, s, recipientHint)
 			if err != nil {
 				return err

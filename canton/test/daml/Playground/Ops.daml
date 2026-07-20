@@ -21,7 +21,7 @@ import DA.Action (when)
 import DA.Map qualified as Map
 import DA.Optional (fromSome, fromSomeNote, isSome)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (AnyContractId)
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..), emptyMetadata)
 import Wormhole.Core.Bytes (leftPadTo, intToBytesN, normalizeHex)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
@@ -35,6 +35,7 @@ import Test.TestCore qualified as TestCore
 import Test.TestNtt (mkHolding, MockBurnMintFactory, MockTransferFactory)
 import Test.TestReplay (coveringDisclosure)
 
+import Playground.Amulet (AmuletSeam, toDisclosure, amuletHoldings)
 import Playground.MockToken (MockToken)
 import Playground.Types
 
@@ -125,6 +126,10 @@ data TransferOutInput = TransferOutInput with
     nonce            : Int
     consistencyLevel : Int
     inputHoldingCids : [ContractId Holding]
+    -- "cip56-custody" only: the real Amulet registry's transfer-factory cid, choice context,
+    -- and disclosures, resolved off-ledger by Go (internal/amulet.GetTransferFactory) for
+    -- THIS call -- never cached across calls. 'None' for every other kind.
+    amulet           : Optional AmuletSeam
   deriving (Eq, Show)
 
 -- | Bit-exact recomputation of the published VAA payload -- what `guardian sign-vaa` needs.
@@ -231,11 +236,34 @@ transferOut input = do
 
   dMgr <- fromSome <$> queryDisclosure input.admin mgrCid
   dEmitter <- fromSome <$> queryDisclosure input.admin emCid
-  (_, registryCid, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
+  (_, registryCidDefault, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
   dCs <- fromSome <$> queryDisclosure input.operator csCid
 
+  -- Cip56Custody drives the real Amulet registry: the factory cid/choice-context/disclosures
+  -- arrive fresh per call in input.amulet (resolveTokenSeam deliberately left registryCid =
+  -- None for this kind -- there is no mock factory to fall back to). Every other kind is
+  -- byte-identical to before this feature landed.
+  (registryCid, extraArgs, inputHoldingCids, dSeam) <- case parseTokenKind input.tokenKind of
+    Cip56Custody -> do
+      let seam = fromSomeNote "playground: cip56-custody transferOut needs a resolved input.amulet seam" input.amulet
+      dTok <- case dTokens of
+        [d] -> pure d
+        _   -> abort "playground: cip56-custody token disclosure resolution invariant violated"
+      [(_, tok)] <- query @Cip56CustodyToken input.admin
+      resolvedHoldingCids <-
+        if input.inputHoldingCids == []
+          then amuletHoldings input.user tok.instrumentId.admin
+          else pure input.inputHoldingCids
+      let extraArgs = ExtraArgs with context = seam.choiceContext, meta = emptyMetadata
+          dDisclosed = map (toDisclosure dTok) seam.disclosed
+      pure (Some (coerceContractId seam.factoryCid), extraArgs, resolvedHoldingCids, dTok :: dDisclosed)
+    _ -> do
+      when (isSome input.amulet) $
+        abort "playground: the amulet seam must be None for a non-cip56-custody deployment"
+      pure (registryCidDefault, emptyExtraArgs, input.inputHoldingCids, dTokens)
+
   let baseOpts = actAs input.user <> disclose dMgr <> disclose dEmitter <> disclose dCs
-  _ <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
+  _ <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dSeam) do
     exerciseCmd mgrCid Transfer with
       user = input.user
       transceiverEmitterCid = emCid
@@ -246,10 +274,10 @@ transferOut input = do
       rawAmount = input.rawAmount
       nonce = input.nonce
       consistencyLevel = input.consistencyLevel
-      inputHoldingCids = input.inputHoldingCids
+      inputHoldingCids
       feeAllocation = None  -- playground MVP assumes fee 0; see Playground.Init's note
       registryCid
-      extraArgs = emptyExtraArgs
+      extraArgs
 
   pure TransferOutOutput with
     outboundSequence = mgr.outboundSequence
