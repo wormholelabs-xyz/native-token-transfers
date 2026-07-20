@@ -30,6 +30,7 @@ import (
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
 var (
@@ -160,6 +161,16 @@ func stripVerbose(output string) string {
 
 func testdataPath(name string) string {
 	return filepath.Join("..", "testdata", name)
+}
+
+// mustHex decodes a hex string, failing the test on error -- used for the observer's streamed
+// payload, which the CLI already validated on the way in (only the test's own decode needs a
+// clean failure message).
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	require.NoError(t, err)
+	return b
 }
 
 func TestPlaygroundE2E(t *testing.T) {
@@ -580,6 +591,94 @@ func TestPlaygroundE2E(t *testing.T) {
 		// "cip56 burn-mint deployment". Bump these counts whenever a deploy subtest is added.
 		require.Len(t, listed.Managers, 3, "burnmint + lockunlock + cip56bm managers")
 		require.GreaterOrEqual(t, len(listed.Emitters), 4, "three transceiver emitters + the standalone one")
+	})
+
+	// The only subtest driving REAL Canton Coin (Amulet) rather than a local mock registry:
+	// a CIP-56 custody (lock/unlock) deployment, a real tap + TransferPreapproval, an outbound
+	// lock of 1 CC, and the guardian observation proved off a real Ledger API v2 update stream
+	// (not the recompute path) -- see the playground plan's "Goal" section. LocalNet-only:
+	// the sandbox has no DSO/Amulet, so `deploy` gates on prof.AmuletAvailable and this subtest
+	// self-skips rather than duplicating that gate's own coverage (see the Phase-1 sandbox
+	// subtest below).
+	t.Run("real amulet cip56-custody: transfer 1 CC observed on stream", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("real Amulet requires the localnet profile")
+		}
+
+		// 1. deploy: onboards the custody wallet user, creates its TransferPreapproval, and
+		// deploys the real Cip56CustodyToken hook against the real DSO's Amulet instrument.
+		h.mustRun("deploy", "--config", testdataPath("deploy-cip56-custody.json"))
+		s := h.loadState()
+		d, ok := s.Deployment("cc-custody")
+		require.True(t, ok)
+		require.Equal(t, "cip56-custody", d.TokenKind)
+		require.NotEmpty(t, d.CustodyParty)
+		require.Contains(t, d.InstrumentAdmin, "DSO::", "instrument admin must be the real DSO party")
+
+		// 2. record the pre-transfer ledger end so the stream read below only sees this
+		// transfer's own publish.
+		out := h.mustRun("observe", "stream", "--deployment", "cc-custody", "--print-offset")
+		fromOffset := extractField(t, out, "ledgerEnd")
+
+		// 3. transfer 1 CC (raw 10^10 at 10 decimals). The CLI auto-onboards + taps the
+		// sender, fetches the real transfer-factory + choice context from the scan-proxy, and
+		// runs Playground.Ops:transferOut with the real seam.
+		out = h.mustRun("transfer", "--deployment", "cc-custody",
+			"--user", "cc-sender", "--chain", "2",
+			"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "10000000000", "--sign")
+		payloadHex := extractField(t, out, "payload")
+		seq := extractField(t, out, "sequence")
+		require.True(t, strings.HasPrefix(payloadHex, "9945ff10"))
+
+		// 4. the observation: read the real update stream as guardian-watcher (readAs
+		// guardianObserver only -- never the operator/admin) and prove the streamed message
+		// matches the recomputed one bit-for-bit.
+		out = h.mustRun("observe", "stream", "--deployment", "cc-custody",
+			"--from-offset", fromOffset, "--count", "1", "--timeout", "3m")
+		var observed []struct {
+			EmitterChain     int    `json:"emitterChain"`
+			EmitterAddress   string `json:"emitterAddress"`
+			Sequence         int    `json:"sequence"`
+			Nonce            int    `json:"nonce"`
+			ConsistencyLevel int    `json:"consistencyLevel"`
+			Payload          string `json:"payload"`
+			EffectiveAt      string `json:"effectiveAt"`
+			UpdateID         string `json:"updateId"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stripVerbose(out)), &observed))
+		require.Len(t, observed, 1)
+		m := observed[0]
+		require.Equal(t, 72, m.EmitterChain)
+		require.Equal(t, d.TransceiverAddress, m.EmitterAddress,
+			"derived emitter address must be this deployment's transceiver")
+		require.Equal(t, seq, strconv.Itoa(m.Sequence), "streamed sequence == recomputed sequence")
+		require.Equal(t, payloadHex, m.Payload, "streamed payload == recomputed payload (bit-exact)")
+		require.NotEmpty(t, m.EffectiveAt)
+
+		// Decode the NTT payload off the STREAMED bytes (not the recomputed ones): 1 CC at
+		// 8 wire decimals.
+		wtm := wire.DecodeWormholeTransceiverMessage(mustHex(t, m.Payload))
+		mm := wire.DecodeNttManagerMessage(wtm.ManagerPayload)
+		ntt := wire.DecodeNativeTokenTransfer(mm.Payload)
+		require.Equal(t, uint64(100_000_000), ntt.Amount, "1 CC at 8 wire decimals")
+		require.Equal(t, uint8(8), ntt.Decimals)
+		require.Equal(t, uint16(2), ntt.RecipientChain)
+
+		// 5. custody actually holds the locked 1.0 CC.
+		out = h.mustRun("balance", "--party", "cc-custody-custody", "--deployment", "cc-custody")
+		require.Equal(t, "1.0000000000", extractField(t, out, "amuletHoldingTotal"))
+	})
+
+	// Sandbox-viable coverage of the AmuletAvailable gate: the sandbox has no DSO/Amulet, so
+	// `deploy` must reject a cip56-custody deployment with a clear error rather than trying (and
+	// failing confusingly) to resolve a DSO party that doesn't exist there.
+	t.Run("cip56-custody is rejected without real Amulet", func(t *testing.T) {
+		if playgroundProfile == "localnet" {
+			t.Skip("this pins the sandbox gating error; localnet exercises the real path above")
+		}
+		out, err := h.run("deploy", "--config", testdataPath("deploy-cip56-custody.json"), "--name", "cc-custody-rejected")
+		require.Error(t, err, "cip56-custody must be rejected on a profile without real Amulet")
+		require.Contains(t, out, "cip56-custody requires a profile with real Amulet (localnet)")
 	})
 
 	t.Run("network status reports running localnet services", func(t *testing.T) {
