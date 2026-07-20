@@ -1,13 +1,27 @@
--- | CIP-56 implementations of the 'NttToken' seam, against the vendored
+-- | CIP-56 implementations of the 'NttToken' interface, against the vendored
 -- token-standard DARs. Work for Canton Coin (Amulet) or any conforming token.
 --
---   * lock/unlock ('Cip56CustodyToken') via 'TransferFactory_Transfer': lock =
---     sender -> custody; unlock = custody -> recipient.
---   * burn/mint ('Cip56BurnMintToken') via 'BurnMintFactory_BurnMint': burn =
---     spend @inputHoldingCids@, no outputs; mint = one output to recipient.
+-- Two Cip56 token types, one for each side of the 'MintOrUnlock' choice:
 --
--- Each hook stores the registry factory cid and the token 'InstrumentId';
--- per-transfer holdings + context arrive through the seam, disclosed off-ledger.
+--   * 'Cip56CustodyToken' is the unlock side. The token's holding already
+--     exists on Canton, sitting with a custody party between send and
+--     receive; unlocking moves it from custody to the recipient via
+--     'TransferFactory_Transfer' (lock = sender -> custody, unlock =
+--     custody -> recipient).
+--   * 'Cip56BurnMintToken' is the mint side. The token's holding does not
+--     exist yet; minting creates it directly for the recipient via
+--     'BurnMintFactory_BurnMint' (burn = spend @inputHoldingCids@, no
+--     outputs; mint = one output to the recipient).
+--
+-- A "factory" is a contract, implemented by the token's registry (e.g.
+-- Amulet), that carries out the registry's own transfer/burn/mint logic --
+-- NTT calls into it rather than moving holdings directly.
+--
+-- Each hook stores the token 'InstrumentId', but not the registry's factory
+-- cid: that's resolved off-ledger and disclosed fresh on every call
+-- (@registryCid@), the same as every other CIP-56 handle here, so a registry
+-- can replace its factory contract without stranding any already-created
+-- token or pre-approval.
 --
 -- Amounts: NTT carries an integer 'TrimmedAmount'; CIP-56 holdings are 'Decimal'
 -- ('trimmedToDecimal' converts).
@@ -15,7 +29,7 @@ module Wormhole.Ntt.TokenCip56 where
 
 import DA.Time (days, addRelTime)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.MetadataV1 (AnyContractId, emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1
   ( Transfer (..), TransferFactory, TransferFactory_Transfer (..)
   , TransferInstructionResult (..), TransferInstructionResult_Output (..)
@@ -27,6 +41,14 @@ import Wormhole.Ntt.Token
 trimmedToDecimal : TrimmedAmount -> Decimal
 trimmedToDecimal ta = intToDecimal ta.amount / intToDecimal (tenPow ta.decimals)
 
+-- | Require the caller-supplied, freshly-resolved registry cid, coercing it to
+-- the concrete factory type this call needs. Aborts with @msg@ if the caller
+-- didn't supply one -- there is no stored fallback to fall back to.
+requireRegistryCid : Text -> Optional AnyContractId -> Update (ContractId t)
+requireRegistryCid msg = \case
+  Some c -> pure (coerceContractId c)
+  None -> abort msg
+
 ----------------------------------------------------------------------
 -- lock / unlock via the transfer factory
 ----------------------------------------------------------------------
@@ -37,7 +59,6 @@ template Cip56CustodyToken
     manager            : Party                        -- NTT operator that drives the seam
     custody            : Party                        -- holds locked funds between send/receive
     instrumentId       : InstrumentId
-    transferFactoryCid : ContractId TransferFactory   -- the registry's transfer factory
   where
     signatory admin
     observer manager
@@ -47,7 +68,9 @@ template Cip56CustodyToken
 
       -- Lock: sender -> custody. Must settle synchronously (Completed); a
       -- Pending/Failed result means the tokens never reached custody.
-      lockOrBurnImpl sender amount inputHoldingCids extraArgs = do
+      lockOrBurnImpl sender amount inputHoldingCids registryCid extraArgs = do
+        transferFactoryCid <- requireRegistryCid @TransferFactory
+          "ntt: registry transfer factory cid required to lock this token" registryCid
         now <- getTime
         res <- exercise transferFactoryCid TransferFactory_Transfer with
                expectedAdmin = instrumentId.admin
@@ -67,7 +90,17 @@ template Cip56CustodyToken
 
       -- Unlock: custody -> recipient, spending the custody holdings. Same
       -- synchronous-settle requirement as the lock path.
-      mintOrUnlockImpl recipient amount inputHoldingCids extraArgs = do
+      --
+      -- @_depositPreapprovalCid@ is ignored here. That field only applies to
+      -- the minting side (alice pre-approving NTT itself to mint tokens
+      -- directly to her balance). For the unlocking side, the holding
+      -- contract already exists on Canton, and alice's consent instead has
+      -- to be registered with the token's own registry -- e.g. Canton Coin's
+      -- transferPreapproval. Without it, the registry-level transfer fails
+      -- with an error message.
+      mintOrUnlockImpl recipient amount inputHoldingCids _depositPreapprovalCid registryCid extraArgs = do
+        transferFactoryCid <- requireRegistryCid @TransferFactory
+          "ntt: registry transfer factory cid required to unlock this token" registryCid
         now <- getTime
         res <- exercise transferFactoryCid TransferFactory_Transfer with
                expectedAdmin = instrumentId.admin
@@ -85,6 +118,12 @@ template Cip56CustodyToken
           TransferInstructionResult_Completed _ -> pure ()
           _ -> abort "ntt: transfer did not settle synchronously"
 
+      -- This is the unlock case, and there is no NTT-level pre-approval to
+      -- give here -- it always aborts. Alice must instead pre-approve with
+      -- the token's own registry (e.g. Amulet's transferPreapproval).
+      preApproveImpl _user =
+        abort "ntt: in order to unlock this token, a pre-approval is needed from the registry of the token contract. See transferPreapproval in the amulet implementation"
+
 ----------------------------------------------------------------------
 -- burn / mint via the burn-mint factory
 ----------------------------------------------------------------------
@@ -94,7 +133,6 @@ template Cip56BurnMintToken
     admin              : Party
     manager            : Party
     instrumentId       : InstrumentId
-    burnMintFactoryCid : ContractId BurnMintFactory
   where
     signatory admin
     observer manager
@@ -103,7 +141,9 @@ template Cip56BurnMintToken
       view = NttTokenView with admin, manager, mode = BurnMint
 
       -- Burn: spend the sender's holdings for exactly the wire amount, returning change.
-      lockOrBurnImpl sender amount inputHoldingCids extraArgs = do
+      lockOrBurnImpl sender amount inputHoldingCids registryCid extraArgs = do
+        burnMintFactoryCid <- requireRegistryCid @BurnMintFactory
+          "ntt: registry burn/mint factory cid required to burn this token" registryCid
         let target = trimmedToDecimal amount
         views <- forA inputHoldingCids \cid -> do
           hv <- view <$> fetch cid
@@ -130,18 +170,79 @@ template Cip56BurnMintToken
                extraActors = [sender]
         pure ()
 
-      -- Mint: one output to the recipient, no inputs.
-      mintOrUnlockImpl recipient amount _inputHoldingCids extraArgs = do
+      -- In the minting case, alice must give approval for token holdings to
+      -- be minted to her. It takes depositPreapprovalCid as an input, which
+      -- alice created in order to allow minting of tokens directly to her
+      -- balance.
+      --
+      -- Alice's DepositPreapproval contract is signed by both alice and the
+      -- admin. Exercising its Deposit choice is therefore authorized by
+      -- both of them, and that authorization carries through to the
+      -- burn-mint factory call made inside Deposit -- which is how the
+      -- factory gets alice's signature for the owner-signed output, even
+      -- though this choice itself is manager-only. If alice never gave a
+      -- pre-approval, the mint aborts and the transfer can be re-relayed
+      -- once she opts in. @registryCid@ (the current burn/mint factory,
+      -- resolved off-ledger by the caller) is forwarded into 'Deposit' --
+      -- 'Cip56DepositPreapproval' doesn't store one of its own.
+      mintOrUnlockImpl recipient amount _inputHoldingCids depositPreapprovalCid registryCid extraArgs = do
+        cid <- case depositPreapprovalCid of
+          Some c -> pure c
+          None -> abort "ntt: deposit pre-approval required to mint an owner-signed holding"
+        vw <- view <$> fetch cid
+        assertMsg "ntt: deposit pre-approval is not for this recipient" (vw.owner == recipient)
+        assertMsg "ntt: deposit pre-approval is not for this registry" (vw.admin == admin)
+        assertMsg "ntt: deposit pre-approval is for a different instrument" (vw.instrumentId == instrumentId)
+        exercise cid Deposit with amount, inputHoldingCids = [], registryCid, extraArgs
+
+      -- Opt-in: create the caller's standing 'Cip56DepositPreapproval'. Both
+      -- required signatures are already in scope — the token contract is
+      -- admin-signed and the caller controls 'PreApproveDeposit' — so the
+      -- dual-signed contract is created in one step. Alice re-supplies the
+      -- current factory cid on every 'Deposit' instead, so there's nothing
+      -- to go stale here.
+      preApproveImpl user =
+        fmap (Some . toInterfaceContractId @DepositPreapproval) $
+          create Cip56DepositPreapproval with admin, owner = user, instrumentId
+
+----------------------------------------------------------------------
+-- burn / mint deposit pre-approval (recipient standing consent)
+----------------------------------------------------------------------
+
+-- | Alice's standing consent to receive burn/mint deposits of one instrument.
+-- Signed by both @admin@ and @owner@: exercising 'Deposit' puts both signatures
+-- in scope, enough to create alice's owner-signed holding while she is offline.
+-- Created in one step by 'Cip56BurnMintToken.PreApproveDeposit'; alice can
+-- 'Revoke' at any time. Carries no factory cid of its own -- the caller
+-- resolves the registry's current burn/mint factory off-ledger and passes it
+-- to 'Deposit' fresh on every call, so there's nothing here to go stale.
+template Cip56DepositPreapproval
+  with
+    admin        : Party
+    owner        : Party
+    instrumentId : InstrumentId
+  where
+    signatory admin, owner
+
+    interface instance DepositPreapproval for Cip56DepositPreapproval where
+      view = DepositPreapprovalView with admin, owner, instrumentId
+      -- The factory call needs two signatures: the admin's (as the burn/mint
+      -- controller) and the owner's (listed in @extraActors@, required for the
+      -- owner-signed output). Both are in scope here because both parties signed
+      -- this contract.
+      depositImpl amount _inputHoldingCids registryCid extraArgs = do
+        burnMintFactoryCid <- requireRegistryCid @BurnMintFactory
+          "ntt: registry burn/mint factory cid required to deposit to this pre-approval" registryCid
         _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
-               expectedAdmin = instrumentId.admin
-               outputs =
-                 [ BurnMintOutput with
-                     owner = recipient
-                     amount = trimmedToDecimal amount
-                     context = extraArgs.context
-                 ]
-               instrumentId
-               inputHoldingCids = []
-               extraArgs
-               extraActors = []
+          expectedAdmin = instrumentId.admin
+          outputs =
+            [ BurnMintOutput with
+                owner
+                amount = trimmedToDecimal amount
+                context = extraArgs.context
+            ]
+          instrumentId
+          inputHoldingCids = []
+          extraArgs
+          extraActors = [owner]
         pure ()

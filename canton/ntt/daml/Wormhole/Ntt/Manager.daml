@@ -9,12 +9,17 @@
 -- core 'Emitter' published through; the manager address ('nttManagerAddressFor')
 -- has @admin@ in its preimage, so a compromised operator can't forge an existing
 -- manager's address. No contract keys — contracts resolve by disclosed cid, and
--- both churn, so a sender re-resolves cids per send (README §4.7).
+-- both churn, so a sender re-resolves cids per send (README §4.7). The token's
+-- own registry factory cid follows the same rule: 'Transfer'/'Receive' take it
+-- as @registryCid@, resolved and disclosed fresh by the caller every time,
+-- rather than pinned inside the token contract.
 --
 -- Send ('Transfer') publishes an ordinary core message via 'PublishMessage'.
 -- Receive ('Receive') is permissionless: any executor relays an inbound VAA;
 -- replay protection is the core per-consumer trie (scoped to @admin@), guardian
--- root pinned via the disclosed 'CoreState'.
+-- root pinned via the disclosed 'CoreState'. Minting an owner-signed token needs
+-- the recipient's signature; it comes from a standing 'DepositPreapproval' the
+-- recipient created earlier, so the recipient can stay offline at relay time.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -24,7 +29,7 @@ import DA.Optional (fromSomeNote)
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding)
-import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs)
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State
@@ -177,6 +182,7 @@ template NttManager
         consistencyLevel      : Int
         inputHoldingCids      : [ContractId Holding]   -- CIP-56 holdings to lock/burn
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- messageFee; None at fee 0
+        registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
         extraArgs             : ExtraArgs              -- CIP-56 registry choice context
       controller user
       do
@@ -191,7 +197,7 @@ template NttManager
             && transceiver.emitterId == transceiverEmitterId)
         -- Lock (custody) or burn the user's tokens via the token seam.
         exercise tokenCid LockOrBurn with
-          sender = user, amount = trimmed, inputHoldingCids, extraArgs
+          sender = user, amount = trimmed, inputHoldingCids, registryCid, extraArgs
         let ntt = NativeTokenTransfer with
               decimals = trimmed.decimals
               amount = trimmed.amount
@@ -222,11 +228,6 @@ template NttManager
     -- @admin@, so each deployment claims a VAA once), enforces the peer, binds
     -- @recipient@ to the VAA's @recipientAddress@, and mints/unlocks.
     --
-    -- @executor@ carries no authority: the @nonconsuming@ body inherits
-    -- 'NttManager''s signatory authority (@operator, admin@), which the nested
-    -- choices need; the executor only supplies disclosures. (An owner-signed token
-    -- additionally needs a recipient pre-approval — off-ledger, README §11.)
-    --
     -- The disclosed 'CoreState' is authenticated by pinning its
     -- @guardianGovernance@ to the anchor @admin@ committed at deployment. Pinning
     -- the operator wouldn't stop a compromised operator forging a 'CoreState' under
@@ -241,14 +242,16 @@ template NttManager
     -- @pubKeys@ are untrusted hints (hint-free verification is a follow-up, §11).
     nonconsuming choice Receive : NativeTokenTransfer
       with
-        executor         : Party                 -- any relayer; carries no authority
-        coreStateCid     : ContractId CoreState   -- disclosed; pinned via guardianGovernance
-        replayNodeCid    : ContractId ReplayNode   -- covering trie node for vaa.hash
-        vaaBytes         : Bytes
-        pubKeys          : [(Int, Bytes)]
-        recipient        : Party
-        inputHoldingCids : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
-        extraArgs        : ExtraArgs             -- CIP-56 choice context
+        executor              : Party                 -- any relayer; carries no authority
+        coreStateCid          : ContractId CoreState   -- disclosed; pinned via guardianGovernance
+        replayNodeCid         : ContractId ReplayNode   -- covering trie node for vaa.hash
+        vaaBytes              : Bytes
+        pubKeys               : [(Int, Bytes)]
+        recipient             : Party
+        inputHoldingCids      : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
+        depositPreapprovalCid : Optional (ContractId DepositPreapproval)  -- recipient consent (owner-signed kinds)
+        registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
+        extraArgs             : ExtraArgs             -- CIP-56 choice context
       controller executor
       do
         -- Authenticate the guardian trust root before verifying against it.
@@ -276,5 +279,7 @@ template NttManager
           recipient
           amount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
           inputHoldingCids
+          depositPreapprovalCid
+          registryCid
           extraArgs
         pure ntt

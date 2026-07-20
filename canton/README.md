@@ -128,6 +128,24 @@ the peer, decodes, binds the recipient, and mints/unlocks.
 (`TestNtt:testNttReceiveByExecutorRecipientMismatchFails` drives a real receive by
 a third-party relayer, all the way to the recipient gate.)
 
+**Recipient deposit pre-approval — how an owner-signed mint gets the recipient's
+authority without the recipient online.** `Receive` is `executor`-only, yet an
+owner-signed holding (signatory `admin, owner`) cannot be created without the
+recipient's authority. A choice body runs with the exercised contract's
+signatories plus the choice's controllers — never the submission's `actAs` set and
+never across nested nodes outward — so the recipient's authority must originate
+from a contract it signed. A recipient therefore exercises `PreApproveDeposit` on
+the token once, creating a standing dual-signed `DepositPreapproval` (recipient +
+`admin`, the Canton Coin `TransferPreapproval` analog). `MintOrUnlock` runs the
+mint *inside* that pre-approval's `Deposit` choice, borrowing the recipient's
+signatory authority; the recipient need not be online at relay time. A missing (or
+revoked) pre-approval aborts the whole transaction atomically — the VAA digest is
+**not** consumed, so the same VAA is deliverable once the recipient opts in
+(`TestNtt:testMintOrUnlockPreapprovedSucceeds` /
+`testMintOrUnlockWithoutPreapprovalFails` / `testRevokedPreapprovalFails`). The
+`Deposit` choice is `nonconsuming` (one approval, unlimited deliveries); the
+recipient alone holds `Revoke` (no expiry, no admin-side cancel).
+
 **Guardian trust root — pinned to `guardianGovernance`, not the operator.** The
 disclosed `CoreState` is authenticated by checking its `guardianGovernance`
 against the anchor `admin` committed at deployment (via `GetGuardianGovernance`).
@@ -157,24 +175,40 @@ live two-step harness (`testing/go/ntt_recipient_match_integration_test.go`).
 `NttManager` never references a concrete token; it holds a `ContractId NttToken`
 and calls `LockOrBurn` / `MintOrUnlock`, isolating the token detail the way
 `VAA.daml` isolates crypto. `TokenMode` selects lock/unlock or burn/mint. The seam
-choices carry the CIP-0056 runtime handles (`[ContractId Holding]`, `ExtraArgs`)
-the manager threads through. Real implementations live in `ntt-cip56`
-(`Cip56CustodyToken`, `Cip56BurnMintToken`); a stdlib `MockToken` in the test
-package exercises the whole protocol under `dpm test`. **Submission caveat:** a
-production send/receive is app-orchestrated — the caller submits with the token
-holder's authority and the registry's disclosed contracts (`extraArgs`). For a
-third-party-executor receive against a real (owner-signed) token, the recipient
-additionally needs a CIP-0056 transfer pre-approval, or must submit itself; the
-mock (admin-signed holdings) proves the on-ledger path without it. `Cip56CustodyToken`'s
-lock/unlock also asserts the registry's `TransferFactory_Transfer` settled
-synchronously (`TransferInstructionResult_Completed`); a `Pending`/`Failed`
-result aborts instead of letting the seam continue with tokens not actually
-moved.
+choices carry the CIP-0056 runtime handles the manager threads through:
+`[ContractId Holding]`, `ExtraArgs`, and `registryCid` — the registry's own
+runtime dependency (e.g. its factory contract), resolved off-ledger and
+disclosed fresh by the caller on every `Transfer`/`Receive`, the same as
+`coreStateCid`/`transceiverEmitterCid`. No contract is ever pinned inside the
+token itself, so a registry can replace its factory without stranding any
+already-created token or `DepositPreapproval`. Real implementations live in
+`ntt-cip56` (`Cip56CustodyToken`, `Cip56BurnMintToken`); the test package
+(`Test.TestNtt`) exercises the whole protocol against them under `dpm test`.
+**Counterparty authority.**
+Each leg reaches the token holder's authority differently. Outbound `LockOrBurn`
+lists the live `sender` as a co-controller, so the sender's authority spends its
+own holdings. Inbound `MintOrUnlock` is `manager`-only; for an owner-signed token
+the recipient's authority arrives through its standing `DepositPreapproval`
+(see Receive above), so a relayer drives receipt with no live recipient
+co-signature. `Cip56CustodyToken`'s lock/unlock additionally asserts the registry's
+`TransferFactory_Transfer` settled synchronously
+(`TransferInstructionResult_Completed`); a `Pending`/`Failed` result aborts instead
+of letting the seam continue with tokens not actually moved. The custody kind takes
+no NTT-level pre-approval: `TransferFactory_Transfer` has no `extraActors` and its
+controller is `transfer.sender = custody`, so the recipient's authority cannot
+reach the receiver holding — a synchronous unlock to an arbitrary recipient depends
+on *registry-level* receiver pre-approval (e.g. Amulet's own `TransferPreapproval`)
+instead.
 
 ## Follow-ups
 
-- **Third-party-executor + owner-signed token**: needs a recipient pre-approval
-  (above) for a fully hands-off relay; the on-ledger permissionless path is done.
+- **Third-party-executor + owner-signed token**: done — the recipient's standing
+  `DepositPreapproval` (see Receive above) lends its authority to the mint, so a
+  relayer drives a fully hands-off receive with no live recipient co-signature.
+- **Never-opted-in recipients**: a pending+claim fallback (mint a pending
+  instruction the recipient later claims) would let delivery proceed before opt-in;
+  deliberately out of scope, but the seam's `Optional` pre-approval cid and
+  kind-specific impl bodies leave room for a pending arm later.
 - **Send contention / message id**: `Transfer` is consuming (per-manager
   `outboundSequence`), so concurrent sends serialize on the manager cid. Sourcing
   the NTT message id from the transceiver `Emitter`'s sequence would let `Transfer`
