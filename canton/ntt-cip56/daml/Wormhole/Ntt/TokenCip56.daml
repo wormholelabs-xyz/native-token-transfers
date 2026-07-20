@@ -91,15 +91,13 @@ template Cip56CustodyToken
       -- Unlock: custody -> recipient, spending the custody holdings. Same
       -- synchronous-settle requirement as the lock path.
       --
-      -- When the ntt is minting, alice must have given a pre-approval to
-      -- mint tokens to her holdings. We therefore pass in the
-      -- depositPreapproval Cid from alice in order to pass signatory checks.
-      --
-      -- Note that the "depositPreapproval" flow is only for tokens that are
-      -- on the minting side. For the unlocking side, the holding contract
-      -- already exists on Canton and the user will need to call e.g.
-      -- transferPreapproval (as is the case for Canton Coin). If there is no
-      -- transferPreapproval, it will fail with an error message.
+      -- @_depositPreapprovalCid@ is ignored here. That field only applies to
+      -- the minting side (alice pre-approving NTT itself to mint tokens
+      -- directly to her balance). For the unlocking side, the holding
+      -- contract already exists on Canton, and alice's consent instead has
+      -- to be registered with the token's own registry -- e.g. Canton Coin's
+      -- transferPreapproval. Without it, the registry-level transfer fails
+      -- with an error message.
       mintOrUnlockImpl recipient amount inputHoldingCids _depositPreapprovalCid registryCid extraArgs = do
         transferFactoryCid <- requireRegistryCid @TransferFactory
           "ntt: registry transfer factory cid required to unlock this token" registryCid
