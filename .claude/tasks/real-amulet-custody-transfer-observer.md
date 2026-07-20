@@ -466,6 +466,33 @@ Go unit tests written in this phase too (they fail/skip until their packages exi
 
 ### Phase 1 — Real `cip56-custody` token kind (Daml deploy path + gating)
 
+**DONE**: implemented all 11 items. Daml: `Cip56Custody` added to `Playground.Types.TokenKind`;
+`Playground.Deploy.DeployInput` gained `custody`/`instrumentAdmin : Optional Party` and a new
+branch creating a plain `Cip56CustodyToken` (no mock factory); `Playground.Ops.resolveTokenSeam`
+gained a `Cip56Custody` case (`registryCid = None`, token disclosure only) and `receiveVaa` now
+guards this kind with an explicit `abort` before any submit (needed `import DA.Action (when)` --
+`when` is not in Daml's default Prelude scope, a build error caught this immediately);
+`Playground.Query` gained `amuletBalance` (`queryInterface @Holding`, filtered by
+instrument/lock/owner). Go: `deploy.go` requires `prof.AmuletAvailable` and `mode ==
+"lock-unlock"` for this kind, resolves the DSO via `LocalNetManager.DSOPartyID`, and runs the
+full custody-onboarding sequence (onboard wallet user → grant actAs → tap the validator's own
+wallet → create TransferPreapproval) via the Phase-2 `internal/amulet` client BEFORE the deploy
+script call; `state.Deployment` gained `CustodyParty`/`CustodyUser`/`InstrumentAdmin`; `balance`
+(`query.go`) branches on `TokenKind == "cip56-custody"` to call `amuletBalance` instead of
+`balances`, and a new `resolvePartyOrCustody` helper resolves a deployment's own
+`"<name>-custody"` hint directly from state (it's a wallet user's real party, never one
+allocated by `allocatePlaygroundParty`) instead of trying to allocate a fresh one.
+`canton/dars/README.md` and `canton/test/daml.yaml` updated per the supply-chain section.
+
+Verified: `dpm build --all` green (only an expected "unused dependency" warning for
+`splice-amulet` until Phase 3's `Playground.Amulet` module uses it); `dpm test --all` in
+`canton/test` green (all pre-existing Daml unit tests pass unchanged); the FULL sandbox e2e
+suite (`go test -tags e2e ./e2e -run TestPlaygroundE2E -v -timeout 20m`, no `LOCALNET_DIR`)
+passes end to end (574s) — every pre-existing subtest green, the new real-Amulet subtest
+self-skips ("real Amulet requires the localnet profile"), and the new Phase-1 gating subtest
+("cip56-custody is rejected without real Amulet") passes. `go build ./...` and `go vet
+./internal/...` clean except the still-expected `internal/observer` red state (Phase 4).
+
 1. **`canton/dars/splice-amulet-0.1.22.dar`** (new, vendored binary): extract from
    `/Users/smurf/WormholeLabs/Canton/0.6.12_splice-node.tar.gz` path
    `splice-node/dars/splice-amulet-0.1.22.dar`. sha256

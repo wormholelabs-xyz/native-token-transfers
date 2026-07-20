@@ -31,20 +31,27 @@ showTokenMode LockUnlock = "lock-unlock"
 
 -- | Which 'Wormhole.Ntt.Token.NttToken' implementation a deployment uses. 'MockAdminSigned'
 -- (Playground.MockToken:MockToken) needs no funding step -- 'LockOrBurn' always succeeds regardless of
--- the caller's actual holdings, which is why it is the e2e test's default. The Cip56 kinds
+-- the caller's actual holdings, which is why it is the e2e test's default. The Cip56 mock kinds
 -- drive the real production 'Cip56BurnMintToken'/'Cip56CustodyToken' impls over local mock
 -- registries (Test.TestNtt:mkBurnMintToken/mkCustodyToken) and DO need a real
--- 'Playground.Ops:fundUser' holding before a transfer.
+-- 'Playground.Ops:fundUser' holding before a transfer. 'Cip56Custody' is the real-Amulet
+-- variant: the SAME 'Cip56CustodyToken' hook, but against the real DSO's Amulet registry on
+-- Splice LocalNet rather than a local mock 'Test.TestNtt:MockTransferFactory' -- its
+-- registry cid/choice-context/disclosures are resolved off-ledger per call (see
+-- Playground.Ops:transferOut's 'Cip56Custody' branch), never a fresh mock factory at deploy
+-- time.
 data TokenKind
   = MockAdminSigned
   | Cip56BurnMintMock
   | Cip56CustodyMock
+  | Cip56Custody
   deriving (Eq, Show)
 
 parseTokenKind : Text -> TokenKind
 parseTokenKind "mock-admin-signed" = MockAdminSigned
 parseTokenKind "cip56-burn-mint-mock" = Cip56BurnMintMock
 parseTokenKind "cip56-custody-mock" = Cip56CustodyMock
+parseTokenKind "cip56-custody" = Cip56Custody
 parseTokenKind other = error ("playground: unknown tokenKind " <> other)
 
 -- | The 'Splice.Api.Token.HoldingV1.InstrumentId' every playground deployment's Cip56 mock

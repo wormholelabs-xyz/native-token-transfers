@@ -44,9 +44,15 @@ type Profile struct {
 	// "ledger-api-user"); empty for the sandbox, which needs no explicit user id.
 	UserID string
 
-	// JSONAPIBaseURL is the JSON Ledger API v2 base (user-rights grants, DAR upload).
-	// Empty for the sandbox, which has no auth and needs neither.
+	// JSONAPIBaseURL is the JSON Ledger API v2 base (user-rights grants, DAR upload, and --
+	// for cip56-custody -- the observer's update stream). Empty for the sandbox, which has no
+	// auth and needs neither.
 	JSONAPIBaseURL string
+
+	// ValidatorBaseURL is the Splice validator API base (tap, TransferPreapproval, the
+	// transfer-instruction registry's scan-proxy, DSO party lookup) -- internal/amulet's
+	// target. Empty for the sandbox, which has no validator/DSO at all.
+	ValidatorBaseURL string
 }
 
 // SandboxPort returns the sandbox gRPC port: CANTON_SANDBOX_PORT if set (matching the
@@ -82,14 +88,15 @@ func Get(name Name) (Profile, error) {
 			_, _ = fmt.Sscanf(v, "%d", &port)
 		}
 		return Profile{
-			Name:            LocalNet,
-			LedgerHost:      host,
-			LedgerPort:      port,
-			RequiresAuth:    true,
-			UploadDAR:       true,
-			AmuletAvailable: true,
-			UserID:          "ledger-api-user",
-			JSONAPIBaseURL:  envOr("LOCALNET_JSON_API_URL", "http://localhost:3975"),
+			Name:             LocalNet,
+			LedgerHost:       host,
+			LedgerPort:       port,
+			RequiresAuth:     true,
+			UploadDAR:        true,
+			AmuletAvailable:  true,
+			UserID:           "ledger-api-user",
+			JSONAPIBaseURL:   envOr("LOCALNET_JSON_API_URL", "http://localhost:3975"),
+			ValidatorBaseURL: envOr("LOCALNET_VALIDATOR_URL", "http://localhost:3903"),
 		}, nil
 	default:
 		return Profile{}, fmt.Errorf("profile: unknown profile %q (want sandbox|localnet)", name)

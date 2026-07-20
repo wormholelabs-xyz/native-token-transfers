@@ -17,6 +17,7 @@
 module Playground.Ops where
 
 import Daml.Script hiding (AnyContractId)
+import DA.Action (when)
 import DA.Map qualified as Map
 import DA.Optional (fromSome, fromSomeNote, isSome)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
@@ -169,6 +170,16 @@ resolveTokenSeam admin kind = case kind of
     [(facCid, _)] <- query @MockTransferFactory admin
     dFactory <- fromSome <$> queryDisclosure admin facCid
     pure (toInterfaceContractId @NttToken cid, Some (coerceContractId facCid), [dTok, dFactory])
+  Cip56Custody -> do
+    -- Real Amulet: no on-ledger mock factory to resolve here. The real transfer-factory cid
+    -- is resolved off-ledger (the scan-proxy registry call) and disclosed fresh per call by
+    -- transferOut's Cip56Custody branch, not by this generic resolver -- only the token
+    -- hook's own disclosure is returned; registryCid is 'None' here on purpose (a caller that
+    -- doesn't override it, e.g. receiveVaa, aborts with a clear "not supported" message
+    -- rather than silently trying to lock/unlock against nothing).
+    [(cid, _)] <- query @Cip56CustodyToken admin
+    dTok <- fromSome <$> queryDisclosure admin cid
+    pure (toInterfaceContractId @NttToken cid, None, [dTok])
 
 resolveTokenDisclosure : Party -> TokenKind -> Script [Disclosure]
 resolveTokenDisclosure admin kind = do
@@ -372,6 +383,13 @@ data ReceiveVaaOutput = ReceiveVaaOutput with
 
 receiveVaa : ReceiveVaaInput -> Script ReceiveVaaOutput
 receiveVaa input = do
+  -- Receiving network is out of scope for the real-Amulet arc (the playground plan's Goal):
+  -- resolveTokenSeam's Cip56Custody case deliberately returns registryCid = None (no mock
+  -- factory exists to fall back to), so an unmet abort here explains why clearly instead of
+  -- surfacing a generic "registry transfer factory cid required" error from deep inside
+  -- Cip56CustodyToken.mintOrUnlockImpl.
+  when (parseTokenKind input.tokenKind == Cip56Custody) $
+    abort "playground: cip56-custody receive/unlock not supported by the playground"
   (mgrCid, _mgr) <- resolveManager input.operator input.managerId
   csCid <- resolveCoreState input.operator
   let digest = (parseVAA input.vaaBytes).hash
