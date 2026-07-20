@@ -162,6 +162,13 @@ func testdataPath(name string) string {
 	return filepath.Join("..", "testdata", name)
 }
 
+// addr32 builds a 32-byte (64 hex char) address literal ending in the given 2-hex-char
+// suffix, for constructing distinct peer manager/transceiver addresses in the tests below
+// without repeating long hex literals by hand.
+func addr32(suffix string) string {
+	return strings.Repeat("00", 31) + suffix
+}
+
 func TestPlaygroundE2E(t *testing.T) {
 	if playgroundProfile == "localnet" && os.Getenv("LOCALNET_DIR") == "" {
 		t.Skip("NTT_PLAYGROUND_PROFILE=localnet requires LOCALNET_DIR (see the CLI README's LocalNet section)")
@@ -580,6 +587,326 @@ func TestPlaygroundE2E(t *testing.T) {
 		// "cip56 burn-mint deployment". Bump these counts whenever a deploy subtest is added.
 		require.Len(t, listed.Managers, 3, "burnmint + lockunlock + cip56bm managers")
 		require.GreaterOrEqual(t, len(listed.Emitters), 4, "three transceiver emitters + the standalone one")
+	})
+
+	// The suite's remaining Receive gate coverage: Manager.daml's Receive choice
+	// (Manager.daml:243-285) has six on-ledger gates evaluated in this order -- (1)
+	// VerifyAndConsumeVAA (guardian-set lookup, then signature, then replay), (2) peer lookup
+	// by source chain, (3) emitter-is-peer-transceiver binding, (4) recipient-manager binding,
+	// (5) source-manager-is-peer-manager binding, (6) recipient binding. The existing
+	// "adversarial VAAs" subtest above already covers replay, signature tampering, the pubkey
+	// hint, and recipient binding (gate 6); the five subtests below cover the rest: the
+	// previously-unreached gates 2-5, the guardian-set lookup half of gate 1, the full ladder
+	// evaluated together, malformed-byte parsing, and the `peer set` command (previously
+	// unexercised).
+	t.Run("inbound receive enforces peer and manager binding", func(t *testing.T) {
+		// A1 -- gate 2: chain 7 has never been configured as a burnmint peer. sign-vaa lets us
+		// sign an arbitrary payload for a chain/emitter pair that sign-transfer could never
+		// reach (sign-transfer requires a configured peer client-side); the signature is
+		// genuinely valid, so this isolates the peer-lookup gate before the payload is ever
+		// decoded.
+		out := h.mustRun("guardian", "sign-vaa",
+			"--emitter-chain", "7", "--emitter", addr32("cc"), "--sequence", "9001", "--payload", "deadbeef")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+
+		out, err := h.run("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an inbound VAA from a chain with no configured peer must be rejected")
+		require.Contains(t, out, "no peer for source chain 7")
+
+		// A2 -- gate 3: chain 2 HAS a peer, but its transceiver is addr32("cc"), not
+		// addr32("ee") -- the emitter binding must reject a signer that isn't the configured
+		// transceiver even though the chain itself is known.
+		out = h.mustRun("guardian", "sign-vaa",
+			"--emitter-chain", "2", "--emitter", addr32("ee"), "--sequence", "9002", "--payload", "deadbeef")
+		vaaHex = extractField(t, out, "vaa")
+		pubKeyHex = extractField(t, out, "pubkey")
+
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an inbound VAA from an emitter that isn't the configured peer transceiver must be rejected")
+		require.Contains(t, out, "VAA emitter is not the configured peer transceiver")
+
+		// A3 -- gate 4, the realistic real-world gap: all three testdata deployments share the
+		// same chain-2 peer addresses (manager addr32("bb"), transceiver addr32("cc")), so a
+		// VAA signed for lockunlock also passes burnmint's gates 2 and 3 (shared transceiver).
+		// It must still be stopped -- by gate 4, since each deployment's own managerAddress is
+		// unique and checked before the source-manager check (gate 5).
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "lockunlock", "--to-recipient", "Alice", "--amount", "4321", "--source-chain", "2")
+		vaaHex = extractField(t, out, "vaa")
+		pubKeyHex = extractField(t, out, "pubkey")
+
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "relaying a VAA whose recipientManager belongs to a different deployment must be rejected")
+		require.Contains(t, out, "wrong recipient manager")
+
+		// Control: the same VAA, received on its true deployment, must still succeed -- proving
+		// the failed cross-deployment relay above burned nothing, and that replay digests are
+		// scoped per deployment admin (VerifyAndConsumeVAA's consumer = admin).
+		out = h.mustRun("receive", "--deployment", "lockunlock",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=4321")
+
+		// A4 -- gate 5 (also the first exercise of `peer set`): the only way to make a VAA's
+		// baked-in sourceManager diverge from the peer's ON-LEDGER managerAddress without
+		// touching the deployment's own manager is to change the peer after signing.
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "lockunlock", "--to-recipient", "Carol", "--amount", "5000", "--source-chain", "2")
+		vaaHex = extractField(t, out, "vaa")
+		pubKeyHex = extractField(t, out, "pubkey")
+
+		// Replace lockunlock's chain-2 peer manager (keep the transceiver at "cc" so gate 3
+		// still passes, and the VAA's own recipientManager is unaffected -- gate 4 still
+		// passes -- so gate 5 is the only thing left to fire).
+		out = h.mustRun("peer", "set", "--deployment", "lockunlock", "--chain", "2",
+			"--manager", addr32("dd"), "--transceiver", addr32("cc"))
+		require.Contains(t, out, "peer set: lockunlock chain=2")
+
+		out, err = h.run("receive", "--deployment", "lockunlock",
+			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
+		require.Error(t, err, "a VAA whose baked-in sourceManager no longer matches the peer's current on-ledger manager must be rejected")
+		require.Contains(t, out, "source manager is not the peer manager")
+
+		// Restore the peer to its original manager.
+		out = h.mustRun("peer", "set", "--deployment", "lockunlock", "--chain", "2",
+			"--manager", addr32("bb"), "--transceiver", addr32("cc"))
+		require.Contains(t, out, "peer set: lockunlock chain=2")
+
+		// Control: the SAME VAA now succeeds -- proving the restore took effect on-ledger and
+		// the failed step above consumed nothing.
+		out = h.mustRun("receive", "--deployment", "lockunlock",
+			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=5000")
+	})
+
+	t.Run("unknown guardian set index is rejected", func(t *testing.T) {
+		// B1: a VAA naming a never-installed guardian set. The guardianSetIndex lives at
+		// vaaBytes[1:5], outside the signed body (which starts at offset vaaHeaderLen=72), so
+		// rewriting it leaves the signature -- and the replay digest, computed over the body
+		// only -- untouched; the failure is genuinely the on-ledger set lookup, not a botched
+		// signature.
+		//
+		// (A real superseded-guardian-set test -- signing with an old key after a genuine
+		// guardian-set upgrade -- needs CLI surface this playground doesn't have yet
+		// (guardian.Sign hardcodes index 0, and there's no `sign-governance
+		// guardian-set-upgrade` subcommand); it's documented as follow-up B2 in the plan and
+		// deliberately not attempted here.)
+		out := h.mustRun("guardian", "sign-transfer",
+			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "111", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+
+		vaaBytes, err := hex.DecodeString(vaaHex)
+		require.NoError(t, err)
+		tampered := append([]byte(nil), vaaBytes...)
+		tampered[1], tampered[2], tampered[3], tampered[4] = 0, 0, 0, 42
+		tamperedHex := hex.EncodeToString(tampered)
+
+		out, err = h.run("guardian", "verify-vaa", "--vaa", tamperedHex, "--pubkey", pubKeyHex)
+		require.Error(t, err, "a VAA naming a never-installed guardian set index must fail on-ledger verification")
+		require.Contains(t, out, "unknown guardian set index")
+
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", tamperedHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "the same tampered guardian-set index must be rejected inside Receive's VerifyAndConsumeVAA")
+		require.Contains(t, out, "unknown guardian set index")
+
+		// Control: the pristine VAA (real index 0) still delivers -- proving the failures above
+		// were about the tampered index, not the VAA itself.
+		out = h.mustRun("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=111")
+	})
+
+	// One base VAA, then four receives walking down the gate ladder from most- to
+	// least-violated -- pinning the evaluation order documented above: no later gate can ever
+	// be reached while an earlier one is violated.
+	t.Run("layered gates fire outermost-first on multiply-invalid VAAs", func(t *testing.T) {
+		out := h.mustRun("guardian", "sign-transfer",
+			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "222", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		vaaBytes, err := hex.DecodeString(vaaHex)
+		require.NoError(t, err)
+
+		// C1: three violations at once -- unknown guardian set index, a tampered payload byte,
+		// and (were it ever reached) the wrong recipient. The set-index lookup is the first
+		// sub-check of gate 1, so it fires before the tamper is checked and long before
+		// recipient binding (gate 6).
+		c1 := append([]byte(nil), vaaBytes...)
+		c1[1], c1[2], c1[3], c1[4] = 0, 0, 0, 42
+		c1[len(c1)-1] ^= 0xFF
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", hex.EncodeToString(c1), "--recipient", "Eve", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an unknown guardian-set index must be rejected even when the payload and recipient are also wrong")
+		require.Contains(t, out, "unknown guardian set index")
+
+		// C2: two violations -- tampered payload only (valid set index), wrong recipient.
+		// Signature verification (gate 1) fires before recipient binding (gate 6).
+		c2 := append([]byte(nil), vaaBytes...)
+		c2[len(c2)-1] ^= 0xFF
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", hex.EncodeToString(c2), "--recipient", "Eve", "--pubkey", pubKeyHex)
+		require.Error(t, err, "a tampered payload must be rejected even when the recipient is also wrong")
+		require.Contains(t, out, "invalid signature for guardian index 0")
+
+		// C3: one violation -- pristine VAA, wrong recipient. The ladder's last rung: recipient
+		// binding (gate 6) is reached only once every earlier gate has passed. (Intentionally
+		// repeats the existing "adversarial VAAs" case 1, here as the ladder's base case.)
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Eve", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an otherwise-valid VAA received by the wrong recipient must be rejected")
+		require.Contains(t, out, "recipient does not match VAA recipientAddress")
+
+		// C4: cross-deployment (wrong recipient manager, gate 4) AND wrong recipient (gate 6) --
+		// manager binding must fire first.
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "lockunlock", "--to-recipient", "Alice", "--amount", "2220", "--source-chain", "2")
+		c4VaaHex := extractField(t, out, "vaa")
+		c4PubKeyHex := extractField(t, out, "pubkey")
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", c4VaaHex, "--recipient", "Eve", "--pubkey", c4PubKeyHex)
+		require.Error(t, err, "a cross-deployment relay to the wrong recipient must be rejected on manager binding, not recipient binding")
+		require.Contains(t, out, "wrong recipient manager")
+
+		// Control: the pristine group-C burnmint VAA, correctly received by Alice, proves none
+		// of the four layered negatives above consumed it.
+		out = h.mustRun("receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=222")
+	})
+
+	t.Run("malformed VAA byte strings are rejected", func(t *testing.T) {
+		// receiveVaa computes its replay digest via parseVAA in-script (Ops.daml:377) -- off-
+		// ledger, but through the identical core parsing function and abort strings as the
+		// on-ledger ParseAndVerifyVAA that `guardian verify-vaa` drives. Cobra accepts
+		// --vaa "" (the flag still counts as explicitly set), so there's no client-side gap
+		// masking these.
+		out := h.mustRun("guardian", "sign-transfer",
+			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "333", "--source-chain", "2")
+		freshVaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		freshBytes, err := hex.DecodeString(freshVaaHex)
+		require.NoError(t, err)
+
+		// D1: empty -- sliceBytes needs 2 hex chars for the version byte alone; there are 0.
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", "", "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an empty VAA must fail to parse")
+		require.Contains(t, out, "sliceBytes: out of range")
+
+		// D2: truncated -- 40 bytes (80 hex chars) covers version+guardianSetIndex+sigCount+
+		// guardianIndex but dies slicing the 65-byte signature. Checked both off-ledger
+		// (receive) and on-ledger (verify-vaa) since both drive the identical parse.
+		truncatedHex := freshVaaHex[:80]
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", truncatedHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "a truncated VAA must fail to parse")
+		require.Contains(t, out, "sliceBytes: out of range")
+
+		out, err = h.run("guardian", "verify-vaa", "--vaa", truncatedHex, "--pubkey", pubKeyHex)
+		require.Error(t, err, "the same truncated bytes must fail identically in the on-ledger parse")
+		require.Contains(t, out, "sliceBytes: out of range")
+
+		// D3: garbage hex -- passes the length check, but the hex decoder dies on a non-hex
+		// character.
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", "zzzz", "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "non-hex characters must be rejected")
+		require.Contains(t, out, "invalid hex digit: z")
+
+		// D4: a valid version byte (01) followed by too few bytes for the guardianSetIndex.
+		// parseVAA forces `version` first via its `if version /= 1` guard, and only once that
+		// passes does it read guardianSetIndex, whose 4-byte slice needs 10 hex chars but has
+		// just 3 here. (A bare "abc" would instead read version=0xab=171 and be rejected as an
+		// unsupported version before any slice is reached -- that earlier gate is D5's job; the
+		// leading "01" is what steers this case to the short-slice failure it means to test.)
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", "01abc", "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "a VAA too short for the guardianSetIndex field must fail to parse")
+		require.Contains(t, out, "sliceBytes: out of range")
+
+		// D5: wrong version byte -- vaaBytes[0] is outside the signed body, so the signature
+		// stays valid and parsing gets far enough to reject the version value itself.
+		d5 := append([]byte(nil), freshBytes...)
+		d5[0] = 0x02
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", hex.EncodeToString(d5), "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "an unsupported VAA version must be rejected")
+		require.Contains(t, out, "unsupported VAA version: 2")
+
+		// D6: over-length -- appended bytes join the body (everything after the signature block
+		// IS the body), so the recomputed digest changes under an unchanged signature: this is
+		// a genuinely on-ledger rejection, not a parse error.
+		out, err = h.run("receive", "--deployment", "burnmint",
+			"--vaa", freshVaaHex+"00000000", "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Error(t, err, "extra trailing bytes must invalidate the signature over the (now longer) body")
+		require.Contains(t, out, "invalid signature for guardian index 0")
+
+		// Control: the pristine VAA still delivers.
+		out = h.mustRun("receive", "--deployment", "burnmint",
+			"--vaa", freshVaaHex, "--recipient", "Alice", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=333")
+	})
+
+	t.Run("peer set configures a new chain end to end", func(t *testing.T) {
+		// A4 exercised replace-and-restore on an existing chain; this proves a net-new peer
+		// (chain 3, never configured before) is honored on both the signing side (the state
+		// file `sign-transfer` reads) and the receive side (the on-ledger Manager.Receive
+		// checks) -- additive, so no restore is needed afterward.
+		out := h.mustRun("peer", "set", "--deployment", "lockunlock", "--chain", "3",
+			"--manager", addr32("dd"), "--transceiver", addr32("ee"))
+		require.Contains(t, out, "peer set: lockunlock chain=3")
+
+		s := h.loadState()
+		d, ok := s.Deployment("lockunlock")
+		require.True(t, ok)
+		p, ok := d.Peer(3)
+		require.True(t, ok, "chain 3 should have been persisted to the state file")
+		require.Equal(t, addr32("dd"), p.ManagerAddress)
+		require.Equal(t, addr32("ee"), p.TransceiverAddress)
+
+		// On-ledger read-back via Playground.Query:listContracts' peer listing (observe).
+		out = h.mustRun("observe", "--deployment", "lockunlock")
+		var observed struct {
+			Peers []struct {
+				Chain              int    `json:"chain"`
+				ManagerAddress     string `json:"managerAddress"`
+				TransceiverAddress string `json:"transceiverAddress"`
+			} `json:"peers"`
+		}
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
+		require.Len(t, observed.Peers, 2, "lockunlock should now have chain 2 (from deploy) and chain 3 (just added)")
+		var foundChain3 bool
+		for _, peer := range observed.Peers {
+			if peer.Chain == 3 {
+				foundChain3 = true
+				require.Equal(t, addr32("dd"), peer.ManagerAddress)
+				require.Equal(t, addr32("ee"), peer.TransceiverAddress)
+			}
+		}
+		require.True(t, foundChain3, "the on-ledger peer listing should include the newly configured chain 3")
+
+		// sign-transfer now finds the chain-3 peer in state and bakes in dd/ee; receive on the
+		// same deployment then passes all of gates 2-5 against the CLI-configured peer -- a
+		// real mint, not just a state-file/on-ledger read-back match.
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "lockunlock", "--to-recipient", "Carol", "--amount", "777", "--source-chain", "3")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+
+		out = h.mustRun("receive", "--deployment", "lockunlock",
+			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=777")
 	})
 
 	t.Run("network status reports running localnet services", func(t *testing.T) {
