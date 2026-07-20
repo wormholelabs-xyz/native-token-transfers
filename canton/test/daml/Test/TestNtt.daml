@@ -284,6 +284,65 @@ testCustodyLockPendingRejected = do
     Left err -> abort ("expected a synchronous-settle failure, got: " <> show err)
     Right _ -> abort "pending lock succeeded: tokens were never moved to custody"
 
+-- | The custody kind takes no NTT-level deposit pre-approval: 'PreApproveDeposit'
+-- must abort unconditionally (registry-level receiver pre-approval is the real
+-- dependency; see Wormhole.Ntt.TokenCip56's module comment). Mirrors the
+-- FailureStatusError pattern of 'testCustodyLockPendingRejected'.
+testCustodyPreApproveRejected : Script ()
+testCustodyPreApproveRejected = do
+  admin <- allocateParty "CustodyPreAdmin"
+  manager <- allocateParty "CustodyPreManager"
+  custody <- allocateParty "CustodyPreCustody"
+  alice <- allocateParty "CustodyPreAlice"
+  let instrumentId = InstrumentId with admin, id = "LOCK"
+  tokenCid <- mkCustodyToken admin manager custody instrumentId False
+  -- The token hook is admin-signed with only the manager observing; disclose it
+  -- so alice (the opting-in user, PreApproveDeposit's controller) can exercise.
+  [(concreteCid, _)] <- query @Cip56CustodyToken admin
+  dTok <- fromSome <$> queryDisclosure admin concreteCid
+  res <- trySubmit (actAs alice <> disclose dTok) do
+    exerciseCmd tokenCid PreApproveDeposit with user = alice
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected the custody no-pre-approval abort, got: " <> fs.message)
+        ("custody kind takes no NTT deposit pre-approval" `isInfixOf` fs.message)
+    Left err -> abort ("expected the custody no-pre-approval abort, got: " <> show err)
+    Right _ -> abort "PreApproveDeposit succeeded on the custody kind"
+
+-- | The unlock leg (custody -> recipient) in Completed mode, independent of the
+-- e2e sandbox: 'custody = admin' (as in 'testCustodyLockCompletedSucceeds')
+-- because 'Cip56MockHolding' is owner-signed and 'MintOrUnlock' carries no
+-- recipient authority -- the receiver-owned holding create only reaches
+-- 'recipient's authority when recipient = custody = admin (see the module-level
+-- authority trace in the CIP-56 custody test-coverage plan). Submitted as
+-- 'actAs manager' alone (no admin actAs): admin's authority still reaches the
+-- nested 'TransferFactory_Transfer' as the token's signatory, but the
+-- admin-signed, unobserved 'MockTransferFactory' needs an explicit disclosure
+-- for manager to even see it.
+testCustodyUnlockCompletedSucceeds : Script ()
+testCustodyUnlockCompletedSucceeds = do
+  admin <- allocateParty "CustodyUnlockAdmin"
+  manager <- allocateParty "CustodyUnlockManager"
+  let custody = admin
+  let recipient = admin
+  let instrumentId = InstrumentId with admin, id = "LOCK"
+  tokenCid <- mkCustodyToken admin manager custody instrumentId False
+  [(facCid, _)] <- query @MockTransferFactory admin
+  dFactory <- fromSome <$> queryDisclosure admin facCid
+
+  _ <- submit (actAs manager <> disclose dFactory) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = []
+      depositPreapprovalCid = None
+      extraArgs = emptyExtraArgs
+
+  custodyHoldings <- cip56HoldingsOwnedBy admin custody
+  case custodyHoldings of
+    [(_, h)] -> h.amount === 0.01
+    _ -> abort ("expected exactly one custody holding after unlock, got: " <> show custodyHoldings)
+
 -- | Fix 1: a genuinely owner-signed sender ('alice', distinct from admin and
 -- manager) drives a real burn. 'Cip56MockHolding' is signatory @admin, owner@,
 -- so archiving alice's holding needs her live authority; that authority only

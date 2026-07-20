@@ -388,10 +388,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "emitterChain=72")
 	})
 
-	// The only subtest driving a real production NttToken impl end to end: the CIP-56
-	// burn/mint seam (Cip56BurnMintToken.MintOrUnlock on inbound, LockOrBurn on outbound)
-	// over the local mock registry, exercising the auto-funding path, the Daml Decimal
-	// JSON boundary, and -- via step f -- the suite's only value-conservation assertion.
+	// One of two subtests driving a real production NttToken impl end to end (the other is the
+	// CIP-56 custody deployment below): the CIP-56 burn/mint seam (Cip56BurnMintToken
+	// .MintOrUnlock on inbound, LockOrBurn on outbound) over the local mock registry,
+	// exercising the auto-funding path, the Daml Decimal JSON boundary, and -- via step f --
+	// the suite's only value-conservation assertion.
 	var cip56Total string
 	t.Run("cip56 burn-mint deployment: funded transfer round-trip", func(t *testing.T) {
 		out := h.mustRun("deploy", "--config", testdataPath("deploy-cip56-burnmint.json"))
@@ -486,6 +487,62 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "amount=250000")
 	})
 
+	// The custody kind's other real-impl leg: Cip56CustodyToken.LockOrBurn/MintOrUnlock over a
+	// local TransferFactory mock, exercising lock (sender -> custody) and unlock (custody ->
+	// recipient) end to end, plus the design's negative: the custody kind rejects NTT-level
+	// deposit pre-approval outright (TokenCip56.daml:103-104), unlike the burn-mint kind above.
+	t.Run("cip56 custody deployment: lock-unlock through the custody party", func(t *testing.T) {
+		out := h.mustRun("deploy", "--config", testdataPath("deploy-cip56-custody.json"))
+		require.Contains(t, out, "[v] set peer chain=2")
+
+		s := h.loadState()
+		d, ok := s.Deployment("cip56cu")
+		require.True(t, ok)
+		require.Equal(t, "cip56-custody-mock", d.TokenKind, "the deployment must use the real CIP-56 custody impl")
+
+		// The custody kind's preApproveImpl aborts unconditionally -- there is no NTT-level
+		// pre-approval to opt into; registry-level receiver pre-approval is the real (and here
+		// out of scope) dependency. See TokenCip56.daml's module comment.
+		out, err := h.run("preapprove", "--deployment", "cip56cu", "--user", "Grace")
+		require.Error(t, err, "the custody kind must reject NTT-level deposit pre-approval outright")
+		require.Contains(t, out, "custody kind takes no NTT deposit pre-approval")
+
+		// Inbound unlock: Cip56CustodyToken.mintOrUnlockImpl -> TransferFactory_Transfer with
+		// sender=custody, receiver=recipient. MintOrUnlock is manager-only and carries no
+		// recipient authority, so creating the receiver-owned (dual-signed) Cip56MockHolding
+		// only succeeds when recipient = custody = admin (Deploy.daml:49 sets custody = admin
+		// for this mock deployment). Target the deployment's own admin party accordingly.
+		out = h.mustRun("guardian", "sign-transfer",
+			"--deployment", "cip56cu", "--to-recipient", "cip56cu-admin", "--amount", "400000", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+
+		out = h.mustRun("receive", "--deployment", "cip56cu",
+			"--vaa", vaaHex, "--recipient", "cip56cu-admin", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=400000")
+
+		out = h.mustRun("balance", "--party", "cip56cu-admin", "--deployment", "cip56cu")
+		require.Equal(t, "0.0040000000", extractField(t, out, "cip56HoldingTotal"),
+			"the receive should have unlocked 400000 units (0.004 at 8 decimals) to the custody/admin party")
+
+		// Outbound lock: a distinct user (Heidi) demonstrates genuine holding movement into the
+		// custody party. The CLI auto-funds 0.003 (transfer.go, non-mock kinds), and
+		// lockOrBurnImpl requires the transfer to settle synchronously (Completed mode here),
+		// landing the funded holding on custody(=admin) on top of the unlocked 0.004.
+		out = h.mustRun("transfer", "--deployment", "cip56cu",
+			"--user", "Heidi", "--chain", "2",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "300000", "--sign")
+		require.Equal(t, "72", extractField(t, out, "emitterChain"), "outbound messages are published from Canton (chain 72)")
+		require.True(t, strings.HasPrefix(extractField(t, out, "payload"), "9945ff10"),
+			"recomputed payload should carry the transceiver prefix")
+
+		out = h.mustRun("balance", "--party", "cip56cu-admin", "--deployment", "cip56cu")
+		require.Equal(t, "0.0070000000", extractField(t, out, "cip56HoldingTotal"),
+			"the locked 0.003 must have moved into the custody party on top of the 0.004 unlocked")
+	})
+
 	t.Run("party list shows allocated parties", func(t *testing.T) {
 		s := h.loadState()
 		require.NotEmpty(t, s.Users["Alice"], "Alice should have been allocated by the inbound transfer step")
@@ -576,10 +633,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
 		require.Equal(t, 0, listed.GuardianSetIndex)
-		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment", and
-		// "cip56 burn-mint deployment". Bump these counts whenever a deploy subtest is added.
-		require.Len(t, listed.Managers, 3, "burnmint + lockunlock + cip56bm managers")
-		require.GreaterOrEqual(t, len(listed.Emitters), 4, "three transceiver emitters + the standalone one")
+		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment",
+		// "cip56 burn-mint deployment", and "cip56 custody deployment". Bump these counts
+		// whenever a deploy subtest is added.
+		require.Len(t, listed.Managers, 4, "burnmint + lockunlock + cip56bm + cip56cu managers")
+		require.GreaterOrEqual(t, len(listed.Emitters), 5, "four transceiver emitters + the standalone one")
 	})
 
 	t.Run("network status reports running localnet services", func(t *testing.T) {
