@@ -1,0 +1,73 @@
+-- | Parameterized deployment: registers a transceiver 'Emitter', stands up (or wires) an
+-- 'NttToken' impl, registers the 'NttManager' (crankless, admin-driven per
+-- Wormhole.Ntt.Manager:RegisterManager), and claims a replay-trie root for the new admin --
+-- steps 1-4 of "Deploying an NTT on Canton" (canton/README.md), reusing the already-tested
+-- Test.TestCore/Test.TestNtt/Test.TestReplay helpers rather than reimplementing them.
+module Playground.Deploy where
+
+import Daml.Script
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Wormhole.Core.Replay (defaultSplitThreshold)
+import Wormhole.Ntt.Manager
+import Wormhole.Ntt.Token (NttToken)
+import Test.TestCore (registerEmitter)
+import Test.TestNtt (mkBurnMintToken, mkCustodyToken)
+import Test.TestReplay (registerReplayRoot)
+
+import Playground.MockToken (MockToken (..))
+
+import Playground.Types
+
+data DeployInput = DeployInput with
+    operator           : Party
+    guardianGovernance : Party
+    admin              : Party  -- CLI-allocated (with actAs rights granted; see Playground.Init's note)
+    mode               : Text   -- "burn-mint" | "lock-unlock"
+    tokenKind          : Text   -- "mock-admin-signed" | "cip56-burn-mint-mock" | "cip56-custody-mock"
+    tokenDecimals      : Int
+  deriving (Eq, Show)
+
+data DeployOutput = DeployOutput with
+    managerId          : Int
+    managerAddress     : Text
+    transceiverAddress : Text
+    admin              : Party
+  deriving (Eq, Show)
+
+deployNtt : DeployInput -> Script DeployOutput
+deployNtt input = do
+  let admin = input.admin
+  emitterCid <- registerEmitter input.operator admin
+  Some em <- queryContractId admin emitterCid
+  let mode = parseTokenMode input.mode
+      instrumentId = InstrumentId with admin, id = playgroundInstrumentId
+
+  tokenCid <- case parseTokenKind input.tokenKind of
+    MockAdminSigned -> do
+      mockCid <- submit admin do createCmd MockToken with admin, manager = input.operator, mode
+      pure (toInterfaceContractId @NttToken mockCid)
+    Cip56BurnMintMock -> fst <$> mkBurnMintToken admin input.operator instrumentId
+    Cip56CustodyMock -> fst <$> mkCustodyToken admin input.operator admin instrumentId False -- custody = admin; Completed mode
+
+  [(regCid, _)] <- query @NttManagerRegistry input.operator
+  regDisc <- fromSome <$> queryDisclosure input.operator regCid
+  (_, mgrId) <- submit (actAs admin <> disclose regDisc) do
+    exerciseCmd regCid RegisterManager with
+      admin
+      guardianGovernance = input.guardianGovernance
+      transceiverEmitterCid = emitterCid
+      tokenCid
+      mode
+      tokenDecimals = input.tokenDecimals
+  Some mgr <- queryContractId input.operator mgrId
+
+  -- Every deployment's admin gets its own replay-protection trie scope (consumer = admin),
+  -- matching Test.TestNtt:setupReceiveManager.
+  _ <- registerReplayRoot input.operator admin defaultSplitThreshold
+
+  pure DeployOutput with
+    managerId = mgr.managerId
+    managerAddress = mgr.managerAddress
+    transceiverAddress = em.emitterAddress
+    admin

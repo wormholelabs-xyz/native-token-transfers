@@ -1,0 +1,13 @@
+{
+  "name": "lockunlock",
+  "mode": "lock-unlock",
+  "tokenKind": "mock-admin-signed",
+  "decimals": 8,
+  "peers": [
+    {
+      "chain": 2,
+      "manager": "00000000000000000000000000000000000000000000000000000000000000bb",
+      "transceiver": "00000000000000000000000000000000000000000000000000000000000000cc"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+-- | Parameterized bootstrap: the playground's version of Test.TestCore:setupWithInstrument,
+-- taking the guardian set from CLI input instead of hardcoding the devnet guardian. This is
+-- what makes "arbitrary 1/1 guardian, not just the devnet key" possible -- the CLI generates
+-- (or is given) a guardian key entirely off-ledger and only ever hands this script the
+-- resulting address.
+--
+-- Message fee starts at 0, same as every other bootstrap in this repo: 'mkInitialCoreState'
+-- takes no fee parameter, and the only way to raise it is a real governance VAA
+-- ('Wormhole.Core.State.SubmitGovernanceVAA'), applied via `guardian sign-governance set-fee`
+-- (which both signs the VAA with the playground's own guardian key and submits it) -- there is
+-- deliberately no side-channel to set an initial fee.
+module Playground.Init where
+
+import Daml.Script
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Ntt.Manager (NttManagerRegistry (..))
+
+-- | @guardianAddresses@ are 20-byte hex guardian addresses (Wormhole.Core.Bytes:Bytes20);
+-- typically exactly one, e.g. the address of a CLI-generated key
+-- ('internal/guardian.Key.Address' in the Go CLI).
+--
+-- The three parties are allocated by the CLI beforehand (Playground.Ops:
+-- allocatePlaygroundParty) rather than here: on auth-enabled ledgers (LocalNet) the
+-- script user needs explicit actAs rights on a party before submitting as it, and the CLI
+-- grants those between allocation and this script's submits -- an in-script allocateParty
+-- would hit PERMISSION_DENIED at the first submit.
+data InitInput = InitInput with
+    operator           : Party
+    guardianGovernance : Party
+    guardianObserver   : Party
+    guardianAddresses  : [Text]
+  deriving (Eq, Show)
+
+data InitOutput = InitOutput with
+    operator           : Party
+    guardianGovernance : Party
+    guardianObserver   : Party
+  deriving (Eq, Show)
+
+initPlayground : InitInput -> Script InitOutput
+initPlayground input = do
+  let operator = input.operator
+      guardianGovernance = input.guardianGovernance
+      guardianObserver = input.guardianObserver
+  -- Fees are never validated at fee 0 (Wormhole.Core.Fees:chargeFee is a no-op then), so this
+  -- placeholder instrument is never exercised unless a later governance VAA raises the fee.
+  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  _ <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+                 defaultGovernanceContract input.guardianAddresses guardianObserver
+                 feeInstrument guardianGovernance)
+  _ <- submit operator do
+    createCmd (mkInitialEmitterRegistry operator guardianGovernance guardianObserver 0)
+  _ <- submit operator do
+    createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
+  _ <- submit operator do
+    createCmd NttManagerRegistry with operator, nextId = 0
+  pure InitOutput with operator, guardianGovernance, guardianObserver

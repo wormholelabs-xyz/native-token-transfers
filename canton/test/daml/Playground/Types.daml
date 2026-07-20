@@ -1,0 +1,108 @@
+-- | JSON-serializable input/output records for the playground CLI's `dpm script` entrypoints
+-- (Playground.Init/Deploy/Ops/Query), plus the shared by-identity resolvers every op script
+-- uses instead of persisting contract ids (see the CLI README's cid-churn rule: CoreState,
+-- NttManager, and Emitter all churn on every consuming exercise, so every script re-resolves
+-- them from the ACS by stable identity -- party + managerId/emitterId -- rather than trusting
+-- a cid the CLI cached from a previous invocation).
+--
+-- Enums travel as plain 'Text' (not Daml variants) so the JSON the CLI parses/emits stays a
+-- boring, flat shape; 'parseTokenMode'/'showTokenMode' and 'parseTokenKind' are the only
+-- places that convert to/from the real Daml types.
+module Playground.Types where
+
+import Daml.Script
+import DA.Map qualified as Map
+import Wormhole.Core.State (CoreState, Emitter)
+import Wormhole.Ntt.Manager (NttManager)
+import Wormhole.Ntt.Token (TokenMode (..))
+
+----------------------------------------------------------------------
+-- Text enums
+----------------------------------------------------------------------
+
+parseTokenMode : Text -> TokenMode
+parseTokenMode "burn-mint" = BurnMint
+parseTokenMode "lock-unlock" = LockUnlock
+parseTokenMode other = error ("playground: unknown mode " <> other <> " (want burn-mint|lock-unlock)")
+
+showTokenMode : TokenMode -> Text
+showTokenMode BurnMint = "burn-mint"
+showTokenMode LockUnlock = "lock-unlock"
+
+-- | Which 'Wormhole.Ntt.Token.NttToken' implementation a deployment uses. 'MockAdminSigned'
+-- (Playground.MockToken:MockToken) needs no funding step -- 'LockOrBurn' always succeeds regardless of
+-- the caller's actual holdings, which is why it is the e2e test's default. The Cip56 kinds
+-- drive the real production 'Cip56BurnMintToken'/'Cip56CustodyToken' impls over local mock
+-- registries (Test.TestNtt:mkBurnMintToken/mkCustodyToken) and DO need a real
+-- 'Playground.Ops:fundUser' holding before a transfer.
+data TokenKind
+  = MockAdminSigned
+  | Cip56BurnMintMock
+  | Cip56CustodyMock
+  deriving (Eq, Show)
+
+parseTokenKind : Text -> TokenKind
+parseTokenKind "mock-admin-signed" = MockAdminSigned
+parseTokenKind "cip56-burn-mint-mock" = Cip56BurnMintMock
+parseTokenKind "cip56-custody-mock" = Cip56CustodyMock
+parseTokenKind other = error ("playground: unknown tokenKind " <> other)
+
+-- | The 'Splice.Api.Token.HoldingV1.InstrumentId' every playground deployment's Cip56 mock
+-- registry (if any) mints under. One instrument id per admin is enough: each deployment
+-- allocates a fresh admin party (Playground.Deploy:deployNtt), so there is no cross-
+-- deployment collision.
+playgroundInstrumentId : Text
+playgroundInstrumentId = "PLAYGROUND"
+
+----------------------------------------------------------------------
+-- By-identity resolvers (never persist contract ids across CLI invocations)
+----------------------------------------------------------------------
+
+-- | The single live 'CoreState', as seen by @operator@ (a co-signatory of every genesis
+-- CoreState this playground creates). Fails loudly if `initPlayground` was never run, or ran
+-- more than once against the same participant without a network reset.
+resolveCoreState : Party -> Script (ContractId CoreState)
+resolveCoreState operator = do
+  css <- query @CoreState operator
+  case css of
+    [(cid, _)] -> pure cid
+    [] -> abort "playground: no CoreState -- run `init` first"
+    _ -> abort "playground: more than one CoreState visible to operator -- reset the network"
+
+-- | The 'NttManager' allocated at @managerId@ (Deploy's `RegisterManager` output), resolved
+-- fresh from @operator@'s ACS view (operator co-signs every deployment).
+resolveManager : Party -> Int -> Script (ContractId NttManager, NttManager)
+resolveManager operator managerId = do
+  mgrs <- query @NttManager operator
+  case [ (cid, m) | (cid, m) <- mgrs, m.managerId == managerId ] of
+    [one] -> pure one
+    [] -> abort ("playground: no NttManager with id " <> show managerId)
+    _ -> abort ("playground: more than one NttManager with id " <> show managerId)
+
+-- | The transceiver 'Emitter' for a deployment's @transceiverEmitterId@, resolved from
+-- @operator@'s ACS view ('Wormhole.Core.State.Emitter' is co-signed by the registry operator).
+resolveEmitter : Party -> Int -> Script (ContractId Emitter, Emitter)
+resolveEmitter operator emitterId = do
+  ems <- query @Emitter operator
+  case [ (cid, e) | (cid, e) <- ems, e.emitterId == emitterId ] of
+    [one] -> pure one
+    [] -> abort ("playground: no Emitter with id " <> show emitterId)
+    _ -> abort ("playground: more than one Emitter with id " <> show emitterId)
+
+-- | All deployments' managers currently visible to @operator@ -- used by `queryStatus` to
+-- enumerate every deployment without the caller needing to know ids up front.
+allManagers : Party -> Script [(ContractId NttManager, NttManager)]
+allManagers operator = query @NttManager operator
+
+-- | A deployment's peer, flattened to a plain record (not a tuple) so the JSON the CLI reads
+-- stays boring -- see the module-level note on Text enums/flat records.
+data PeerStatus = PeerStatus with
+    chain              : Int
+    managerAddress     : Text
+    transceiverAddress : Text
+  deriving (Eq, Show)
+
+peersList : NttManager -> [PeerStatus]
+peersList mgr =
+  [ PeerStatus with chain, managerAddress = p.managerAddress, transceiverAddress = p.transceiverAddress
+  | (chain, p) <- Map.toList mgr.peers ]
