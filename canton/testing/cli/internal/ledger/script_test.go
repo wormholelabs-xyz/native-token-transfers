@@ -98,6 +98,108 @@ func TestIsTransientLedgerError(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
+// isLedgerUnreachableError / scriptFailureErr
+// ----------------------------------------------------------------------
+
+func TestIsLedgerUnreachableError(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"connection refused", "Caused by: java.net.ConnectException: Connection refused (Connection refused)", true},
+		{"UNAVAILABLE io exception", "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception\n...", true},
+		{"unrelated dpm failure", "script raised an exception: DivideByZero", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isLedgerUnreachableError([]byte(c.out)); got != c.want {
+				t.Fatalf("isLedgerUnreachableError(%q) = %v, want %v", c.out, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRun_LedgerUnreachableProducesFriendlyError exercises the classifier end to end: a fake
+// dpm binary that always fails with the "Connection refused: localhost:6865" signature should
+// make Run return the short, actionable message (naming the profile and host:port) instead of
+// the raw dpm output, after exhausting the retry budget.
+func TestRun_LedgerUnreachableProducesFriendlyError(t *testing.T) {
+	dpm := fakeDpmScript(t, `echo "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception" >&2
+echo "Caused by: java.net.ConnectException: Connection refused: localhost:6865" >&2
+exit 1
+`)
+	r := &Runner{
+		DpmPath:       dpm,
+		DarPath:       "unused.dar",
+		WorkDir:       t.TempDir(),
+		RetryAttempts: 1,
+		RetryInterval: time.Millisecond,
+		Profile:       profile.Profile{Name: profile.LocalNet, LedgerHost: "localhost", LedgerPort: 6865},
+	}
+	err := r.Run(context.Background(), "Playground.Ops:setPeer", map[string]any{}, nil)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	want := "cannot reach the localnet ledger at localhost:6865 -- is it running? " +
+		"start it with 'just localnet-cli' (or 'ntt-playground --profile localnet network up'), or check --profile"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected the friendly ledger-unreachable message, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "io.grpc.StatusRuntimeException") {
+		t.Fatalf("expected the raw dpm stack to be suppressed from the default error, got %q", err.Error())
+	}
+}
+
+// TestRun_LedgerUnreachableNarratesRawOutputUnderVerbose confirms the raw dpm output stays
+// available for debugging when Logf is set (the app's --verbose path), even though the
+// returned error itself remains the clean one-liner.
+func TestRun_LedgerUnreachableNarratesRawOutputUnderVerbose(t *testing.T) {
+	dpm := fakeDpmScript(t, `echo "Connection refused: localhost:6865" >&2
+exit 1
+`)
+	var lines []string
+	r := &Runner{
+		DpmPath:       dpm,
+		DarPath:       "unused.dar",
+		WorkDir:       t.TempDir(),
+		RetryAttempts: 0,
+		RetryInterval: time.Millisecond,
+		Profile:       profile.Profile{Name: profile.Sandbox, LedgerHost: "localhost", LedgerPort: 6865},
+		Logf:          func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) },
+	}
+	err := r.Run(context.Background(), "Playground.Ops:setPeer", map[string]any{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot reach the sandbox ledger") {
+		t.Fatalf("expected the friendly message, got %v", err)
+	}
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "Connection refused") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the raw dpm output to be narrated via Logf under --verbose, got lines: %v", lines)
+	}
+}
+
+// TestRun_NonConnectivityFailureIsUnaffected confirms an unrelated dpm failure still surfaces
+// its real message (unchanged from before the ledger-unreachable classifier was added).
+func TestRun_NonConnectivityFailureIsUnaffected(t *testing.T) {
+	dpm := fakeDpmScript(t, `echo "script raised an unrelated exception: DivideByZero" >&2
+exit 1
+`)
+	r := &Runner{DpmPath: dpm, DarPath: "unused.dar", WorkDir: t.TempDir(), RetryInterval: time.Millisecond}
+	err := r.Run(context.Background(), "Playground.Ops:setPeer", map[string]any{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "DivideByZero") {
+		t.Fatalf("expected the real dpm error to pass through, got %v", err)
+	}
+	if strings.Contains(err.Error(), "cannot reach the") {
+		t.Fatalf("did not expect the friendly ledger-unreachable message here, got %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------
 // Runner: retry/timeout defaults
 // ----------------------------------------------------------------------
 
@@ -272,7 +374,11 @@ exit 0
 }
 
 func TestRun_RetriesExhaustedReturnsError(t *testing.T) {
-	dpm := fakeDpmScript(t, `echo "UNAVAILABLE: io exception" >&2
+	// "SocketException: Connection reset" is transient (retry-worthy, per isTransientLedgerError)
+	// but is deliberately not one of isLedgerUnreachableError's signatures, so this keeps testing
+	// retry-exhaustion producing the generic dpm-script error, distinct from the
+	// ledger-unreachable friendly-message tests above.
+	dpm := fakeDpmScript(t, `echo "java.net.SocketException: Connection reset" >&2
 exit 1
 `)
 	r := &Runner{DpmPath: dpm, DarPath: "unused.dar", WorkDir: t.TempDir(), RetryAttempts: 1, RetryInterval: time.Millisecond}
@@ -283,7 +389,9 @@ exit 1
 }
 
 func TestRun_CtxCancelledDuringRetryWait(t *testing.T) {
-	dpm := fakeDpmScript(t, `echo "UNAVAILABLE: io exception" >&2
+	// See TestRun_RetriesExhaustedReturnsError: "SocketException: Connection reset" is
+	// transient/retry-worthy but not one of isLedgerUnreachableError's signatures.
+	dpm := fakeDpmScript(t, `echo "java.net.SocketException: Connection reset" >&2
 exit 1
 `)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)

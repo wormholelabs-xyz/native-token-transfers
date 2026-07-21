@@ -42,6 +42,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			a.stderr = cmd.ErrOrStderr()
+			a.resolveProfileFromState(cmd)
 		},
 	}
 
@@ -164,4 +165,23 @@ func (a *app) saveState(s *state.State) error {
 
 func (a *app) resolvedProfile() (profile.Profile, error) {
 	return profile.Get(a.profile)
+}
+
+// resolveProfileFromState defaults a.profile to the profile recorded in the state file at
+// a.stateFile, but only when the user did not pass --profile explicitly on this invocation.
+// This is what lets a bare `ntt-playground party list` after `just localnet-cli` (which
+// records "profile":"localnet" in the state file) target the same ledger the user just bootstrapped,
+// instead of silently falling back to the sandbox default and failing against a JVM that was
+// never started. An explicit --profile always wins; a missing state file, an unreadable one, or
+// one with no recorded profile leaves the "sandbox" default alone. `init` is unaffected: it
+// populates the profile field, and with no prior state file this is a no-op.
+func (a *app) resolveProfileFromState(cmd *cobra.Command) {
+	if cmd.Flags().Changed("profile") {
+		return
+	}
+	s, err := state.Load(a.stateFile)
+	if err != nil || s.Profile == "" {
+		return
+	}
+	a.profile = profile.Name(s.Profile)
 }

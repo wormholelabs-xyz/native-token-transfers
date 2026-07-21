@@ -170,6 +170,43 @@ func TestCmd_NetworkDown_LocalNetMissingComposeDir(t *testing.T) {
 	}
 }
 
+// TestCmd_NetworkStatus_DefaultsToStateFileProfileWhenFlagNotSet proves the profile-resolution
+// fix end to end: a state file recording "profile":"localnet" (as `init` writes when bootstrapped
+// under --profile localnet, e.g. via `just localnet-cli`) makes a bare `network status` (no
+// --profile) behave as if --profile localnet had been passed -- it hits the localnet code path
+// (no compose dir found) instead of silently defaulting to sandbox.
+func TestCmd_NetworkStatus_DefaultsToStateFileProfileWhenFlagNotSet(t *testing.T) {
+	t.Setenv("LOCALNET_DIR", "")
+	t.Setenv("HOME", t.TempDir())
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Profile = "localnet"
+	seedStateFile(t, stateFile, s)
+
+	args := append(baseFlags(stateFile), "--canton-dir", t.TempDir(), "network", "status")
+	_, _, err := runPlayground(t, args...)
+	if err == nil || !contains(err.Error(), "no Splice LocalNet dir found") {
+		t.Fatalf("expected the localnet code path (proving the recorded profile won), got %v", err)
+	}
+}
+
+// TestCmd_NetworkStatus_ExplicitFlagOverridesStateFile proves an explicit --profile still wins
+// over a state file recording a different profile.
+func TestCmd_NetworkStatus_ExplicitFlagOverridesStateFile(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Profile = "localnet"
+	seedStateFile(t, stateFile, s)
+
+	stdout, _, err := runPlayground(t, append(append(baseFlags(stateFile), "--profile", "sandbox"), "network", "status")...)
+	if err != nil {
+		t.Fatalf("network status: %v", err)
+	}
+	if !contains(stdout, "sandbox: not running") {
+		t.Fatalf("expected the explicit --profile sandbox to win, got %q", stdout)
+	}
+}
+
 func TestCmd_NetworkStatus_SandboxNotRunning(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
 	stdout, _, err := runPlayground(t, append(baseFlags(stateFile), "network", "status")...)

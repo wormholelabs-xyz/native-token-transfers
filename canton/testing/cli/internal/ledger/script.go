@@ -107,6 +107,45 @@ func isTransientLedgerError(out []byte) bool {
 	return false
 }
 
+// isLedgerUnreachableError reports whether out (a FAILED `dpm script` invocation's combined
+// stdout/stderr) looks like the target ledger simply isn't listening on its host:port -- a
+// fresh TCP refusal, or the gRPC UNAVAILABLE/io-exception dpm-script raises for the same
+// condition. Deliberately shares signatures with isTransientLedgerError: that function decides
+// whether to retry, this one decides how to report the failure once the retry budget (if any)
+// is exhausted. At that point there is no user-facing difference between "the ledger dropped
+// the connection and never came back" and "the ledger was never up at all" -- both mean it
+// isn't reachable right now, e.g. because --profile doesn't match the ledger that's running.
+func isLedgerUnreachableError(out []byte) bool {
+	s := string(out)
+	for _, sig := range []string{
+		"Connection refused",
+		"UNAVAILABLE: io exception",
+	} {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// scriptFailureErr builds the error Run returns for a FAILED dpm script invocation. When out
+// matches isLedgerUnreachableError, it returns a short, actionable message naming the profile
+// and host:port instead of dumping the raw Java/gRPC stack -- that stack is still narrated to
+// stderr under --verbose (via Logf) so debugging stays possible. Any other failure keeps
+// surfacing its real message plus the raw dpm output, unchanged.
+func (r *Runner) scriptFailureErr(scriptName string, runErr error, out []byte) error {
+	if isLedgerUnreachableError(out) {
+		if r.Logf != nil {
+			r.logf("script %s failed: raw dpm output:\n%s", scriptName, out)
+		}
+		return fmt.Errorf(
+			"ledger: cannot reach the %s ledger at %s:%d -- is it running? "+
+				"start it with 'just localnet-cli' (or 'ntt-playground --profile %s network up'), or check --profile",
+			r.Profile.Name, r.Profile.LedgerHost, r.Profile.LedgerPort, r.Profile.Name)
+	}
+	return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, runErr, out)
+}
+
 // NewRunner constructs a Runner, resolving dpm from PATH/~/.dpm/bin if dpmPath is empty.
 func NewRunner(dpmPath, darPath string, p profile.Profile, accessTokenFile, workDir string) (*Runner, error) {
 	if dpmPath == "" {
@@ -189,14 +228,14 @@ func (r *Runner) Run(ctx context.Context, scriptName string, input, output any) 
 			break
 		}
 		if attempt >= r.retryAttempts() || !isTransientLedgerError(out) {
-			return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, runErr, out)
+			return r.scriptFailureErr(scriptName, runErr, out)
 		}
 		r.logf("script %s: transient ledger connectivity error (attempt %d/%d), retrying in %s",
 			scriptName, attempt+1, r.retryAttempts(), r.retryInterval())
 		select {
 		case <-time.After(r.retryInterval()):
 		case <-ctx.Done():
-			return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, runErr, out)
+			return r.scriptFailureErr(scriptName, runErr, out)
 		}
 	}
 	r.logf("script %s ok (%s)", scriptName, time.Since(start).Round(time.Millisecond))

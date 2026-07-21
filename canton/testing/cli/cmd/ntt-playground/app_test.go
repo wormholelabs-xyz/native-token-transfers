@@ -182,6 +182,80 @@ func TestResolvedProfile_Unknown(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
+// resolveProfileFromState
+// ----------------------------------------------------------------------
+
+func TestResolveProfileFromState_StateFileWinsWhenFlagNotSet(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Profile = "localnet"
+	if err := s.Save(stateFile); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	a := &app{stateFile: stateFile, profile: profile.Sandbox}
+	root := newRootCmd()
+	root.SetArgs([]string{"--state-file", stateFile, "status"})
+	// Parse flags without running the command, so cmd.Flags().Changed reflects only what was
+	// passed on argv (here, nothing touches --profile).
+	if err := root.ParseFlags([]string{"--state-file", stateFile, "status"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	a.resolveProfileFromState(root)
+	if a.profile != profile.LocalNet {
+		t.Fatalf("expected the state file's profile to win, got %q", a.profile)
+	}
+}
+
+func TestResolveProfileFromState_ExplicitFlagWins(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Profile = "localnet"
+	if err := s.Save(stateFile); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	a := &app{stateFile: stateFile, profile: profile.Sandbox}
+	root := newRootCmd()
+	if err := root.ParseFlags([]string{"--state-file", stateFile, "--profile", "sandbox", "status"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	a.resolveProfileFromState(root)
+	if a.profile != profile.Sandbox {
+		t.Fatalf("expected the explicit --profile to win, got %q", a.profile)
+	}
+}
+
+func TestResolveProfileFromState_NoStateFileKeepsDefault(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "missing.json")
+	a := &app{stateFile: stateFile, profile: profile.Sandbox}
+	root := newRootCmd()
+	if err := root.ParseFlags([]string{"--state-file", stateFile, "status"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	a.resolveProfileFromState(root)
+	if a.profile != profile.Sandbox {
+		t.Fatalf("expected the sandbox default to survive a missing state file, got %q", a.profile)
+	}
+}
+
+func TestResolveProfileFromState_EmptyRecordedProfileKeepsDefault(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	if err := state.New().Save(stateFile); err != nil { // Profile field left at its zero value
+		t.Fatalf("seed state: %v", err)
+	}
+	a := &app{stateFile: stateFile, profile: profile.Sandbox}
+	root := newRootCmd()
+	if err := root.ParseFlags([]string{"--state-file", stateFile, "status"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	a.resolveProfileFromState(root)
+	if a.profile != profile.Sandbox {
+		t.Fatalf("expected the sandbox default to survive an empty recorded profile, got %q", a.profile)
+	}
+}
+
+// ----------------------------------------------------------------------
 // vlogf / verboseLogf
 // ----------------------------------------------------------------------
 
