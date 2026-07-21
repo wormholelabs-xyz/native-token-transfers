@@ -269,8 +269,8 @@ testCustodyLockPendingRejected = do
     Right _ -> abort "pending lock succeeded: tokens were never moved to custody"
 
 -- | The custody kind takes no NTT-level deposit pre-approval: 'PreApproveDeposit' must abort
--- unconditionally -- registry-level receiver pre-approval (e.g. Amulet's transferPreapproval)
--- is the real dependency, not anything the NTT seam itself tracks; see
+-- unconditionally. Receiver pre-approval happens at the registry level (e.g. Amulet's
+-- transferPreapproval), not anything the NTT token interface tracks; see
 -- 'Wormhole.Ntt.TokenCip56.Cip56CustodyToken's 'preApproveImpl'. Mirrors the
 -- 'FailureStatusError' pattern of 'testCustodyLockPendingRejected'.
 testCustodyPreApproveRejected : Script ()

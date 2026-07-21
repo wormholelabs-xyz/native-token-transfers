@@ -37,7 +37,7 @@ type Profile struct {
 	UploadDAR bool
 
 	// AmuletAvailable is true only for LocalNet -- the sandbox has no DSO/Amulet, so
-	// Cip56Custody-against-real-Amulet (task 9, out of scope here) never applies there.
+	// Cip56Custody against real Amulet never applies there.
 	AmuletAvailable bool
 
 	// UserID is the daml-script --user-id to run as (LocalNet's admin/ledger-api user,

@@ -417,10 +417,10 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "emitterChain=72")
 	})
 
-	// The only subtest driving a real production NttToken impl end to end: the CIP-56
-	// burn/mint seam (Cip56BurnMintToken.MintOrUnlock on inbound, LockOrBurn on outbound)
-	// over the local mock registry, exercising the auto-funding path, the Daml Decimal
-	// JSON boundary, and -- via step f -- the suite's only value-conservation assertion.
+	// The only subtest driving a real production NttToken implementation end to end: the
+	// CIP-56 burn/mint token (Cip56BurnMintToken.MintOrUnlock on inbound, LockOrBurn on
+	// outbound) over the local mock registry. It exercises the auto-funding path, the Daml
+	// Decimal JSON boundary, and the suite's only value-conservation check.
 	var cip56Total string
 	t.Run("cip56 burn-mint deployment: funded transfer round-trip", func(t *testing.T) {
 		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-burnmint.json"))
@@ -431,11 +431,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, "cip56-burn-mint-mock", d.TokenKind, "the deployment must use the real CIP-56 burn/mint impl")
 
-		// Inbound arc (owner-signed kind): the recipient must first opt in via a standing
-		// DepositPreapproval, otherwise Cip56BurnMintToken.MintOrUnlock aborts. This proves the
-		// three design invariants at once: (1) a fresh recipient can't be minted to without
-		// consent, (2) opting in makes the SAME VAA deliverable (the failed receive did not burn
-		// the digest -- decision 5's atomicity), (3) the recipient is passive at delivery time.
+		// Inbound path (owner-signed kind): the recipient must first opt in via a standing
+		// DepositPreapproval, otherwise Cip56BurnMintToken.MintOrUnlock aborts. This proves three
+		// things at once: (1) a fresh recipient can't be minted to without consent, (2) opting in
+		// makes the SAME VAA deliverable, because the failed receive did not burn the digest, and
+		// (3) the recipient is passive at delivery time.
 		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "750000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
@@ -515,16 +515,16 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "amount=250000")
 	})
 
-	// Sandbox-viable coverage of the CIP-56 custody seam's mock kind (Cip56CustodyToken over
-	// Test.TestNtt:MockTransferFactory, cf. the real-Amulet "real amulet cip56-custody" subtest
-	// below, which needs the localnet profile). Playground.Deploy:deployNtt's Cip56CustodyMock
-	// branch hardcodes custody = admin, and the deployment's admin party is cached in state
-	// under the "<name>-admin" hint (deploy.go's default adminHint) -- so that SAME cached hint
-	// doubles as the custody party for both `guardian sign-transfer --to-recipient` and
-	// `receive --recipient`. This isn't incidental: Cip56MockHolding is owner-signed and
+	// Sandbox-viable coverage of the CIP-56 custody token's mock kind (Cip56CustodyToken over
+	// Test.TestNtt:MockTransferFactory; the real-Amulet "real amulet cip56-custody" subtest
+	// below needs the localnet profile). Playground.Deploy:deployNtt's Cip56CustodyMock branch
+	// hardcodes custody = admin, and the deployment's admin party is cached in state under the
+	// "<name>-admin" hint (deploy.go's default adminHint), so that same cached hint doubles as
+	// the custody party for both `guardian sign-transfer --to-recipient` and `receive
+	// --recipient`. This is required, not incidental: Cip56MockHolding is owner-signed and
 	// `receive` is executor-only (no actAs recipient), so the unlock's receiver-owned holding
-	// create only reaches valid authority when recipient == custody == admin (see
-	// Test.TestNtt:testCustodyUnlockCompletedSucceeds's module-level authority trace).
+	// create only has valid authority when recipient == custody == admin (see
+	// Test.TestNtt:testCustodyUnlockCompletedSucceeds).
 	t.Run("cip56 custody deployment (mock): lock-unlock through the custody party", func(t *testing.T) {
 		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-custody-mock.json"))
 		require.Contains(t, out, "[v] set peer chain=2")
@@ -776,8 +776,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// (A real superseded-guardian-set test -- signing with an old key after a genuine
 		// guardian-set upgrade -- needs CLI surface this playground doesn't have yet
 		// (guardian.Sign hardcodes index 0, and there's no `sign-governance
-		// guardian-set-upgrade` subcommand); it's documented as follow-up B2 in the plan and
-		// deliberately not attempted here.)
+		// guardian-set-upgrade` subcommand), so it is not attempted here.)
 		out := h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "111", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
@@ -994,10 +993,9 @@ func TestPlaygroundE2E(t *testing.T) {
 	// The only subtest driving REAL Canton Coin (Amulet) rather than a local mock registry:
 	// a CIP-56 custody (lock/unlock) deployment, a real tap + TransferPreapproval, an outbound
 	// lock of 1 CC, and the guardian observation proved off a real Ledger API v2 update stream
-	// (not the recompute path) -- see the playground plan's "Goal" section. LocalNet-only:
-	// the sandbox has no DSO/Amulet, so `deploy` gates on prof.AmuletAvailable and this subtest
-	// self-skips rather than duplicating that gate's own coverage (see the Phase-1 sandbox
-	// subtest below).
+	// (not the recompute path). LocalNet-only: the sandbox has no DSO/Amulet, so `deploy` gates
+	// on prof.AmuletAvailable and this subtest self-skips rather than duplicating that gate's own
+	// coverage (see the sandbox-rejection subtest below).
 	t.Run("real amulet cip56-custody: transfer 1 CC observed on stream", func(t *testing.T) {
 		if playgroundProfile != "localnet" {
 			t.Skip("real Amulet requires the localnet profile")
@@ -1018,9 +1016,9 @@ func TestPlaygroundE2E(t *testing.T) {
 		out := h.mustRun(t, "observe", "stream", "--deployment", "cc-custody", "--print-offset")
 		fromOffset := extractField(t, out, "ledgerEnd")
 
-		// 3. transfer 1 CC (raw 10^10 at 10 decimals). The CLI auto-onboards + taps the
-		// sender, fetches the real transfer-factory + choice context from the scan-proxy, and
-		// runs Playground.Ops:transferOut with the real seam.
+		// 3. transfer 1 CC (raw 10^10 at 10 decimals). The CLI auto-onboards and taps the
+		// sender, fetches the real transfer factory and choice context from the scan-proxy, and
+		// runs Playground.Ops:transferOut against the real Amulet registry.
 		out = h.mustRun(t, "transfer", "--deployment", "cc-custody",
 			"--user", "cc-sender", "--chain", "2",
 			"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "10000000000", "--sign")

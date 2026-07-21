@@ -1,7 +1,7 @@
 // LocalNet backend: Splice LocalNet docker-compose lifecycle, readiness polling, unsafe
-// shared-secret JWT minting, and DAR upload via the JSON Ledger API v2. Facts pinned from
-// the Splice LocalNet release notes (see the CLI README's LocalNet section for the verified
-// release and any deviations found at verification time):
+// shared-secret JWT minting, and DAR upload via the JSON Ledger API v2. The values below come
+// from the Splice LocalNet release notes; see the CLI README's LocalNet section for the exact
+// release they were checked against:
 //
 //   - app-provider participant: gRPC Ledger API 3901, JSON Ledger API v2 3975, validator API
 //     3903.
@@ -88,8 +88,8 @@ func (m *LocalNetManager) validatorBaseURL() string {
 // ledgerAddr is the gRPC Ledger API address `dpm script` actually connects to (port 3901,
 // distinct from the validator's HTTP API on 3903) -- readiness must gate on THIS being
 // reachable, not just the validator's HTTP endpoints, since a script call can still fail with
-// a transient gRPC connection error even after readyz/scan-proxy report healthy (findings:
-// observed live under host resource pressure).
+// a transient gRPC connection error even after readyz/scan-proxy report healthy (observed
+// under host resource pressure).
 func (m *LocalNetManager) ledgerAddr() string {
 	host := m.LedgerHost
 	if host == "" {
@@ -151,7 +151,8 @@ func (m *LocalNetManager) env() []string {
 // Up brings the smallest useful LocalNet topology up (sv + app-provider profiles,
 // APP_USER_PROFILE=off per compose.env's default) and waits for docker compose's own
 // healthchecks (--wait), then polls the validator readyz endpoint as a belt-and-braces
-// check. First boot (DSO bootstrap) is documented at 2-6 minutes; timeout should be generous.
+// check. First boot bootstraps the DSO (the network's Decentralized Synchronizer Operator
+// party) and is documented at 2-6 minutes, so the timeout should be generous.
 func (m *LocalNetManager) Up(ctx context.Context, timeout time.Duration) error {
 	tag := m.ImageTag
 	if tag == "" {
@@ -354,9 +355,9 @@ func probeTCP(ctx context.Context, addr string, timeout time.Duration) bool {
 	return true
 }
 
-// DSOPartyID fetches the DSO party id from the validator's scan-proxy, needed for Amulet
-// instrument ids (task 9, out of scope here, but the lookup is part of the LocalNet backend
-// contract).
+// DSOPartyID fetches the DSO party id from the validator's scan-proxy. Amulet instrument ids
+// need it, and the lookup is part of the LocalNet backend contract even where the current CLI
+// does not use it.
 func (m *LocalNetManager) DSOPartyID(ctx context.Context) (string, error) {
 	token, err := MintUnsafeToken(LocalNetAdminUser, time.Hour)
 	if err != nil {
@@ -499,10 +500,10 @@ func CreateLedgerUser(ctx context.Context, jsonLedgerAPIBaseURL, adminToken, use
 	return nil
 }
 
-// GrantLedgerAPIUserRights grants actAs/readAs rights on parties to LocalNetAdminUser, for
-// the case (flagged as an open risk in the playground plan) where daml-script running as
-// ledger-api-user does not automatically get actAs for parties it allocates itself.
-// jsonLedgerAPIBaseURL is the same host:3975 UploadDAR uses.
+// GrantLedgerAPIUserRights grants actAs/readAs rights on parties to LocalNetAdminUser. It
+// covers the case where daml-script running as ledger-api-user does not automatically get
+// actAs for parties it allocates itself. jsonLedgerAPIBaseURL is the same host:3975 UploadDAR
+// uses.
 func GrantLedgerAPIUserRights(ctx context.Context, jsonLedgerAPIBaseURL, adminToken string, actAsParties []string) error {
 	// The v2 OpenAPI encodes the rights oneOf with a `value` wrapper:
 	// {"kind": {"CanActAs": {"value": {"party": ...}}}} -- omitting it yields

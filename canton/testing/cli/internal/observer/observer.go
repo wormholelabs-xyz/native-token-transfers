@@ -1,15 +1,13 @@
 // Package observer reads the real Ledger API v2 update stream (JSON Ledger API, over
 // WebSocket) as the guardianObserver party's dedicated reader user, decoding every consuming
 // `PublishMessage` exercise into a WormholeMessage -- the guardian *observation*, as opposed
-// to Playground.Ops:transferOut's recomputed payload. This is the CLI's only non-`dpm script`
-// path that reaches the ledger, and it is strictly read-only (see the playground plan's
-// design decisions): no command it issues ever submits anything.
+// to Playground.Ops:transferOut's recomputed payload. This is the CLI's only path that
+// reaches the ledger without `dpm script`, and it is strictly read-only: no command it issues
+// ever submits anything.
 //
-// Wire shapes below are pinned against a live Splice LocalNet 0.6.12 stack (see the playground
-// plan's "Verify-live results", findings §7/§8): the top-level `update` sum type is
-// "value"-wrapped ({"update": {"Transaction": {"value": <JsTransaction>}}}), but individual
-// `events[]` items are flat ({"ExercisedEvent": {...fields directly...}}) -- a real deviation
-// from the plan's original (unverified) doc comment, which showed the Transaction unwrapped.
+// The wire shapes below are pinned against a live Splice LocalNet 0.6.12 stack. The top-level
+// `update` sum type is "value"-wrapped ({"update": {"Transaction": {"value": <JsTransaction>}}}),
+// but individual `events[]` items are flat ({"ExercisedEvent": {...fields directly...}}).
 package observer
 
 import (
@@ -63,9 +61,8 @@ type Observed struct {
 	EmitterAddress   string // hex(wire.DerivedAddress(EmitterAddressTag, Registrar, Owner, EmitterID))
 }
 
-// flexInt64 decodes a JSON int64 that may render as a bare number or a quoted string --
-// findings §7/V8: Canton's JSON API renders large int64 fields either way depending on
-// context, and both were observed live.
+// flexInt64 decodes a JSON int64 that may render as a bare number or a quoted string.
+// Canton's JSON API renders large int64 fields either way depending on context.
 type flexInt64 int64
 
 func (f *flexInt64) UnmarshalJSON(b []byte) error {
@@ -91,7 +88,7 @@ type wormholeMessage struct {
 }
 
 // jsExercisedEvent is the subset of the JSON Ledger API's ExercisedEvent fields this package
-// needs (findings §7's verbatim field list); everything else is ignored, not modeled.
+// needs; everything else is ignored, not modeled.
 type jsExercisedEvent struct {
 	Choice         string          `json:"choice"`
 	Consuming      bool            `json:"consuming"`
@@ -113,9 +110,9 @@ type jsTransaction struct {
 	Events      []jsEvent `json:"events"`
 }
 
-// updateFrame is one `{"update": {...}}` frame. Only the "Transaction" kind is modeled --
+// updateFrame is one `{"update": {...}}` frame. Only the "Transaction" kind is modeled.
 // OffsetCheckpoint/Reassignment/TopologyTransaction frames decode with Update.Transaction
-// left nil and are skipped by DecodeUpdateFrame, per findings §7 ("skip" them).
+// left nil and are skipped by DecodeUpdateFrame.
 type updateFrame struct {
 	Update struct {
 		Transaction *struct {
@@ -195,16 +192,15 @@ func LedgerEnd(ctx context.Context, baseURL, token string) (int64, error) {
 	return out.Offset, nil
 }
 
-// emitterTemplateID is the wormhole-core Emitter template, addressed by package NAME (not
-// package-id) -- findings §7: the JSON API accepts "#<package-name>:<Module>:<Entity>" and
-// resolves it to whatever package-id is currently vetted, so no package-id computation is
-// needed here.
+// emitterTemplateID is the wormhole-core Emitter template, addressed by package name rather
+// than package-id. The JSON API accepts "#<package-name>:<Module>:<Entity>" and resolves it
+// to whatever package-id is currently vetted, so no package-id computation is needed here.
 const emitterTemplateID = "#wormhole-core:Wormhole.Core.State:Emitter"
 
-// getUpdatesRequest mirrors the GetUpdatesRequest shape confirmed live (findings §7): a
-// single-party TemplateFilter on Emitter, LEDGER_EFFECTS transaction shape (so witnessed
-// exercises -- not just creates -- come through, since guardianObserver is only ever an
-// observer, never a signatory, of the consuming PublishMessage exercise).
+// getUpdatesRequest mirrors the GetUpdatesRequest shape confirmed live: a single-party
+// TemplateFilter on Emitter with the LEDGER_EFFECTS transaction shape, so witnessed exercises
+// (not just creates) come through, since guardianObserver is only ever an observer, never a
+// signatory, of the consuming PublishMessage exercise.
 type getUpdatesRequest struct {
 	BeginExclusive int64 `json:"beginExclusive"`
 	UpdateFormat   struct {
@@ -265,14 +261,12 @@ func toWebsocketURL(httpBaseURL string) string {
 // observation with the reader's CanReadAs(observerParty) rights alone.
 //
 // Auth: the Canton 3.5 JSON API docs specify two `Sec-WebSocket-Protocol` subprotocols
-// ("daml.ws.auth", "jwt.token.<jwt>") for browser clients, which can't set arbitrary headers
-// on a WebSocket handshake. That convention was tried FIRST against a live 0.6.12 LocalNet
-// and failed: the server accepted the handshake but rejected the very first request with
+// ("daml.ws.auth", "jwt.token.<jwt>") for browser clients, which cannot set arbitrary headers
+// on a WebSocket handshake. That convention was tried first against a live 0.6.12 LocalNet and
+// failed: the server accepted the handshake but rejected the very first request with
 // `{"grpcCodeValue":16,...}` (UNAUTHENTICATED, "a security-sensitive error"). A plain
-// `Authorization: Bearer <token>` header -- which a non-browser Go client can set freely --
-// was then confirmed live to work correctly (two real PublishMessage exercises streamed back
-// intact). This is a genuine deviation from the plan's V7 assumption, not a guess: both
-// approaches were reproduced against the same running stack before picking this one.
+// `Authorization: Bearer <token>` header, which a non-browser Go client can set freely, was
+// then confirmed to work: two real PublishMessage exercises streamed back intact.
 func Stream(ctx context.Context, cfg Config, yield func(Observed) bool) error {
 	wsURL := toWebsocketURL(cfg.JSONAPIBaseURL) + "/v2/updates"
 	cfg.logf("observer: dialing %s (beginExclusive=%d, party=%s)", wsURL, cfg.BeginExclusive, cfg.ObserverParty)

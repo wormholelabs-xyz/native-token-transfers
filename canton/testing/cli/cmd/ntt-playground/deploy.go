@@ -14,8 +14,8 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
 
-// deployConfig is the user-written deployment config file's shape (the playground plan's
-// "deploy config" -- {name, mode, tokenKind, decimals, peers}).
+// deployConfig is the shape of the user-written deployment config file:
+// {name, mode, tokenKind, decimals, peers}.
 type deployConfig struct {
 	Name      string       `json:"name"`
 	Mode      string       `json:"mode"`      // "burn-mint" | "lock-unlock"
@@ -43,10 +43,11 @@ type deployInput struct {
 	InstrumentAdmin    *string `json:"instrumentAdmin"` // "cip56-custody" only; null otherwise
 }
 
-// amuletTapUSD is the belt-and-braces amount tapped to the validator's own wallet
-// (app-provider) before requesting the custody's TransferPreapproval, since the validator
-// pays the preapproval's creation fee (findings §8). Price-independent cushion, matching the
-// plan's "generous USD amount" guidance for tap.
+// amuletTapUSD is the USD amount added to the validator's own wallet before requesting the
+// custody party's TransferPreapproval. The validator pays the fee to create that preapproval,
+// so its wallet must hold a balance first. TransferPreapproval is Splice's standing
+// authorization that lets a party receive Amulet transfers. The amount is deliberately larger
+// than needed because the devnet Amulet price is not fixed.
 const amuletTapUSD = "1000"
 
 type deployOutput struct {
@@ -99,14 +100,13 @@ func newDeployCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			// cip56-custody drives real Canton Coin (Amulet) rather than a local mock
-			// registry: it needs a profile with a real DSO (AmuletAvailable), only supports
-			// lock-unlock (Amulet has no BurnMintFactory), and requires the custody party to
-			// be an onboarded validator wallet user with a standing TransferPreapproval
-			// BEFORE the deploy script runs (Playground.Deploy:deployNtt's Cip56Custody
-			// branch just creates the token hook against an already-resolved custody/DSO
-			// party pair -- see internal/amulet for the off-ledger onboarding/tap/preapproval
-			// calls).
+			// cip56-custody uses real Canton Coin (Amulet) instead of a local mock registry.
+			// It needs a profile with a real DSO (the Amulet operator party), only supports
+			// lock-unlock (Amulet has no burn-mint factory), and requires the custody party to
+			// already be an onboarded validator wallet user with a standing TransferPreapproval
+			// before the deploy script runs. The deploy script only creates the token hook
+			// against an already-resolved custody and DSO party pair; setupCip56Custody below
+			// resolves those inputs off-ledger.
 			var custodyPartyPtr, instrumentAdminPtr *string
 			var custodyUser string
 			if cfg.TokenKind == "cip56-custody" {
@@ -194,14 +194,12 @@ func newDeployCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// setupCip56Custody resolves everything Playground.Deploy:deployNtt's Cip56Custody branch
-// needs before it runs: the real DSO party, the custody wallet user's onboarded party (with
-// actAs granted to the script user), and a standing TransferPreapproval for it. The validator
-// pays the preapproval's creation fee, so its own wallet (app-provider) is tapped first --
-// belt-and-braces, matching the plan's design decision. None of this is a `dpm script` call:
-// it is all off-ledger HTTP against the validator (internal/amulet) plus one localnet.go
-// lookup, exactly the CLI's "ledger chokepoint stays dpm script for everything that submits"
-// rule -- these calls resolve inputs, they don't submit commands themselves.
+// setupCip56Custody resolves everything the deploy script's cip56-custody path needs before
+// it runs: the real DSO party, the custody wallet user's onboarded party (with actAs granted
+// to the script user), and a standing TransferPreapproval for it. The validator pays the fee
+// to create the preapproval, so its own wallet is funded first. None of these steps submit a
+// ledger command: they are all off-ledger HTTP calls to the validator plus one localnet
+// lookup that resolve inputs for the deploy script.
 func setupCip56Custody(ctx context.Context, cmd *cobra.Command, a *app, deploymentName string, prof profile.Profile) (custodyParty, custodyUser, dsoParty string, err error) {
 	m, err := a.localNetManager()
 	if err != nil {

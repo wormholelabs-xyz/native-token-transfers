@@ -13,9 +13,9 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/observer"
 )
 
-// guardianWatcherUser is the observer stream's dedicated reader ledger user: granted ONLY
-// CanReadAs(guardianObserver), never actAs -- proving the guardian observation works with
-// observer rights alone (the playground plan's headline claim).
+// guardianWatcherUser is the observer stream's dedicated reader ledger user. It is granted
+// only CanReadAs(guardianObserver) and never actAs, which shows that guardian observation
+// works with read-only rights alone.
 const guardianWatcherUser = "guardian-watcher"
 
 // observedOutput is the JSON shape `observe stream` prints -- camelCase, machine-parseable,

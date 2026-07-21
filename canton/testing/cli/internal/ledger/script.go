@@ -1,9 +1,9 @@
-// Package ledger runs Daml Scripts via `dpm script`, marshaling Go structs to/from the JSON
-// files the daml-script CLI reads/writes. This is deliberately the CLI's only way to touch
-// the ledger (no Go gRPC client, per the design note in the playground plan): disclosures,
-// multi-party actAs, and interface exercising are already solved in Daml Script, and the
-// pattern is proven by the existing canton/testing/go harness. Sandbox and LocalNet differ
-// only in host/port/auth/upload flags, all carried by profile.Profile.
+// Package ledger runs Daml Scripts via `dpm script`, marshaling Go structs to and from the
+// JSON files the daml-script CLI reads and writes. This is the CLI's only way to touch the
+// ledger; there is no Go gRPC client. Daml Script already handles disclosures, multi-party
+// actAs, and interface exercising, and the existing canton/testing/go harness proves the
+// pattern. The sandbox and LocalNet profiles differ only in host, port, auth, and upload
+// flags, all carried by profile.Profile.
 package ledger
 
 import (

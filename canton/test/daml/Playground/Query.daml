@@ -182,9 +182,9 @@ data AmuletBalanceOutput = AmuletBalanceOutput with
   deriving (Eq, Show)
 
 -- | Sum of @owner@'s unlocked real Amulet holdings, read directly off the token-standard
--- 'Holding' interface -- not an HTTP call (findings §6: "not an HTTP problem at all"). Locked
--- holdings (mid-transfer) are excluded; only 'owner' is summed even though 'queryInterface'
--- may also surface holdings @owner@ merely observes.
+-- 'Holding' interface rather than over HTTP. Locked holdings (mid-transfer) are excluded;
+-- only 'owner' is summed even though 'queryInterface' may also surface holdings @owner@
+-- merely observes.
 amuletBalance : AmuletBalanceInput -> Script AmuletBalanceOutput
 amuletBalance input = do
   let instrument = InstrumentId with admin = input.instrumentAdmin, id = "Amulet"

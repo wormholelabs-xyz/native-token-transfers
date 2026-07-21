@@ -142,7 +142,7 @@ data TransferOutOutput = TransferOutOutput with
     payload          : Text  -- encoded WormholeTransceiverMessage, hex
   deriving (Eq, Show)
 
--- | Resolve the token-seam contracts a nested LockOrBurn/MintOrUnlock needs visible to the
+-- | Resolve the token contracts a nested LockOrBurn/MintOrUnlock needs visible to the
 -- submitter even though they aren't choice arguments (Wormhole.Ntt.Manager's NttManager
 -- stores only the interface cid). For the Cip56 kinds this is BOTH the token hook AND its
 -- underlying registry factory: the mock factories (Test.TestNtt:MockBurnMintFactory /
@@ -396,7 +396,7 @@ data ReceiveVaaInput = ReceiveVaaInput with
     operator  : Party
     managerId : Int
     admin     : Party  -- the deployment's replay-trie consumer (Playground.Deploy:deployNtt)
-    tokenKind : Text   -- selects the token-seam disclosure (see resolveTokenDisclosure)
+    tokenKind : Text   -- selects the token disclosure (see resolveTokenDisclosure)
     executor  : Party
     recipient : Party
     vaaBytes  : Text
@@ -411,11 +411,10 @@ data ReceiveVaaOutput = ReceiveVaaOutput with
 
 receiveVaa : ReceiveVaaInput -> Script ReceiveVaaOutput
 receiveVaa input = do
-  -- Receiving network is out of scope for the real-Amulet arc (the playground plan's Goal):
-  -- resolveTokenSeam's Cip56Custody case deliberately returns registryCid = None (no mock
-  -- factory exists to fall back to), so an unmet abort here explains why clearly instead of
-  -- surfacing a generic "registry transfer factory cid required" error from deep inside
-  -- Cip56CustodyToken.mintOrUnlockImpl.
+  -- Receiving is out of scope for the real-Amulet flow: resolveTokenSeam's Cip56Custody case
+  -- deliberately returns registryCid = None (there is no mock factory to fall back to), so
+  -- aborting here explains why clearly instead of surfacing a generic "registry transfer
+  -- factory cid required" error from deep inside Cip56CustodyToken.mintOrUnlockImpl.
   when (parseTokenKind input.tokenKind == Cip56Custody) $
     abort "playground: cip56-custody receive/unlock not supported by the playground"
   (mgrCid, _mgr) <- resolveManager input.operator input.managerId
@@ -459,7 +458,7 @@ receiveVaa input = do
 
 data PreapproveDepositInput = PreapproveDepositInput with
     admin     : Party  -- the deployment's token admin (co-signatory of the pre-approval)
-    tokenKind : Text   -- selects the token-seam disclosure (see resolveTokenSeam)
+    tokenKind : Text   -- selects the token disclosure (see resolveTokenSeam)
     user      : Party  -- the recipient opting in
   deriving (Eq, Show)
 

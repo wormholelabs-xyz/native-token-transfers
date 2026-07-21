@@ -170,8 +170,7 @@ func knownHints(s *state.State) map[string]string {
 // grantActAs grants the script user actAs rights on parties, on profiles with auth
 // enabled (LocalNet). Allocating a party does NOT confer submission rights on the
 // allocating user there -- without this grant the first submit as the new party fails
-// with PERMISSION_DENIED (verified against a live 0.6.12 stack). No-op on the sandbox,
-// whose Ledger API runs without auth.
+// with PERMISSION_DENIED. No-op on the sandbox, whose Ledger API runs without auth.
 func grantActAs(cmd *cobra.Command, a *app, parties ...string) error {
 	prof, err := a.resolvedProfile()
 	if err != nil {

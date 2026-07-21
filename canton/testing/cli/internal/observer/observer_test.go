@@ -9,11 +9,10 @@ import (
 
 // exercisedUpdateFixture returns one `POST /v2/updates` (or WS) response frame carrying a
 // single consuming PublishMessage ExercisedEvent, with sequence/emitterId/nonce encoded as
-// JSON numbers or strings depending on numericAsString -- both are observed live against
-// Splice LocalNet's JSON Ledger API (see the playground plan's V8 row), so the decoder must
-// tolerate either. The shape (including the Update-kind "value" wrapper, and the flat
-// ExercisedEvent fields) mirrors what was captured live from a running 0.6.12 stack via the
-// `POST /v2/updates` blocking-list fallback (see the plan's "Verify-live results" section).
+// JSON numbers or strings depending on numericAsString. Splice LocalNet's JSON Ledger API
+// emits both forms, so the decoder must tolerate either. The shape (including the Update-kind
+// "value" wrapper and the flat ExercisedEvent fields) matches what a running 0.6.12 stack
+// returns from the `POST /v2/updates` blocking-list fallback.
 func exercisedUpdateFixture(t *testing.T, sequence, emitterID, nonce string, numericAsString bool) []byte {
 	t.Helper()
 	quote := func(v string) string {
@@ -93,9 +92,9 @@ func TestDecodeUpdateFrame_ExtractsPublishMessage(t *testing.T) {
 	}
 }
 
-// TestDecodeUpdateFrame_NumericOrString pins the json.Number tolerance the plan's V8 row
-// requires: sequence/emitterId/nonce may render as a JSON number or a quoted string depending
-// on the participant's int64 rendering -- both must decode identically.
+// TestDecodeUpdateFrame_NumericOrString checks the json.Number tolerance:
+// sequence/emitterId/nonce may render as a JSON number or a quoted string depending on the
+// participant's int64 rendering, and both must decode identically.
 func TestDecodeUpdateFrame_NumericOrString(t *testing.T) {
 	asNumber, err := DecodeUpdateFrame(exercisedUpdateFixture(t, "5", "9", "3", false))
 	if err != nil {
@@ -176,9 +175,9 @@ func TestDecodeUpdateFrame_SkipsNonPublishMessage(t *testing.T) {
 	}
 }
 
-// TestDecodeUpdateFrame_SkipsNonTransactionUpdates proves OffsetCheckpoint (and other
-// non-Transaction update kinds) are skipped rather than erroring, matching the plan's
-// findings §7 ("skip OffsetCheckpoint/Reassignment/TopologyTransaction").
+// TestDecodeUpdateFrame_SkipsNonTransactionUpdates checks that OffsetCheckpoint (and other
+// non-Transaction update kinds such as Reassignment and TopologyTransaction) are skipped
+// rather than treated as errors.
 func TestDecodeUpdateFrame_SkipsNonTransactionUpdates(t *testing.T) {
 	raw := `{"update": {"OffsetCheckpoint": {"value": {"offset": 44}}}}`
 	observed, err := DecodeUpdateFrame([]byte(raw))

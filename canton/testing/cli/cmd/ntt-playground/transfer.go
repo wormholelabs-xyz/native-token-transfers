@@ -42,9 +42,11 @@ type transferOutInput struct {
 }
 
 // amuletSeamJSON/disclosedContractInJSON mirror Playground.Amulet.daml's
-// AmuletSeam/DisclosedContractIn -- the real Amulet registry's resolved factory cid, choice
-// context, and disclosures, fetched fresh per transfer (internal/amulet.GetTransferFactory)
-// and passed through verbatim (ChoiceContext travels as raw Daml-JSON, untouched by Go).
+// AmuletSeam/DisclosedContractIn. They carry the Amulet registry's resolved TransferFactory
+// (Splice's contract for building an Amulet transfer): its contract id, choice context, and
+// disclosed contracts. These are fetched fresh for each transfer via
+// internal/amulet.GetTransferFactory and passed through verbatim; the choice context stays as
+// raw Daml-JSON, untouched by Go.
 type amuletSeamJSON struct {
 	FactoryCid    string                    `json:"factoryCid"`
 	ChoiceContext json.RawMessage           `json:"choiceContext"`
@@ -57,13 +59,11 @@ type disclosedContractInJSON struct {
 	Blob       string `json:"blob"`
 }
 
-// toAmuletSeamJSON drops SynchronizerID (Daml Script's Disclosure type has no field for it --
-// see the plan's findings §9) from the registry's disclosed-contract shape, and re-encodes
-// createdEventBlob from base64 (the registry's wire format) to hex: verified live against
-// LocalNet that `dpm script`'s Disclosure.blob field is HEX, not base64 -- passing the
-// registry's base64 straight through fails with "cannot parse HexString" (a deviation from
-// the plan's V5 assumption that the two encodings were interchangeable; they carry the same
-// bytes, just rendered differently).
+// toAmuletSeamJSON adapts the registry's disclosed-contract shape for `dpm script`. It drops
+// SynchronizerID, because Daml Script's Disclosure type has no field for it, and re-encodes
+// createdEventBlob from base64 (the registry's wire format) to hex. The script's
+// Disclosure.blob field must be hex: passing the registry's base64 straight through fails with
+// "cannot parse HexString". Both encodings carry the same bytes.
 func toAmuletSeamJSON(f amulet.TransferFactory) (*amuletSeamJSON, error) {
 	disclosed := make([]disclosedContractInJSON, len(f.DisclosedContracts))
 	for i, dc := range f.DisclosedContracts {
@@ -85,10 +85,10 @@ type transferOutOutput struct {
 	Payload          string `json:"payload"`
 }
 
-// defaultTapUSD is the sender's default tap amount for a cip56-custody transfer: a
-// price-independent cushion (the plan explicitly says not to assert the CC amount of the tap
-// itself, since LocalNet leaves the devnet amulet price unset). "0" skips the tap (e.g. a
-// second transfer by an already-funded sender).
+// defaultTapUSD is the sender's default tap amount for a cip56-custody transfer, in USD. The
+// devnet Amulet price is not fixed on LocalNet, so the resulting Canton Coin amount is not
+// asserted; the value is just a cushion. "0" skips the tap, e.g. a second transfer by an
+// already-funded sender.
 const defaultTapUSD = "100"
 
 func newTransferCmd(a *app) *cobra.Command {
@@ -120,9 +120,9 @@ func newTransferCmd(a *app) *cobra.Command {
 				sourceTokenHex = strings.Repeat("00", 32)
 			}
 
-			// cip56-custody drives real Canton Coin (Amulet): the sender must be a validator
-			// wallet user (only wallet users can be tapped), never a bare script-allocated
-			// party -- see the plan's "Party & user model". Every other kind is unchanged.
+			// cip56-custody uses real Canton Coin (Amulet): the sender must be a validator
+			// wallet user, since only wallet users can be tapped, never a bare
+			// script-allocated party. Every other token kind is unchanged.
 			var userParty string
 			var amuletClient *amulet.Client
 			if d.TokenKind == "cip56-custody" {
@@ -185,10 +185,10 @@ func newTransferCmd(a *app) *cobra.Command {
 				holdingCids = []string{fundOut.HoldingCid}
 			}
 
-			// cip56-custody resolves the real transfer-factory + choice context fresh for
-			// THIS call (never cached -- the plan's "recheck on submit failure" note), and
-			// leaves inputHoldingCids empty so Playground.Amulet:amuletHoldings enumerates
-			// the sender's unlocked Amulet in-script.
+			// cip56-custody resolves the real transfer factory and choice context fresh for
+			// this call and never caches them, so a submit failure can be retried against a
+			// current factory. It leaves inputHoldingCids empty so Playground.Amulet:amuletHoldings
+			// enumerates the sender's unlocked Amulet in-script.
 			var amuletSeam *amuletSeamJSON
 			if d.TokenKind == "cip56-custody" {
 				amountDecimal := formatDecimal(amount, d.TokenDecimals) // full instrument scale (e.g. 10 decimals for Amulet), not the 8-decimal wire trim

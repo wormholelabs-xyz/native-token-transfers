@@ -1,8 +1,9 @@
 # ntt-playground
 
 A devnet playground CLI for the Canton NTT contracts in `canton/`. It stands up
-a local Canton network, deploys an NTT (manager + transceiver + token seam),
-controls a 1/1 Wormhole guardian that signs VAAs on demand, and drives
+a local Canton network, deploys an NTT (a manager, a transceiver, and the token
+interface the manager calls to move tokens), controls a 1/1 Wormhole guardian
+that signs VAAs (Wormhole's signed cross-chain messages) on demand, and drives
 inbound/outbound transfers end to end — all from the command line, with no
 second real chain involved (outbound transfers are verified by recomputing and
 signing the published message; inbound transfers are signed as if from a
@@ -96,7 +97,7 @@ instead of per-service compose state.
 | `init [--guardian-key HEX] [--fee N]` | Bootstrap a fresh `CoreState` + registries with a 1/1 guardian set. Generates a random guardian key unless `--guardian-key` is given. `--fee` self-signs and applies an initial `SetMessageFee` governance VAA. |
 | `party list` | List every party the participant knows (`party=... isLocal=...`), annotating the hints of playground-allocated ones (`hint=Alice`). |
 | `party allocate --hint HINT` | Allocate a party under a hint. Idempotent: an already-known hint returns its existing party. |
-| `deploy --config FILE [--name NAME]` | Deploy an NTT (registers the transceiver `Emitter`, stands up the token seam, registers the `NttManager`, claims a replay-trie root, and pre-sets any peers listed in the config). |
+| `deploy --config FILE [--name NAME]` | Deploy an NTT (registers the transceiver `Emitter`, stands up the token interface, registers the `NttManager`, claims a replay-trie root, and pre-sets any peers listed in the config). |
 | `emitter register --name NAME --owner HINT` | Register a standalone core-bridge `Emitter` (not tied to an NTT deployment), keyed under a CLI-local name in state. |
 | `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
@@ -239,27 +240,20 @@ lock/unlock path is exercisable against it directly — see
 [Real Amulet (`cip56-custody`)](#real-amulet-cip56-custody) for the real
 (not mock) registry client this profile enables.
 
-**Verification status:** the sandbox profile is continuously verified in CI
-(the `playground CLI (go vet/test + sandbox e2e)` job in
-[`.github/workflows/canton.yml`](../../../.github/workflows/canton.yml)), on
-every push and pull request. The LocalNet profile's distinguishing surface —
-unsafe-JWT auth, DAR vetting against a real DSO topology, `CanActAs` grants,
-real Amulet (tap, `TransferPreapproval`, the transfer-instruction registry),
-and the real Ledger API v2 update stream — is exactly what that job can never
-exercise, so it is covered separately by the `playground CLI (LocalNet e2e)`
-job in the same workflow (weekly schedule plus manual `workflow_dispatch`, not
-a PR gate: the stack is too heavy to run on every push). The full e2e suite,
-including the real-Amulet `cip56-custody` subtest (deploy against the live
-DSO, tap + `TransferPreapproval` + a real 1 CC lock, and a real update-stream
-observation whose sequence/payload matched the recomputed ones byte-for-byte),
-has already passed end to end against a live Splice LocalNet 0.6.12 stack
-(`NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v`), confirming
-auth, DAR vetting, party rights, real-Amulet wallet/registry calls, the WS
-update stream, and the JSON encoding assumptions against a real authenticated
-participant. The suite has grown since that first run; treat newly added
-subtests as unverified against LocalNet until the scheduled job covers them.
-LocalNet-only facts discovered and fixed during verification, each impossible
-to observe on the auth-less sandbox:
+**Verification status:** the sandbox profile runs in CI on every push and pull
+request (the `playground CLI (go vet/test + sandbox e2e)` job in
+[`.github/workflows/canton.yml`](../../../.github/workflows/canton.yml)). The
+LocalNet profile's distinguishing surface — unsafe-JWT auth, DAR vetting
+against a real DSO topology, `CanActAs` grants, real Amulet (tap,
+`TransferPreapproval`, the transfer-instruction registry), and the real Ledger
+API v2 update stream — cannot run in that job, so it is covered separately by
+the `playground CLI (LocalNet e2e)` job in the same workflow (weekly schedule
+plus manual `workflow_dispatch`, not a PR gate, because the stack is too heavy
+to run on every push). Run it locally with
+`NTT_PLAYGROUND_PROFILE=localnet go test -tags e2e ./e2e -v`.
+
+LocalNet-only behaviors to be aware of, none of which the auth-less sandbox can
+show:
 
 - the validator's `v0` API (scan-proxy, unlike `readyz`) requires a bearer
   token, so the readiness poll and `DSOPartyID` send one;
@@ -306,8 +300,8 @@ to observe on the auth-less sandbox:
 - **Hex vs. base64**, found by running against a live LocalNet: `dpm script`'s
   `Disclosure.blob` field is hex, while the Amulet transfer-instruction
   registry's `createdEventBlob` is base64 — same bytes, different rendering.
-  `toAmuletSeamJSON` (`transfer.go`) re-encodes before handing the seam to
-  `Playground.Ops:transferOut`.
+  `toAmuletSeamJSON` (`transfer.go`) re-encodes before handing the token
+  arguments to `Playground.Ops:transferOut`.
 
 ## MainNet path
 
@@ -331,7 +325,7 @@ Documented, not implemented — this CLI is devnet-only throughout.
   script-only companion DAR with zero templates.
 - **Fees/token.** The fee instrument becomes Canton Coin; a real `Allocation`
   is drawn from the user's wallet per `Transfer`/`PublishMessage`. The token
-  seam becomes a real Amulet (or other CIP-56) registry client. Only
+  interface becomes a real Amulet (or other CIP-56) registry client. Only
   lock/unlock (`Cip56CustodyToken`) works against Amulet directly — burn/mint
   needs a registry implementing `BurnMintFactory`.
 - **Disclosures.** The operator-as-oracle `queryDisclosure`/`coveringNode`

@@ -1,16 +1,17 @@
-// Package amulet is a thin authenticated HTTP client for the Splice LocalNet validator's
-// wallet/scan-proxy endpoints that a real Canton Coin (Amulet) CIP-56 custody deployment
-// needs off-ledger: wallet-user onboarding, devnet tap (funding), TransferPreapproval
-// creation, and the transfer-instruction registry's transfer-factory + choice-context
-// resolution. Every call mints a fresh per-user bearer token via network.MintUnsafeToken --
-// LocalNet's unsafe shared-secret JWT scheme -- matching the plan's "Party & user model"
-// (each of sender/custody act as their own wallet user, never the operator).
+// Package amulet is a small authenticated HTTP client for a Splice LocalNet validator's
+// wallet and scan-proxy endpoints. Splice is the Canton Network stack; Amulet is its native
+// Canton Coin token. A real Amulet CIP-56 custody deployment needs these calls off-ledger:
+// onboarding a wallet user, tapping the devnet faucet for funds, creating a
+// TransferPreapproval, and resolving the transfer-instruction registry's transfer factory and
+// choice context. Every call mints a fresh per-user bearer token via network.MintUnsafeToken
+// (LocalNet's unsafe shared-secret JWT scheme). The sender and the custody party each act as
+// their own wallet user; the operator never acts for them.
 //
-// This package deliberately touches the ledger only through the validator's HTTP APIs, never
-// through a Daml Script or a gRPC Ledger API client -- the CLI's one ledger chokepoint stays
-// `dpm script` (internal/ledger.Runner); this package only resolves what a script's `--input-
-// file` needs (a wallet user's party, a transfer-factory cid, and its choice context/
-// disclosures) before the script call that actually submits.
+// This package reaches the ledger only through the validator's HTTP APIs, never through a
+// Daml Script or a gRPC Ledger API client. The CLI's single ledger entry point stays
+// `dpm script` (internal/ledger.Runner). This package only resolves what a script's
+// --input-file needs -- a wallet user's party, a transfer-factory contract id, and its choice
+// context and disclosures -- before the script call that actually submits.
 package amulet
 
 import (
@@ -28,16 +29,16 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 )
 
-// defaultOnboardTimeout is generous: a brand-new user's FIRST /v0/register call was observed
-// live to take longer than 10s (the validator's onboarding automation -- wallet install
-// contracts, primary party allocation -- is slow on a cold start); a retry within 60s always
-// succeeded (idempotent). See the playground plan's "Verify-live results", V1.
+// defaultOnboardTimeout is deliberately generous. A brand-new user's first /v0/register call
+// can take more than 10s, because the validator's onboarding automation (installing wallet
+// contracts and allocating the primary party) is slow on a cold start. The call is
+// idempotent, so a retry within 60s succeeds.
 const defaultOnboardTimeout = 60 * time.Second
 
-// defaultRetryInterval/defaultRetryTimeout back the tap/preapproval retry loops: LocalNet's
-// mining-round ingestion can lag briefly right after `network up` (findings §5), and the
-// wallet's TransferPreapproval creation blocks on validator automation that can 429 while in
-// flight (findings §3). Two minutes matches the plan's stated bound.
+// defaultRetryInterval and defaultRetryTimeout back the tap and preapproval retry loops.
+// Right after `network up`, LocalNet's mining-round ingestion can lag briefly. The wallet's
+// TransferPreapproval creation waits on validator automation that can return HTTP 429 while
+// still in flight. Two minutes is enough to cover both.
 const (
 	defaultRetryInterval = 5 * time.Second
 	defaultRetryTimeout  = 2 * time.Minute
@@ -122,10 +123,9 @@ func (c *Client) doJSON(ctx context.Context, timeout time.Duration, method, path
 	return resp.StatusCode, respBody, nil
 }
 
-// retryable reports whether status/body look like the two known transient-failure shapes:
-// round-ingestion lag right after `network up` (findings §5, surfaced as a 503 or an error
-// body naming "no open mining round"), or the preapproval endpoint's in-flight 429
-// (findings §3).
+// retryable reports whether status/body look like one of the two known transient failures:
+// mining-round ingestion lag right after `network up` (an HTTP 503, or an error body naming
+// "no open mining round"), or the preapproval endpoint's in-flight HTTP 429.
 func retryable(status int, body []byte) bool {
 	if status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests {
 		return true
@@ -133,11 +133,11 @@ func retryable(status int, body []byte) bool {
 	return strings.Contains(strings.ToLower(string(body)), "no open mining round")
 }
 
-// isTransientTransportError reports whether err looks like a client-side timeout/network
-// hiccup rather than a definitive failure -- observed live against LocalNet: tap/preapproval
-// calls occasionally take noticeably longer than the per-attempt HTTP timeout (validator
-// automation contention, not a real error), so these deserve the same retry treatment as an
-// HTTP-level 503/429 rather than failing the whole call on one slow attempt.
+// isTransientTransportError reports whether err looks like a client-side timeout or network
+// hiccup rather than a definitive failure. Tap and preapproval calls can occasionally take
+// longer than the per-attempt HTTP timeout under validator automation load, which is not a
+// real error, so they deserve the same retry treatment as an HTTP 503 or 429 rather than
+// failing the whole call on one slow attempt.
 func isTransientTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -157,11 +157,11 @@ type registerResponse struct {
 	PartyID string `json:"party_id"`
 }
 
-// OnboardWalletUser onboards user as a validator wallet user (POST /v0/register, the new
-// user's own JWT, empty body) and returns its primary party. Idempotent: re-registering an
-// already-onboarded user returns the same party (findings §8). Retries a transient transport
-// timeout once (a cold-start onboarding was observed live to occasionally exceed even the
-// generous per-attempt timeout) for up to RetryTimeout.
+// OnboardWalletUser onboards user as a validator wallet user (POST /v0/register with the new
+// user's own JWT and an empty body) and returns its primary party. It is idempotent:
+// re-registering an already-onboarded user returns the same party. A cold-start onboarding
+// can exceed even the generous per-attempt timeout, so it retries a transient transport
+// timeout for up to RetryTimeout.
 func (c *Client) OnboardWalletUser(ctx context.Context, user string) (string, error) {
 	deadline := time.Now().Add(c.retryTimeout())
 	for {
@@ -200,10 +200,9 @@ type tapResponse struct {
 	ContractID string `json:"contract_id"`
 }
 
-// Tap mints Amulet to user's primary party via the devnet tap (POST /v0/wallet/tap).
-// usdAmount is USD, not CC -- the handler divides by the current open round's amuletPrice
-// server-side (findings §2). Retries the round-ingestion-lag failure mode for up to
-// RetryTimeout.
+// Tap mints Amulet to user's primary party via the devnet faucet (POST /v0/wallet/tap).
+// usdAmount is in USD, not Canton Coin: the handler divides it by the current open round's
+// Amulet price server-side. Retries the mining-round ingestion lag for up to RetryTimeout.
 func (c *Client) Tap(ctx context.Context, user, usdAmount string) (string, error) {
 	deadline := time.Now().Add(c.retryTimeout())
 	for {
@@ -291,7 +290,7 @@ func (c *Client) CreateTransferPreapproval(ctx context.Context, user string) (st
 // ----------------------------------------------------------------------
 
 // TransferArgs is what GetTransferFactory needs to build the registry's
-// TransferFactory_Transfer choiceArguments (findings §4/V2).
+// TransferFactory_Transfer choiceArguments.
 type TransferArgs struct {
 	DSO      string // instrumentId.admin / expectedAdmin
 	Sender   string
@@ -327,8 +326,8 @@ type transferFactoryResponse struct {
 	ChoiceContext choiceContextWire `json:"choiceContext"`
 }
 
-// rfc3339Millis renders t the way the scan-proxy accepted live (millisecond-precision UTC,
-// e.g. "2026-07-20T14:47:18.000Z" -- see the plan's V2 verify-live result).
+// rfc3339Millis renders t the way the scan-proxy accepts it: millisecond-precision UTC, e.g.
+// "2026-07-20T14:47:18.000Z".
 func rfc3339Millis(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }

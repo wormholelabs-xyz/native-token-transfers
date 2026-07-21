@@ -21,8 +21,8 @@ func testClient(t *testing.T, srv *httptest.Server) *Client {
 	}
 }
 
-// TestTap_RequestAndResponse pins the tap body/response shape (findings §2): a bare
-// {"amount": "<usd decimal string>"} POST, response {"contract_id": "..."}.
+// TestTap_RequestAndResponse checks the tap request/response shape: a bare
+// {"amount": "<usd decimal string>"} POST, with response {"contract_id": "..."}.
 func TestTap_RequestAndResponse(t *testing.T) {
 	var gotPath, gotAuth string
 	var gotBody map[string]any
@@ -55,9 +55,9 @@ func TestTap_RequestAndResponse(t *testing.T) {
 	}
 }
 
-// TestTap_RetriesNoOpenMiningRound pins the plan's "retry ~2 min on no open mining round"
-// mitigation (findings §5/§2): the first response looks like the round-ingestion-lag failure
-// mode, and a subsequent call succeeds -- Tap must retry rather than surface the first error.
+// TestTap_RetriesNoOpenMiningRound checks that Tap retries when the validator reports no
+// open mining round. This transient failure clears once a round is available, so the first
+// response fails and a later call succeeds; Tap must retry rather than surface the first error.
 func TestTap_RetriesNoOpenMiningRound(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +85,8 @@ func TestTap_RetriesNoOpenMiningRound(t *testing.T) {
 	}
 }
 
-// TestCreateTransferPreapproval_409IsSuccess pins findings §3: a 409 means the
-// TransferPreapproval already exists and must be treated as success, not an error.
+// TestCreateTransferPreapproval_409IsSuccess checks that a 409 is treated as success: it
+// means the TransferPreapproval already exists, so it must not surface as an error.
 func TestCreateTransferPreapproval_409IsSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/validator/v0/wallet/transfer-preapproval" {
@@ -107,8 +107,8 @@ func TestCreateTransferPreapproval_409IsSuccess(t *testing.T) {
 	}
 }
 
-// TestCreateTransferPreapproval_RetriesOn429 pins findings §3: 429 means the validator's
-// automation is still converting the proposal in flight -- retry with backoff.
+// TestCreateTransferPreapproval_RetriesOn429 checks the retry on 429: the validator's
+// automation is still converting the proposal in flight, so retry with backoff.
 func TestCreateTransferPreapproval_RetriesOn429(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -134,8 +134,8 @@ func TestCreateTransferPreapproval_RetriesOn429(t *testing.T) {
 	}
 }
 
-// TestGetTransferFactory_RequestAndResponse pins findings §4: the choiceArguments encoding
-// (instrumentId.id == "Amulet"), and the response decode including disclosedContracts.
+// TestGetTransferFactory_RequestAndResponse checks the choiceArguments encoding
+// (instrumentId.id == "Amulet") and the response decode, including disclosedContracts.
 func TestGetTransferFactory_RequestAndResponse(t *testing.T) {
 	var gotReq map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -192,9 +192,9 @@ func TestGetTransferFactory_RequestAndResponse(t *testing.T) {
 	}
 }
 
-// TestGetTransferFactory_RejectsNonDirect pins the plan's hard gate: anything other than
-// "direct" would settle Pending and the on-ledger custody hook would abort -- Go must fail
-// fast instead of submitting.
+// TestGetTransferFactory_RejectsNonDirect checks the transferKind gate: anything other than
+// "direct" would settle Pending and the on-ledger custody hook would abort, so the client must
+// fail fast instead of submitting.
 func TestGetTransferFactory_RejectsNonDirect(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -218,8 +218,8 @@ func TestGetTransferFactory_RejectsNonDirect(t *testing.T) {
 	}
 }
 
-// TestOnboardWalletUser_RequestAndResponse pins findings §8: POST /v0/register with the
-// new user's own JWT and an empty body, response {"party_id": "..."}.
+// TestOnboardWalletUser_RequestAndResponse checks the onboarding call: POST /v0/register
+// with the new user's own JWT and an empty body, with response {"party_id": "..."}.
 func TestOnboardWalletUser_RequestAndResponse(t *testing.T) {
 	var gotPath, gotAuth, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
