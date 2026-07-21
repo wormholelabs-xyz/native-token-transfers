@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
@@ -192,8 +193,10 @@ func mustHex(t *testing.T, s string) []byte {
 }
 
 func TestPlaygroundE2E(t *testing.T) {
-	if playgroundProfile == "localnet" && os.Getenv("LOCALNET_DIR") == "" {
-		t.Skip("NTT_PLAYGROUND_PROFILE=localnet requires LOCALNET_DIR (see the CLI README's LocalNet section)")
+	if playgroundProfile == "localnet" {
+		if _, err := network.ResolveLocalNetDir(cantonDir); err != nil {
+			t.Skip(err.Error())
+		}
 	}
 
 	h := newHarness(t)

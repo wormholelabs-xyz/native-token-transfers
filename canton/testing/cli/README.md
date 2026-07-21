@@ -220,6 +220,17 @@ export IMAGE_TAG=0.6.12
 ./ntt-playground --profile localnet network down    # wipes parties/DARs/state
 ```
 
+`LOCALNET_DIR` is optional. If it is unset, the CLI looks for the extracted bundle at, in
+order:
+
+1. `canton/testing/.localnet/splice-node/docker-compose/localnet` (repo-local cache; gitignored)
+2. `$HOME/.cache/ntt-playground/splice-node/docker-compose/localnet`
+3. `$HOME/splice-node/docker-compose/localnet`
+
+and uses the first one that contains a `compose.yaml`. Extracting the tarball to one of those
+paths means every subsequent shell picks it up with no export needed. Set `LOCALNET_DIR`
+explicitly to override discovery or to point at a bundle elsewhere.
+
 The CLI applies a compose override on top of the bundle
 (`wormhole-postgres-override.yaml`, written into `LOCALNET_DIR` automatically):
 the bundle hardcodes `container_name: postgres` (colliding with any other

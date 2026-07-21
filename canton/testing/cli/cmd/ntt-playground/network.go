@@ -38,16 +38,25 @@ func (a *app) sandboxManager() (*network.SandboxManager, error) {
 func (a *app) vlogNetwork(cmd *cobra.Command, verb string) {
 	switch a.profile {
 	case profile.LocalNet:
-		a.vlogf(cmd, "network %s: profile=localnet LOCALNET_DIR=%s IMAGE_TAG=%s", verb, os.Getenv("LOCALNET_DIR"), os.Getenv("IMAGE_TAG"))
+		cantonDir, _ := a.resolvedCantonDir()
+		composeDir, err := network.ResolveLocalNetDir(cantonDir)
+		if err != nil {
+			composeDir = fmt.Sprintf("<unresolved: %v>", err)
+		}
+		a.vlogf(cmd, "network %s: profile=localnet LOCALNET_DIR=%s IMAGE_TAG=%s", verb, composeDir, os.Getenv("IMAGE_TAG"))
 	default:
 		a.vlogf(cmd, "network %s: profile=sandbox port=%d run-dir=%s", verb, profile.SandboxPort(), a.resolvedRunDir())
 	}
 }
 
 func (a *app) localNetManager() (*network.LocalNetManager, error) {
-	composeDir := os.Getenv("LOCALNET_DIR")
-	if composeDir == "" {
-		return nil, fmt.Errorf("network: LOCALNET_DIR must point at the extracted splice-node/docker-compose/localnet directory")
+	// cantonDir is best-effort here: a missing canton/ root only rules out one discovery
+	// candidate (the repo-local cache), so its own resolution error is swallowed rather than
+	// masking a perfectly good LOCALNET_DIR or a hit on the other candidates.
+	cantonDir, _ := a.resolvedCantonDir()
+	composeDir, err := network.ResolveLocalNetDir(cantonDir)
+	if err != nil {
+		return nil, err
 	}
 	return &network.LocalNetManager{ComposeDir: composeDir, ImageTag: os.Getenv("IMAGE_TAG"), Logf: a.verboseLogf()}, nil
 }

@@ -11,14 +11,25 @@ Run everything from this directory (`canton/testing/cli`).
 | Tier | Needs |
 |------|-------|
 | unit, daml, e2e-sandbox | `dpm` on `PATH`, Go, `just` |
-| e2e-localnet | the above **plus** Docker Desktop (>= 24 GB RAM) and `LOCALNET_DIR` |
+| e2e-localnet | the above **plus** Docker Desktop (>= 24 GB RAM) |
 
 - `dpm` (Daml toolchain) — the recipes add `~/.dpm/bin` to `PATH` for you.
 - `just` — `brew install just`.
 - Docker memory: give Docker **>= 24 GB** (Settings -> Resources -> Memory). Below that,
   the Splice stack's Postgres boots unhealthy and the run fails at network-up.
-- `LOCALNET_DIR` — an extracted `splice-node/docker-compose/localnet` from a Splice
-  release bundle (e.g. `0.6.12_splice-node.tar.gz`):
+- An extracted `splice-node/docker-compose/localnet` from a Splice release bundle (e.g.
+  `0.6.12_splice-node.tar.gz`). `LOCALNET_DIR` is optional: the CLI auto-discovers the bundle at
+  one of these paths, in order, and only needs the env var if none of them apply:
+  1. `canton/testing/.localnet/splice-node/docker-compose/localnet` (repo-local cache; gitignored)
+  2. `$HOME/.cache/ntt-playground/splice-node/docker-compose/localnet`
+  3. `$HOME/splice-node/docker-compose/localnet`
+
+  To use auto-discovery, extract the bundle to one of those paths instead of exporting the
+  variable, e.g.:
+  ```sh
+  mkdir -p ../../.localnet && tar xzf 0.6.12_splice-node.tar.gz -C ../../.localnet
+  ```
+  To override discovery (or point at a non-standard location), set `LOCALNET_DIR` explicitly:
   ```sh
   export LOCALNET_DIR=/path/to/splice-node/docker-compose/localnet
   ```
@@ -41,7 +52,8 @@ transfer and the Ledger API v2 stream observer.
 ## Step by step: the LocalNet run
 
 1. Give Docker >= 24 GB and make sure it is running.
-2. Point `LOCALNET_DIR` at your extracted bundle:
+2. Make your extracted bundle discoverable: either extract it to one of the standard paths
+   (see Prerequisites above), or point `LOCALNET_DIR` at it explicitly:
    ```sh
    export LOCALNET_DIR=/path/to/splice-node/docker-compose/localnet
    ```
@@ -73,7 +85,7 @@ just localnet-down     # tear it down (also cleans up after an interrupted run)
 | `UNAVAILABLE: Connection reset` / `CoordinatedShutdown` mid-run | ledger dropped under memory pressure | same as above — it is resources, not the tests |
 | sandbox run fails ~3 min in, ports `6864-6869` in use | a stale `ntt-playground` sandbox process from a killed run | `pkill -f ntt-playground`, rerun |
 | `nginx ... host not found in upstream "ans-web-ui-app-user"` at boot | cosmetic — the web-UI proxy; the CLI uses the gRPC ledger directly | ignore; tests are unaffected |
-| `ERROR: export LOCALNET_DIR` | `LOCALNET_DIR` not set | set it (see prerequisites) |
+| `network: no Splice LocalNet dir found; checked: ...` | no candidate path has an extracted bundle | extract the bundle to a standard path, or set `LOCALNET_DIR` (see prerequisites) |
 
 ## Coverage
 

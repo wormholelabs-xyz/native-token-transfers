@@ -129,33 +129,44 @@ func TestCmd_GuardianSignTransfer_NoGuardianKey(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
-// network status / up / down: localnet profile without LOCALNET_DIR
+// network status / up / down: localnet profile with no LOCALNET_DIR and no
+// discoverable candidate (HOME and --canton-dir both point at empty temp dirs, so
+// network.ResolveLocalNetDir has nothing to find).
 // ----------------------------------------------------------------------
+
+// noLocalNetDiscoveryFlags isolates a test from the real filesystem's discovery candidates:
+// HOME is repointed at an empty temp dir (no ~/.cache/ntt-playground or ~/splice-node), and
+// --canton-dir at a separate empty temp dir (no testing/.localnet either).
+func noLocalNetDiscoveryFlags(t *testing.T, stateFile string) []string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	return append(baseFlags(stateFile), "--profile", "localnet", "--canton-dir", t.TempDir())
+}
 
 func TestCmd_NetworkStatus_LocalNetMissingComposeDir(t *testing.T) {
 	t.Setenv("LOCALNET_DIR", "")
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
-	_, _, err := runPlayground(t, append(append(baseFlags(stateFile), "--profile", "localnet"), "network", "status")...)
-	if err == nil || !contains(err.Error(), "LOCALNET_DIR must point at") {
-		t.Fatalf("expected a missing-LOCALNET_DIR error, got %v", err)
+	_, _, err := runPlayground(t, append(noLocalNetDiscoveryFlags(t, stateFile), "network", "status")...)
+	if err == nil || !contains(err.Error(), "no Splice LocalNet dir found") {
+		t.Fatalf("expected a no-LocalNet-dir-found error, got %v", err)
 	}
 }
 
 func TestCmd_NetworkUp_LocalNetMissingComposeDir(t *testing.T) {
 	t.Setenv("LOCALNET_DIR", "")
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
-	_, _, err := runPlayground(t, append(append(baseFlags(stateFile), "--profile", "localnet"), "network", "up")...)
-	if err == nil || !contains(err.Error(), "LOCALNET_DIR must point at") {
-		t.Fatalf("expected a missing-LOCALNET_DIR error, got %v", err)
+	_, _, err := runPlayground(t, append(noLocalNetDiscoveryFlags(t, stateFile), "network", "up")...)
+	if err == nil || !contains(err.Error(), "no Splice LocalNet dir found") {
+		t.Fatalf("expected a no-LocalNet-dir-found error, got %v", err)
 	}
 }
 
 func TestCmd_NetworkDown_LocalNetMissingComposeDir(t *testing.T) {
 	t.Setenv("LOCALNET_DIR", "")
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
-	_, _, err := runPlayground(t, append(append(baseFlags(stateFile), "--profile", "localnet"), "network", "down")...)
-	if err == nil || !contains(err.Error(), "LOCALNET_DIR must point at") {
-		t.Fatalf("expected a missing-LOCALNET_DIR error, got %v", err)
+	_, _, err := runPlayground(t, append(noLocalNetDiscoveryFlags(t, stateFile), "network", "down")...)
+	if err == nil || !contains(err.Error(), "no Splice LocalNet dir found") {
+		t.Fatalf("expected a no-LocalNet-dir-found error, got %v", err)
 	}
 }
 
