@@ -6,10 +6,6 @@ on:
   push:
     branches:
       - main
-  schedule:
-    # Weekly LocalNet e2e run (see the cli-localnet-e2e job below). Cron is
-    # UTC; this job is the only one that reacts to the schedule trigger.
-    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -21,7 +17,6 @@ defaults:
 jobs:
   daml:
     name: dpm build & test
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -55,7 +50,6 @@ jobs:
 
   cli:
     name: playground CLI (go vet/test + sandbox e2e)
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -117,7 +111,7 @@ jobs:
   # runs on the weekly schedule above or an explicit manual dispatch.
   cli-localnet-e2e:
     name: playground CLI (LocalNet e2e)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
