@@ -38,6 +38,7 @@ var (
 	cliBinPath        string
 	cantonDir         string
 	playgroundProfile string
+	cliVerbose        bool
 )
 
 func TestMain(m *testing.M) {
@@ -57,6 +58,11 @@ func TestMain(m *testing.M) {
 	if playgroundProfile == "" {
 		playgroundProfile = "sandbox"
 	}
+
+	// The CLI's "[v] " sub-step narration is on unless NTT_PLAYGROUND_E2E_VERBOSE=false.
+	// Default on, so a bare `go test -tags e2e ./e2e` still narrates; the justfile sets
+	// this to false when run as `just verbose=false ...` to fully quiet the output.
+	cliVerbose = os.Getenv("NTT_PLAYGROUND_E2E_VERBOSE") != "false"
 
 	binDir, err := os.MkdirTemp("", "ntt-playground-e2e-bin-*")
 	if err != nil {
@@ -112,15 +118,18 @@ func newHarness(t *testing.T) *harness {
 // teardown.
 func (h *harness) run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	// --verbose is always on so every step's sub-step narration (stderr, "[v] " prefix)
-	// lands in the combined output mustRun logs -- `go test -v` then shows the full story.
-	full := append([]string{
+	// Flags shared by every CLI call. --verbose adds the "[v] " sub-step narration to the
+	// captured output; it is on unless NTT_PLAYGROUND_E2E_VERBOSE=false (see cliVerbose).
+	full := []string{
 		"--state-file", h.stateFile,
 		"--canton-dir", cantonDir,
 		"--profile", playgroundProfile,
 		"--run-dir", filepath.Join(h.workDir, ".run"),
-		"--verbose",
-	}, args...)
+	}
+	if cliVerbose {
+		full = append(full, "--verbose")
+	}
+	full = append(full, args...)
 	cmd := exec.Command(cliBinPath, full...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err

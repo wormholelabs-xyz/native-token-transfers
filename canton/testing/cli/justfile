@@ -8,10 +8,10 @@ export PATH := env_var("HOME") + "/.dpm/bin:" + env_var("PATH")
 
 image_tag := env_var_or_default("IMAGE_TAG", "0.6.12")
 
-# Verbose test output (go test -v). On by default; turn off per-run with
+# Verbose test output. On by default; turn off per-run with
 #   just verbose=false e2e-localnet
-# The CLI's own --verbose narration is always captured; this only controls whether
-# `go test` prints it for passing subtests (failures always show their output).
+# Controls BOTH `go test -v` and the CLI's own "[v] " narration (via
+# NTT_PLAYGROUND_E2E_VERBOSE), so verbose=false fully quiets the run.
 verbose := "true"
 gotest_v := if verbose == "true" { "-v" } else { "" }
 
@@ -44,7 +44,7 @@ build:
 
 # End-to-end suite on the in-process sandbox ledger (no Docker).
 e2e-sandbox:
-    NTT_PLAYGROUND_PROFILE=sandbox go test -tags e2e ./e2e -run TestPlaygroundE2E {{gotest_v}} -count=1 -timeout 20m
+    NTT_PLAYGROUND_PROFILE=sandbox NTT_PLAYGROUND_E2E_VERBOSE={{verbose}} go test -tags e2e ./e2e -run TestPlaygroundE2E {{gotest_v}} -count=1 -timeout 20m
 
 # Non-Docker gate: unit + Daml + sandbox e2e.
 check: unit daml e2e-sandbox
@@ -54,7 +54,7 @@ check: unit daml e2e-sandbox
 
 # Full e2e on real Splice LocalNet (Docker; boots and tears down LocalNet itself).
 e2e-localnet:
-    NTT_PLAYGROUND_PROFILE=localnet IMAGE_TAG={{image_tag}} go test -tags e2e ./e2e -run TestPlaygroundE2E {{gotest_v}} -count=1 -timeout 40m
+    NTT_PLAYGROUND_PROFILE=localnet IMAGE_TAG={{image_tag}} NTT_PLAYGROUND_E2E_VERBOSE={{verbose}} go test -tags e2e ./e2e -run TestPlaygroundE2E {{gotest_v}} -count=1 -timeout 40m
 
 # Boot LocalNet manually (for poking around outside a test run). LOCALNET_DIR optional, see above.
 localnet-up:
