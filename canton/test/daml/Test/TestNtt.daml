@@ -37,7 +37,7 @@ import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Token
 import Wormhole.Ntt.Manager
-import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken(..), Cip56CustodyToken(..), Cip56DepositPreapproval(..))
+import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken(..), Cip56CustodyToken(..), Cip56CustodyTrackingToken(..), Cip56DepositPreapproval(..))
 import Test.MockToken (mintAndAllocate, mockBalance)
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 import Test.TestCore
@@ -373,6 +373,52 @@ testBurnMintExactCoverNoChange = do
 
   remaining <- cip56HoldingsOwnedBy admin sender
   remaining === []
+
+----------------------------------------------------------------------
+-- Unified custody balance via intrinsic tracking (no flag, no caller cids)
+----------------------------------------------------------------------
+
+-- | Two successive locks leave the custody party with a SINGLE holding whose
+-- amount is the sum -- with no caller-supplied holding cids and no flag. The
+-- 'Cip56CustodyTrackingToken' records its current custody holding in a keyed
+-- 'CustodyHoldingTracker' and folds each newly locked holding into it. 'custody
+-- = admin' so the consolidation self-transfer has the custody authority in
+-- scope; the sender is a distinct party ('alice') so its own wallet is not
+-- counted as custody balance. admin co-acts only for visibility of the
+-- admin-signed factory/tracker and the admin-owned custody holdings.
+testCustodyTrackingUnifiesAcrossLocks : Script ()
+testCustodyTrackingUnifiesAcrossLocks = do
+  admin <- allocateParty "TrackLockAdmin"
+  manager <- allocateParty "TrackLockManager"
+  alice <- allocateParty "TrackLockAlice"
+  let custody = admin
+  let instrumentId = InstrumentId with admin, id = "LOCK"
+  factoryCid <- toInterfaceContractId @TransferFactory <$> submit admin do
+    createCmd MockTransferFactory with admin, pending = False
+  tokenCid <- toInterfaceContractId @NttToken <$> submit admin do
+    createCmd Cip56CustodyTrackingToken with admin, manager, custody, instrumentId
+  s1 <- mkHolding admin alice instrumentId 0.01
+  s2 <- mkHolding admin alice instrumentId 0.02
+
+  let lockOne holdingCid rawAmount = submit (actAs manager <> actAs alice <> actAs admin) do
+        exerciseCmd tokenCid LockOrBurn with
+          sender = alice
+          amount = TrimmedAmount with decimals = 8, amount = rawAmount
+          inputHoldingCids = [holdingCid]
+          registryCid = someRegistryCid factoryCid
+          extraArgs = emptyExtraArgs
+  _ <- lockOne s1 1_000_000
+  -- After the first lock the custody party holds exactly the one locked holding.
+  afterFirst <- cip56HoldingsOwnedBy admin custody
+  case afterFirst of
+    [(_, h)] -> h.amount === 0.01
+    _ -> abort ("expected one custody holding after the first lock, got: " <> show afterFirst)
+  _ <- lockOne s2 2_000_000
+
+  custodyHoldings <- cip56HoldingsOwnedBy admin custody
+  case custodyHoldings of
+    [(_, h)] -> h.amount === 0.03
+    _ -> abort ("expected exactly one unified custody holding, got: " <> show custodyHoldings)
 
 ----------------------------------------------------------------------
 -- Deposit pre-approval (recipient standing consent) at the mint seam

@@ -25,11 +25,20 @@
 --
 -- Amounts: NTT carries an integer 'TrimmedAmount'; CIP-56 holdings are 'Decimal'
 -- ('trimmedToDecimal' converts).
+--
+-- Unified custody balance: 'Cip56CustodyToken' below is the general lock/unlock
+-- token and does no consolidation -- against real Canton Coin the DSO owns the
+-- holdings and Amulet's own automation merges/splits them. For a controllable
+-- registry (where the NTT layer controls the holding lifecycle, e.g. the mock
+-- factory) 'Cip56CustodyTrackingToken' keeps the custody balance a single holding
+-- intrinsically: it records the current custody holding in a keyed
+-- 'CustodyHoldingTracker' and, on every lock, merges the newly locked holding
+-- into it -- no flag and no caller-supplied holding cids.
 module Wormhole.Ntt.TokenCip56 where
 
 import DA.Time (days, addRelTime)
-import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (AnyContractId, emptyMetadata)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs, emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1
   ( Transfer (..), TransferFactory, TransferFactory_Transfer (..)
   , TransferInstructionResult (..), TransferInstructionResult_Output (..)
@@ -121,6 +130,155 @@ template Cip56CustodyToken
       -- This is the unlock case, and there is no NTT-level pre-approval to
       -- give here -- it always aborts. Alice must instead pre-approve with
       -- the token's own registry (e.g. Amulet's transferPreapproval).
+      preApproveImpl _user =
+        abort "ntt: in order to unlock this token, a pre-approval is needed from the registry of the token contract. See transferPreapproval in the amulet implementation"
+
+----------------------------------------------------------------------
+-- controllable-registry custody token with an intrinsic single-holding balance
+----------------------------------------------------------------------
+
+-- | Records the custody party's single consolidated holding for one instrument,
+-- keyed by @(admin, custody, instrumentId)@. 'Cip56CustodyTrackingToken' looks
+-- this up on every lock and merges the newly locked holding into it, so the
+-- custody balance stays one holding with no caller input. Signed by @admin@
+-- (the authority in scope while the token drives a lock); @custody@ observes it.
+--
+-- Sound only when the NTT layer controls the holding lifecycle (a controllable
+-- registry / the mock factory), so a stored cid stays valid. NOT used for real
+-- Canton Coin: Amulet's automation archives and replaces coins, which would
+-- leave a tracked cid stale -- that path uses the plain 'Cip56CustodyToken'
+-- above, which tracks nothing.
+template CustodyHoldingTracker
+  with
+    admin        : Party
+    custody      : Party
+    instrumentId : InstrumentId
+    holdingCid   : ContractId Holding
+  where
+    signatory admin
+    observer custody
+    key (admin, custody, instrumentId) : (Party, Party, InstrumentId)
+    maintainer key._1
+
+-- | Consolidate @cids@ into a single holding owned by @custody@, via a
+-- self-transfer (custody -> custody) of their summed amount through the transfer
+-- factory. One input is already a single holding and is returned as-is; the
+-- self-transfer must yield exactly one holding. Needs @custody@'s authority in
+-- scope (available when @custody == admin@).
+consolidateCustodyToOne
+  : ContractId TransferFactory -> Party -> InstrumentId -> [ContractId Holding] -> ExtraArgs -> Update (ContractId Holding)
+consolidateCustodyToOne transferFactoryCid custody instrumentId cids extraArgs =
+  case cids of
+    [] -> abort "ntt: no custody holding to consolidate"
+    [single] -> pure single
+    _ -> do
+      amounts <- forA cids \c -> do
+        hv <- view <$> fetch c
+        pure hv.amount
+      now <- getTime
+      res <- exercise transferFactoryCid TransferFactory_Transfer with
+             expectedAdmin = instrumentId.admin
+             transfer = Transfer with
+               sender = custody
+               receiver = custody
+               amount = sum amounts
+               instrumentId
+               requestedAt = now
+               executeBefore = now `addRelTime` days 1
+               inputHoldingCids = cids
+               meta = emptyMetadata
+             extraArgs
+      case res.output of
+        TransferInstructionResult_Completed [merged] -> pure merged
+        TransferInstructionResult_Completed _ ->
+          abort "ntt: custody consolidation did not produce a single holding"
+        _ -> abort "ntt: custody consolidation did not settle synchronously"
+
+-- | A lock/unlock custody token for a controllable registry that keeps the
+-- custody balance a single holding intrinsically: each lock merges the newly
+-- locked holding with the one recorded in the 'CustodyHoldingTracker' and
+-- updates the tracker; an unlock spends the tracked holding and re-establishes
+-- the tracker from any change. No flag, no caller-supplied holding cids. See
+-- 'CustodyHoldingTracker' for why this is not used against real Canton Coin.
+template Cip56CustodyTrackingToken
+  with
+    admin              : Party
+    manager            : Party
+    custody            : Party
+    instrumentId       : InstrumentId
+  where
+    signatory admin
+    observer manager
+
+    interface instance NttToken for Cip56CustodyTrackingToken where
+      view = NttTokenView with admin, manager, mode = LockUnlock
+
+      -- Lock: sender -> custody, then fold the new holding into the tracked
+      -- custody holding so custody is left holding exactly one.
+      lockOrBurnImpl sender amount inputHoldingCids registryCid extraArgs = do
+        transferFactoryCid <- requireRegistryCid @TransferFactory
+          "ntt: registry transfer factory cid required to lock this token" registryCid
+        now <- getTime
+        res <- exercise transferFactoryCid TransferFactory_Transfer with
+               expectedAdmin = instrumentId.admin
+               transfer = Transfer with
+                 sender
+                 receiver = custody
+                 amount = trimmedToDecimal amount
+                 instrumentId
+                 requestedAt = now
+                 executeBefore = now `addRelTime` days 1
+                 inputHoldingCids
+                 meta = emptyMetadata
+               extraArgs
+        newCustodyCids <- case res.output of
+          TransferInstructionResult_Completed cids -> pure cids
+          _ -> abort "ntt: transfer did not settle synchronously"
+        -- Merge the new holding with the currently-tracked one (if any) and
+        -- record the single result.
+        priorCids <- lookupByKey @CustodyHoldingTracker (admin, custody, instrumentId) >>= \case
+          None -> pure []
+          Some trackerCid -> do
+            t <- fetch trackerCid
+            archive trackerCid
+            pure [t.holdingCid]
+        merged <- consolidateCustodyToOne transferFactoryCid custody instrumentId
+                    (priorCids <> newCustodyCids) extraArgs
+        create CustodyHoldingTracker with admin, custody, instrumentId, holdingCid = merged
+        pure ()
+
+      -- Unlock: custody -> recipient. The custody balance is the single tracked
+      -- holding, so the unlock spends it; drop the tracker and re-establish it
+      -- from any change the transfer returned (none, when fully drained).
+      mintOrUnlockImpl recipient amount inputHoldingCids _depositPreapprovalCid registryCid extraArgs = do
+        transferFactoryCid <- requireRegistryCid @TransferFactory
+          "ntt: registry transfer factory cid required to unlock this token" registryCid
+        now <- getTime
+        res <- exercise transferFactoryCid TransferFactory_Transfer with
+               expectedAdmin = instrumentId.admin
+               transfer = Transfer with
+                 sender = custody
+                 receiver = recipient
+                 amount = trimmedToDecimal amount
+                 instrumentId
+                 requestedAt = now
+                 executeBefore = now `addRelTime` days 1
+                 inputHoldingCids
+                 meta = emptyMetadata
+               extraArgs
+        _ <- case res.output of
+          TransferInstructionResult_Completed _ -> pure ()
+          _ -> abort "ntt: transfer did not settle synchronously"
+        lookupByKey @CustodyHoldingTracker (admin, custody, instrumentId) >>= \case
+          None -> pure ()
+          Some trackerCid -> archive trackerCid
+        case res.senderChangeCids of
+          [] -> pure ()
+          changeCids -> do
+            merged <- consolidateCustodyToOne transferFactoryCid custody instrumentId changeCids extraArgs
+            create CustodyHoldingTracker with admin, custody, instrumentId, holdingCid = merged
+            pure ()
+
       preApproveImpl _user =
         abort "ntt: in order to unlock this token, a pre-approval is needed from the registry of the token contract. See transferPreapproval in the amulet implementation"
 
