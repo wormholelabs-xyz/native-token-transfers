@@ -1,10 +1,11 @@
 -- | Helpers for driving the CIP-56 token-standard interfaces.
 --
--- The registry's factory contract is never stored on the ledger. Callers
--- resolve the registry's current factory off-ledger and pass its cid (as an
--- 'AnyContractId') with every call, so a registry can replace its factory
--- without breaking anything on our side. 'requireFactory' unwraps and coerces
--- that argument.
+-- A registry's factory is a stateless service contract (a reified dictionary):
+-- its choices are nonconsuming, so its cid is stable and changes only when the
+-- registry is upgraded. The deployment commits that cid at registration and
+-- uses it thereafter, so an untrusted caller cannot substitute a look-alike
+-- factory. 'coerceFactory' unwraps the committed cid to the concrete factory
+-- type a call site needs.
 module Wormhole.Ntt.Cip56 where
 
 import DA.Time (RelTime, hours, addRelTime)
@@ -13,12 +14,10 @@ import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs, emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 
--- | Unwrap the caller-supplied factory cid, coercing it to the factory type the
--- call site needs. Aborts with @msg@ if the caller did not supply one.
-requireFactory : Text -> Optional AnyContractId -> Update (ContractId t)
-requireFactory msg mc = case mc of
-  Some c -> pure (coerceContractId c)
-  None -> abort msg
+-- | Coerce the deployment's committed factory cid to the concrete factory type
+-- a call site needs.
+coerceFactory : AnyContractId -> ContractId t
+coerceFactory = coerceContractId
 
 -- | The @executeBefore@ horizon stamped on factory transfers. The field is
 -- mandatory in the CIP-56 transfer spec, but its value never matters here:

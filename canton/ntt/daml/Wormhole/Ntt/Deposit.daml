@@ -22,7 +22,7 @@ import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..))
 import Splice.Api.Token.BurnMintV1
   (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
-import Wormhole.Ntt.Cip56 (requireFactory)
+import Wormhole.Ntt.Cip56 (coerceFactory)
 
 template DepositPreapproval
   with
@@ -37,18 +37,17 @@ template DepositPreapproval
     -- | Mint @amount@ to the pre-approving @owner@. The manager computes
     -- @amount@ from the verified VAA and drives this choice with the
     -- instrument admin's inherited authority; the recipient stays offline.
-    -- @registryCid@ is the registry's current burn/mint factory, resolved
-    -- off-ledger and passed fresh on every call.
+    -- @factoryCid@ is the deployment's committed burn/mint factory, supplied by
+    -- 'Wormhole.Ntt.Manager.Mint'; the choice is admin-controlled, so a relayer
+    -- cannot reach it with a factory of its own.
     nonconsuming choice Deposit : ()
       with
         amount      : Decimal
-        registryCid : Optional AnyContractId
+        factoryCid  : AnyContractId
         extraArgs   : ExtraArgs
       controller instrumentId.admin
       do
-        factoryCid <- requireFactory @BurnMintFactory
-          "ntt: burn/mint factory cid required to deposit to this pre-approval" registryCid
-        _ <- exercise factoryCid BurnMintFactory_BurnMint with
+        _ <- exercise (coerceFactory @BurnMintFactory factoryCid) BurnMintFactory_BurnMint with
           expectedAdmin = instrumentId.admin
           instrumentId
           inputHoldingCids = [] : [ContractId Holding]

@@ -31,6 +31,13 @@
 -- id is hash-bound to the deployment admin ('nttInstrumentIdFor'), so no
 -- second deployment can register against an instrument that is already
 -- bridged.
+--
+-- The registry factory is deployment config, not per-call input. The token's
+-- factory is a stateless service contract whose cid is stable (its choices are
+-- nonconsuming), so the manager commits it at registration and uses that cid
+-- for every operation. A caller therefore cannot route a lock, burn, unlock,
+-- or mint through a look-alike factory to fake a token movement; @admin@
+-- refreshes it with 'SetFactory' on the rare occasion the registry is upgraded.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -231,20 +238,30 @@ template NttManager
     tokenConfig          : NttTokenConfig
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
+    factoryCid           : AnyContractId   -- the registry's factory (TransferFactory or BurnMintFactory by mode)
   where
     -- See the module header for what each signature contributes. All three are
     -- inherited from the NttGovernance root at registration; no signatory acts
     -- per transfer.
     signatory operator, admin, guardianGovernance
 
-    -- | Register or replace a peer deployment. The only consuming choice, so
-    -- the manager cid is stable between peer changes.
+    -- | Register or replace a peer deployment. Consuming, but only admin
+    -- config changes it, so the manager cid is stable across transfer traffic.
     choice SetPeer : ContractId NttManager
       with
         chainId : Int
         peer    : Peer
       controller admin
       do create this with peers = Map.insert chainId (normalizePeer peer) peers
+
+    -- | Repoint the committed registry factory. Needed only when the registry
+    -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
+    -- the new cid from the registry and commits it here.
+    choice SetFactory : ContractId NttManager
+      with
+        newFactoryCid : AnyContractId
+      controller admin
+      do create this with factoryCid = newFactoryCid
 
     -- | Outbound transfer. Trims the amount to the wire form, moves @user@'s
     -- tokens (lock into gg custody, crediting the deployment's 'LockedLedger',
@@ -274,7 +291,6 @@ template NttManager
         consistencyLevel      : Int
         inputHoldingCids      : [ContractId Holding]
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- message fee; None at fee 0
-        registryCid           : Optional AnyContractId  -- the registry's current factory
         extraArgs             : ExtraArgs
       controller user
       do
@@ -296,8 +312,7 @@ template NttManager
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
             ledger <- resolveLedger this lcid
-            factoryCid <- requireFactory @TIV1.TransferFactory
-              "ntt: registry transfer factory cid required to lock this token" registryCid
+            let factoryCid = coerceFactory @TIV1.TransferFactory this.factoryCid
             (depositCids, _) <- executeSyncTransfer factoryCid
               SyncTransfer with
                 sender = user
@@ -328,8 +343,7 @@ template NttManager
           -- Burn: spend the user's holdings for exactly the wire amount and
           -- return the rest as change.
           BurnMint -> do
-            factoryCid <- requireFactory @BurnMintFactory
-              "ntt: registry burn/mint factory cid required to burn this token" registryCid
+            let factoryCid = coerceFactory @BurnMintFactory this.factoryCid
             holdingAmounts <- forA inputHoldingCids \cid -> do
               hv <- view <$> fetch cid
               assertMsg "ntt: burn holding not owned by sender" (hv.owner == user)
@@ -393,7 +407,6 @@ template NttManager
         recipient        : Party
         ledgerCid        : ContractId LockedLedger
         inputHoldingCids : [ContractId Holding]      -- explicit override; [] = use the pot hint
-        registryCid      : Optional AnyContractId
         extraArgs        : ExtraArgs
       controller executor
       do
@@ -412,8 +425,7 @@ template NttManager
           ([], Some pot) -> pure [pot]
           ([], None) -> abort "ntt: no custody hint on the ledger; supply explicit holdings"
           (cids, _) -> pure cids
-        factoryCid <- requireFactory @TIV1.TransferFactory
-          "ntt: registry transfer factory cid required to unlock this token" registryCid
+        let factoryCid = coerceFactory @TIV1.TransferFactory this.factoryCid
         (_, changeCids) <- executeSyncTransfer factoryCid
           SyncTransfer with
             sender = guardianGovernance
@@ -442,7 +454,6 @@ template NttManager
         caller             : Party
         ledgerCid          : ContractId LockedLedger
         custodyHoldingCids : [ContractId Holding]
-        registryCid        : Optional AnyContractId
         extraArgs          : ExtraArgs
       controller caller
       do
@@ -451,8 +462,7 @@ template NttManager
         assertMsg "ntt: no custody holdings supplied" (not (null custodyHoldingCids))
         _ <- resolveLedger this ledgerCid
         total <- sumCustodyHoldings this custodyHoldingCids
-        factoryCid <- requireFactory @TIV1.TransferFactory
-          "ntt: registry transfer factory cid required to consolidate custody" registryCid
+        let factoryCid = coerceFactory @TIV1.TransferFactory this.factoryCid
         (mergedCids, _) <- executeSyncTransfer factoryCid
           SyncTransfer with
             sender = guardianGovernance
@@ -481,7 +491,6 @@ template NttManager
         pubKeys               : [(Int, Bytes)]
         recipient             : Party
         depositPreapprovalCid : ContractId DepositPreapproval
-        registryCid           : Optional AnyContractId
         extraArgs             : ExtraArgs
       controller executor
       do
@@ -500,6 +509,6 @@ template NttManager
           (mintAmount > 0.0)
         exercise depositPreapprovalCid Deposit with
           amount = mintAmount
-          registryCid
+          factoryCid = this.factoryCid
           extraArgs
         pure ntt

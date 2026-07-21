@@ -184,10 +184,6 @@ template MockTransferFactory
       transferFactory_publicFetchImpl _self _arg =
         pure TransferFactoryView with admin, meta = emptyMetadata
 
--- | Wrap a factory cid as the 'registryCid' argument.
-someRegistryCid : ContractId t -> Optional AnyContractId
-someRegistryCid = Some . coerceContractId
-
 -- | Create a 'Cip56MockHolding' owned by @owner@.
 mkHolding : Party -> Party -> InstrumentId -> Decimal -> Script (ContractId Holding)
 mkHolding admin owner instrument amount =
@@ -350,6 +346,7 @@ deploy operator gg admin config = do
       instrumentNonce = 0
       tokenConfig = config
       tokenDecimals = 8
+      factoryCid = factoryAnyCid
   pure Deployment with mgrCid, emitterCid, factoryAnyCid, instrumentId, ledgerCid
 
 -- | Two deployments get distinct managers with sequential ids and owner-bound
@@ -397,6 +394,7 @@ testBurnMintRegistrationRequiresBoundInstrument = do
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
+      factoryCid = coerceContractId emitterCid   -- unused; registration fails first
   expectAbort "not bound to this admin" res
 
 -- | The exclusivity attack the binding exists to stop: mallory registers her
@@ -422,6 +420,7 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
         instrumentNonce = nonce
         tokenConfig = BurnMint
         tokenDecimals = 8
+        factoryCid = coerceContractId emitterCid   -- unused; registration fails first
     expectAbort "not bound to this admin" res
 
 -- | Burn/mint registration rejects an instrument that gg does not administer
@@ -444,6 +443,7 @@ testRegistrationBounds = do
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
+      factoryCid = coerceContractId emitterCid   -- unused; registration fails first
   expectAbort "requires guardianGovernance to administer" res
 
   res <- trySubmit (actAs admin <> disclose govDisc) do
@@ -454,6 +454,7 @@ testRegistrationBounds = do
       instrumentNonce = 0
       tokenConfig = LockUnlock
       tokenDecimals = 11
+      factoryCid = coerceContractId emitterCid   -- unused; registration fails first
   expectAbort "tokenDecimals must be between 0 and 10" res
 
 ----------------------------------------------------------------------
@@ -532,7 +533,6 @@ sendTransfer user d csId holdings =
     consistencyLevel = 0
     inputHoldingCids = holdings
     feeAllocation = None
-    registryCid = Some d.factoryAnyCid
     extraArgs = emptyExtraArgs
 
 -- | A lock moves the sender's holding into gg custody and credits the
@@ -583,7 +583,6 @@ testTransferLockAccounting = do
       consistencyLevel = 0
       inputHoldingCids = [holdingCid2]
       feeAllocation = None
-      registryCid = Some d.factoryAnyCid
       extraArgs = emptyExtraArgs
 
   [(_, ledger2)] <- query @LockedLedger operator
@@ -615,7 +614,6 @@ testConsolidateCustody = do
       caller = alice
       ledgerCid = fromSome d.ledgerCid
       custodyHoldingCids = [frag1, frag2]
-      registryCid = Some d.factoryAnyCid
       extraArgs = emptyExtraArgs
 
   [(freshLedgerCid, ledger)] <- query @LockedLedger operator
@@ -635,12 +633,12 @@ testConsolidateCustody = do
       caller = alice
       ledgerCid = freshLedgerCid
       custodyHoldingCids = [aliceHolding]
-      registryCid = Some d.factoryAnyCid
       extraArgs = emptyExtraArgs
   expectAbort "not owned by guardianGovernance" res
 
 -- | A lock against a registry that answers Pending moves nothing, so the
--- manager's synchronous-settlement check aborts the send.
+-- manager's synchronous-settlement check aborts the send. Admin repoints the
+-- deployment's committed factory to the pending one via 'SetFactory'.
 testLockPendingSettlementRejected : Script ()
 testLockPendingSettlementRejected = do
   (operator, gg, csId) <- nttSetup
@@ -650,9 +648,10 @@ testLockPendingSettlementRejected = do
   pendingFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = True
   pendingDisc <- fromSome <$> queryDisclosure gg pendingFc
   let pendingAny = coerceContractId (toInterfaceContractId @TransferFactory pendingFc)
+  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactoryCid = pendingAny
 
   res <- trySubmitWithDiscs alice (pendingDisc :: discs) do
-    exerciseCmd d.mgrCid Transfer with
+    exerciseCmd mgrCid Transfer with
       user = alice
       transceiverEmitterCid = d.emitterCid
       coreStateCid = csId
@@ -665,9 +664,33 @@ testLockPendingSettlementRejected = do
       consistencyLevel = 0
       inputHoldingCids = [holdingCid]
       feeAllocation = None
-      registryCid = Some pendingAny
       extraArgs = emptyExtraArgs
   expectAbort "did not settle synchronously" res
+
+-- | Only admin can repoint the committed factory, and a send then routes
+-- through the new one (the upgrade path). A non-admin cannot call 'SetFactory'.
+testSetFactory : Script ()
+testSetFactory = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "SetFactoryAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  holdingCid <- mkHolding gg alice d.instrumentId 0.01
+
+  -- A stranger cannot repoint the factory.
+  stranger <- allocateParty "SetFactoryStranger"
+  submitMustFail stranger do exerciseCmd d.mgrCid SetFactory with newFactoryCid = d.factoryAnyCid
+
+  -- Admin repoints to a fresh (working) factory; the send routes through it.
+  freshFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
+  freshDisc <- fromSome <$> queryDisclosure gg freshFc
+  let freshAny = coerceContractId (toInterfaceContractId @TransferFactory freshFc)
+  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactoryCid = freshAny
+
+  _ <- submitWithDiscs alice (freshDisc :: discs) do
+    sendTransfer alice (d with mgrCid) csId [holdingCid]
+
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.01
 
 -- | A lock/unlock transfer without the deployment's ledger cid is rejected;
 -- so is a zero amount.
@@ -696,7 +719,6 @@ testTransferArgumentChecks = do
       consistencyLevel = 0
       inputHoldingCids = [holdingCid]
       feeAllocation = None
-      registryCid = Some d.factoryAnyCid
       extraArgs = emptyExtraArgs
   expectAbort "zero after trimming" res
 
@@ -772,7 +794,7 @@ testDepositMintSucceeds = do
   _ <- submit gg do
     exerciseCmd preCid Deposit with
       amount = 0.01
-      registryCid = Some d.factoryAnyCid
+      factoryCid = d.factoryAnyCid
       extraArgs = emptyExtraArgs
 
   holdings <- cip56HoldingsOwnedBy gg alice
@@ -794,7 +816,7 @@ testRevokedPreapprovalFails = do
   res <- trySubmit gg do
     exerciseCmd preCid Deposit with
       amount = 0.01
-      registryCid = Some d.factoryAnyCid
+      factoryCid = d.factoryAnyCid
       extraArgs = emptyExtraArgs
   case res of
     Left _ -> pure ()
@@ -843,7 +865,6 @@ testNttSend = do
         consistencyLevel = 0
         inputHoldingCids = [holdingCid]
         feeAllocation = feeAlloc
-        registryCid = Some d'.factoryAnyCid
         extraArgs = emptyExtraArgs
 
   -- Fee due but none attached: rejected.
@@ -913,7 +934,6 @@ testNttTransferByDifferentUser = do
       consistencyLevel = 0
       inputHoldingCids = [holdingCid]
       feeAllocation = Some feePay
-      registryCid = Some d'.factoryAnyCid
       extraArgs = emptyExtraArgs
 
   [(_, em)] <- query @Emitter admin
@@ -950,7 +970,6 @@ testNttTransferRequiresUserAuthority = do
         consistencyLevel = 0
         inputHoldingCids = []
         feeAllocation = None
-        registryCid = None
         extraArgs = emptyExtraArgs
 
   submitMustFail admin do doTransfer
@@ -1000,6 +1019,7 @@ setupFixedManager operator gg admin config = do
       tokenConfig = config
       tokenDecimals = 8
       peers = Map.empty
+      factoryCid = factoryAnyCid
   mgrCid <- submit admin do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
@@ -1044,7 +1064,6 @@ testReceiveByExecutorRecipientMismatchFails = do
       recipient = wrongRecipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
-      registryCid = None
       extraArgs = emptyExtraArgs
   expectAbort "recipient does not match" res
 
@@ -1075,7 +1094,6 @@ testReceivePinsGuardianGovernance = do
       recipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
-      registryCid = None
       extraArgs = emptyExtraArgs
   expectAbort "committed guardian trust anchor" res
 
@@ -1110,7 +1128,6 @@ testReleaseRejectsForeignLedger = do
       recipient
       ledgerCid = foreignLedger
       inputHoldingCids = []
-      registryCid = None
       extraArgs = emptyExtraArgs
   expectAbort "does not belong to this deployment" res
 
@@ -1189,7 +1206,6 @@ integrationNttReceiveMatch input = do
       pubKeys = [(0, devnetGuardianPubKey)]
       recipient = input.recipient
       depositPreapprovalCid = input.depositPreapprovalCid
-      registryCid = someRegistryCid input.factoryCid
       extraArgs = emptyExtraArgs
 
   holdings <- cip56HoldingsOwnedBy gg input.recipient
@@ -1209,6 +1225,5 @@ integrationNttReceiveMatch input = do
       pubKeys = [(0, devnetGuardianPubKey)]
       recipient = input.recipient
       depositPreapprovalCid = input.depositPreapprovalCid
-      registryCid = someRegistryCid input.factoryCid
       extraArgs = emptyExtraArgs
   pure ()

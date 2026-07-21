@@ -211,11 +211,27 @@ allocated Party).
 ## Token integration and custody
 
 The manager calls the CIP-0056 factories directly: `TransferFactory` for
-lock/unlock, `BurnMintFactory` for burn/mint. The registry's factory cid is
-never stored on the ledger. Callers resolve the registry's current factory
-off-ledger and pass it as `registryCid` on every operation, the same way
-`coreStateCid` is passed, so a registry can replace its factory without
-stranding anything.
+lock/unlock, `BurnMintFactory` for burn/mint.
+
+**The factory is deployment config, not per-call input.** A registry's factory
+is a stateless service contract — a reified dictionary — whose choices are all
+nonconsuming, so its cid is stable and changes only when the registry itself is
+upgraded. The manager therefore commits the factory cid at registration and
+uses that committed cid for every lock, burn, unlock, and mint; `admin`
+refreshes it with `SetFactory` on the rare occasion of a registry upgrade.
+
+This is what stops an untrusted caller from substituting a look-alike factory.
+Because holdings are interface-only, the factory is the sole actuator of any
+token movement, and a caller-supplied cid can't be authenticated on-ledger (an
+interface view is implementation-controlled and can lie, and there are no
+contract keys). If the sender chose the factory, a malicious one could report a
+lock or burn that never happened while the manager still emitted a genuine,
+value-bearing VAA — bridge inflation. Committing the factory removes caller
+choice: the trust collapses to the deployment `admin`, which every peer already
+trusts by registering it as a peer (the same trust EVM and Solana NTT place in a
+peer's configured token). The residual is liveness only: if the registry
+rotates its factory and `admin` hasn't yet called `SetFactory`, transfers pause
+(they never mis-settle) until the committed cid is refreshed.
 
 **Custody sits with the guardian quorum.** Bridged value is owned by `gg`, not
 by the deployment admin, who could otherwise drain reserves or mint at will.
@@ -288,8 +304,9 @@ registry-level receiver pre-approval (for example Amulet's own
 
 ## Contention and contract churn
 
-The manager itself is consumed only by `SetPeer`, so its cid is stable between
-peer changes and disclosures of it stay valid. What serializes is:
+The manager itself is consumed only by its admin-config choices (`SetPeer`,
+`SetFactory`), so across transfer traffic its cid is stable and disclosures of
+it stay valid. What serializes is:
 
 - Sends, on the transceiver `Emitter` (consumed by every publish). Inherent to
   Wormhole sequence numbering.
