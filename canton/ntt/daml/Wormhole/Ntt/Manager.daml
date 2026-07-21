@@ -1,25 +1,36 @@
--- | NttManager + its single (threshold-1) Wormhole transceiver for Canton.
+-- | The NTT manager: one contract per deployment, carrying the deployment's
+-- configuration and the three value-moving choices — 'Transfer' (outbound
+-- send), 'Release' (inbound unlock) and 'Mint' (inbound mint).
 --
--- Deployment is permissionless and crankless: an @admin@ with a disclosure to the
--- operator's 'NttManagerRegistry' calls 'RegisterManager' directly; @operator@'s
--- co-signature is inherited from the registry. @operator@ and @admin@ co-sign the
--- manager; neither controls transfer contents.
+-- The manager drives the CIP-56 token-standard interfaces ('Holding',
+-- 'TIV1.TransferFactory', 'BurnMintFactory') directly, so any conforming token
+-- works without a per-token wrapper contract.
 --
--- Addresses are key-derived ('derivedAddress'): the transceiver address is the
--- core 'Emitter' published through; the manager address ('nttManagerAddressFor')
--- has @admin@ in its preimage, so a compromised operator can't forge an existing
--- manager's address. No contract keys — contracts resolve by disclosed cid, and
--- both churn, so a sender re-resolves cids per send (README §4.7). The token's
--- own registry factory cid follows the same rule: 'Transfer'/'Receive' take it
--- as @registryCid@, resolved and disclosed fresh by the caller every time,
--- rather than pinned inside the token contract.
+-- Three parties sign the manager, and each signature has one job:
 --
--- Send ('Transfer') publishes an ordinary core message via 'PublishMessage'.
--- Receive ('Receive') is permissionless: any executor relays an inbound VAA;
--- replay protection is the core per-consumer trie (scoped to @admin@), guardian
--- root pinned via the disclosed 'CoreState'. Minting an owner-signed token needs
--- the recipient's signature; it comes from a standing 'DepositPreapproval' the
--- recipient created earlier, so the recipient can stay offline at relay time.
+--   * @guardianGovernance@ (gg), the guardians' k-of-n threshold party, is the
+--     custody and mint authority. Its signature is what lets the manager's
+--     choice bodies spend the gg-owned reserve (lock/unlock) or mint the
+--     gg-administered instrument (burn/mint).
+--   * @admin@, the deployer, supplies the replay-trie authority
+--     ('VerifyAndConsumeVAA' runs with @consumer = admin@) and maintains the
+--     peer table.
+--   * @operator@ ties the deployment to its core bridge instance.
+--
+-- gg signs actively only once, at the ceremony that creates the
+-- 'Wormhole.Ntt.Governance.NttGovernance' root; every manager inherits gg's
+-- signature from that root. Value can only move inside the manager's fixed
+-- choice bodies, and both inbound choices verify and consume a VAA first, so
+-- none of the three parties can move bridged value alone, and relaying stays
+-- permissionless: any executor may submit, but only the VAA-bound transfer can
+-- happen.
+--
+-- Isolation between deployments: lock/unlock deployments share gg as
+-- custodian, so each keeps a 'LockedLedger' and can never release more than it
+-- locked. Burn/mint deployments are isolated by instrument, and the instrument
+-- id is hash-bound to the deployment admin ('nttInstrumentIdFor'), so no
+-- second deployment can register against an instrument that is already
+-- bridged.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -28,20 +39,34 @@ import DA.Map qualified as Map
 import DA.Optional (fromSomeNote)
 
 import Splice.Api.Token.AllocationV1 (Allocation)
-import Splice.Api.Token.HoldingV1 (Holding)
-import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..))
+import Splice.Api.Token.BurnMintV1
+  (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State
-  ( Emitter, CoreState
+  ( Emitter, CoreState, WormholeMessage
   , GetGuardianGovernance (..), VerifyAndConsumeVAA (..), PublishMessage (..) )
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
+import Wormhole.Ntt.Amount
+import Wormhole.Ntt.Cip56
+import Wormhole.Ntt.Deposit
+import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Payload
-import Wormhole.Ntt.Token
+
+-- | How the deployment holds bridged value: custody it (lock on send, unlock
+-- on receive) or destroy and recreate it (burn on send, mint on receive). One
+-- mode per deployment, fixed at registration.
+data NttTokenConfig
+  = LockUnlock
+  | BurnMint
+  deriving (Eq, Show)
 
 -- | A peer NTT deployment on another chain: its manager address (the
--- @recipientManager@/@sourceManager@ in the transceiver message) and transceiver
--- address (the inbound VAA emitter). Both 32 bytes.
+-- @recipientManager@/@sourceManager@ in the transceiver message) and its
+-- transceiver address (the emitter of inbound VAAs). Both 32 bytes.
 data Peer = Peer with
     managerAddress     : Bytes32
     transceiverAddress : Bytes32
@@ -52,9 +77,7 @@ normalizePeer p = Peer with
     managerAddress = normalizeHex p.managerAddress
     transceiverAddress = normalizeHex p.transceiverAddress
 
--- | Domain-separation tag for NTT manager addresses. Distinct from
--- 'emitterAddressTag' so an emitter and manager with the same
--- @(operator, admin, id)@ derive different addresses.
+-- | Domain-separation tag for NTT manager addresses.
 nttManagerAddressTag : Text
 nttManagerAddressTag = "wormhole:ntt-manager:v1"
 
@@ -64,96 +87,135 @@ nttManagerAddressFor : Party -> Party -> Int -> Bytes32
 nttManagerAddressFor operator admin managerId =
   derivedAddress (DomainTag nttManagerAddressTag) operator admin (RegistryId managerId)
 
--- | Domain-separation tag for NTT recipient-address bindings. Distinct from
--- every other domain tag so a binding can't collide with an emitter, manager, or
--- governance address.
+-- | Domain-separation tag for NTT recipient-address bindings.
 recipientAddressTag : Text
 recipientAddressTag = "wormhole:ntt-recipient:v1"
 
--- | @keccak256(tag ‖ lp(utf8(recipientText)))@ (@lp@ = 4-byte big-endian length
--- prefix). Text form split from 'recipientAddressFor' so tests can pin the
--- encoding against a fixed string (a live Party's fingerprint is
--- nondeterministic). Mirrors 'derivedAddressFromText'.
+-- | @keccak256(tag ‖ lp(utf8(recipientText)))@. Split from
+-- 'recipientAddressFor' so tests can pin the encoding against a fixed string.
 recipientAddressFromText : Text -> Bytes32
 recipientAddressFromText recipientText =
   normalizeHex (keccak256 (toHex recipientAddressTag
     <> unLenPrefixed (lenPrefixed (toHex recipientText))))
 
 -- | The 32-byte binding a sender computes off-chain for an outbound transfer's
--- @recipientAddress@ to reach @recipient@ on Canton. 'Receive' recomputes it from
--- the caller-supplied @recipient@ and checks it against the VAA.
+-- @recipientAddress@ to reach @recipient@ on Canton. The inbound path
+-- recomputes it from the caller-supplied @recipient@ and checks it against the
+-- VAA.
 recipientAddressFor : Party -> Bytes32
 recipientAddressFor recipient = recipientAddressFromText (partyToText recipient)
 
--- | Allocates increasing manager ids, one registry per operator. Same caveat as
--- 'EmitterRegistry': counter discipline is behavioral, but address integrity is
--- cryptographic (admin co-signature + admin in the preimage). Resolved by
--- disclosed cid.
-template NttManagerRegistry
-  with
-    operator : Party
-    nextId   : Int
-  where
-    signatory operator
+-- | Domain-separation tag for burn/mint instrument-id bindings.
+nttInstrumentIdTag : Text
+nttInstrumentIdTag = "wormhole:ntt-instrument:v1"
 
-    -- | Stand up a deployment directly (crankless). Any @admin@ with a disclosure
-    -- to this registry can register; @operator@'s co-signature is inherited from
-    -- the registry. @admin@ passes its already-registered core 'Emitter' (the
-    -- transceiver), fetched and bound here.
-    --
-    -- @guardianGovernance@ is the trust anchor 'Receive' pins. A bogus anchor only
-    -- breaks the admin's own deployment (no authentic 'CoreState' carries it); it
-    -- can't redirect transfers to a forged guardian set.
-    choice RegisterManager : (ContractId NttManagerRegistry, ContractId NttManager)
-      with
-        admin                 : Party
-        guardianGovernance    : Party
-        transceiverEmitterCid : ContractId Emitter
-        tokenCid              : ContractId NttToken
-        mode                  : TokenMode
-        tokenDecimals         : Int
-      controller admin
-      do
-        transceiver <- fetch transceiverEmitterCid
-        assertMsg "ntt: transceiver emitter is not owned by the admin"
-          (transceiver.owner == admin)
-        assertMsg "ntt: transceiver emitter is not from this operator"
-          (transceiver.operator == operator)
-        reg' <- create this with nextId = nextId + 1
-        mgr <- create NttManager with
-          operator
-          admin
-          guardianGovernance
-          managerId = nextId
-          managerAddress = nttManagerAddressFor operator admin nextId
-          transceiverEmitterId = transceiver.emitterId
-          tokenCid
-          mode
-          tokenDecimals
-          peers = Map.empty
-          outboundSequence = 0
-        pure (reg', mgr)
+-- | Text form of 'nttInstrumentIdFor'. Split out so tests can pin the encoding
+-- against a fixed string.
+nttInstrumentIdFromText : Text -> Int -> Text
+nttInstrumentIdFromText adminText nonce =
+  "wormhole-ntt:" <> normalizeHex (keccak256 (toHex nttInstrumentIdTag
+    <> unLenPrefixed (lenPrefixed (toHex adminText))
+    <> intToBytesN nonce 8))
+
+-- | The instrument id a burn/mint deployment's instrument must carry:
+-- hash-committed to the registering @admin@, with @nonce@ distinguishing
+-- multiple deployments by the same admin.
+--
+-- This binding is what makes a burn/mint instrument exclusive to one
+-- deployment. Registration is permissionless and gg administers every
+-- burn/mint instrument, so without it anyone could register a second manager
+-- for an instrument that is already bridged and mint it against VAAs from a
+-- peer they control. A CIP-56 instrument's id is part of its identity and
+-- fixed at creation, so committing the admin into the id at creation and
+-- checking the commitment at registration ('RegisterManager') means only that
+-- admin can ever bind a manager to the instrument. It plays the role of EVM
+-- NTT's @setMinter@ pointer, attached to the immutable instrument identity
+-- instead of a mutable token field.
+nttInstrumentIdFor : Party -> Int -> Text
+nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) nonce
+
+-- | Check that a caller-supplied 'LockedLedger' is this deployment's own.
+-- Only 'Wormhole.Ntt.Governance.RegisterManager' can create a ledger (it needs
+-- all three signatures), and it creates exactly one per lock/unlock
+-- deployment, so matching the identity fields suffices.
+resolveLedger : NttManager -> ContractId LockedLedger -> Update ()
+resolveLedger mgr ledgerCid = do
+  ledger <- fetch ledgerCid
+  assertMsg "ntt: locked ledger does not belong to this deployment"
+    (ledger.operator == mgr.operator
+      && ledger.admin == mgr.admin
+      && ledger.guardianGovernance == mgr.guardianGovernance
+      && ledger.managerAddress == mgr.managerAddress)
+
+-- | The inbound VAA verification shared by 'Release' and 'Mint' — the
+-- security-critical gate, run entirely against the manager's own committed
+-- configuration. In order:
+--
+--   1. Pin the disclosed 'CoreState' to the deployment's committed guardian
+--      trust anchor (its @guardianGovernance@). Pinning the operator instead
+--      would not help: a compromised operator can co-sign a forged 'CoreState'
+--      under a throwaway gg party, but cannot forge the real gg's signature.
+--   2. Verify the VAA's guardian signatures and consume its digest in the
+--      deployment's replay trie (scoped to @admin@), atomically.
+--   3. Check the VAA emitter is the configured peer transceiver for its chain,
+--      and the nested message's source and recipient managers match the peer
+--      and this deployment.
+--   4. Bind the caller-supplied @recipient@ to the VAA's @recipientAddress@,
+--      so a relayer cannot steer the payout.
+--
+-- Returns the decoded transfer.
+verifyInboundTransfer
+  :  NttManager
+  -> Party                    -- ^ executor (relayer; carries no authority)
+  -> ContractId CoreState
+  -> ContractId ReplayNode
+  -> Bytes                    -- ^ the encoded VAA
+  -> [(Int, Bytes)]           -- ^ guardian pubkey hints (untrusted)
+  -> Party                    -- ^ recipient, bound against the VAA
+  -> Update NativeTokenTransfer
+verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys recipient = do
+  csGg <- exercise coreStateCid GetGuardianGovernance with reader = executor
+  assertMsg "ntt: core state is not the committed guardian trust anchor"
+    (csGg == mgr.guardianGovernance)
+  (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
+    encodedVAA = vaaBytes
+    pubKeys
+    consumer = mgr.admin
+    replayNodeCid
+  let peer = fromSomeNote ("ntt: no peer for source chain " <> show vaa.emitterChain)
+               (Map.lookup vaa.emitterChain mgr.peers)
+  assertMsg "ntt: VAA emitter is not the configured peer transceiver"
+    (normalizeHex vaa.emitterAddress == peer.transceiverAddress)
+  let wm = decodeWormholeTransceiverMessage vaa.payload
+  assertMsg "ntt: wrong recipient manager" (wm.recipientManager == mgr.managerAddress)
+  assertMsg "ntt: source manager is not the peer manager"
+    (wm.sourceManager == peer.managerAddress)
+  let mm = decodeNttManagerMessage wm.managerPayload
+      ntt = decodeNativeTokenTransfer mm.payload
+  assertMsg "ntt: recipient does not match VAA recipientAddress"
+    (recipientAddressFor recipient == normalizeHex ntt.recipientAddress)
+  pure ntt
 
 template NttManager
   with
     operator             : Party
     admin                : Party
-    guardianGovernance   : Party           -- guardian trust anchor 'Receive' pins on the CoreState
-    managerId            : Int             -- registry-allocated; part of the address preimage
+    guardianGovernance   : Party           -- gg: custody/mint authority and trust anchor
+    managerId            : Int             -- allocated by NttGovernance; in the address preimage
     managerAddress       : Bytes32         -- nttManagerAddressFor operator admin managerId
     transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = admin)
-    tokenCid             : ContractId NttToken
-    mode                 : TokenMode
-    tokenDecimals        : Int
-    peers                : Map Int Peer     -- recipient / source chainId -> peer
-    outboundSequence     : Int              -- next NttManagerMessage id
-    -- (Inbound replay protection is the core per-consumer trie, not manager state.)
+    instrumentId         : InstrumentId    -- the bridged CIP-56 instrument
+    tokenConfig          : NttTokenConfig
+    tokenDecimals        : Int             -- the local token's decimals (0..10)
+    peers                : Map Int Peer    -- chain id -> peer deployment
   where
-    -- Admin co-signs: the manager address includes admin, so a compromised
-    -- operator can't mint a manager with an existing deployment's address.
-    signatory operator, admin
+    -- See the module header for what each signature contributes. All three are
+    -- inherited from the NttGovernance root at registration; no signatory acts
+    -- per transfer.
+    signatory operator, admin, guardianGovernance
 
-    -- | Register/replace a peer deployment.
+    -- | Register or replace a peer deployment. The only consuming choice, so
+    -- the manager cid is stable between peer changes.
     choice SetPeer : ContractId NttManager
       with
         chainId : Int
@@ -161,43 +223,93 @@ template NttManager
       controller admin
       do create this with peers = Map.insert chainId (normalizePeer peer) peers
 
-    -- | Outbound transfer. Trims the amount, locks/burns the token from @user@ via
-    -- the seam, publishes the NTT message via the transceiver 'Emitter', advances
-    -- the sequence. @user@ is sole controller; the nested @LockOrBurn@ and
-    -- @PublishMessage@ ride on 'NttManager''s inherited signatory authority.
+    -- | Outbound transfer. Trims the amount to the wire form, moves @user@'s
+    -- tokens (lock into gg custody, crediting the deployment's 'LockedLedger',
+    -- or burn, returning change), and publishes the NTT message through the
+    -- deployment's transceiver 'Emitter'.
     --
-    -- @user@ attaches a fee allocation from its own wallet — the governance-set
-    -- fee every publish pays (empty at fee 0); a send is never fee-exempt. @user@
-    -- is not a stakeholder of these contracts, so they must be disclosed to it.
-    choice Transfer : ContractId NttManager
+    -- @user@ is the sole controller and self-pays the governance message fee
+    -- (as payer it co-controls the nested 'PublishMessage', which draws the
+    -- fee from @feeAllocation@). Everything else the body exercises runs on
+    -- the manager's inherited signatory authority; the CIP-56 factory checks
+    -- that the input holdings belong to @user@.
+    --
+    -- The message id is the transceiver's next sequence number, read from the
+    -- fetched 'Emitter' in the same transaction that publishes, so it equals
+    -- the resulting VAA's sequence and is unique per transceiver.
+    nonconsuming choice Transfer : WormholeMessage
       with
-        user                  : Party                 -- token owner initiating the transfer; pays the fee
-        transceiverEmitterCid : ContractId Emitter     -- this deployment's transceiver (disclosed)
-        coreStateCid          : ContractId CoreState   -- for the message-fee read (disclosed)
+        user                  : Party
+        transceiverEmitterCid : ContractId Emitter
+        coreStateCid          : ContractId CoreState
+        ledgerCid             : Optional (ContractId LockedLedger)  -- required for lock/unlock
         recipientChain        : Int
         recipientAddress      : Bytes32
         sourceToken           : Bytes32
-        rawAmount             : Int
+        rawAmount             : Int      -- integer units at tokenDecimals
         nonce                 : Int
         consistencyLevel      : Int
-        inputHoldingCids      : [ContractId Holding]   -- CIP-56 holdings to lock/burn
-        feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- messageFee; None at fee 0
-        registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
-        extraArgs             : ExtraArgs              -- CIP-56 registry choice context
+        inputHoldingCids      : [ContractId Holding]
+        feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- message fee; None at fee 0
+        registryCid           : Optional AnyContractId  -- the registry's current factory
+        extraArgs             : ExtraArgs
       controller user
       do
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
                      (Map.lookup recipientChain peers)
             trimmed = trimAmount rawAmount tokenDecimals
-        -- Bind the caller-supplied transceiver to this deployment before publishing.
+            amount = trimmedToDecimal trimmed
+        assertMsg "ntt: transfer amount is zero after trimming" (amount > 0.0)
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
           (transceiver.owner == admin
             && transceiver.operator == operator
             && transceiver.emitterId == transceiverEmitterId)
-        -- Lock (custody) or burn the user's tokens via the token seam.
-        exercise tokenCid LockOrBurn with
-          sender = user, amount = trimmed, inputHoldingCids, registryCid, extraArgs
+        case tokenConfig of
+          -- Lock: move the user's holdings into gg custody and credit the
+          -- deployment's ledger by the same amount, atomically.
+          LockUnlock -> do
+            let lcid = fromSomeNote
+                  "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
+            resolveLedger this lcid
+            factoryCid <- requireFactory @TIV1.TransferFactory
+              "ntt: registry transfer factory cid required to lock this token" registryCid
+            executeSyncTransfer factoryCid
+              SyncTransfer with
+                sender = user
+                receiver = guardianGovernance
+                amount
+                instrumentId
+              inputHoldingCids
+              extraArgs
+            _ <- exercise lcid Credit with amount
+            pure ()
+          -- Burn: spend the user's holdings for exactly the wire amount and
+          -- return the rest as change.
+          BurnMint -> do
+            factoryCid <- requireFactory @BurnMintFactory
+              "ntt: registry burn/mint factory cid required to burn this token" registryCid
+            holdingAmounts <- forA inputHoldingCids \cid -> do
+              hv <- view <$> fetch cid
+              assertMsg "ntt: burn holding not owned by sender" (hv.owner == user)
+              assertMsg "ntt: burn holding instrument mismatch" (hv.instrumentId == instrumentId)
+              assertMsg "ntt: burn holding is locked" (hv.lock == None)
+              pure hv.amount
+            let total = sum holdingAmounts
+            assertMsg "ntt: input holdings do not cover the burn amount" (total >= amount)
+            let change = total - amount
+                outputs =
+                  if change == 0.0
+                    then []
+                    else [ BurnMintOutput with owner = user, amount = change, context = extraArgs.context ]
+            _ <- exercise factoryCid BurnMintFactory_BurnMint with
+              expectedAdmin = instrumentId.admin
+              instrumentId
+              inputHoldingCids
+              outputs
+              extraActors = [user]
+              extraArgs
+            pure ()
         let ntt = NativeTokenTransfer with
               decimals = trimmed.decimals
               amount = trimmed.amount
@@ -206,7 +318,7 @@ template NttManager
               recipientChain
               additionalPayload = ""
             mm = NttManagerMessage with
-              id = leftPadTo 32 (intToBytesN outboundSequence 8)
+              id = leftPadTo 32 (intToBytesN transceiver.sequence 8)
               sender = managerAddress
               payload = encodeNativeTokenTransfer ntt
             wm = WormholeTransceiverMessage with
@@ -214,72 +326,92 @@ template NttManager
               recipientManager = peer.managerAddress
               managerPayload = encodeNttManagerMessage mm
               transceiverPayload = ""
-        _ <- exercise transceiverEmitterCid PublishMessage with
-               payload = encodeWormholeTransceiverMessage wm
-               nonce
-               consistencyLevel
-               coreStateCid
-               payer = user
-               feeAllocation
-        create this with outboundSequence = outboundSequence + 1
+        exercise transceiverEmitterCid PublishMessage with
+          payload = encodeWormholeTransceiverMessage wm
+          nonce
+          consistencyLevel
+          coreStateCid
+          payer = user
+          feeAllocation
 
-    -- | Inbound transfer, permissionless. Any @executor@ relays the VAA: verifies
-    -- + claims it atomically via 'VerifyAndConsumeVAA' (per-consumer trie scoped to
-    -- @admin@, so each deployment claims a VAA once), enforces the peer, binds
-    -- @recipient@ to the VAA's @recipientAddress@, and mints/unlocks.
-    --
-    -- The disclosed 'CoreState' is authenticated by pinning its
-    -- @guardianGovernance@ to the anchor @admin@ committed at deployment. Pinning
-    -- the operator wouldn't stop a compromised operator forging a 'CoreState' under
-    -- a throwaway gg; pinning @guardianGovernance@ (the guardians' k-of-n
-    -- threshold, unforgeable by a hot operator key) does.
-    --
-    -- The executor can't supply an arbitrary @recipient@: 'recipientAddressFor
-    -- recipient' must equal the VAA's @recipientAddress@ (sender-fixed, guardian-
-    -- signed). This permanently binds the VAA to that Party id; a recipient needing
-    -- a different party requires a re-send.
-    --
-    -- @pubKeys@ are untrusted hints (hint-free verification is a follow-up, §11).
-    nonconsuming choice Receive : NativeTokenTransfer
+    -- | Inbound unlock (lock/unlock deployments), permissionless. Any
+    -- @executor@ relays the VAA; 'verifyInboundTransfer' is the gate. The
+    -- deployment's 'LockedLedger' is debited first — 'Debit' rejects anything
+    -- above the balance, so this deployment can never pay out more than it
+    -- locked — then gg's custody holdings are transferred to the VAA-bound
+    -- recipient. Returns the successor ledger cid and the decoded transfer.
+    nonconsuming choice Release : (ContractId LockedLedger, NativeTokenTransfer)
       with
-        executor              : Party                 -- any relayer; carries no authority
-        coreStateCid          : ContractId CoreState   -- disclosed; pinned via guardianGovernance
-        replayNodeCid         : ContractId ReplayNode   -- covering trie node for vaa.hash
+        executor         : Party
+        coreStateCid     : ContractId CoreState
+        replayNodeCid    : ContractId ReplayNode
+        vaaBytes         : Bytes
+        pubKeys          : [(Int, Bytes)]
+        recipient        : Party
+        ledgerCid        : ContractId LockedLedger
+        inputHoldingCids : [ContractId Holding]      -- gg custody holdings to spend
+        registryCid      : Optional AnyContractId
+        extraArgs        : ExtraArgs
+      controller executor
+      do
+        assertMsg "ntt: release is only for lock/unlock deployments"
+          (tokenConfig == LockUnlock)
+        resolveLedger this ledgerCid
+        ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid
+                 vaaBytes pubKeys recipient
+        let wireAmount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
+            releaseAmount = untrimToDecimal wireAmount tokenDecimals
+        assertMsg "ntt: received amount is zero at this token's decimals"
+          (releaseAmount > 0.0)
+        ledgerCid' <- exercise ledgerCid Debit with amount = releaseAmount
+        factoryCid <- requireFactory @TIV1.TransferFactory
+          "ntt: registry transfer factory cid required to unlock this token" registryCid
+        executeSyncTransfer factoryCid
+          SyncTransfer with
+            sender = guardianGovernance
+            receiver = recipient
+            amount = releaseAmount
+            instrumentId
+          inputHoldingCids
+          extraArgs
+        pure (ledgerCid', ntt)
+
+    -- | Inbound mint (burn/mint deployments), permissionless. Any @executor@
+    -- relays the VAA; 'verifyInboundTransfer' is the gate. The mint runs
+    -- inside the recipient's standing 'DepositPreapproval' (checked to match
+    -- the recipient and this deployment's instrument), which supplies the
+    -- recipient's signature while the manager supplies gg's instrument-admin
+    -- authority — so the recipient can be offline. If the recipient has not
+    -- opted in, the transaction aborts before the VAA digest is consumed, and
+    -- the same VAA stays deliverable later.
+    nonconsuming choice Mint : NativeTokenTransfer
+      with
+        executor              : Party
+        coreStateCid          : ContractId CoreState
+        replayNodeCid         : ContractId ReplayNode
         vaaBytes              : Bytes
         pubKeys               : [(Int, Bytes)]
         recipient             : Party
-        inputHoldingCids      : [ContractId Holding]   -- custody holdings to unlock ([] for mint)
-        depositPreapprovalCid : Optional (ContractId DepositPreapproval)  -- recipient consent (owner-signed kinds)
-        registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
-        extraArgs             : ExtraArgs             -- CIP-56 choice context
+        depositPreapprovalCid : ContractId DepositPreapproval
+        registryCid           : Optional AnyContractId
+        extraArgs             : ExtraArgs
       controller executor
       do
-        -- Authenticate the guardian trust root before verifying against it.
-        csGg <- exercise coreStateCid GetGuardianGovernance with reader = executor
-        assertMsg "ntt: core state is not the committed guardian trust anchor"
-          (csGg == guardianGovernance)
-        (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
-          encodedVAA = vaaBytes
-          pubKeys
-          consumer = admin
-          replayNodeCid
-        let peer = fromSomeNote ("ntt: no peer for source chain " <> show vaa.emitterChain)
-                     (Map.lookup vaa.emitterChain peers)
-        assertMsg "ntt: VAA emitter is not the configured peer transceiver"
-          (normalizeHex vaa.emitterAddress == peer.transceiverAddress)
-        let wm = decodeWormholeTransceiverMessage vaa.payload
-        assertMsg "ntt: wrong recipient manager" (wm.recipientManager == managerAddress)
-        assertMsg "ntt: source manager is not the peer manager"
-          (wm.sourceManager == peer.managerAddress)
-        let mm = decodeNttManagerMessage wm.managerPayload
-            ntt = decodeNativeTokenTransfer mm.payload
-        assertMsg "ntt: recipient does not match VAA recipientAddress"
-          (recipientAddressFor recipient == normalizeHex ntt.recipientAddress)
-        exercise tokenCid MintOrUnlock with
-          recipient
-          amount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
-          inputHoldingCids
-          depositPreapprovalCid
+        assertMsg "ntt: mint is only for burn/mint deployments"
+          (tokenConfig == BurnMint)
+        ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid
+                 vaaBytes pubKeys recipient
+        pre <- fetch depositPreapprovalCid
+        assertMsg "ntt: deposit pre-approval is not for this recipient"
+          (pre.owner == recipient)
+        assertMsg "ntt: deposit pre-approval is for a different instrument"
+          (pre.instrumentId == instrumentId)
+        let wireAmount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
+            mintAmount = untrimToDecimal wireAmount tokenDecimals
+        assertMsg "ntt: received amount is zero at this token's decimals"
+          (mintAmount > 0.0)
+        exercise depositPreapprovalCid Deposit with
+          amount = mintAmount
           registryCid
           extraArgs
         pure ntt

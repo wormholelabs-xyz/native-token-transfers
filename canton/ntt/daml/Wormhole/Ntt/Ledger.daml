@@ -1,0 +1,56 @@
+-- | Per-deployment accounting for lock/unlock custody.
+--
+-- Every lock/unlock deployment deposits into the same custodian party
+-- (@guardianGovernance@), so the physical holdings form one fungible pot. Each
+-- deployment therefore keeps its own 'LockedLedger': the manager credits it on
+-- every lock and debits it on every release, and 'Debit' rejects any amount
+-- above the balance. A deployment can release at most what it locked, which is
+-- what keeps a deployment with a hostile peer away from other deployments'
+-- collateral. The cap is sound even though the pot is fungible: credits and
+-- debits are atomic with the corresponding deposit and release, so the sum of
+-- all ledger balances never exceeds the custodian's physical holdings.
+--
+-- The ledger is a separate contract rather than a field on 'NttManager' so
+-- that transfer traffic does not consume the manager: the manager changes only
+-- when the admin edits the peer table, and its cid stays stable for everyone
+-- who holds a disclosure of it.
+module Wormhole.Ntt.Ledger where
+
+import Wormhole.Core.Bytes (Bytes32)
+
+template LockedLedger
+  with
+    operator           : Party
+    admin              : Party
+    guardianGovernance : Party
+    managerAddress     : Bytes32   -- the owning NttManager
+    balance            : Decimal
+  where
+    -- Same signatories as the owning manager. Creating a ledger needs all
+    -- three signatures, and the only code path that has them is
+    -- 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
+    -- ledger per lock/unlock deployment. The manager checks the four identity
+    -- fields before using a caller-supplied ledger cid.
+    signatory operator, admin, guardianGovernance
+    ensure balance >= 0.0
+
+    -- The controllers are the full signatory set, so only a choice body that
+    -- already carries all three authorities (in practice: the owning manager's
+    -- choices) can move the balance.
+    choice Credit : ContractId LockedLedger
+      with
+        amount : Decimal
+      controller operator, admin, guardianGovernance
+      do
+        assertMsg "ntt: ledger credit must be positive" (amount > 0.0)
+        create this with balance = balance + amount
+
+    choice Debit : ContractId LockedLedger
+      with
+        amount : Decimal
+      controller operator, admin, guardianGovernance
+      do
+        assertMsg "ntt: ledger debit must be positive" (amount > 0.0)
+        assertMsg "ntt: release exceeds this deployment's locked balance"
+          (amount <= balance)
+        create this with balance = balance - amount

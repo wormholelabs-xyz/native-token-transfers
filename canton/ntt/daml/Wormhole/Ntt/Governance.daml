@@ -1,0 +1,93 @@
+-- | The NTT bootstrap root and manager registry.
+--
+-- 'NttGovernance' is created once per operator by a guardian quorum ceremony —
+-- the same k-of-n external-signing flow that creates the genesis @CoreState@.
+-- That ceremony is the only time @guardianGovernance@ (gg) actively signs for
+-- NTT. Afterwards, 'RegisterManager' lends the root's inherited signatures to
+-- create a fully co-signed 'NttManager' per deployment, so deployment stays
+-- permissionless and crankless: any admin with a disclosure of this root can
+-- register, and no fresh quorum runs per manager. This is the same
+-- signed-anchor pattern the core uses for @EmitterRegistry@.
+--
+-- Lending gg's signature this way is safe because 'RegisterManager' only ever
+-- creates the fixed 'NttManager' (and 'LockedLedger') templates, whose choices
+-- gate every movement of gg's value behind VAA verification.
+module Wormhole.Ntt.Governance where
+
+import DA.Map qualified as Map
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Wormhole.Core.State (Emitter)
+import Wormhole.Ntt.Ledger
+import Wormhole.Ntt.Manager
+
+template NttGovernance
+  with
+    operator           : Party
+    guardianGovernance : Party
+    nextId             : Int
+  where
+    signatory guardianGovernance, operator
+
+    -- | Stand up a deployment: allocate the next manager id and create the
+    -- 'NttManager' (plus, for lock/unlock, its zero-balance 'LockedLedger').
+    -- @admin@ is the caller and passes its already-registered core 'Emitter'
+    -- as the deployment's transceiver.
+    --
+    -- For burn/mint, two checks make the mint capability sound:
+    -- @guardianGovernance@ must administer the instrument (otherwise the
+    -- manager could never mint it), and the instrument id must be
+    -- hash-committed to @admin@ via 'nttInstrumentIdFor' — see there for why
+    -- this keeps a bridged instrument exclusive to one deployment.
+    --
+    -- Consuming, so concurrent registrations contend on this root; the loser
+    -- re-resolves the fresh cid and retries.
+    choice RegisterManager
+      : (ContractId NttGovernance, ContractId NttManager, Optional (ContractId LockedLedger))
+      with
+        admin                 : Party
+        transceiverEmitterCid : ContractId Emitter
+        instrumentId          : InstrumentId
+        instrumentNonce       : Int   -- the nonce in the burn/mint instrument-id binding
+        tokenConfig           : NttTokenConfig
+        tokenDecimals         : Int
+      controller admin
+      do
+        transceiver <- fetch transceiverEmitterCid
+        assertMsg "ntt: transceiver emitter is not owned by the admin"
+          (transceiver.owner == admin)
+        assertMsg "ntt: transceiver emitter is not from this operator"
+          (transceiver.operator == operator)
+        -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
+        -- fractional digits a Daml Decimal carries.
+        assertMsg "ntt: tokenDecimals must be between 0 and 10"
+          (tokenDecimals >= 0 && tokenDecimals <= 10)
+        case tokenConfig of
+          BurnMint -> do
+            assertMsg
+              "ntt: burn/mint requires guardianGovernance to administer the instrument"
+              (guardianGovernance == instrumentId.admin)
+            assertMsg "ntt: burn/mint instrument id is not bound to this admin"
+              (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
+          LockUnlock -> pure ()
+        reg' <- create this with nextId = nextId + 1
+        let managerAddress = nttManagerAddressFor operator admin nextId
+        mgr <- create NttManager with
+          operator
+          admin
+          guardianGovernance
+          managerId = nextId
+          managerAddress
+          transceiverEmitterId = transceiver.emitterId
+          instrumentId
+          tokenConfig
+          tokenDecimals
+          peers = Map.empty
+        ledger <- case tokenConfig of
+          LockUnlock -> Some <$> create LockedLedger with
+            operator
+            admin
+            guardianGovernance
+            managerAddress
+            balance = 0.0
+          BurnMint -> pure None
+        pure (reg', mgr, ledger)

@@ -1,0 +1,66 @@
+-- | Helpers for driving the CIP-56 token-standard interfaces.
+--
+-- The registry's factory contract is never stored on the ledger. Callers
+-- resolve the registry's current factory off-ledger and pass its cid (as an
+-- 'AnyContractId') with every call, so a registry can replace its factory
+-- without breaking anything on our side. 'requireFactory' unwraps and coerces
+-- that argument.
+module Wormhole.Ntt.Cip56 where
+
+import DA.Time (RelTime, hours, addRelTime)
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+
+-- | Unwrap the caller-supplied factory cid, coercing it to the factory type the
+-- call site needs. Aborts with @msg@ if the caller did not supply one.
+requireFactory : Text -> Optional AnyContractId -> Update (ContractId t)
+requireFactory msg mc = case mc of
+  Some c -> pure (coerceContractId c)
+  None -> abort msg
+
+-- | The @executeBefore@ horizon stamped on factory transfers. The field is
+-- mandatory in the CIP-56 transfer spec, but its value never matters here:
+-- 'executeSyncTransfer' requires the transfer to settle in the submitting
+-- transaction, so any future time works.
+transferValidity : RelTime
+transferValidity = hours 24
+
+-- | The value-moving part of a CIP-56 transfer. A named record rather than
+-- positional arguments, so that sender and receiver cannot be swapped silently
+-- at a call site.
+data SyncTransfer = SyncTransfer with
+    sender       : Party
+    receiver     : Party
+    amount       : Decimal
+    instrumentId : InstrumentId
+  deriving (Eq, Show)
+
+-- | Execute a CIP-56 'TIV1.TransferFactory_Transfer' that must settle in the
+-- current transaction. A registry that answers with a Pending or Failed result
+-- has not moved the tokens, so the whole transaction aborts instead of letting
+-- the bridge continue as if value had moved.
+executeSyncTransfer
+  :  ContractId TIV1.TransferFactory
+  -> SyncTransfer
+  -> [ContractId Holding]
+  -> ExtraArgs
+  -> Update ()
+executeSyncTransfer factoryCid t inputHoldingCids extraArgs = do
+  now <- getTime
+  res <- exercise factoryCid TIV1.TransferFactory_Transfer with
+    expectedAdmin = t.instrumentId.admin
+    transfer = TIV1.Transfer with
+      sender = t.sender
+      receiver = t.receiver
+      amount = t.amount
+      instrumentId = t.instrumentId
+      requestedAt = now
+      executeBefore = now `addRelTime` transferValidity
+      inputHoldingCids
+      meta = emptyMetadata
+    extraArgs
+  case res.output of
+    TIV1.TransferInstructionResult_Completed _ -> pure ()
+    _ -> abort "ntt: transfer did not settle synchronously"

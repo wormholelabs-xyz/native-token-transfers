@@ -1,7 +1,7 @@
 //go:build integration
 
 // Integration test closing the NTT recipient-binding test gap: no automated test
-// exercised the matching-recipient path through a real `Receive`, because the
+// exercised the matching-recipient path through a real `NttManager.Mint`, because the
 // static fixture VAA has a fixed recipientAddress and a live Party's fingerprint
 // is allocated fresh each run. The live two-step harness:
 //
@@ -174,7 +174,7 @@ func TestCantonNttReceiveMatchIntegration(t *testing.T) {
 	require.NoError(t, err)
 	_ = conn.Close()
 
-	// Step 1: allocate the recipient (and everything else Receive needs) and
+	// Step 1: allocate the recipient (and everything else Mint needs) and
 	// get its ACTUAL, on-ledger-computed recipientAddressFor hash.
 	setupFile := filepath.Join(sandboxDir, "setup.json")
 	out, err := exec.Command(dpm, "script", "--dar", dar, "--upload-dar", "yes",
@@ -219,5 +219,5 @@ func TestCantonNttReceiveMatchIntegration(t *testing.T) {
 		"--ledger-host", "localhost", "--ledger-port", port,
 		"--input-file", inputFile).CombinedOutput()
 	require.NoErrorf(t, err, "receive-match dpm script failed: %s", out)
-	t.Logf("step 3: matching-recipient Receive + replay rejection both verified live: %s", out)
+	t.Logf("step 3: matching-recipient Mint + replay rejection both verified live: %s", out)
 }
