@@ -62,6 +62,7 @@ e2e-localnet:
 
 # Bootstrap an interactive LocalNet session (build CLI, boot LocalNet, run init).
 localnet-cli:
+    @echo "Bringing up LocalNet and initializing the playground -- this takes a few minutes, hang tight..."
     go build -o ntt-playground ./cmd/ntt-playground
     IMAGE_TAG={{image_tag}} ./ntt-playground --profile localnet network up
     ./ntt-playground --profile localnet init
