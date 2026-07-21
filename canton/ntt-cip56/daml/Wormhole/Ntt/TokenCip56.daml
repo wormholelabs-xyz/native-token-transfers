@@ -53,18 +53,35 @@ requireRegistryCid msg = \case
 -- lock / unlock via the transfer factory
 ----------------------------------------------------------------------
 
+-- | The unlock (lock/unlock) hook. @custody@ is the party that holds locked
+-- funds between send and receive; the unlock moves them @custody -> recipient@.
+--
+-- @custody@ is NOT a signatory of this token. That is the security property:
+-- 'TransferFactory_Transfer' is @controller transfer.sender@ and the unlock's
+-- @sender = custody@, so moving custody funds needs @custody@'s authority IN the
+-- transaction. By keeping @custody@ out of the signatories, that authority can
+-- only be supplied FRESH at submission (as a 'MintOrUnlock' co-controller, via
+-- the view's @custodian@), never delegated by this contract. In production
+-- @custody@ is the guardian-governance party, whose external quorum-gated signer
+-- only co-signs a valid-VAA 'NttManager.Receive'; so the operator/manager alone
+-- cannot move custody funds through any choice.
+--
+-- Residual (follow-up, not fixed here): a participant that actually holds
+-- @custody@'s raw @actAs@ could co-sign a bare drain, or submit a direct Amulet
+-- transfer outside NTT. Full trustlessness requires @custody@ to be an external
+-- party whose off-ledger signer only co-signs VAA-verified transactions.
 template Cip56CustodyToken
   with
     admin              : Party                        -- token registry admin (backs transfers)
     manager            : Party                        -- NTT operator that drives the seam
-    custody            : Party                        -- holds locked funds between send/receive
+    custody            : Party                        -- holds locked funds between send/receive; supplies fresh unlock authority
     instrumentId       : InstrumentId
   where
     signatory admin
     observer manager
 
     interface instance NttToken for Cip56CustodyToken where
-      view = NttTokenView with admin, manager, mode = LockUnlock
+      view = NttTokenView with admin, manager, mode = LockUnlock, custodian = Some custody
 
       -- Lock: sender -> custody. Must settle synchronously (Completed); a
       -- Pending/Failed result means the tokens never reached custody.
@@ -138,7 +155,7 @@ template Cip56BurnMintToken
     observer manager
 
     interface instance NttToken for Cip56BurnMintToken where
-      view = NttTokenView with admin, manager, mode = BurnMint
+      view = NttTokenView with admin, manager, mode = BurnMint, custodian = None
 
       -- Burn: spend the sender's holdings for exactly the wire amount, returning change.
       lockOrBurnImpl sender amount inputHoldingCids registryCid extraArgs = do

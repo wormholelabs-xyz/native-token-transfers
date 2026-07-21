@@ -239,6 +239,17 @@ template NttManager
     -- signed). This permanently binds the VAA to that Party id; a recipient needing
     -- a different party requires a re-send.
     --
+    -- Controller: the @executor@ (any relayer) and, for the custody
+    -- ('LockUnlock') mode, the @guardianGovernance@ custodian. Burn/mint mints
+    -- fresh holdings and stays fully permissionless. A custody unlock moves the
+    -- custodian's own holdings, so 'MintOrUnlock' requires the custodian's fresh
+    -- authority (it is not a signatory anywhere); requiring @guardianGovernance@
+    -- here is what threads that authority into the VAA-gated body. In production
+    -- @guardianGovernance@ is an external, quorum-gated signer that only co-signs
+    -- a valid-VAA receive — so the operator alone can never move custody funds.
+    -- (Residual: a participant holding @guardianGovernance@'s raw @actAs@ could
+    -- co-sign; the external-signer requirement is the follow-up.)
+    --
     -- @pubKeys@ are untrusted hints (hint-free verification is a follow-up, §11).
     nonconsuming choice Receive : NativeTokenTransfer
       with
@@ -252,7 +263,7 @@ template NttManager
         depositPreapprovalCid : Optional (ContractId DepositPreapproval)  -- recipient consent (owner-signed kinds)
         registryCid           : Optional AnyContractId -- registry's current factory, resolved off-ledger
         extraArgs             : ExtraArgs             -- CIP-56 choice context
-      controller executor
+      controller executor :: (if mode == LockUnlock then [guardianGovernance] else [])
       do
         -- Authenticate the guardian trust root before verifying against it.
         csGg <- exercise coreStateCid GetGuardianGovernance with reader = executor

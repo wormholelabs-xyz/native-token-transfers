@@ -268,6 +268,97 @@ testCustodyLockPendingRejected = do
     Left err -> abort ("expected a synchronous-settle failure, got: " <> show err)
     Right _ -> abort "pending lock succeeded: tokens were never moved to custody"
 
+----------------------------------------------------------------------
+-- Guardian-governance custody: the unlock moves the custodian's funds and
+-- therefore needs the custodian's FRESH authority (it is not a signatory of
+-- the token). These tests use custody = a dedicated 'guardianGovernance' party.
+--
+-- The locked custody funds are pre-created directly (mkHolding, which needs
+-- the custodian's one-time authority) to represent the resting state a real
+-- lock produces. A real lock TO a third-party custody can't be driven through
+-- the owner-signed 'Cip56MockHolding' mock (creating the custodian's holding
+-- would need its authority at lock time; production supplies that via the
+-- custodian's registry-level TransferPreapproval, unmodeled here) — the same
+-- reason 'testCustodyLockCompletedSucceeds' keeps custody = admin.
+----------------------------------------------------------------------
+
+-- | Disclose the (admin-signed, observer manager) custody token so a non-admin
+-- submitter can exercise 'MintOrUnlock' on it.
+discloseCustodyToken : Party -> Script Disclosure
+discloseCustodyToken admin = do
+  [(cid, _)] <- query @Cip56CustodyToken admin
+  fromSome <$> queryDisclosure admin cid
+
+-- | Positive: an unlock submitted WITH the guardianGovernance custodian's
+-- authority moves custody funds to the recipient while the recipient is offline.
+-- Submitted as @manager <> guardianGovernance@ (no admin actAs — the admin's
+-- authority is delegated by the admin-signed token/factory), so the ONLY fresh
+-- signature is the custodian's. @recipient = admin@ keeps the recipient offline:
+-- its owner-signed holding is created under the factory's admin authority (a
+-- distinct third-party recipient would need its own registry pre-approval, as
+-- noted above).
+testCustodyUnlockWithGuardianGovernanceSucceeds : Script ()
+testCustodyUnlockWithGuardianGovernanceSucceeds = do
+  admin <- allocateParty "CustodyUnlockAdmin"
+  manager <- allocateParty "CustodyUnlockManager"
+  guardianGovernance <- allocateParty "CustodyUnlockGg"
+  let custody = guardianGovernance
+      recipient = admin
+      instrumentId = InstrumentId with admin, id = "LOCK"
+  (tokenCid, factoryCid) <- mkCustodyToken admin manager custody instrumentId False
+  custodyHolding <- mkHolding admin custody instrumentId 0.01
+  dTok <- discloseCustodyToken admin
+  dFactory <- discloseTransferFactory admin
+
+  _ <- submit (actAs manager <> actAs guardianGovernance <> disclose dTok <> disclose dFactory) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = [custodyHolding]
+      depositPreapprovalCid = None
+      registryCid = someRegistryCid factoryCid
+      extraArgs = emptyExtraArgs
+
+  custodyRemaining <- cip56HoldingsOwnedBy admin custody
+  custodyRemaining === []
+  recipientHoldings <- cip56HoldingsOwnedBy admin recipient
+  case recipientHoldings of
+    [(_, h)] -> h.amount === 0.01
+    _ -> abort ("expected exactly one holding unlocked to the recipient, got: " <> show recipientHoldings)
+
+-- | NEGATIVE (the key one): the manager (== operator) alone CANNOT unlock custody
+-- funds. 'MintOrUnlock' on a custody token requires the guardianGovernance
+-- custodian as a co-controller, and the custodian is not a signatory anywhere,
+-- so there is no delegated authority for the manager to ride on. Everything else
+-- is disclosed (token, factory, and the custody holding), so the submission fails
+-- for exactly one reason: the missing custodian authority. This closes the
+-- operator-as-custodian hole at the contract level.
+testCustodyUnlockWithoutGuardianGovernanceFails : Script ()
+testCustodyUnlockWithoutGuardianGovernanceFails = do
+  admin <- allocateParty "CustodyDrainAdmin"
+  manager <- allocateParty "CustodyDrainManager"
+  guardianGovernance <- allocateParty "CustodyDrainGg"
+  let custody = guardianGovernance
+      recipient = admin
+      instrumentId = InstrumentId with admin, id = "LOCK"
+  (tokenCid, factoryCid) <- mkCustodyToken admin manager custody instrumentId False
+  custodyHolding <- mkHolding admin custody instrumentId 0.01
+  dTok <- discloseCustodyToken admin
+  dFactory <- discloseTransferFactory admin
+  -- Disclose the custody holding to the manager too, so visibility is not the
+  -- reason this fails — only the missing custodian authority is.
+  [(concreteHolding, _)] <- cip56HoldingsOwnedBy admin custody
+  dHolding <- fromSome <$> queryDisclosure admin concreteHolding
+
+  submitMustFail (actAs manager <> disclose dTok <> disclose dFactory <> disclose dHolding) do
+    exerciseCmd tokenCid MintOrUnlock with
+      recipient
+      amount = TrimmedAmount with decimals = 8, amount = 1_000_000
+      inputHoldingCids = [custodyHolding]
+      depositPreapprovalCid = None
+      registryCid = someRegistryCid factoryCid
+      extraArgs = emptyExtraArgs
+
 -- | Fix 1: a genuinely owner-signed sender ('alice', distinct from admin and
 -- manager) drives a real burn. 'Cip56MockHolding' is signatory @admin, owner@,
 -- so archiving alice's holding needs her live authority; that authority only
@@ -860,6 +951,74 @@ testNttReceivePinsGuardianGovernance = do
         ("committed guardian trust anchor" `isInfixOf` fs.message)
     Left err -> abort ("expected a guardian-governance pin failure, got: " <> show err)
     Right _ -> abort "Receive accepted a forged CoreState under a throwaway gg"
+
+-- | Stand up a custody ('LockUnlock') deployment whose @managerAddress@ is the
+-- fixture's recipientManager (0x..aa), so a relay gets past the manager/peer
+-- checks to the recipient-binding step. custody = @guardianGovernance@.
+setupCustodyReceiveManager : Party -> Party -> Party -> Script (ContractId NttManager)
+setupCustodyReceiveManager operator guardianGovernance admin = do
+  let instrumentId = bridgedInstrument admin
+  _ <- submit admin do createCmd MockTransferFactory with admin, pending = False
+  tokenConcrete <- submit admin do
+    createCmd Cip56CustodyToken with admin, manager = operator, custody = guardianGovernance, instrumentId
+  let tokenCid = toInterfaceContractId @NttToken tokenConcrete
+  mgrId <- submit (actAs operator <> actAs admin) do
+    createCmd NttManager with
+      operator
+      admin
+      guardianGovernance
+      managerId = 998
+      managerAddress = b32 "aa"
+      transceiverEmitterId = 998
+      tokenCid
+      mode = LockUnlock
+      tokenDecimals = 8
+      peers = Map.empty
+      outboundSequence = 0
+  mgrId <- submit admin do
+    exerciseCmd mgrId SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+  _ <- registerReplayRoot operator admin defaultSplitThreshold
+  pure mgrId
+
+-- | NEGATIVE at the Receive layer: a custody ('LockUnlock') 'Receive' requires
+-- @guardianGovernance@'s fresh co-signature. The operator (== executor here)
+-- alone cannot drive it — even with a valid VAA. Adding @guardianGovernance@
+-- clears that controller gate, and the same relay then fails only on the
+-- recipient binding (a fresh party can't match the fixture VAA), proving the
+-- one thing operator-alone lacked was the custodian's authority.
+testCustodyReceiveRequiresGuardianGovernance : Script ()
+testCustodyReceiveRequiresGuardianGovernance = do
+  (operator, guardianGovernance, csId) <- nttSetup
+  admin <- allocateParty "CustodyRecvAdmin"
+  wrongRecipient <- allocateParty "CustodyRecvWrong"
+  mgrId <- setupCustodyReceiveManager operator guardianGovernance admin
+  (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
+
+  let doReceive = exerciseCmd mgrId Receive with
+        executor = operator
+        coreStateCid = csId
+        replayNodeCid = nodeCid
+        vaaBytes = nttTransferVAA
+        pubKeys = [(0, devnetGuardianPubKey)]
+        recipient = wrongRecipient
+        inputHoldingCids = []
+        depositPreapprovalCid = None
+        registryCid = None
+        extraArgs = emptyExtraArgs
+
+  -- Operator alone: rejected — the custody Receive requires gg as a controller.
+  submitMustFail operator do doReceive
+
+  -- With gg co-signing: clears the gate, fails only on the recipient binding.
+  res <- trySubmit (actAs operator <> actAs guardianGovernance) do doReceive
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected a recipient-binding failure, got: " <> fs.message)
+        ("recipient does not match" `isInfixOf` fs.message)
+    Left err -> abort ("expected a recipient-binding failure, got: " <> show err)
+    Right _ -> abort "custody Receive succeeded with a mismatched recipient"
 
 ----------------------------------------------------------------------
 -- Receive (matching recipient), live two-step harness

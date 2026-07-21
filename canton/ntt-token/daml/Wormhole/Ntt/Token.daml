@@ -19,6 +19,7 @@
 -- per call, the same as every other cid here; never a Daml contract key).
 module Wormhole.Ntt.Token where
 
+import DA.Optional (optionalToList)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..), emptyChoiceContext, emptyMetadata)
 
@@ -63,11 +64,21 @@ untrimAmount ta toDecimals =
     else ta.amount / tenPow (ta.decimals - toDecimals)
 
 -- | The view of an 'NttToken' hook: the token admin (whose authority it carries),
--- the manager party that drives it, and the mode.
+-- the manager party that drives it, the mode, and — for custody (lock/unlock)
+-- kinds — the @custodian@ that holds locked funds.
+--
+-- @custodian@ is a required co-controller of 'MintOrUnlock' (see below). It is
+-- deliberately NOT a signatory of the token: the unlock spends the custodian's
+-- own holdings ('TransferFactory_Transfer' is @controller transfer.sender@, and
+-- @sender = custodian@), so the custodian's authority must be supplied FRESH at
+-- submission rather than delegated by the token contract. A delegated custodian
+-- authority is exactly what would let the manager drain custody without a VAA.
+-- 'None' for kinds that mint fresh holdings (burn/mint) and so have no custodian.
 data NttTokenView = NttTokenView with
-    admin   : Party
-    manager : Party
-    mode    : TokenMode
+    admin     : Party
+    manager   : Party
+    mode      : TokenMode
+    custodian : Optional Party
   deriving (Eq, Show)
 
 -- | Empty 'ExtraArgs', for callers/impls that need no registry context.
@@ -153,9 +164,15 @@ interface NttToken where
     controller (view this).manager, sender
     do lockOrBurnImpl this sender amount inputHoldingCids registryCid extraArgs
 
-  -- Manager-only, so a relayer can drive a receive while the recipient is
-  -- offline. The recipient's signature is not supplied here — for owner-signed
-  -- kinds it comes from the standing 'DepositPreapproval' passed in.
+  -- Controlled by the manager and, for custody kinds, the @custodian@ (from the
+  -- view). Burn/mint kinds have no custodian, so the controller is just the
+  -- manager and a relayer can drive the mint while the recipient is offline (the
+  -- recipient's signature comes from the standing 'DepositPreapproval' passed
+  -- in). Custody kinds additionally require the custodian's FRESH authority: the
+  -- unlock spends the custodian's holdings, so its authority cannot be delegated
+  -- by the token contract (that would let the manager drain custody without a
+  -- VAA). In production the custodian is the guardian-governance party, whose
+  -- external quorum-gated signer only co-signs a valid-VAA 'NttManager.Receive'.
   nonconsuming choice MintOrUnlock : ()
     with
       recipient             : Party
@@ -164,7 +181,7 @@ interface NttToken where
       depositPreapprovalCid : Optional (ContractId DepositPreapproval)
       registryCid           : Optional AnyContractId
       extraArgs             : ExtraArgs
-    controller (view this).manager
+    controller (view this).manager :: optionalToList (view this).custodian
     do mintOrUnlockImpl this recipient amount inputHoldingCids depositPreapprovalCid registryCid extraArgs
 
   -- | Recipient opt-in, done once before the first inbound transfer. @user@

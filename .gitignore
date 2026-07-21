@@ -29,4 +29,5 @@ node_modules
 .wormhole
 
 # Claude code
+.claude/
 .claude/settings.local.json
