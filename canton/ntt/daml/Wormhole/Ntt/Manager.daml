@@ -134,11 +134,11 @@ nttInstrumentIdFromText adminText nonce =
 nttInstrumentIdFor : Party -> Int -> Text
 nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) nonce
 
--- | Check that a caller-supplied 'LockedLedger' is this deployment's own.
--- Only 'Wormhole.Ntt.Governance.RegisterManager' can create a ledger (it needs
--- all three signatures), and it creates exactly one per lock/unlock
--- deployment, so matching the identity fields suffices.
-resolveLedger : NttManager -> ContractId LockedLedger -> Update ()
+-- | Check that a caller-supplied 'LockedLedger' is this deployment's own, and
+-- return its payload. Only 'Wormhole.Ntt.Governance.RegisterManager' can
+-- create a ledger (it needs all three signatures), and it creates exactly one
+-- per lock/unlock deployment, so matching the identity fields suffices.
+resolveLedger : NttManager -> ContractId LockedLedger -> Update LockedLedger
 resolveLedger mgr ledgerCid = do
   ledger <- fetch ledgerCid
   assertMsg "ntt: locked ledger does not belong to this deployment"
@@ -146,6 +146,29 @@ resolveLedger mgr ledgerCid = do
       && ledger.admin == mgr.admin
       && ledger.guardianGovernance == mgr.guardianGovernance
       && ledger.managerAddress == mgr.managerAddress)
+  pure ledger
+
+-- | Validate custody holdings (owned by gg, this deployment's instrument,
+-- unlocked) and return their total. Used before merging them into the pot.
+sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
+sumCustodyHoldings mgr cids = do
+  amounts <- forA cids \cid -> do
+    hv <- view <$> fetch cid
+    assertMsg "ntt: custody holding is not owned by guardianGovernance"
+      (hv.owner == mgr.guardianGovernance)
+    assertMsg "ntt: custody holding instrument mismatch"
+      (hv.instrumentId == mgr.instrumentId)
+    assertMsg "ntt: custody holding is locked" (hv.lock == None)
+    pure hv.amount
+  pure (sum amounts)
+
+-- | The hint stored back on the ledger after an operation: the single
+-- resulting holding, or 'None' when the registry returned zero or several
+-- (then 'ConsolidateCustody' can rebuild it).
+custodyHintFrom : [ContractId Holding] -> Optional (ContractId Holding)
+custodyHintFrom = \case
+  [cid] -> Some cid
+  _ -> None
 
 -- | The inbound VAA verification shared by 'Release' and 'Mint' — the
 -- security-critical gate, run entirely against the manager's own committed
@@ -266,15 +289,16 @@ template NttManager
             && transceiver.operator == operator
             && transceiver.emitterId == transceiverEmitterId)
         case tokenConfig of
-          -- Lock: move the user's holdings into gg custody and credit the
-          -- deployment's ledger by the same amount, atomically.
+          -- Lock: move the user's holdings into gg custody, merge the fresh
+          -- deposit with the existing pot so the deployment keeps a single
+          -- custody holding, and credit the ledger — all atomically.
           LockUnlock -> do
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
-            resolveLedger this lcid
+            ledger <- resolveLedger this lcid
             factoryCid <- requireFactory @TIV1.TransferFactory
               "ntt: registry transfer factory cid required to lock this token" registryCid
-            executeSyncTransfer factoryCid
+            (depositCids, _) <- executeSyncTransfer factoryCid
               SyncTransfer with
                 sender = user
                 receiver = guardianGovernance
@@ -282,7 +306,24 @@ template NttManager
                 instrumentId
               inputHoldingCids
               extraArgs
-            _ <- exercise lcid Credit with amount
+            let potCids = case ledger.custodyHoldingCid of
+                  Some pot -> pot :: depositCids
+                  None -> depositCids
+            newHint <- case potCids of
+              -- Already a single holding (first lock, or an empty pot).
+              [single] -> pure (Some single)
+              _ -> do
+                total <- sumCustodyHoldings this potCids
+                (mergedCids, _) <- executeSyncTransfer factoryCid
+                  SyncTransfer with
+                    sender = guardianGovernance
+                    receiver = guardianGovernance
+                    amount = total
+                    instrumentId
+                  potCids
+                  extraArgs
+                pure (custodyHintFrom mergedCids)
+            _ <- exercise lcid Credit with amount, newCustodyHint = newHint
             pure ()
           -- Burn: spend the user's holdings for exactly the wire amount and
           -- return the rest as change.
@@ -336,10 +377,12 @@ template NttManager
 
     -- | Inbound unlock (lock/unlock deployments), permissionless. Any
     -- @executor@ relays the VAA; 'verifyInboundTransfer' is the gate. The
-    -- deployment's 'LockedLedger' is debited first — 'Debit' rejects anything
-    -- above the balance, so this deployment can never pay out more than it
-    -- locked — then gg's custody holdings are transferred to the VAA-bound
-    -- recipient. Returns the successor ledger cid and the decoded transfer.
+    -- transfer spends the deployment's consolidated pot (the ledger's custody
+    -- hint) unless the caller supplies explicit holdings; the sender change
+    -- becomes the new pot. The ledger is then debited, and 'Debit' rejects
+    -- anything above the balance, so this deployment can never pay out more
+    -- than it locked. Returns the successor ledger cid and the decoded
+    -- transfer.
     nonconsuming choice Release : (ContractId LockedLedger, NativeTokenTransfer)
       with
         executor         : Party
@@ -349,32 +392,77 @@ template NttManager
         pubKeys          : [(Int, Bytes)]
         recipient        : Party
         ledgerCid        : ContractId LockedLedger
-        inputHoldingCids : [ContractId Holding]      -- gg custody holdings to spend
+        inputHoldingCids : [ContractId Holding]      -- explicit override; [] = use the pot hint
         registryCid      : Optional AnyContractId
         extraArgs        : ExtraArgs
       controller executor
       do
         assertMsg "ntt: release is only for lock/unlock deployments"
           (tokenConfig == LockUnlock)
-        resolveLedger this ledgerCid
+        ledger <- resolveLedger this ledgerCid
         ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid
                  vaaBytes pubKeys recipient
         let wireAmount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
             releaseAmount = untrimToDecimal wireAmount tokenDecimals
         assertMsg "ntt: received amount is zero at this token's decimals"
           (releaseAmount > 0.0)
-        ledgerCid' <- exercise ledgerCid Debit with amount = releaseAmount
+        assertMsg "ntt: release exceeds this deployment's locked balance"
+          (releaseAmount <= ledger.balance)
+        inputs <- case (inputHoldingCids, ledger.custodyHoldingCid) of
+          ([], Some pot) -> pure [pot]
+          ([], None) -> abort "ntt: no custody hint on the ledger; supply explicit holdings"
+          (cids, _) -> pure cids
         factoryCid <- requireFactory @TIV1.TransferFactory
           "ntt: registry transfer factory cid required to unlock this token" registryCid
-        executeSyncTransfer factoryCid
+        (_, changeCids) <- executeSyncTransfer factoryCid
           SyncTransfer with
             sender = guardianGovernance
             receiver = recipient
             amount = releaseAmount
             instrumentId
-          inputHoldingCids
+          inputs
           extraArgs
+        ledgerCid' <- exercise ledgerCid Debit with
+          amount = releaseAmount
+          newCustodyHint = custodyHintFrom changeCids
         pure (ledgerCid', ntt)
+
+    -- | Merge custody holdings back into a single pot and repoint the
+    -- ledger's hint at it: the repair path after a registry-side
+    -- reorganization, an operation that left multiple change holdings, or
+    -- releases that used explicit inputs. Permissionless (the self-transfer
+    -- is value-neutral and the holdings are validated as this instrument's
+    -- gg custody), so relayer tooling can run it opportunistically. Note the
+    -- holdings carry no deployment tag, so callers should pass this
+    -- deployment's own fragments; merging another deployment's pot is
+    -- value-neutral but stales that deployment's hint, which it can repair
+    -- the same way.
+    nonconsuming choice ConsolidateCustody : ContractId LockedLedger
+      with
+        caller             : Party
+        ledgerCid          : ContractId LockedLedger
+        custodyHoldingCids : [ContractId Holding]
+        registryCid        : Optional AnyContractId
+        extraArgs          : ExtraArgs
+      controller caller
+      do
+        assertMsg "ntt: consolidation is only for lock/unlock deployments"
+          (tokenConfig == LockUnlock)
+        assertMsg "ntt: no custody holdings supplied" (not (null custodyHoldingCids))
+        _ <- resolveLedger this ledgerCid
+        total <- sumCustodyHoldings this custodyHoldingCids
+        factoryCid <- requireFactory @TIV1.TransferFactory
+          "ntt: registry transfer factory cid required to consolidate custody" registryCid
+        (mergedCids, _) <- executeSyncTransfer factoryCid
+          SyncTransfer with
+            sender = guardianGovernance
+            receiver = guardianGovernance
+            amount = total
+            instrumentId
+          custodyHoldingCids
+          extraArgs
+        exercise ledgerCid SetCustodyHint with
+          newCustodyHint = custodyHintFrom mergedCids
 
     -- | Inbound mint (burn/mint deployments), permissionless. Any @executor@
     -- relays the VAA; 'verifyInboundTransfer' is the gate. The mint runs

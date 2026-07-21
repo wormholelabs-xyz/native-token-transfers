@@ -147,9 +147,9 @@ which is what lets the fee be drawn from the user's own allocation
 (`TestNtt:testNttSend`, `testNttTransferByDifferentUser`).
 
 The user is not a stakeholder of the manager, the transceiver, the
-`CoreState`, the `LockedLedger`, or the registry factory, so a submission
-attaches them as explicit disclosures. This is a visibility requirement, not
-an authorization one.
+`CoreState`, the `LockedLedger`, the custody pot holding, or the registry
+factory, so a submission attaches them as explicit disclosures. This is a
+visibility requirement, not an authorization one.
 
 ## Receive (`NttManager.Release` / `NttManager.Mint`)
 
@@ -239,6 +239,26 @@ release may physically spend fee holdings of the same instrument. That is
 value-neutral (change returns to `gg` and the cap still binds), but worth
 knowing when auditing `gg`'s holdings.
 
+**The custody pot (single-holding invariant).** Custody holdings are visible
+only to their stakeholders (`gg` and the registry admin), so an executor can
+only spend what someone discloses to it. To avoid an off-chain index and coin
+selection over custody fragments, the manager keeps each deployment's custody
+consolidated into one holding, and the ledger carries a pointer to it
+(`custodyHoldingCid`): a lock merges the fresh deposit into the pot with a
+`gg`-to-`gg` self-transfer, and a release spends the pot and records the
+single change holding as the new pot. The pointer updates in exactly the
+transactions the ledger already changes in, so a relayer's disclosure bundle
+(manager, ledger, pot) is complete and self-refreshing. The pointer is a hint,
+not a trust anchor: holdings are validated (owner, instrument) at use time,
+`Release` accepts explicit holding cids as an override, and the permissionless
+`ConsolidateCustody` choice re-merges fragments and repoints the hint after a
+registry-side reorganization (registries may restructure their holdings
+without us, which is why the cid can go stale and why storing it is safe only
+as a hint). One open consideration for real registries: transfer fees charged
+out of `gg`'s inputs would bleed the physical pot below the ledger sum, so a
+fee-charging registry needs a per-registry answer (fee waivers, top-ups, or
+debiting fees from the ledger).
+
 **Instrument binding (burn/mint exclusivity).** Burn/mint deployments are
 isolated by instrument: a manager only ever mints its own `instrumentId`. That
 is only meaningful if an instrument belongs to at most one deployment, and
@@ -273,9 +293,10 @@ peer changes and disclosures of it stay valid. What serializes is:
 
 - Sends, on the transceiver `Emitter` (consumed by every publish). Inherent to
   Wormhole sequence numbering.
-- Lock-mode value movement, on the `LockedLedger` (both `Transfer` and
-  `Release` touch it). Burn/mint deployments have no ledger, so their sends
-  contend only on the emitter and their mints only on the replay trie.
+- Lock-mode value movement, on the `LockedLedger` and the custody pot holding
+  (both `Transfer` and `Release` touch them, in the same transactions).
+  Burn/mint deployments have no ledger, so their sends contend only on the
+  emitter and their mints only on the replay trie.
 - VAA consumption, on the covering replay-trie node.
 
 A submission that loses a race re-resolves the fresh cid and retries, the same

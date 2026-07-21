@@ -41,12 +41,15 @@ data SyncTransfer = SyncTransfer with
 -- current transaction. A registry that answers with a Pending or Failed result
 -- has not moved the tokens, so the whole transaction aborts instead of letting
 -- the bridge continue as if value had moved.
+--
+-- Returns the receiver's new holdings and the sender's change holdings, which
+-- the manager uses to keep the custody pot consolidated.
 executeSyncTransfer
   :  ContractId TIV1.TransferFactory
   -> SyncTransfer
   -> [ContractId Holding]
   -> ExtraArgs
-  -> Update ()
+  -> Update ([ContractId Holding], [ContractId Holding])
 executeSyncTransfer factoryCid t inputHoldingCids extraArgs = do
   now <- getTime
   res <- exercise factoryCid TIV1.TransferFactory_Transfer with
@@ -62,5 +65,6 @@ executeSyncTransfer factoryCid t inputHoldingCids extraArgs = do
       meta = emptyMetadata
     extraArgs
   case res.output of
-    TIV1.TransferInstructionResult_Completed _ -> pure ()
+    TIV1.TransferInstructionResult_Completed receiverHoldingCids ->
+      pure (receiverHoldingCids, res.senderChangeCids)
     _ -> abort "ntt: transfer did not settle synchronously"

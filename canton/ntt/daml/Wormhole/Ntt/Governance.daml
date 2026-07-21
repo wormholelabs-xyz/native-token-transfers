@@ -89,5 +89,6 @@ template NttGovernance
             guardianGovernance
             managerAddress
             balance = 0.0
+            custodyHoldingCid = None
           BurnMint -> pure None
         pure (reg', mgr, ledger)

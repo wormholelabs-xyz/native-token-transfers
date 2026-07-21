@@ -154,15 +154,31 @@ template MockTransferFactory
               senderChangeCids = []
               meta = emptyMetadata
           else do
+            -- Like a real registry: require the inputs to cover the amount and
+            -- return the surplus to the sender as a single change holding.
+            views <- forA arg.transfer.inputHoldingCids \cid -> view <$> fetch cid
+            let total = sum (map (.amount) views)
+            assertMsg "mock: inputs do not cover the transfer amount"
+              (total >= arg.transfer.amount)
             forA_ arg.transfer.inputHoldingCids archive
             rcid <- toInterfaceContractId @Holding <$> create Cip56MockHolding with
               admin
               owner = arg.transfer.receiver
               instrument = arg.transfer.instrumentId
               amount = arg.transfer.amount
+            changeCids <-
+              if total > arg.transfer.amount
+                then do
+                  c <- create Cip56MockHolding with
+                    admin
+                    owner = arg.transfer.sender
+                    instrument = arg.transfer.instrumentId
+                    amount = total - arg.transfer.amount
+                  pure [toInterfaceContractId @Holding c]
+                else pure []
             pure TransferInstructionResult with
               output = TransferInstructionResult_Completed with receiverHoldingCids = [rcid]
-              senderChangeCids = []
+              senderChangeCids = changeCids
               meta = emptyMetadata
 
       transferFactory_publicFetchImpl _self _arg =
@@ -452,16 +468,17 @@ testLockedLedgerCap = do
   alice <- allocateParty "LedgerAlice"
   d <- deploy operator gg alice LockUnlock
   let trio = actAs operator <> actAs alice <> actAs gg
-  lcid <- submit trio do exerciseCmd (fromSome d.ledgerCid) Credit with amount = 5.0
+  lcid <- submit trio do
+    exerciseCmd (fromSome d.ledgerCid) Credit with amount = 5.0, newCustodyHint = None
 
-  res <- trySubmit trio do exerciseCmd lcid Debit with amount = 6.0
+  res <- trySubmit trio do exerciseCmd lcid Debit with amount = 6.0, newCustodyHint = None
   expectAbort "exceeds this deployment's locked balance" res
 
-  submitMustFail alice do exerciseCmd lcid Debit with amount = 1.0
-  submitMustFail gg do exerciseCmd lcid Debit with amount = 1.0
-  submitMustFail operator do exerciseCmd lcid Debit with amount = 1.0
+  submitMustFail alice do exerciseCmd lcid Debit with amount = 1.0, newCustodyHint = None
+  submitMustFail gg do exerciseCmd lcid Debit with amount = 1.0, newCustodyHint = None
+  submitMustFail operator do exerciseCmd lcid Debit with amount = 1.0, newCustodyHint = None
 
-  lcid <- submit trio do exerciseCmd lcid Debit with amount = 5.0
+  lcid <- submit trio do exerciseCmd lcid Debit with amount = 5.0, newCustodyHint = None
   Some ledger <- queryContractId operator lcid
   ledger.balance === 0.0
 
@@ -519,7 +536,9 @@ sendTransfer user d csId holdings =
     extraArgs = emptyExtraArgs
 
 -- | A lock moves the sender's holding into gg custody and credits the
--- deployment's 'LockedLedger' by the same amount.
+-- deployment's 'LockedLedger' by the same amount. A second lock merges the
+-- fresh deposit into the pot, so gg still holds exactly one custody holding
+-- and the ledger's hint points at it.
 testTransferLockAccounting : Script ()
 testTransferLockAccounting = do
   (operator, gg, csId) <- nttSetup
@@ -529,14 +548,96 @@ testTransferLockAccounting = do
 
   _ <- submitWithDiscs alice discs do sendTransfer alice d csId [holdingCid]
 
-  [(_, ledger)] <- query @LockedLedger operator
+  [(ledgerCid, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
   [(_, em)] <- query @Emitter alice
   em.sequence === 1
   custody <- cip56HoldingsOwnedBy gg gg
-  case custody of
-    [(_, h)] -> h.amount === 0.01
+  potCid <- case custody of
+    [(cid, h)] -> do
+      h.amount === 0.01
+      pure cid
     _ -> abort ("expected exactly one gg custody holding, got: " <> show custody)
+  ledger.custodyHoldingCid === Some (toInterfaceContractId @Holding potCid)
+
+  -- Second lock: the deposit is merged with the pot in the same transaction.
+  -- The sender re-resolves the churned cids (emitter, ledger) and needs the
+  -- pot holding disclosed too.
+  holdingCid2 <- mkHolding gg alice d.instrumentId 0.005
+  [(emitterCid2, _)] <- query @Emitter alice
+  ledgerDisc <- fromSome <$> queryDisclosure operator ledgerCid
+  potDisc <- fromSome <$> queryDisclosure gg potCid
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  factoryDisc <- discloseTransferFactory gg
+  _ <- submitWithDiscs alice [ledgerDisc, potDisc, csDisc, factoryDisc] do
+    exerciseCmd d.mgrCid Transfer with
+      user = alice
+      transceiverEmitterCid = emitterCid2
+      coreStateCid = csId
+      ledgerCid = Some ledgerCid
+      recipientChain = 2
+      recipientAddress = b32 "ee"
+      sourceToken = b32 "dd"
+      rawAmount = 500000
+      nonce = 1
+      consistencyLevel = 0
+      inputHoldingCids = [holdingCid2]
+      feeAllocation = None
+      registryCid = Some d.factoryAnyCid
+      extraArgs = emptyExtraArgs
+
+  [(_, ledger2)] <- query @LockedLedger operator
+  ledger2.balance === 0.015
+  custody2 <- cip56HoldingsOwnedBy gg gg
+  case custody2 of
+    [(cid, h)] -> do
+      h.amount === 0.015
+      ledger2.custodyHoldingCid === Some (toInterfaceContractId @Holding cid)
+    _ -> abort ("expected one merged gg custody holding, got: " <> show custody2)
+
+-- | Anyone can merge custody fragments back into one pot and repoint the
+-- ledger's hint: the repair path for stale hints and explicit-input releases.
+testConsolidateCustody : Script ()
+testConsolidateCustody = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "ConsAlice"
+  (d, _) <- sendScaffold operator gg alice LockUnlock csId
+  -- Two pre-existing custody fragments, hint not set (as after a registry-side
+  -- reorganization).
+  frag1 <- mkHolding gg gg d.instrumentId 1.0
+  frag2 <- mkHolding gg gg d.instrumentId 2.0
+  factoryDisc <- discloseTransferFactory gg
+  f1Disc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding frag1)
+  f2Disc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding frag2)
+
+  _ <- submitWithDiscs alice [factoryDisc, f1Disc, f2Disc] do
+    exerciseCmd d.mgrCid ConsolidateCustody with
+      caller = alice
+      ledgerCid = fromSome d.ledgerCid
+      custodyHoldingCids = [frag1, frag2]
+      registryCid = Some d.factoryAnyCid
+      extraArgs = emptyExtraArgs
+
+  [(freshLedgerCid, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.0   -- consolidation never touches the balance
+  custody <- cip56HoldingsOwnedBy gg gg
+  case custody of
+    [(cid, h)] -> do
+      h.amount === 3.0
+      ledger.custodyHoldingCid === Some (toInterfaceContractId @Holding cid)
+    _ -> abort ("expected one merged gg custody holding, got: " <> show custody)
+
+  -- Holdings that are not gg custody of this instrument are rejected.
+  aliceHolding <- mkHolding gg alice d.instrumentId 1.0
+  ahDisc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding aliceHolding)
+  res <- trySubmitWithDiscs alice [factoryDisc, ahDisc] do
+    exerciseCmd d.mgrCid ConsolidateCustody with
+      caller = alice
+      ledgerCid = freshLedgerCid
+      custodyHoldingCids = [aliceHolding]
+      registryCid = Some d.factoryAnyCid
+      extraArgs = emptyExtraArgs
+  expectAbort "not owned by guardianGovernance" res
 
 -- | A lock against a registry that answers Pending moves nothing, so the
 -- manager's synchronous-settlement check aborts the send.
@@ -911,6 +1012,7 @@ setupFixedManager operator gg admin config = do
         guardianGovernance = gg
         managerAddress = b32 "aa"
         balance = 0.0
+        custodyHoldingCid = None
     BurnMint -> pure None
   _ <- registerReplayRoot operator admin defaultSplitThreshold
   pure (mgrCid, factoryAnyCid, ledgerCid)
@@ -996,6 +1098,7 @@ testReleaseRejectsForeignLedger = do
       guardianGovernance = gg
       managerAddress = b32 "ff"
       balance = 100.0
+      custodyHoldingCid = None
 
   res <- trySubmit (actAs operator) do
     exerciseCmd mgrCid Release with
