@@ -22,7 +22,7 @@ import DA.Map qualified as Map
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
-import Wormhole.Core.Replay (defaultSplitThreshold)
+import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
   , RegisterEmitter (..), ClaimReplayRoot (..) )
@@ -120,19 +120,24 @@ template NttGovernance
           coreStateCid
           feeAllocation = emitterFeeAllocation
         emitter <- fetch emitterCid
+        assertMsg "ntt: emitter registry is not this bridge instance's"
+          (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
 
         let managerAddress = nttManagerAddressFor operator admin nextId
             namespace = nttNamespaceFor instrumentId admin nextId
 
         -- Claim the deployment's replay-trie root, sub-scoped under gg by the
         -- derived namespace.
-        _ <- exercise replayRootRegistryCid ClaimReplayRoot with
+        rootCid <- exercise replayRootRegistryCid ClaimReplayRoot with
           consumer = guardianGovernance
           namespace
           splitThreshold = defaultSplitThreshold
           payer = admin
           coreStateCid
           feeAllocation = claimFeeAllocation
+        root <- fetch rootCid
+        assertMsg "ntt: replay root registry is not this bridge instance's"
+          (root.operator == operator)
 
         reg' <- create this with nextId = nextId + 1
         mgr <- create NttManager with

@@ -45,7 +45,7 @@ import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
-import Wormhole.Core.Setup (mkInitialCoreState, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
@@ -645,6 +645,61 @@ testSetPeerGuards = do
   -- A well-formed peer on another chain is accepted.
   _ <- submit admin do exerciseCmd d.mgrCid SetPeer with chainId = 2, peer = goodPeer
   pure ()
+
+-- | Registration pins the caller-supplied registries to this bridge instance:
+-- a real-template registry stood up by a rogue operator is rejected at
+-- registration time, for either registry, instead of minting a deployment
+-- whose transceiver or replay scope can never pass the downstream operator
+-- checks.
+testRegistrationRejectsForeignRegistries : Script ()
+testRegistrationRejectsForeignRegistries = do
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "ForeignRegAdmin"
+  rogue <- allocateParty "RogueOperator"
+  rogueObserver <- allocateParty "RogueRegObserver"
+  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
+  [(govCid, _)] <- query @NttGovernance operator
+  govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+
+  shadowEmReg <- submit rogue do
+    createCmd (mkInitialEmitterRegistry rogue gg rogueObserver 0)
+  shadowEmRegDisc <- fromSome <$> queryDisclosure rogue shadowEmReg
+  res <- trySubmit (actAs admin <> disclose govDisc <> disclose shadowEmRegDisc <> disclose rrRegDisc) do
+    exerciseCmd govCid RegisterManager with
+      admin
+      chainId = cantonChainId
+      emitterRegistryCid = shadowEmReg
+      replayRootRegistryCid = rrReg
+      instrumentId = bridgedInstrument gg
+      instrumentNonce = 0
+      tokenConfig = LockUnlock
+      tokenDecimals = 8
+      factory
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+  expectAbort "emitter registry is not this bridge instance's" res
+
+  shadowRrReg <- submit rogue do
+    createCmd (mkInitialReplayRootRegistry rogue gg 0)
+  shadowRrRegDisc <- fromSome <$> queryDisclosure rogue shadowRrReg
+  res <- trySubmit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose shadowRrRegDisc) do
+    exerciseCmd govCid RegisterManager with
+      admin
+      chainId = cantonChainId
+      emitterRegistryCid = emReg
+      replayRootRegistryCid = shadowRrReg
+      instrumentId = bridgedInstrument gg
+      instrumentNonce = 0
+      tokenConfig = LockUnlock
+      tokenDecimals = 8
+      factory
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+  expectAbort "replay root registry is not this bridge instance's" res
 
 ----------------------------------------------------------------------
 -- The locked ledger
