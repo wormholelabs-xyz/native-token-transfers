@@ -6,45 +6,53 @@
 -- 'TIV1.TransferFactory', 'BurnMintFactory') directly, so any conforming token
 -- works without a per-token wrapper contract.
 --
--- Three parties sign the manager, and each signature has one job:
+-- Four parties sign the manager, and each signature has one job:
 --
+--   * @namespace@ is the deployment's stable identity. It is in the manager
+--     and transceiver address preimages, owns the transceiver 'Emitter', names
+--     the 'LockedLedger', and scopes replay protection ('VerifyAndConsumeVAA'
+--     runs with @consumer = namespace@). It never changes and never acts after
+--     registration; it must be durable (losing the party means a new
+--     deployment and a migration).
+--   * @admin@ is the operational role: it maintains the peer table, rotates
+--     the committed factory, and owns the lock/unlock reserve. It is
+--     transferable ('TransferAdmin'); transferring it to gg is the guardian
+--     quorum's custody opt-in. At registration, namespace and admin may be the
+--     same party.
 --   * @guardianGovernance@ (gg), the guardians' k-of-n threshold party, is the
---     promoted-custody and mint authority. Its signature is what lets the
---     manager's choice bodies spend a promoted deployment's gg-owned reserve
---     (lock/unlock) or mint the gg-administered instrument (burn/mint).
---   * @admin@, the deployer, supplies the replay-trie authority
---     ('VerifyAndConsumeVAA' runs with @consumer = admin@) and maintains the
---     peer table.
+--     mint authority for burn/mint instruments and the quorum end-state of
+--     'TransferAdmin': a gg-adminned deployment's reserve is quorum-owned and
+--     its admin operations are governance actions.
 --   * @operator@ ties the deployment to its core bridge instance.
 --
 -- gg signs actively only once, at the ceremony that creates the
 -- 'Wormhole.Ntt.Governance.NttGovernance' root; every manager inherits gg's
 -- signature from that root. Value can only move inside the manager's fixed
 -- choice bodies, and both inbound choices verify and consume a VAA first, so
--- none of the three parties can move bridged value alone, and relaying stays
+-- no signatory can move bridged value alone, and relaying stays
 -- permissionless: any executor may submit, but only the VAA-bound transfer can
 -- happen.
 --
--- Lock/unlock custody is two-phase. A deployment registers with its reserve
--- owned by its own @admin@ ('AdminCustody'): fully operational, permissionless,
--- and explicitly custodial — the admin owns the reserve and its users trust it.
--- The guardian quorum can later opt in via 'Promote', which moves the reserve
--- to @gg@ ('GuardianCustody') and takes factory rotation under governance.
--- Isolation between deployments follows from ownership: unpromoted reserves are
--- owned by distinct admin parties and cannot mix, and the gg-owned pool is
--- shared only among deployments the quorum vetted. Ownership survives any
--- registry-side reorganization of holdings, which is why the partition is by
--- owner and not by holding topology. Each lock/unlock deployment also keeps a
--- 'LockedLedger' and can never release more than it locked. Burn/mint
--- deployments are isolated by instrument: the instrument id is hash-bound to
--- the deployment admin ('nttInstrumentIdFor'), so no second deployment can
--- register against an instrument that is already bridged.
+-- Lock/unlock custody is owned by the current @admin@. A deployment registers
+-- fully operational and explicitly custodial — the admin owns the reserve and
+-- its users trust it, like a custodial bridge. The guardian quorum can later
+-- opt in via 'TransferAdmin' to gg, after which the reserve is quorum-owned
+-- and every inbound movement is gated only by VAA verification. Isolation
+-- between deployments follows from ownership: reserves of distinct admins
+-- cannot mix, and the gg-owned pool is shared only among deployments the
+-- quorum accepted. Ownership survives any registry-side reorganization of
+-- holdings, which is why the partition is by owner and not by holding
+-- topology. Each lock/unlock deployment also keeps a 'LockedLedger' and can
+-- never release more than it locked. Burn/mint deployments are isolated by
+-- instrument: the instrument id is hash-bound to the deployment namespace
+-- ('nttInstrumentIdFor'), so no second deployment can register against an
+-- instrument that is already bridged.
 --
--- Because every choice body carries all three signatures, custody paths must
+-- Because every choice body carries all four signatures, custody paths must
 -- never rely on ambient authority: 'sumCustodyHoldings' checks that each
--- custody holding the manager spends is owned by the deployment's current
--- custodian, so an unpromoted deployment cannot spend gg-owned holdings even
--- though gg's authority is in scope.
+-- custody holding the manager spends is owned by the deployment's own current
+-- @admin@, so one deployment's choices can never spend another custodian's
+-- holdings even when that party's authority is in scope.
 --
 -- The registry factory is deployment config, not per-call input. The token's
 -- factory is a stateless service contract whose cid is stable (its choices are
@@ -53,9 +61,9 @@
 -- or mint through a look-alike factory to fake a token movement. The
 -- commitment is typed by mode ('NttFactory'), matched against 'NttTokenConfig'
 -- at registration and rotation, so no call site coerces a contract id. @admin@
--- refreshes it with 'SetFactory' on the rare occasion the registry is upgraded;
--- after promotion that refresh needs gg too, since the pool's soundness rests
--- on the factory the quorum vetted at 'Promote'.
+-- refreshes it with 'SetFactory' on the rare occasion the registry is
+-- upgraded; on a gg-adminned deployment that rotation is automatically a
+-- governance action.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -89,16 +97,6 @@ data NttTokenConfig
   | BurnMint
   deriving (Eq, Show)
 
--- | Who owns a lock/unlock deployment's reserve. Registration always starts at
--- 'AdminCustody' (permissionless, and explicitly custodial: the admin owns the
--- reserve). 'Promote' is the guardian quorum's opt-in that moves the reserve to
--- gg. Burn/mint deployments hold no reserve; they stay at 'AdminCustody' and
--- never consult it.
-data NttCustody
-  = AdminCustody
-  | GuardianCustody
-  deriving (Eq, Show)
-
 -- | The deployment's committed registry factory, typed by mode, so a
 -- lock/unlock deployment cannot even hold a burn/mint factory cid (or vice
 -- versa) and no call site needs an unchecked contract-id coercion.
@@ -130,20 +128,6 @@ requireBurnMintFactory = \case
   BurnMintFactoryCid cid -> pure cid
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
--- | The party that owns the deployment's custody in its current phase.
-custodianOf : NttManager -> Party
-custodianOf mgr = case mgr.custody of
-  AdminCustody -> mgr.admin
-  GuardianCustody -> mgr.guardianGovernance
-
--- | Who may rotate the committed factory: admin alone before promotion; after
--- promotion the pool's soundness rests on the factory the quorum vetted, so
--- rotation needs gg too.
-factoryRotationControllers : NttManager -> [Party]
-factoryRotationControllers mgr = case mgr.custody of
-  AdminCustody -> [mgr.admin]
-  GuardianCustody -> [mgr.admin, mgr.guardianGovernance]
-
 -- | A peer NTT deployment on another chain: its manager address (the
 -- @recipientManager@/@sourceManager@ in the transceiver message) and its
 -- transceiver address (the emitter of inbound VAAs). Both 32 bytes.
@@ -162,10 +146,11 @@ nttManagerAddressTag : Text
 nttManagerAddressTag = "wormhole:ntt-manager:v1"
 
 -- | The 32-byte NTT manager address of the 'NttManager' allocated at
--- @managerId@ for @(operator, admin)@.
+-- @managerId@ for @(operator, namespace)@. Bound to the namespace, not the
+-- admin, so it survives 'TransferAdmin'.
 nttManagerAddressFor : Party -> Party -> Int -> Bytes32
-nttManagerAddressFor operator admin managerId =
-  derivedAddress (DomainTag nttManagerAddressTag) operator admin (RegistryId managerId)
+nttManagerAddressFor operator namespace managerId =
+  derivedAddress (DomainTag nttManagerAddressTag) operator namespace (RegistryId managerId)
 
 -- | Domain-separation tag for NTT recipient-address bindings.
 recipientAddressTag : Text
@@ -192,53 +177,57 @@ nttInstrumentIdTag = "wormhole:ntt-instrument:v1"
 -- | Text form of 'nttInstrumentIdFor'. Split out so tests can pin the encoding
 -- against a fixed string.
 nttInstrumentIdFromText : Text -> Int -> Text
-nttInstrumentIdFromText adminText nonce =
+nttInstrumentIdFromText namespaceText nonce =
   "wormhole-ntt:" <> normalizeHex (keccak256 (toHex nttInstrumentIdTag
-    <> unLenPrefixed (lenPrefixed (toHex adminText))
+    <> unLenPrefixed (lenPrefixed (toHex namespaceText))
     <> intToBytesN nonce 8))
 
 -- | The instrument id a burn/mint deployment's instrument must carry:
--- hash-committed to the registering @admin@, with @nonce@ distinguishing
--- multiple deployments by the same admin.
+-- hash-committed to the registering @namespace@ (the deployment's stable
+-- identity, not the transferable admin), with @nonce@ distinguishing multiple
+-- deployments by the same namespace.
 --
 -- This binding is what makes a burn/mint instrument exclusive to one
 -- deployment. Registration is permissionless and gg administers every
 -- burn/mint instrument, so without it anyone could register a second manager
 -- for an instrument that is already bridged and mint it against VAAs from a
 -- peer they control. A CIP-56 instrument's id is part of its identity and
--- fixed at creation, so committing the admin into the id at creation and
+-- fixed at creation, so committing the namespace into the id at creation and
 -- checking the commitment at registration ('RegisterManager') means only that
--- admin can ever bind a manager to the instrument. It plays the role of EVM
--- NTT's @setMinter@ pointer, attached to the immutable instrument identity
+-- namespace can ever bind a manager to the instrument. It plays the role of
+-- EVM NTT's @setMinter@ pointer, attached to the immutable instrument identity
 -- instead of a mutable token field.
 nttInstrumentIdFor : Party -> Int -> Text
-nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) nonce
+nttInstrumentIdFor namespace nonce = nttInstrumentIdFromText (partyToText namespace) nonce
 
 -- | Check that a caller-supplied 'LockedLedger' is this deployment's own, and
 -- return its payload. Only 'Wormhole.Ntt.Governance.RegisterManager' can
--- create a ledger (it needs all three signatures), and it creates exactly one
--- per lock/unlock deployment, so matching the identity fields suffices.
+-- create a ledger (it needs the root's signatures), and it creates exactly one
+-- per lock/unlock deployment, so matching the identity fields suffices. The
+-- ledger is named by the stable @namespace@, not the transferable @admin@, so
+-- it survives 'TransferAdmin' untouched.
 resolveLedger : NttManager -> ContractId LockedLedger -> Update LockedLedger
 resolveLedger mgr ledgerCid = do
   ledger <- fetch ledgerCid
   assertMsg "ntt: locked ledger does not belong to this deployment"
     (ledger.operator == mgr.operator
-      && ledger.admin == mgr.admin
+      && ledger.namespace == mgr.namespace
       && ledger.guardianGovernance == mgr.guardianGovernance
       && ledger.managerAddress == mgr.managerAddress)
   pure ledger
 
--- | Validate custody holdings (owned by the deployment's current custodian,
--- this deployment's instrument, unlocked) and return their total. Run over
--- every custody holding the manager spends: the choice bodies carry both the
--- admin and gg signatures, so without this check a caller could steer a choice
--- into spending the other party's holdings on ambient authority alone.
+-- | Validate custody holdings (owned by the deployment's current @admin@ —
+-- the custodian — this deployment's instrument, unlocked) and return their
+-- total. Run over every custody holding the manager spends: the choice bodies
+-- carry all four signatures, so without this check a caller could steer a
+-- choice into spending another signatory's holdings on ambient authority
+-- alone.
 sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
 sumCustodyHoldings mgr cids = do
   amounts <- forA cids \cid -> do
     hv <- view <$> fetch cid
     assertMsg "ntt: custody holding is not owned by the custodian"
-      (hv.owner == custodianOf mgr)
+      (hv.owner == mgr.admin)
     assertMsg "ntt: custody holding instrument mismatch"
       (hv.instrumentId == mgr.instrumentId)
     assertMsg "ntt: custody holding is locked" (hv.lock == None)
@@ -262,7 +251,8 @@ custodyHintFrom = \case
 --      would not help: a compromised operator can co-sign a forged 'CoreState'
 --      under a throwaway gg party, but cannot forge the real gg's signature.
 --   2. Verify the VAA's guardian signatures and consume its digest in the
---      deployment's replay trie (scoped to @admin@), atomically.
+--      deployment's replay trie (scoped to the stable @namespace@, so replay
+--      protection is unaffected by 'TransferAdmin'), atomically.
 --   3. Check the VAA emitter is the configured peer transceiver for its chain,
 --      and the nested message's source and recipient managers match the peer
 --      and this deployment.
@@ -286,7 +276,7 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
   (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
     encodedVAA = vaaBytes
     pubKeys
-    consumer = mgr.admin
+    consumer = mgr.namespace
     replayNodeCid
   let peer = fromSomeNote ("ntt: no peer for source chain " <> show vaa.emitterChain)
                (Map.lookup vaa.emitterChain mgr.peers)
@@ -305,22 +295,22 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
 template NttManager
   with
     operator             : Party
-    admin                : Party
-    guardianGovernance   : Party           -- gg: custody/mint authority and trust anchor
+    namespace            : Party           -- stable identity: address preimages, replay scope, emitter owner
+    admin                : Party           -- operational role and lock/unlock custodian; transferable
+    guardianGovernance   : Party           -- gg: mint authority and trust anchor
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
-    managerAddress       : Bytes32         -- nttManagerAddressFor operator admin managerId
-    transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = admin)
+    managerAddress       : Bytes32         -- nttManagerAddressFor operator namespace managerId
+    transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = namespace)
     instrumentId         : InstrumentId    -- the bridged CIP-56 instrument
     tokenConfig          : NttTokenConfig
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
-    custody              : NttCustody      -- who owns the lock/unlock reserve; AdminCustody until 'Promote'
   where
-    -- See the module header for what each signature contributes. All three are
-    -- inherited from the NttGovernance root at registration; no signatory acts
-    -- per transfer.
-    signatory operator, admin, guardianGovernance
+    -- See the module header for what each signature contributes. All four are
+    -- inherited from the NttGovernance root at registration (namespace and
+    -- admin from the registering caller); no signatory acts per transfer.
+    signatory operator, namespace, admin, guardianGovernance
 
     -- | Register or replace a peer deployment. Consuming, but only admin
     -- config changes it, so the manager cid is stable across transfer traffic.
@@ -333,53 +323,69 @@ template NttManager
 
     -- | Repoint the committed registry factory. Needed only when the registry
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
-    -- the new cid from the registry and commits it here. After 'Promote' the
-    -- committed factory is the one the quorum vetted, and the gg-owned pool's
-    -- soundness rests on its honesty, so rotation then needs gg too.
+    -- the new cid from the registry and commits it here. On a gg-adminned
+    -- deployment this is automatically a governance action.
     choice SetFactory : ContractId NttManager
       with
         newFactory : NttFactory
-      controller factoryRotationControllers this
+      controller admin
       do
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig newFactory)
         create this with factory = newFactory
 
-    -- | The guardian quorum's opt-in: move custody of the reserve from @admin@
-    -- to @gg@. The quorum names the factory it vetted (@vettedFactory@ must
-    -- equal the committed one), the admin-owned pot is transferred to gg, and
-    -- the manager is recreated at 'GuardianCustody' — which also puts
-    -- 'SetFactory' under governance. If the ledger's pot hint is stale, run
-    -- 'ConsolidateCustody' first.
-    choice Promote : (ContractId NttManager, ContractId LockedLedger)
+    -- | Hand the operational role — and, for lock/unlock, the reserve it owns —
+    -- to @newAdmin@. Both admins authorize: the old admin resigns, and the new
+    -- admin accepts what it is inheriting, naming the committed factory it
+    -- vetted (@vettedFactory@ must match). In practice the handoff runs as
+    -- propose-accept ('AdminTransferProposal' carries the old admin's standing
+    -- consent and its 'AcceptAdminTransfer' nests this choice), so the parties
+    -- need not act in one submission; exercising this directly with both
+    -- authorities works too. The pot is transferred to @newAdmin@ and the
+    -- ledger's hint repointed; if the hint is stale, run 'ConsolidateCustody'
+    -- first. The deployment's identity — manager and transceiver addresses,
+    -- replay scope, the ledger — stays with the unchanged @namespace@, so
+    -- nothing changes on the wire, no replay window opens, and the ledger
+    -- contract is untouched.
+    --
+    -- Transferring to @guardianGovernance@ is the quorum's custody opt-in: the
+    -- reserve becomes quorum-owned and every admin operation ('SetPeer',
+    -- 'SetFactory', a further transfer) becomes a governance action. The same
+    -- choice serves admin succession between ordinary parties, and lets gg
+    -- hand the role back (demotion).
+    choice TransferAdmin : (ContractId NttManager, Optional (ContractId LockedLedger))
       with
-        ledgerCid     : ContractId LockedLedger
+        newAdmin      : Party
+        ledgerCid     : Optional (ContractId LockedLedger)  -- required for lock/unlock
         vettedFactory : NttFactory
         extraArgs     : ExtraArgs
-      controller admin, guardianGovernance
+      controller admin, newAdmin
       do
-        assertMsg "ntt: only lock/unlock deployments are promoted"
-          (tokenConfig == LockUnlock)
-        assertMsg "ntt: deployment is already promoted" (custody == AdminCustody)
-        assertMsg "ntt: committed factory is not the one the quorum vetted"
+        assertMsg "ntt: admin transfer to the current admin" (newAdmin /= admin)
+        assertMsg "ntt: committed factory is not the one the new admin vetted"
           (factory == vettedFactory)
-        ledger <- resolveLedger this ledgerCid
-        ledgerCid' <- case ledger.custodyHoldingCid of
-          None -> pure ledgerCid
-          Some pot -> do
-            total <- sumCustodyHoldings this [pot]
-            transferFactoryCid <- requireTransferFactory factory
-            (movedCids, _) <- executeSyncTransfer transferFactoryCid
-              SyncTransfer with
-                sender = admin
-                receiver = guardianGovernance
-                amount = total
-                instrumentId
-              [pot]
-              extraArgs
-            exercise ledgerCid SetCustodyHint with
-              newCustodyHint = custodyHintFrom movedCids
-        mgrCid' <- create this with custody = GuardianCustody
+        ledgerCid' <- case tokenConfig of
+          BurnMint -> pure None
+          LockUnlock -> do
+            let lcid = fromSomeNote
+                  "ntt: ledger cid required for a lock/unlock admin transfer" ledgerCid
+            ledger <- resolveLedger this lcid
+            case ledger.custodyHoldingCid of
+              None -> pure (Some lcid)
+              Some pot -> do
+                total <- sumCustodyHoldings this [pot]
+                transferFactoryCid <- requireTransferFactory factory
+                (movedCids, _) <- executeSyncTransfer transferFactoryCid
+                  SyncTransfer with
+                    sender = admin
+                    receiver = newAdmin
+                    amount = total
+                    instrumentId
+                  [pot]
+                  extraArgs
+                Some <$> exercise lcid SetCustodyHint with
+                  newCustodyHint = custodyHintFrom movedCids
+        mgrCid' <- create this with admin = newAdmin
         pure (mgrCid', ledgerCid')
 
     -- | Outbound transfer. Trims the amount to the wire form, moves @user@'s
@@ -420,7 +426,7 @@ template NttManager
         assertMsg "ntt: transfer amount is zero after trimming" (amount > 0.0)
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
-          (transceiver.owner == admin
+          (transceiver.owner == namespace
             && transceiver.operator == operator
             && transceiver.emitterId == transceiverEmitterId)
         case tokenConfig of
@@ -430,7 +436,7 @@ template NttManager
           LockUnlock -> do
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
-                custodian = custodianOf this
+                custodian = admin
             transferFactoryCid <- requireTransferFactory factory
             ledger <- resolveLedger this lcid
             (depositCids, _) <- executeSyncTransfer transferFactoryCid
@@ -545,14 +551,14 @@ template NttManager
           ([], Some pot) -> pure [pot]
           ([], None) -> abort "ntt: no custody hint on the ledger; supply explicit holdings"
           (cids, _) -> pure cids
-        -- The body carries both admin's and gg's signatures, so validate that
-        -- the holdings being spent are the current custodian's — a caller must
-        -- not be able to steer the release into the other party's holdings.
+        -- The body carries every signatory's authority, so validate that the
+        -- holdings being spent are the current admin's own — a caller must not
+        -- be able to steer the release into another signatory's holdings.
         _ <- sumCustodyHoldings this inputs
         transferFactoryCid <- requireTransferFactory factory
         (_, changeCids) <- executeSyncTransfer transferFactoryCid
           SyncTransfer with
-            sender = custodianOf this
+            sender = admin
             receiver = recipient
             amount = releaseAmount
             instrumentId
@@ -586,7 +592,7 @@ template NttManager
         assertMsg "ntt: no custody holdings supplied" (not (null custodyHoldingCids))
         _ <- resolveLedger this ledgerCid
         total <- sumCustodyHoldings this custodyHoldingCids
-        let custodian = custodianOf this
+        let custodian = admin
         transferFactoryCid <- requireTransferFactory factory
         (mergedCids, _) <- executeSyncTransfer transferFactoryCid
           SyncTransfer with
@@ -638,3 +644,44 @@ template NttManager
           factoryCid = burnMintFactoryCid
           extraArgs
         pure ntt
+
+-- | The current admin's standing offer to hand the operational role to
+-- @newAdmin@: the propose half of the admin handoff. A single self-signed
+-- create by the proposing admin; @newAdmin@ accepts at its own pace with
+-- 'AcceptAdminTransfer', or the proposer takes the offer back with
+-- 'RetractAdminTransfer'. The offer pins the deployment (@managerAddress@) and
+-- the proposing admin, so a proposal goes stale — and rejects — if the role
+-- has changed hands since it was made.
+template AdminTransferProposal
+  with
+    admin          : Party    -- the proposing (current) admin
+    newAdmin       : Party
+    managerAddress : Bytes32  -- binds the offer to one deployment
+  where
+    signatory admin
+    observer newAdmin
+
+    -- | Accept the offer: exercises 'TransferAdmin' on the deployment's
+    -- manager, with the old admin's authority supplied by this contract's
+    -- stored signature and the new admin's by the controller. The acceptor
+    -- names the committed factory it vetted, exactly as in the direct
+    -- ceremony.
+    choice AcceptAdminTransfer : (ContractId NttManager, Optional (ContractId LockedLedger))
+      with
+        mgrCid        : ContractId NttManager
+        ledgerCid     : Optional (ContractId LockedLedger)  -- required for lock/unlock
+        vettedFactory : NttFactory
+        extraArgs     : ExtraArgs
+      controller newAdmin
+      do
+        mgr <- fetch mgrCid
+        assertMsg "ntt: proposal is not for this deployment"
+          (mgr.managerAddress == managerAddress)
+        assertMsg "ntt: proposal is not by the deployment's current admin"
+          (mgr.admin == admin)
+        exercise mgrCid TransferAdmin with newAdmin, ledgerCid, vettedFactory, extraArgs
+
+    -- | The proposer takes the offer back; nothing else changes.
+    choice RetractAdminTransfer : ()
+      controller admin
+      do pure ()

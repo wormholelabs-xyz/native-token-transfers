@@ -53,17 +53,24 @@ against a `dpm sandbox`.
 
 ## Parties and the trust model
 
-Three parties sign every `NttManager`, and each signature has one job:
+Four parties sign every `NttManager`, and each signature has one job:
 
 - `operator` runs the core bridge instance and ties the deployment to it.
-- `admin` is the deployer. It owns the deployment's transceiver `Emitter`,
-  maintains the peer table, and scopes the deployment's replay protection
-  (VAAs are consumed with `consumer = admin`).
+- `namespace` is the deployment's stable identity. It is in the manager and
+  transceiver address preimages, owns the transceiver `Emitter`, names the
+  `LockedLedger`, and scopes the deployment's replay protection (VAAs are
+  consumed with `consumer = namespace`). It never changes and never acts after
+  registration, and it must be durable: losing the party means a new
+  deployment and a migration.
+- `admin` is the operational role: it maintains the peer table, rotates the
+  committed factory, and owns the lock/unlock reserve. It is transferable
+  (`TransferAdmin`, usually via the propose-accept `AdminTransferProposal`);
+  handing it to `gg` is the guardian quorum's custody opt-in. At registration,
+  namespace and admin may be the same party.
 - `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
-  same party that anchors the core and receives message fees. It owns promoted
-  lock/unlock reserves (see "Custody is two-phase" below) and administers
-  burn/mint instruments, so its signature is the promoted-custody and mint
-  authority.
+  same party that anchors the core and receives message fees. It administers
+  burn/mint instruments, and a deployment whose admin role was handed to it
+  has a quorum-owned reserve and governance-run admin operations.
 
 `gg` acts exactly once: a guardian quorum ceremony (the same external-signing
 flow that creates the genesis `CoreState`) creates the `NttGovernance` root.
@@ -71,44 +78,45 @@ Everything afterwards runs on inherited authority. `RegisterManager` lends the
 root's signatures to create managers, and the manager's choice bodies lend the
 manager's signatures to move tokens. Value can only move inside fixed template
 code, and every inbound movement first verifies and consumes a VAA, so no
-single party can move bridged value, and nobody has to co-sign at transfer
+single signatory can move bridged value, and nobody has to co-sign at transfer
 time. That is what keeps both deployment and relaying permissionless.
 
-A rogue movement of the reserve would take either a native spend by the
-guardian quorum or a new `gg`-signed contract, which is also a quorum act. The
-model ultimately rests on `gg`'s namespace being quorum-governed at the
-topology layer, so its threshold cannot be quietly lowered. That is a
+A rogue movement of a `gg`-owned reserve would take either a native spend by
+the guardian quorum or a new `gg`-signed contract, which is also a quorum act.
+The model ultimately rests on `gg`'s key namespace being quorum-governed at
+the topology layer, so its threshold cannot be quietly lowered. That is a
 deployment requirement; the contracts cannot check it.
 
 ## Deployment
 
 Anyone can stand up a deployment: bring a CIP-0056 token and pick a mode,
 lock/unlock or burn/mint. The deployer first registers a core `Emitter` (the
-transceiver), then exercises `RegisterManager` on the disclosed
-`NttGovernance` root. This allocates a stable `managerId` and creates the
-manager in one transaction, with no approval step: the caller supplies the
-`admin` signature and the root supplies `operator`'s and `gg`'s. For
-lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
-with the reserve starting admin-owned (see "Custody is two-phase" below).
-For burn/mint it checks the mint capability: `gg` must administer the
-instrument, and the instrument id must be bound to the registering admin (see
-"Instrument binding" below).
+transceiver, owned by the namespace party), then exercises `RegisterManager`
+on the disclosed `NttGovernance` root. This allocates a stable `managerId` and
+creates the manager in one transaction, with no approval step: the caller
+supplies the `namespace` and `admin` signatures (one party may play both
+roles) and the root supplies `operator`'s and `gg`'s. For lock/unlock it also
+creates the deployment's `LockedLedger` at balance zero, with the reserve
+starting admin-owned (see "Custody follows the admin" below). For burn/mint it
+checks the mint capability: `gg` must administer the instrument, and the
+instrument id must be bound to the registering namespace (see "Instrument
+binding" below).
 
-Two key-derived identities, both owner-bound (see the core README's message
-publishing section):
+Two key-derived identities, both bound to the stable namespace so they survive
+admin handoffs (see the core README's message publishing section):
 
 - transceiver address =
-  `keccak256("wormhole:emitter:v1" ‖ operator ‖ admin ‖ emitterId)`. This is
-  the VAA emitter other chains register as the peer. It is derived by the
+  `keccak256("wormhole:emitter:v1" ‖ operator ‖ namespace ‖ emitterId)`. This
+  is the VAA emitter other chains register as the peer. It is derived by the
   watcher, not stored, and must be a single shared `Emitter` per deployment,
   since its address is the peer identity.
 - manager address =
-  `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ admin ‖ managerId)`,
+  `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ namespace ‖ managerId)`,
   computed at registration and stored in `managerAddress`. The distinct domain
   tag keeps an emitter and a manager with the same ordinals from colliding.
-  `admin` is in the preimage and co-signs, so a compromised operator cannot
-  forge an existing manager's address to consume that deployment's inbound
-  VAAs.
+  `namespace` is in the preimage and co-signs, so a compromised operator
+  cannot forge an existing manager's address to consume that deployment's
+  inbound VAAs.
 
 Because registration is permissionless, anyone can create junk managers
 co-signed by `gg` and the operator. They are inert (their choices cannot move
@@ -231,51 +239,56 @@ lock or burn that never happened while the manager still emitted a genuine,
 value-bearing VAA — bridge inflation. Committing the factory removes caller
 choice: the trust collapses to the deployment `admin`, which every peer already
 trusts by registering it as a peer (the same trust EVM and Solana NTT place in
-a peer's configured token), and whose reach before promotion ends at its own
-reserve (see below). After promotion the committed factory is the one the
-quorum vetted, so `SetFactory` then needs `gg` too. The other residual is
-liveness: if the registry rotates its factory before the committed cid is
-refreshed, transfers pause (they never mis-settle).
+a peer's configured token), and whose reach ends at its own reserve (see
+below). On a gg-adminned deployment the committed factory is the one the
+quorum vetted when it accepted the role, and rotation is automatically a
+governance action. The other residual is liveness: if the registry rotates its
+factory before the committed cid is refreshed, transfers pause (they never
+mis-settle).
 
-**Custody is two-phase: admin-owned, then promoted to the guardian quorum.** A
-deployment registers with its reserve owned by its own `admin` (`AdminCustody`
-on the manager). It is fully operational and explicitly custodial: the admin
-owns the reserve outright, so users of an unpromoted deployment trust its
-admin the way they would a custodial bridge, and wallets should surface the
-phase. The guardian quorum can later opt in with `Promote`: a co-signed
-ceremony that names the factory the quorum vetted, transfers the pot from the
-admin to `gg`, and puts factory rotation under governance. A promoted reserve
-is owned by `gg`, so the admin can no longer touch it; the manager's choice
-bodies inherit `gg`'s authority and every inbound movement is VAA-gated — the
-same guardian trust that VAA verification already carries.
+**Custody follows the admin.** A deployment registers with its reserve owned
+by its own `admin`: fully operational and explicitly custodial — the admin
+owns the reserve outright, so users trust it the way they would a custodial
+bridge, and wallets should surface who the admin is. The role is handed over
+with `TransferAdmin`, normally as propose-accept: the current admin leaves a
+standing `AdminTransferProposal`, and the new admin accepts at its own pace,
+naming the committed factory it vetted; the pot moves with the role. Handing
+the role to `gg` is the guardian quorum's custody opt-in: the reserve becomes
+quorum-owned — the old admin can no longer touch it, every inbound movement is
+VAA-gated, and all admin operations (peers, factory rotation, a further
+handoff) become governance actions. The handoff changes nothing on the wire:
+the manager and transceiver addresses, the replay scope, and the
+`LockedLedger` are all bound to the stable `namespace`, so peers, in-flight
+VAAs, and the ledger contract are untouched. The same choice serves plain
+admin succession between ordinary parties, and lets `gg` hand the role back.
 
 **Why the partition is by owner.** Isolation between deployments follows from
-ownership, not from accounting or holding topology. Unpromoted reserves are
-owned by distinct admin parties and cannot mix, no matter what any factory
-reports: a deployment that commits a dishonest factory can inflate only its
-own ledger and drain only its own admin-owned reserve. The `gg` pool is shared
-only among deployments the quorum promoted, whose factories it vetted.
-Ownership is also the one partition a registry cannot churn away: registries
-reorganize holdings out from under the bridge (Canton Coin's rounds merge,
-expire, and recreate contracts), which erases any partition built out of
-specific contract ids — a pinned pot cid, an escrow — but never changes who
-owns the value. Finally, because every choice body carries all three
-signatures, the manager checks that each custody holding it spends is owned by
-the deployment's current custodian, so the ambient `gg` authority in an
-unpromoted deployment's choices can never reach the promoted pool.
+ownership, not from accounting or holding topology. Reserves of distinct
+admins cannot mix, no matter what any factory reports: a deployment that
+commits a dishonest factory can inflate only its own ledger and drain only its
+own admin-owned reserve. The `gg` pool is shared only among deployments whose
+admin role the quorum accepted, whose factories it vetted. Ownership is also
+the one partition a registry cannot churn away: registries reorganize holdings
+out from under the bridge (Canton Coin's rounds merge, expire, and recreate
+contracts), which erases any partition built out of specific contract ids — a
+pinned pot cid, an escrow — but never changes who owns the value. Finally,
+because every choice body carries all four signatures, the manager checks that
+each custody holding it spends is owned by the deployment's own current
+`admin`, so the ambient `gg` authority in another deployment's choices can
+never reach the `gg` pool.
 
 **The locked ledger.** Wormhole attests only that an emitter emitted bytes,
 not that a transfer is backed. A deployment that trusts a hostile peer must
 therefore not be able to release more than it locked: each deployment's
 `LockedLedger` is credited on every lock and debited on every release, and
-`Debit` rejects amounts above the balance. Within the promoted `gg` pool,
-where reserves of one instrument are fungible across deployments, this cap is
-what keeps a hostile-peer deployment away from the others' collateral: credits
-and debits are atomic with the corresponding deposit and release, so the sum
-of promoted balances never exceeds `gg`'s physical holdings, and every
+`Debit` rejects amounts above the balance. Within the `gg` pool, where
+reserves of one instrument are fungible across gg-adminned deployments, this
+cap is what keeps a hostile-peer deployment away from the others' collateral:
+credits and debits are atomic with the corresponding deposit and release, so
+the sum of those balances never exceeds `gg`'s physical holdings, and every
 deployment's cap stays satisfiable no matter which holdings a release spends.
-One consequence of the shared promoted pool: `gg` also custodies message fees,
-so a release may physically spend fee holdings of the same instrument. That is
+One consequence of the shared pool: `gg` also custodies message fees, so a
+release may physically spend fee holdings of the same instrument. That is
 value-neutral (change returns to `gg` and the cap still binds), but worth
 knowing when auditing `gg`'s holdings.
 
@@ -327,14 +340,14 @@ custodian on lock, the recipient on unlock) still depends on registry-level
 receiver pre-approval (for example Amulet's own `TransferPreapproval`), which
 is outside NTT's control. One practical upside of admin custody: the lock's
 receiver is the admin itself, which can self-serve that pre-approval; a
-promoted deployment needs it arranged for `gg`, which is part of what the
-quorum takes on by promoting.
+gg-adminned deployment needs it arranged for `gg`, which is part of what the
+quorum takes on by accepting the role.
 
 ## Contention and contract churn
 
 The manager itself is consumed only by its config choices (`SetPeer`,
-`SetFactory`, and the one-time `Promote`), so across transfer traffic its cid
-is stable and disclosures of it stay valid. What serializes is:
+`SetFactory`, and the rare `TransferAdmin`), so across transfer traffic its
+cid is stable and disclosures of it stay valid. What serializes is:
 
 - Sends, on the transceiver `Emitter` (consumed by every publish). Inherent to
   Wormhole sequence numbering.
@@ -354,15 +367,16 @@ fail-closed pattern the core publish path uses.
   opt-in. Deliberately out of scope for now.
 - Foreign-admin lock/unlock against a real registry: the mock factory cannot
   model a real registry's receiver pre-approval, so the tests make `gg` every
-  instrument's admin, run unpromoted lock tests with the sender as the
-  deployment admin, and run the different-user lock test promoted. A real
-  lock/unlock deployment bridges a token whose admin is not `gg` and relies on
-  that registry's `TransferPreapproval`; exercising that end to end is future
-  work.
-- Promotion by governance VAA: `Promote` is a live co-signing ceremony (admin
-  and `gg` act together). A guardian-signed promotion VAA, verified on-ledger
-  like other governance actions, would let the admin submit the quorum's
-  standing approval without a live ceremony.
+  instrument's admin, run most lock tests with the sender as the deployment
+  admin, and hand the admin role to gg first in the different-user lock test.
+  A real lock/unlock deployment bridges a token whose admin is not `gg` and
+  relies on that registry's `TransferPreapproval`; exercising that end to end
+  is future work.
+- Accepting an admin handoff by governance VAA: `gg` accepts an
+  `AdminTransferProposal` by acting on it, which today means a quorum action
+  per acceptance. A guardian-signed acceptance VAA, verified on-ledger like
+  other governance actions, would let anyone submit the quorum's standing
+  approval.
 - Inbound rate limits (EVM NTT parity): a governance-set cap on inbound
   release/mint rate would bound the damage from a compromised peer beyond the
   `LockedLedger` cap. Not required for isolation, so deferred.

@@ -30,26 +30,29 @@ template NttGovernance
 
     -- | Stand up a deployment: allocate the next manager id and create the
     -- 'NttManager' (plus, for lock/unlock, its zero-balance 'LockedLedger').
-    -- @admin@ is the caller and passes its already-registered core 'Emitter'
-    -- as the deployment's transceiver.
+    -- The caller supplies two parties — @namespace@, the deployment's stable
+    -- identity, and @admin@, the transferable operational role; they may be
+    -- the same party — and passes the namespace's already-registered core
+    -- 'Emitter' as the deployment's transceiver.
     --
-    -- Every deployment starts at 'AdminCustody': a lock/unlock reserve is owned
-    -- by the registering @admin@ (explicitly custodial) until the guardian
-    -- quorum opts in with 'Wormhole.Ntt.Manager.Promote'. That keeps
-    -- registration permissionless without ever pooling an unvetted
-    -- deployment's custody with anyone else's.
+    -- A lock/unlock reserve is owned by the registering @admin@ (explicitly
+    -- custodial) until the role is handed to the guardian quorum with
+    -- 'Wormhole.Ntt.Manager.TransferAdmin'. That keeps registration
+    -- permissionless without ever pooling an unvetted deployment's custody
+    -- with anyone else's.
     --
     -- For burn/mint, two checks make the mint capability sound:
     -- @guardianGovernance@ must administer the instrument (otherwise the
     -- manager could never mint it), and the instrument id must be
-    -- hash-committed to @admin@ via 'nttInstrumentIdFor' — see there for why
-    -- this keeps a bridged instrument exclusive to one deployment.
+    -- hash-committed to @namespace@ via 'nttInstrumentIdFor' — see there for
+    -- why this keeps a bridged instrument exclusive to one deployment.
     --
     -- Consuming, so concurrent registrations contend on this root; the loser
     -- re-resolves the fresh cid and retries.
     choice RegisterManager
       : (ContractId NttGovernance, ContractId NttManager, Optional (ContractId LockedLedger))
       with
+        namespace             : Party
         admin                 : Party
         transceiverEmitterCid : ContractId Emitter
         instrumentId          : InstrumentId
@@ -57,11 +60,11 @@ template NttGovernance
         tokenConfig           : NttTokenConfig
         tokenDecimals         : Int
         factory               : NttFactory  -- the registry's factory, typed by mode
-      controller admin
+      controller namespace, admin
       do
         transceiver <- fetch transceiverEmitterCid
-        assertMsg "ntt: transceiver emitter is not owned by the admin"
-          (transceiver.owner == admin)
+        assertMsg "ntt: transceiver emitter is not owned by the namespace"
+          (transceiver.owner == namespace)
         assertMsg "ntt: transceiver emitter is not from this operator"
           (transceiver.operator == operator)
         -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
@@ -73,15 +76,16 @@ template NttGovernance
             assertMsg
               "ntt: burn/mint requires guardianGovernance to administer the instrument"
               (guardianGovernance == instrumentId.admin)
-            assertMsg "ntt: burn/mint instrument id is not bound to this admin"
-              (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
+            assertMsg "ntt: burn/mint instrument id is not bound to this namespace"
+              (instrumentId.id == nttInstrumentIdFor namespace instrumentNonce)
           LockUnlock -> pure ()
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig factory)
         reg' <- create this with nextId = nextId + 1
-        let managerAddress = nttManagerAddressFor operator admin nextId
+        let managerAddress = nttManagerAddressFor operator namespace nextId
         mgr <- create NttManager with
           operator
+          namespace
           admin
           guardianGovernance
           managerId = nextId
@@ -92,11 +96,10 @@ template NttGovernance
           tokenDecimals
           peers = Map.empty
           factory
-          custody = AdminCustody
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with
             operator
-            admin
+            namespace
             guardianGovernance
             managerAddress
             balance = 0.0

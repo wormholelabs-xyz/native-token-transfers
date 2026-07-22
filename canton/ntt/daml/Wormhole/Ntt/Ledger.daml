@@ -1,16 +1,20 @@
 -- | Per-deployment accounting for lock/unlock custody.
 --
--- A deployment's reserve is owned by its current custodian: the deployment
--- @admin@ from registration, @guardianGovernance@ after the quorum promotes it
--- (see 'Wormhole.Ntt.Manager.Promote'). Each deployment keeps its own
--- 'LockedLedger': the manager credits it on every lock and debits it on every
--- release, and 'Debit' rejects any amount above the balance, so a deployment
--- can release at most what it locked. Unpromoted reserves cannot mix (distinct
--- owners); promoted reserves form one gg-owned pot shared only among
--- quorum-vetted deployments, where the cap is what keeps a deployment with a
--- hostile peer away from the others' collateral: credits and debits are atomic
--- with the corresponding deposit and release, so the sum of promoted balances
--- never exceeds gg's physical holdings.
+-- A deployment's reserve is owned by its current @admin@ (transferable via
+-- 'Wormhole.Ntt.Manager.TransferAdmin'; handing it to @guardianGovernance@ is
+-- the quorum's custody opt-in). Each deployment keeps its own 'LockedLedger':
+-- the manager credits it on every lock and debits it on every release, and
+-- 'Debit' rejects any amount above the balance, so a deployment can release at
+-- most what it locked. Reserves of distinct admins cannot mix; gg-adminned
+-- reserves form one pot shared only among deployments the quorum accepted,
+-- where the cap is what keeps a deployment with a hostile peer away from the
+-- others' collateral: credits and debits are atomic with the corresponding
+-- deposit and release, so the sum of those balances never exceeds gg's
+-- physical holdings.
+--
+-- The ledger is named by the deployment's stable @namespace@, not its
+-- transferable admin, so an admin handoff leaves the ledger contract (and its
+-- signatory set) untouched; only the pot's owner changes.
 --
 -- The ledger also carries @custodyHoldingCid@, a pointer to the deployment's
 -- single consolidated custody holding. The manager maintains a single-holding
@@ -33,18 +37,19 @@ import Wormhole.Core.Bytes (Bytes32)
 template LockedLedger
   with
     operator           : Party
-    admin              : Party
+    namespace          : Party     -- the deployment's stable identity party
     guardianGovernance : Party
     managerAddress     : Bytes32   -- the owning NttManager
     balance            : Decimal
     custodyHoldingCid  : Optional (ContractId Holding)  -- hint: the consolidated pot
   where
-    -- Same signatories as the owning manager. Creating a ledger needs all
-    -- three signatures, and the only code path that has them is
-    -- 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
+    -- The manager's stable signatories (its transferable admin is deliberately
+    -- absent, so an admin handoff does not touch this contract). Creating a
+    -- ledger needs all three signatures, and the only code path that has them
+    -- is 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
     -- ledger per lock/unlock deployment. The manager checks the four identity
     -- fields before using a caller-supplied ledger cid.
-    signatory operator, admin, guardianGovernance
+    signatory operator, namespace, guardianGovernance
     ensure balance >= 0.0
 
     -- The controllers are the full signatory set, so only a choice body that
@@ -54,7 +59,7 @@ template LockedLedger
       with
         amount            : Decimal
         newCustodyHint    : Optional (ContractId Holding)
-      controller operator, admin, guardianGovernance
+      controller operator, namespace, guardianGovernance
       do
         assertMsg "ntt: ledger credit must be positive" (amount > 0.0)
         create this with
@@ -65,7 +70,7 @@ template LockedLedger
       with
         amount            : Decimal
         newCustodyHint    : Optional (ContractId Holding)
-      controller operator, admin, guardianGovernance
+      controller operator, namespace, guardianGovernance
       do
         assertMsg "ntt: ledger debit must be positive" (amount > 0.0)
         assertMsg "ntt: release exceeds this deployment's locked balance"
@@ -79,5 +84,5 @@ template LockedLedger
     choice SetCustodyHint : ContractId LockedLedger
       with
         newCustodyHint : Optional (ContractId Holding)
-      controller operator, admin, guardianGovernance
+      controller operator, namespace, guardianGovernance
       do create this with custodyHoldingCid = newCustodyHint
