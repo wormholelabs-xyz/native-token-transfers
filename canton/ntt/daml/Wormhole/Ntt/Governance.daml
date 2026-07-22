@@ -68,10 +68,11 @@ template NttGovernance
     -- deployment.
     --
     -- @coreStateCid@/@emitterFeeAllocation@/@claimFeeAllocation@ fund the
-    -- registry's onboarding fees, if any (@None@ on the zero-fee registries
-    -- devnet uses); @admin@ pays both, as the co-controlling @payer@ on the
-    -- nested 'RegisterEmitter'/'ClaimReplayRoot' — gg, the requester/consumer
-    -- of both, must not be made to fund its own deployments' onboarding.
+    -- registries' onboarding fees; @None@ when a registry charges none.
+    -- INVARIANT: gg never pays fees. It is the requester/consumer of the
+    -- nested 'RegisterEmitter'/'ClaimReplayRoot' for authority reasons only;
+    -- @admin@ is the co-controlling @payer@ on both, so every charge draws
+    -- from the registering admin's allocations.
     --
     -- Consuming, so concurrent registrations contend on this root (and, via
     -- the nested exercises, on the core's 'EmitterRegistry' and
