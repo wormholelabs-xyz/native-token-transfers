@@ -46,11 +46,11 @@ template NttGovernance
     -- contract's own signatories, and no separate namespace party exists
     -- anymore.
     --
-    -- The deployment's stable identity is the derived @namespace : Text@
-    -- ('nttNamespaceFor'), committed here from the registering @admin@, the
-    -- bridged instrument, and the allocated manager id, and the manager and
+    -- The deployment's stable identity is the derived @namespace : Text@:
+    -- @"ntt:" <> keccak256(tag ‖ instrument.admin ‖ instrument.id ‖
+    -- registering admin ‖ managerId)@ ('nttNamespaceFor'). The manager and
     -- transceiver addresses are likewise bound to the registering @admin@
-    -- ('nttManagerAddressFor') — both survive 'Wormhole.Ntt.Manager.TransferAdmin'
+    -- ('nttManagerAddressFor'). Both survive 'Wormhole.Ntt.Manager.TransferAdmin'
     -- because they are computed once, here, and stored, never recomputed
     -- against the current admin.
     --
