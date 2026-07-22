@@ -1,0 +1,72 @@
+-- | Helpers for driving the CIP-56 token-standard interfaces.
+--
+-- A registry's factory is a stateless service contract (a reified dictionary):
+-- its choices are nonconsuming, so its cid is stable and changes only when the
+-- registry is upgraded. The deployment commits that cid at registration (as a
+-- typed 'Wormhole.Ntt.Manager.NttFactory') and uses it thereafter, so an
+-- untrusted caller cannot substitute a look-alike factory.
+module Wormhole.Ntt.Cip56 where
+
+import DA.Time (RelTime, hours, addRelTime)
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+
+-- | The @executeBefore@ horizon stamped on factory transfers. The field is
+-- mandatory in the CIP-56 transfer spec, but its value never matters here:
+-- 'executeSyncTransfer' requires the transfer to settle in the submitting
+-- transaction, so any future time works.
+transferValidity : RelTime
+transferValidity = hours 24
+
+-- | The value-moving part of a CIP-56 transfer. A named record rather than
+-- positional arguments, so that sender and receiver cannot be swapped silently
+-- at a call site.
+data SyncTransfer = SyncTransfer with
+    sender       : Party
+    receiver     : Party
+    amount       : Decimal
+    instrumentId : InstrumentId
+  deriving (Eq, Show)
+
+-- | Execute a CIP-56 'TIV1.TransferFactory_Transfer' that must settle in the
+-- current transaction. A registry that answers with a Pending or Failed result
+-- has not moved the tokens, so the whole transaction aborts instead of letting
+-- the bridge continue as if value had moved.
+--
+-- Returns the receiver's new holdings and the sender's change holdings, which
+-- the manager uses to keep the custody pot consolidated. The receiver's
+-- holdings are checked to sum to exactly the requested amount: the standard's
+-- convention is that fees are charged to the sender on top, and a registry
+-- that deducts them from the delivered amount instead would silently
+-- under-collateralize the bridge on every lock.
+executeSyncTransfer
+  :  ContractId TIV1.TransferFactory
+  -> SyncTransfer
+  -> [ContractId Holding]
+  -> ExtraArgs
+  -> Update ([ContractId Holding], [ContractId Holding])
+executeSyncTransfer factoryCid t inputHoldingCids extraArgs = do
+  now <- getTime
+  res <- exercise factoryCid TIV1.TransferFactory_Transfer with
+    expectedAdmin = t.instrumentId.admin
+    transfer = TIV1.Transfer with
+      sender = t.sender
+      receiver = t.receiver
+      amount = t.amount
+      instrumentId = t.instrumentId
+      requestedAt = now
+      executeBefore = now `addRelTime` transferValidity
+      inputHoldingCids
+      meta = emptyMetadata
+    extraArgs
+  case res.output of
+    TIV1.TransferInstructionResult_Completed receiverHoldingCids -> do
+      delivered <- forA receiverHoldingCids \cid -> do
+        hv <- view <$> fetch cid
+        pure hv.amount
+      assertMsg "ntt: registry did not deliver the exact transfer amount"
+        (sum delivered == t.amount)
+      pure (receiverHoldingCids, res.senderChangeCids)
+    _ -> abort "ntt: transfer did not settle synchronously"
