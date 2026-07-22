@@ -1,14 +1,16 @@
 -- | Per-deployment accounting for lock/unlock custody.
 --
--- Every lock/unlock deployment deposits into the same custodian party
--- (@guardianGovernance@), so the physical holdings form one fungible pot. Each
--- deployment therefore keeps its own 'LockedLedger': the manager credits it on
--- every lock and debits it on every release, and 'Debit' rejects any amount
--- above the balance. A deployment can release at most what it locked, which is
--- what keeps a deployment with a hostile peer away from other deployments'
--- collateral. The cap is sound even though the pot is fungible: credits and
--- debits are atomic with the corresponding deposit and release, so the sum of
--- all ledger balances never exceeds the custodian's physical holdings.
+-- A deployment's reserve is owned by its current custodian: the deployment
+-- @admin@ from registration, @guardianGovernance@ after the quorum promotes it
+-- (see 'Wormhole.Ntt.Manager.Promote'). Each deployment keeps its own
+-- 'LockedLedger': the manager credits it on every lock and debits it on every
+-- release, and 'Debit' rejects any amount above the balance, so a deployment
+-- can release at most what it locked. Unpromoted reserves cannot mix (distinct
+-- owners); promoted reserves form one gg-owned pot shared only among
+-- quorum-vetted deployments, where the cap is what keeps a deployment with a
+-- hostile peer away from the others' collateral: credits and debits are atomic
+-- with the corresponding deposit and release, so the sum of promoted balances
+-- never exceeds gg's physical holdings.
 --
 -- The ledger also carries @custodyHoldingCid@, a pointer to the deployment's
 -- single consolidated custody holding. The manager maintains a single-holding

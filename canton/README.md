@@ -60,9 +60,10 @@ Three parties sign every `NttManager`, and each signature has one job:
   maintains the peer table, and scopes the deployment's replay protection
   (VAAs are consumed with `consumer = admin`).
 - `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
-  same party that anchors the core and receives message fees. It owns the
-  lock/unlock reserves and administers burn/mint instruments, so its signature
-  is the custody and mint authority.
+  same party that anchors the core and receives message fees. It owns promoted
+  lock/unlock reserves (see "Custody is two-phase" below) and administers
+  burn/mint instruments, so its signature is the promoted-custody and mint
+  authority.
 
 `gg` acts exactly once: a guardian quorum ceremony (the same external-signing
 flow that creates the genesis `CoreState`) creates the `NttGovernance` root.
@@ -87,7 +88,8 @@ transceiver), then exercises `RegisterManager` on the disclosed
 `NttGovernance` root. This allocates a stable `managerId` and creates the
 manager in one transaction, with no approval step: the caller supplies the
 `admin` signature and the root supplies `operator`'s and `gg`'s. For
-lock/unlock it also creates the deployment's `LockedLedger` at balance zero.
+lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
+with the reserve starting admin-owned (see "Custody is two-phase" below).
 For burn/mint it checks the mint capability: `gg` must administer the
 instrument, and the instrument id must be bound to the registering admin (see
 "Instrument binding" below).
@@ -228,50 +230,73 @@ contract keys). If the sender chose the factory, a malicious one could report a
 lock or burn that never happened while the manager still emitted a genuine,
 value-bearing VAA — bridge inflation. Committing the factory removes caller
 choice: the trust collapses to the deployment `admin`, which every peer already
-trusts by registering it as a peer (the same trust EVM and Solana NTT place in a
-peer's configured token). The residual is liveness only: if the registry
-rotates its factory and `admin` hasn't yet called `SetFactory`, transfers pause
-(they never mis-settle) until the committed cid is refreshed.
+trusts by registering it as a peer (the same trust EVM and Solana NTT place in
+a peer's configured token), and whose reach before promotion ends at its own
+reserve (see below). After promotion the committed factory is the one the
+quorum vetted, so `SetFactory` then needs `gg` too. The other residual is
+liveness: if the registry rotates its factory before the committed cid is
+refreshed, transfers pause (they never mis-settle).
 
-**Custody sits with the guardian quorum.** Bridged value is owned by `gg`, not
-by the deployment admin, who could otherwise drain reserves or mint at will.
-The manager's choice bodies inherit `gg`'s authority for the custody transfer
-or mint, and every inbound choice is VAA-gated, so the reserve moves only
-against a valid, replay-protected VAA. This adds no new trusted party: it is
-the same guardian quorum that VAA verification already trusts.
+**Custody is two-phase: admin-owned, then promoted to the guardian quorum.** A
+deployment registers with its reserve owned by its own `admin` (`AdminCustody`
+on the manager). It is fully operational and explicitly custodial: the admin
+owns the reserve outright, so users of an unpromoted deployment trust its
+admin the way they would a custodial bridge, and wallets should surface the
+phase. The guardian quorum can later opt in with `Promote`: a co-signed
+ceremony that names the factory the quorum vetted, transfers the pot from the
+admin to `gg`, and puts factory rotation under governance. A promoted reserve
+is owned by `gg`, so the admin can no longer touch it; the manager's choice
+bodies inherit `gg`'s authority and every inbound movement is VAA-gated — the
+same guardian trust that VAA verification already carries.
 
-**The locked ledger.** All lock/unlock deployments deposit into the same `gg`
-pot, and Wormhole attests only that an emitter emitted bytes, not that a
-transfer is backed. A deployment that trusts a hostile peer must therefore not
-be able to reach other deployments' collateral. Each deployment's
+**Why the partition is by owner.** Isolation between deployments follows from
+ownership, not from accounting or holding topology. Unpromoted reserves are
+owned by distinct admin parties and cannot mix, no matter what any factory
+reports: a deployment that commits a dishonest factory can inflate only its
+own ledger and drain only its own admin-owned reserve. The `gg` pool is shared
+only among deployments the quorum promoted, whose factories it vetted.
+Ownership is also the one partition a registry cannot churn away: registries
+reorganize holdings out from under the bridge (Canton Coin's rounds merge,
+expire, and recreate contracts), which erases any partition built out of
+specific contract ids — a pinned pot cid, an escrow — but never changes who
+owns the value. Finally, because every choice body carries all three
+signatures, the manager checks that each custody holding it spends is owned by
+the deployment's current custodian, so the ambient `gg` authority in an
+unpromoted deployment's choices can never reach the promoted pool.
+
+**The locked ledger.** Wormhole attests only that an emitter emitted bytes,
+not that a transfer is backed. A deployment that trusts a hostile peer must
+therefore not be able to release more than it locked: each deployment's
 `LockedLedger` is credited on every lock and debited on every release, and
-`Debit` rejects amounts above the balance, so a deployment can release at most
-what it locked. The cap is sound even though the pot is fungible: credits and
-debits are atomic with the corresponding deposit and release, so the sum of
-all ledger balances never exceeds `gg`'s physical holdings, and every
+`Debit` rejects amounts above the balance. Within the promoted `gg` pool,
+where reserves of one instrument are fungible across deployments, this cap is
+what keeps a hostile-peer deployment away from the others' collateral: credits
+and debits are atomic with the corresponding deposit and release, so the sum
+of promoted balances never exceeds `gg`'s physical holdings, and every
 deployment's cap stays satisfiable no matter which holdings a release spends.
-One consequence of the shared pot: `gg` also custodies message fees, so a
-release may physically spend fee holdings of the same instrument. That is
+One consequence of the shared promoted pool: `gg` also custodies message fees,
+so a release may physically spend fee holdings of the same instrument. That is
 value-neutral (change returns to `gg` and the cap still binds), but worth
 knowing when auditing `gg`'s holdings.
 
 **The custody pot (single-holding invariant).** Custody holdings are visible
-only to their stakeholders (`gg` and the registry admin), so an executor can
-only spend what someone discloses to it. To avoid an off-chain index and coin
-selection over custody fragments, the manager keeps each deployment's custody
-consolidated into one holding, and the ledger carries a pointer to it
-(`custodyHoldingCid`): a lock merges the fresh deposit into the pot with a
-`gg`-to-`gg` self-transfer, and a release spends the pot and records the
-single change holding as the new pot. The pointer updates in exactly the
+only to their stakeholders (the custodian and the registry admin), so an
+executor can only spend what someone discloses to it. To avoid an off-chain
+index and coin selection over custody fragments, the manager keeps each
+deployment's custody consolidated into one holding, and the ledger carries a
+pointer to it (`custodyHoldingCid`): a lock merges the fresh deposit into the
+pot with a custodian self-transfer, and a release spends the pot and records
+the single change holding as the new pot. The pointer updates in exactly the
 transactions the ledger already changes in, so a relayer's disclosure bundle
 (manager, ledger, pot) is complete and self-refreshing. The pointer is a hint,
-not a trust anchor: holdings are validated (owner, instrument) at use time,
-`Release` accepts explicit holding cids as an override, and the permissionless
+not a trust anchor: every holding is validated at use time as the current
+custodian's own, unlocked, of this instrument; `Release` accepts explicit
+holding cids as an override (validated the same way); and the permissionless
 `ConsolidateCustody` choice re-merges fragments and repoints the hint after a
 registry-side reorganization (registries may restructure their holdings
 without us, which is why the cid can go stale and why storing it is safe only
 as a hint). One open consideration for real registries: transfer fees charged
-out of `gg`'s inputs would bleed the physical pot below the ledger sum, so a
+out of custody inputs would bleed the physical pot below the ledger sum, so a
 fee-charging registry needs a per-registry answer (fee waivers, top-ups, or
 debiting fees from the ledger).
 
@@ -298,15 +323,18 @@ deployment-setup requirement documented rather than enforced here.
 `TransferFactory_Transfer` to settle in the same transaction; a `Pending` or
 `Failed` result aborts, so a two-step registry flow can never leave the bridge
 thinking value moved when it did not. Delivering to an arbitrary receiver (the
-custody target on lock, the recipient on unlock) still depends on
-registry-level receiver pre-approval (for example Amulet's own
-`TransferPreapproval`), which is outside NTT's control.
+custodian on lock, the recipient on unlock) still depends on registry-level
+receiver pre-approval (for example Amulet's own `TransferPreapproval`), which
+is outside NTT's control. One practical upside of admin custody: the lock's
+receiver is the admin itself, which can self-serve that pre-approval; a
+promoted deployment needs it arranged for `gg`, which is part of what the
+quorum takes on by promoting.
 
 ## Contention and contract churn
 
-The manager itself is consumed only by its admin-config choices (`SetPeer`,
-`SetFactory`), so across transfer traffic its cid is stable and disclosures of
-it stay valid. What serializes is:
+The manager itself is consumed only by its config choices (`SetPeer`,
+`SetFactory`, and the one-time `Promote`), so across transfer traffic its cid
+is stable and disclosures of it stay valid. What serializes is:
 
 - Sends, on the transceiver `Emitter` (consumed by every publish). Inherent to
   Wormhole sequence numbering.
@@ -324,12 +352,17 @@ fail-closed pattern the core publish path uses.
 - Never-opted-in recipients: a pending+claim fallback (mint a pending
   instruction the recipient later claims) would let delivery proceed before
   opt-in. Deliberately out of scope for now.
-- Foreign-admin lock/unlock against a real registry: the tests collapse the
-  reserve owner (`gg`) and the lock instrument's admin onto one party because
-  the mock factory cannot model a real registry's receiver pre-approval. A
-  real lock/unlock deployment bridges a token whose admin is not `gg` and
-  relies on that registry's `TransferPreapproval`; exercising that end to end
-  is future work.
+- Foreign-admin lock/unlock against a real registry: the mock factory cannot
+  model a real registry's receiver pre-approval, so the tests make `gg` every
+  instrument's admin, run unpromoted lock tests with the sender as the
+  deployment admin, and run the different-user lock test promoted. A real
+  lock/unlock deployment bridges a token whose admin is not `gg` and relies on
+  that registry's `TransferPreapproval`; exercising that end to end is future
+  work.
+- Promotion by governance VAA: `Promote` is a live co-signing ceremony (admin
+  and `gg` act together). A guardian-signed promotion VAA, verified on-ledger
+  like other governance actions, would let the admin submit the quorum's
+  standing approval without a live ceremony.
 - Inbound rate limits (EVM NTT parity): a governance-set cap on inbound
   release/mint rate would bound the damage from a compromised peer beyond the
   `LockedLedger` cap. Not required for isolation, so deferred.

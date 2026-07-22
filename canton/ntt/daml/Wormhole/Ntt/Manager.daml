@@ -9,9 +9,9 @@
 -- Three parties sign the manager, and each signature has one job:
 --
 --   * @guardianGovernance@ (gg), the guardians' k-of-n threshold party, is the
---     custody and mint authority. Its signature is what lets the manager's
---     choice bodies spend the gg-owned reserve (lock/unlock) or mint the
---     gg-administered instrument (burn/mint).
+--     promoted-custody and mint authority. Its signature is what lets the
+--     manager's choice bodies spend a promoted deployment's gg-owned reserve
+--     (lock/unlock) or mint the gg-administered instrument (burn/mint).
 --   * @admin@, the deployer, supplies the replay-trie authority
 --     ('VerifyAndConsumeVAA' runs with @consumer = admin@) and maintains the
 --     peer table.
@@ -25,19 +25,35 @@
 -- permissionless: any executor may submit, but only the VAA-bound transfer can
 -- happen.
 --
--- Isolation between deployments: lock/unlock deployments share gg as
--- custodian, so each keeps a 'LockedLedger' and can never release more than it
--- locked. Burn/mint deployments are isolated by instrument, and the instrument
--- id is hash-bound to the deployment admin ('nttInstrumentIdFor'), so no
--- second deployment can register against an instrument that is already
--- bridged.
+-- Lock/unlock custody is two-phase. A deployment registers with its reserve
+-- owned by its own @admin@ ('AdminCustody'): fully operational, permissionless,
+-- and explicitly custodial — the admin owns the reserve and its users trust it.
+-- The guardian quorum can later opt in via 'Promote', which moves the reserve
+-- to @gg@ ('GuardianCustody') and takes factory rotation under governance.
+-- Isolation between deployments follows from ownership: unpromoted reserves are
+-- owned by distinct admin parties and cannot mix, and the gg-owned pool is
+-- shared only among deployments the quorum vetted. Ownership survives any
+-- registry-side reorganization of holdings, which is why the partition is by
+-- owner and not by holding topology. Each lock/unlock deployment also keeps a
+-- 'LockedLedger' and can never release more than it locked. Burn/mint
+-- deployments are isolated by instrument: the instrument id is hash-bound to
+-- the deployment admin ('nttInstrumentIdFor'), so no second deployment can
+-- register against an instrument that is already bridged.
+--
+-- Because every choice body carries all three signatures, custody paths must
+-- never rely on ambient authority: 'sumCustodyHoldings' checks that each
+-- custody holding the manager spends is owned by the deployment's current
+-- custodian, so an unpromoted deployment cannot spend gg-owned holdings even
+-- though gg's authority is in scope.
 --
 -- The registry factory is deployment config, not per-call input. The token's
 -- factory is a stateless service contract whose cid is stable (its choices are
 -- nonconsuming), so the manager commits it at registration and uses that cid
 -- for every operation. A caller therefore cannot route a lock, burn, unlock,
--- or mint through a look-alike factory to fake a token movement; @admin@
--- refreshes it with 'SetFactory' on the rare occasion the registry is upgraded.
+-- or mint through a look-alike factory to fake a token movement. @admin@
+-- refreshes it with 'SetFactory' on the rare occasion the registry is upgraded;
+-- after promotion that refresh needs gg too, since the pool's soundness rests
+-- on the factory the quorum vetted at 'Promote'.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -70,6 +86,30 @@ data NttTokenConfig
   = LockUnlock
   | BurnMint
   deriving (Eq, Show)
+
+-- | Who owns a lock/unlock deployment's reserve. Registration always starts at
+-- 'AdminCustody' (permissionless, and explicitly custodial: the admin owns the
+-- reserve). 'Promote' is the guardian quorum's opt-in that moves the reserve to
+-- gg. Burn/mint deployments hold no reserve; they stay at 'AdminCustody' and
+-- never consult it.
+data NttCustody
+  = AdminCustody
+  | GuardianCustody
+  deriving (Eq, Show)
+
+-- | The party that owns the deployment's custody in its current phase.
+custodianOf : NttManager -> Party
+custodianOf mgr = case mgr.custody of
+  AdminCustody -> mgr.admin
+  GuardianCustody -> mgr.guardianGovernance
+
+-- | Who may rotate the committed factory: admin alone before promotion; after
+-- promotion the pool's soundness rests on the factory the quorum vetted, so
+-- rotation needs gg too.
+factoryRotationControllers : NttManager -> [Party]
+factoryRotationControllers mgr = case mgr.custody of
+  AdminCustody -> [mgr.admin]
+  GuardianCustody -> [mgr.admin, mgr.guardianGovernance]
 
 -- | A peer NTT deployment on another chain: its manager address (the
 -- @recipientManager@/@sourceManager@ in the transceiver message) and its
@@ -155,14 +195,17 @@ resolveLedger mgr ledgerCid = do
       && ledger.managerAddress == mgr.managerAddress)
   pure ledger
 
--- | Validate custody holdings (owned by gg, this deployment's instrument,
--- unlocked) and return their total. Used before merging them into the pot.
+-- | Validate custody holdings (owned by the deployment's current custodian,
+-- this deployment's instrument, unlocked) and return their total. Run over
+-- every custody holding the manager spends: the choice bodies carry both the
+-- admin and gg signatures, so without this check a caller could steer a choice
+-- into spending the other party's holdings on ambient authority alone.
 sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
 sumCustodyHoldings mgr cids = do
   amounts <- forA cids \cid -> do
     hv <- view <$> fetch cid
-    assertMsg "ntt: custody holding is not owned by guardianGovernance"
-      (hv.owner == mgr.guardianGovernance)
+    assertMsg "ntt: custody holding is not owned by the custodian"
+      (hv.owner == custodianOf mgr)
     assertMsg "ntt: custody holding instrument mismatch"
       (hv.instrumentId == mgr.instrumentId)
     assertMsg "ntt: custody holding is locked" (hv.lock == None)
@@ -239,6 +282,7 @@ template NttManager
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
     factoryCid           : AnyContractId   -- the registry's factory (TransferFactory or BurnMintFactory by mode)
+    custody              : NttCustody      -- who owns the lock/unlock reserve; AdminCustody until 'Promote'
   where
     -- See the module header for what each signature contributes. All three are
     -- inherited from the NttGovernance root at registration; no signatory acts
@@ -256,17 +300,56 @@ template NttManager
 
     -- | Repoint the committed registry factory. Needed only when the registry
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
-    -- the new cid from the registry and commits it here.
+    -- the new cid from the registry and commits it here. After 'Promote' the
+    -- committed factory is the one the quorum vetted, and the gg-owned pool's
+    -- soundness rests on its honesty, so rotation then needs gg too.
     choice SetFactory : ContractId NttManager
       with
         newFactoryCid : AnyContractId
-      controller admin
+      controller factoryRotationControllers this
       do create this with factoryCid = newFactoryCid
 
+    -- | The guardian quorum's opt-in: move custody of the reserve from @admin@
+    -- to @gg@. The quorum names the factory it vetted (@vettedFactoryCid@ must
+    -- equal the committed one), the admin-owned pot is transferred to gg, and
+    -- the manager is recreated at 'GuardianCustody' — which also puts
+    -- 'SetFactory' under governance. If the ledger's pot hint is stale, run
+    -- 'ConsolidateCustody' first.
+    choice Promote : (ContractId NttManager, ContractId LockedLedger)
+      with
+        ledgerCid        : ContractId LockedLedger
+        vettedFactoryCid : AnyContractId
+        extraArgs        : ExtraArgs
+      controller admin, guardianGovernance
+      do
+        assertMsg "ntt: only lock/unlock deployments are promoted"
+          (tokenConfig == LockUnlock)
+        assertMsg "ntt: deployment is already promoted" (custody == AdminCustody)
+        assertMsg "ntt: committed factory is not the one the quorum vetted"
+          (factoryCid == vettedFactoryCid)
+        ledger <- resolveLedger this ledgerCid
+        ledgerCid' <- case ledger.custodyHoldingCid of
+          None -> pure ledgerCid
+          Some pot -> do
+            total <- sumCustodyHoldings this [pot]
+            (movedCids, _) <- executeSyncTransfer
+              (coerceFactory @TIV1.TransferFactory factoryCid)
+              SyncTransfer with
+                sender = admin
+                receiver = guardianGovernance
+                amount = total
+                instrumentId
+              [pot]
+              extraArgs
+            exercise ledgerCid SetCustodyHint with
+              newCustodyHint = custodyHintFrom movedCids
+        mgrCid' <- create this with custody = GuardianCustody
+        pure (mgrCid', ledgerCid')
+
     -- | Outbound transfer. Trims the amount to the wire form, moves @user@'s
-    -- tokens (lock into gg custody, crediting the deployment's 'LockedLedger',
-    -- or burn, returning change), and publishes the NTT message through the
-    -- deployment's transceiver 'Emitter'.
+    -- tokens (lock into the custodian's reserve, crediting the deployment's
+    -- 'LockedLedger', or burn, returning change), and publishes the NTT message
+    -- through the deployment's transceiver 'Emitter'.
     --
     -- @user@ is the sole controller and self-pays the governance message fee
     -- (as payer it co-controls the nested 'PublishMessage', which draws the
@@ -305,18 +388,19 @@ template NttManager
             && transceiver.operator == operator
             && transceiver.emitterId == transceiverEmitterId)
         case tokenConfig of
-          -- Lock: move the user's holdings into gg custody, merge the fresh
-          -- deposit with the existing pot so the deployment keeps a single
-          -- custody holding, and credit the ledger — all atomically.
+          -- Lock: move the user's holdings into the custodian's reserve, merge
+          -- the fresh deposit with the existing pot so the deployment keeps a
+          -- single custody holding, and credit the ledger — all atomically.
           LockUnlock -> do
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
+                custodian = custodianOf this
+                transferFactoryCid = coerceFactory @TIV1.TransferFactory factoryCid
             ledger <- resolveLedger this lcid
-            let factoryCid = coerceFactory @TIV1.TransferFactory this.factoryCid
-            (depositCids, _) <- executeSyncTransfer factoryCid
+            (depositCids, _) <- executeSyncTransfer transferFactoryCid
               SyncTransfer with
                 sender = user
-                receiver = guardianGovernance
+                receiver = custodian
                 amount
                 instrumentId
               inputHoldingCids
@@ -329,10 +413,10 @@ template NttManager
               [single] -> pure (Some single)
               _ -> do
                 total <- sumCustodyHoldings this potCids
-                (mergedCids, _) <- executeSyncTransfer factoryCid
+                (mergedCids, _) <- executeSyncTransfer transferFactoryCid
                   SyncTransfer with
-                    sender = guardianGovernance
-                    receiver = guardianGovernance
+                    sender = custodian
+                    receiver = custodian
                     amount = total
                     instrumentId
                   potCids
@@ -343,7 +427,7 @@ template NttManager
           -- Burn: spend the user's holdings for exactly the wire amount and
           -- return the rest as change.
           BurnMint -> do
-            let factoryCid = coerceFactory @BurnMintFactory this.factoryCid
+            let burnMintFactoryCid = coerceFactory @BurnMintFactory factoryCid
             holdingAmounts <- forA inputHoldingCids \cid -> do
               hv <- view <$> fetch cid
               assertMsg "ntt: burn holding not owned by sender" (hv.owner == user)
@@ -357,7 +441,7 @@ template NttManager
                   if change == 0.0
                     then []
                     else [ BurnMintOutput with owner = user, amount = change, context = extraArgs.context ]
-            _ <- exercise factoryCid BurnMintFactory_BurnMint with
+            _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
               expectedAdmin = instrumentId.admin
               instrumentId
               inputHoldingCids
@@ -425,10 +509,14 @@ template NttManager
           ([], Some pot) -> pure [pot]
           ([], None) -> abort "ntt: no custody hint on the ledger; supply explicit holdings"
           (cids, _) -> pure cids
-        let factoryCid = coerceFactory @TIV1.TransferFactory this.factoryCid
-        (_, changeCids) <- executeSyncTransfer factoryCid
+        -- The body carries both admin's and gg's signatures, so validate that
+        -- the holdings being spent are the current custodian's — a caller must
+        -- not be able to steer the release into the other party's holdings.
+        _ <- sumCustodyHoldings this inputs
+        (_, changeCids) <- executeSyncTransfer
+          (coerceFactory @TIV1.TransferFactory factoryCid)
           SyncTransfer with
-            sender = guardianGovernance
+            sender = custodianOf this
             receiver = recipient
             amount = releaseAmount
             instrumentId
@@ -443,8 +531,8 @@ template NttManager
     -- ledger's hint at it: the repair path after a registry-side
     -- reorganization, an operation that left multiple change holdings, or
     -- releases that used explicit inputs. Permissionless (the self-transfer
-    -- is value-neutral and the holdings are validated as this instrument's
-    -- gg custody), so relayer tooling can run it opportunistically. Note the
+    -- is value-neutral and the holdings are validated as the custodian's own
+    -- of this instrument), so relayer tooling can run it opportunistically. Note the
     -- holdings carry no deployment tag, so callers should pass this
     -- deployment's own fragments; merging another deployment's pot is
     -- value-neutral but stales that deployment's hint, which it can repair
@@ -462,11 +550,12 @@ template NttManager
         assertMsg "ntt: no custody holdings supplied" (not (null custodyHoldingCids))
         _ <- resolveLedger this ledgerCid
         total <- sumCustodyHoldings this custodyHoldingCids
-        let factoryCid = coerceFactory @TIV1.TransferFactory this.factoryCid
-        (mergedCids, _) <- executeSyncTransfer factoryCid
+        let custodian = custodianOf this
+        (mergedCids, _) <- executeSyncTransfer
+          (coerceFactory @TIV1.TransferFactory factoryCid)
           SyncTransfer with
-            sender = guardianGovernance
-            receiver = guardianGovernance
+            sender = custodian
+            receiver = custodian
             amount = total
             instrumentId
           custodyHoldingCids
@@ -509,6 +598,6 @@ template NttManager
           (mintAmount > 0.0)
         exercise depositPreapprovalCid Deposit with
           amount = mintAmount
-          factoryCid = this.factoryCid
+          factoryCid
           extraArgs
         pure ntt

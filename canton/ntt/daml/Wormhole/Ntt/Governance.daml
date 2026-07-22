@@ -34,6 +34,12 @@ template NttGovernance
     -- @admin@ is the caller and passes its already-registered core 'Emitter'
     -- as the deployment's transceiver.
     --
+    -- Every deployment starts at 'AdminCustody': a lock/unlock reserve is owned
+    -- by the registering @admin@ (explicitly custodial) until the guardian
+    -- quorum opts in with 'Wormhole.Ntt.Manager.Promote'. That keeps
+    -- registration permissionless without ever pooling an unvetted
+    -- deployment's custody with anyone else's.
+    --
     -- For burn/mint, two checks make the mint capability sound:
     -- @guardianGovernance@ must administer the instrument (otherwise the
     -- manager could never mint it), and the instrument id must be
@@ -85,6 +91,7 @@ template NttGovernance
           tokenDecimals
           peers = Map.empty
           factoryCid
+          custody = AdminCustody
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with
             operator
