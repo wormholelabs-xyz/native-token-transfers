@@ -1,0 +1,88 @@
+-- | Per-deployment accounting for lock/unlock custody.
+--
+-- A deployment's reserve is owned by its current @admin@ (transferable via
+-- 'Wormhole.Ntt.Manager.TransferAdmin'; handing it to @guardianGovernance@ is
+-- the quorum's custody opt-in). Each deployment keeps its own 'LockedLedger':
+-- the manager credits it on every lock and debits it on every release, and
+-- 'Debit' rejects any amount above the balance, so a deployment can release at
+-- most what it locked. Reserves of distinct admins cannot mix; gg-adminned
+-- reserves form one pot shared only among deployments the quorum accepted,
+-- where the cap is what keeps a deployment with a hostile peer away from the
+-- others' collateral: credits and debits are atomic with the corresponding
+-- deposit and release, so the sum of those balances never exceeds gg's
+-- physical holdings.
+--
+-- The ledger is named by the deployment's stable @namespace@, not its
+-- transferable admin, so an admin handoff leaves the ledger contract (and its
+-- signatory set) untouched; only the pot's owner changes.
+--
+-- The ledger also carries @custodyHoldingCid@, a pointer to the deployment's
+-- single consolidated custody holding. The manager maintains a single-holding
+-- invariant: locks merge the fresh deposit into the pot, releases spend the
+-- pot and record the change, so relayers never need an off-chain index of
+-- custody fragments. The pointer is a hint, not a trust anchor: holdings are
+-- validated (owner, instrument) at use time, the registry may reorganize its
+-- holdings out from under it, and 'Wormhole.Ntt.Manager.ConsolidateCustody'
+-- rebuilds it from explicit cids when it goes stale.
+--
+-- The ledger is a separate contract rather than a field on 'NttManager' so
+-- that transfer traffic does not consume the manager: the manager changes only
+-- when the admin edits the peer table, and its cid stays stable for everyone
+-- who holds a disclosure of it.
+module Wormhole.Ntt.Ledger where
+
+import Splice.Api.Token.HoldingV1 (Holding)
+import Wormhole.Core.Bytes (Bytes32)
+
+template LockedLedger
+  with
+    operator           : Party
+    namespace          : Party     -- the deployment's stable identity party
+    guardianGovernance : Party
+    managerAddress     : Bytes32   -- the owning NttManager
+    balance            : Decimal
+    custodyHoldingCid  : Optional (ContractId Holding)  -- hint: the consolidated pot
+  where
+    -- The manager's stable signatories (its transferable admin is deliberately
+    -- absent, so an admin handoff does not touch this contract). Creating a
+    -- ledger needs all three signatures, and the only code path that has them
+    -- is 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
+    -- ledger per lock/unlock deployment. The manager checks the four identity
+    -- fields before using a caller-supplied ledger cid.
+    signatory operator, namespace, guardianGovernance
+    ensure balance >= 0.0
+
+    -- The controllers are the full signatory set, so only a choice body that
+    -- already carries all three authorities (in practice: the owning manager's
+    -- choices) can update the ledger.
+    choice Credit : ContractId LockedLedger
+      with
+        amount            : Decimal
+        newCustodyHint    : Optional (ContractId Holding)
+      controller operator, namespace, guardianGovernance
+      do
+        assertMsg "ntt: ledger credit must be positive" (amount > 0.0)
+        create this with
+          balance = balance + amount
+          custodyHoldingCid = newCustodyHint
+
+    choice Debit : ContractId LockedLedger
+      with
+        amount            : Decimal
+        newCustodyHint    : Optional (ContractId Holding)
+      controller operator, namespace, guardianGovernance
+      do
+        assertMsg "ntt: ledger debit must be positive" (amount > 0.0)
+        assertMsg "ntt: release exceeds this deployment's locked balance"
+          (amount <= balance)
+        create this with
+          balance = balance - amount
+          custodyHoldingCid = newCustodyHint
+
+    -- | Repoint the custody hint without touching the balance; the repair
+    -- path after a consolidation or a registry-side reorganization.
+    choice SetCustodyHint : ContractId LockedLedger
+      with
+        newCustodyHint : Optional (ContractId Holding)
+      controller operator, namespace, guardianGovernance
+      do create this with custodyHoldingCid = newCustodyHint
