@@ -53,33 +53,48 @@ against a `dpm sandbox`.
 
 ## Parties and the trust model
 
-Four parties sign every `NttManager`, and each signature has one job:
+Three parties sign every `NttManager`, and each signature has one job:
 
 - `operator` runs the core bridge instance and ties the deployment to it.
-- `namespace` is the deployment's stable identity. It is in the manager and
-  transceiver address preimages, owns the transceiver `Emitter`, names the
-  `LockedLedger`, and scopes the deployment's replay protection (VAAs are
-  consumed with `consumer = namespace`). It never changes and never acts after
-  registration, and it must be durable: losing the party means a new
-  deployment and a migration.
 - `admin` is the operational role: it maintains the peer table, rotates the
   committed factory, and owns the lock/unlock reserve. It is transferable
   (`TransferAdmin`, usually via the propose-accept `AdminTransferProposal`);
-  handing it to `gg` is the guardian quorum's custody opt-in. At registration,
-  namespace and admin may be the same party.
+  handing it to `gg` is the guardian quorum's custody opt-in.
 - `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
   same party that anchors the core and receives message fees. It administers
-  burn/mint instruments, and a deployment whose admin role was handed to it
-  has a quorum-owned reserve and governance-run admin operations.
+  burn/mint instruments, owns the deployment's transceiver `Emitter`, is the
+  replay-trie consumer for every deployment, and a deployment whose admin role
+  was handed to it has a quorum-owned reserve and governance-run admin
+  operations.
+
+The deployment's stable identity is no longer a co-signing party. It is a
+derived `namespace : Text`, computed once at registration and stored on the
+manager:
+
+```
+namespace = "ntt:" <> keccak256(tag ‖ lp(instrument.admin) ‖ lp(instrument.id) ‖ lp(registeringAdmin) ‖ managerId)
+```
+
+(`lp` is the 4-byte length prefix used throughout this package's address
+preimages.) It sub-scopes `gg`'s replay trie — inbound VAAs are consumed with
+`consumer = gg, namespace = mgr.namespace` — and never changes, but unlike a
+party it needs no ceremony to mint or safeguard: `gg` is already a lifetime
+signatory of every manager, so the derived text rides along on `gg`'s
+inherited authority. The registering admin in the preimage binds the
+deployment's identity to its creator, and `managerId` guarantees exactly one
+namespace per deployment (closing the corner case where two deployments would
+otherwise share both instrument and registering admin).
 
 `gg` acts exactly once: a guardian quorum ceremony (the same external-signing
 flow that creates the genesis `CoreState`) creates the `NttGovernance` root.
 Everything afterwards runs on inherited authority. `RegisterManager` lends the
-root's signatures to create managers, and the manager's choice bodies lend the
-manager's signatures to move tokens. Value can only move inside fixed template
-code, and every inbound movement first verifies and consumes a VAA, so no
-single signatory can move bridged value, and nobody has to co-sign at transfer
-time. That is what keeps both deployment and relaying permissionless.
+root's signatures to create managers — and, atomically, to mint the
+deployment's `gg`-owned transceiver `Emitter` and claim its `gg`-scoped replay
+root — and the manager's choice bodies lend the manager's signatures to move
+tokens. Value can only move inside fixed template code, and every inbound
+movement first verifies and consumes a VAA, so no single signatory can move
+bridged value, and nobody has to co-sign at transfer time. That is what keeps
+both deployment and relaying permissionless.
 
 A rogue movement of a `gg`-owned reserve would take either a native spend by
 the guardian quorum or a new `gg`-signed contract, which is also a quorum act.
@@ -90,33 +105,42 @@ deployment requirement; the contracts cannot check it.
 ## Deployment
 
 Anyone can stand up a deployment: bring a CIP-0056 token and pick a mode,
-lock/unlock or burn/mint. The deployer first registers a core `Emitter` (the
-transceiver, owned by the namespace party), then exercises `RegisterManager`
-on the disclosed `NttGovernance` root. This allocates a stable `managerId` and
-creates the manager in one transaction, with no approval step: the caller
-supplies the `namespace` and `admin` signatures (one party may play both
-roles) and the root supplies `operator`'s and `gg`'s. For lock/unlock it also
-creates the deployment's `LockedLedger` at balance zero, with the reserve
-starting admin-owned (see "Custody follows the admin" below). For burn/mint it
-checks the mint capability: `gg` must administer the instrument, and the
-instrument id must be bound to the registering namespace (see "Instrument
-binding" below).
+lock/unlock or burn/mint. The deployer exercises `RegisterManager` on the
+disclosed `NttGovernance` root, passing along the core's `EmitterRegistry` and
+`ReplayRootRegistry` anchors (also disclosed). This one transaction:
+allocates a stable `managerId`; mints the deployment's transceiver `Emitter`
+(owned by `gg`, `gg`'s requester authority inherited from `NttGovernance`);
+claims the deployment's replay-trie root (`consumer = gg`, sub-scoped by the
+derived `namespace`); and creates the manager — with no separate approval
+step. The caller supplies only the `admin` signature; the root supplies
+`operator`'s and `gg`'s, and `admin` co-controls (pays) both nested core
+onboarding fees so `gg` is never made to fund a deployment's registration. For
+lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
+with the reserve starting admin-owned (see "Custody follows the admin"
+below). For burn/mint it checks the mint capability: `gg` must administer the
+instrument, and the instrument id must be bound to the registering admin (see
+"Instrument binding" below).
 
-Two key-derived identities, both bound to the stable namespace so they survive
-admin handoffs (see the core README's message publishing section):
+Two key-derived identities, both bound to the REGISTERING admin — present as a
+controller at registration, and whose signature co-signs the created manager —
+so they survive later admin handoffs (see the core README's message
+publishing section):
 
 - transceiver address =
-  `keccak256("wormhole:emitter:v1" ‖ operator ‖ namespace ‖ emitterId)`. This
-  is the VAA emitter other chains register as the peer. It is derived by the
+  `keccak256("wormhole:emitter:v1" ‖ operator ‖ gg ‖ emitterId)`. This is the
+  VAA emitter other chains register as the peer. It is derived by the
   watcher, not stored, and must be a single shared `Emitter` per deployment,
-  since its address is the peer identity.
+  since its address is the peer identity. (The preimage's owner ordinal is
+  `gg`, not the registering admin — `gg` co-signs every `Emitter` it mints.)
 - manager address =
-  `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ namespace ‖ managerId)`,
-  computed at registration and stored in `managerAddress`. The distinct domain
-  tag keeps an emitter and a manager with the same ordinals from colliding.
-  `namespace` is in the preimage and co-signs, so a compromised operator
-  cannot forge an existing manager's address to consume that deployment's
-  inbound VAAs.
+  `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ registeringAdmin ‖ managerId)`,
+  computed once at registration and stored in `managerAddress`. The distinct
+  domain tag keeps an emitter and a manager with the same ordinals from
+  colliding. The registering admin's signature co-signs the manager at
+  creation, so a compromised operator cannot forge an existing manager's
+  address to consume that deployment's inbound VAAs; because the address is
+  computed once and stored, not recomputed, it is unaffected by any later
+  `TransferAdmin`.
 
 Because registration is permissionless, anyone can create junk managers
 co-signed by `gg` and the operator. They are inert (their choices cannot move
@@ -174,9 +198,10 @@ checks, in order:
    `CoreState` under a throwaway gg party, but cannot forge the real `gg`'s
    signature (`TestNtt:testReceivePinsGuardianGovernance`).
 2. Verify the VAA's guardian signatures and consume its digest, atomically,
-   with the core `VerifyAndConsumeVAA` (the per-consumer replay trie, scoped
-   to the stable `namespace`, so each deployment consumes a VAA at most once
-   and the scope is unaffected by an admin handoff).
+   with the core `VerifyAndConsumeVAA` (`consumer = gg`, sub-scoped to the
+   deployment's derived `namespace`, so each deployment consumes a VAA at most
+   once, independently of every other deployment under the same `gg`, and the
+   scope is unaffected by an admin handoff).
 3. Check the VAA emitter is the configured peer transceiver for its source
    chain, and that the nested message's source and recipient manager addresses
    match the peer and this deployment.
@@ -258,10 +283,13 @@ the role to `gg` is the guardian quorum's custody opt-in: the reserve becomes
 quorum-owned — the old admin can no longer touch it, every inbound movement is
 VAA-gated, and all admin operations (peers, factory rotation, a further
 handoff) become governance actions. The handoff changes nothing on the wire:
-the manager and transceiver addresses, the replay scope, and the
-`LockedLedger` are all bound to the stable `namespace`, so peers, in-flight
-VAAs, and the ledger contract are untouched. The same choice serves plain
-admin succession between ordinary parties, and lets `gg` hand the role back.
+the manager and transceiver addresses are bound to the registering admin (not
+the current one), the replay scope is the derived `namespace` under `gg` (both
+unaffected by who currently holds `admin`), and the transceiver `Emitter`'s
+owner authority is `gg`'s own, inherited from the manager's signatories rather
+than from `admin` — so peers, in-flight VAAs, the ledger contract, and outbound
+sends are all untouched by the handoff. The same choice serves plain admin
+succession between ordinary parties, and lets `gg` hand the role back.
 
 **Why the partition is by owner.** Isolation between deployments follows from
 ownership, not from accounting or holding topology. Reserves of distinct
@@ -322,17 +350,16 @@ assumed. It cannot be enforced by lookup (no contract keys, so "nobody has
 claimed this instrument yet" is not an on-ledger-checkable fact), and a
 claimed-instruments set on the root would grow without bound. Instead the
 binding lives in the instrument's identity: `RegisterManager` requires
-`instrumentId.id == nttInstrumentIdFor namespace nonce`, a hash commitment to
-the registering namespace. A CIP-0056 instrument id is fixed at creation, so
-whoever creates the instrument decides, once and forever, which namespace can
-bind a manager to it. This is the role EVM NTT's `setMinter` pointer plays,
-attached to the immutable instrument identity instead of a mutable token field
+`instrumentId.id == nttInstrumentIdFor admin nonce`, a hash commitment to the
+registering admin. A CIP-0056 instrument id is fixed at creation, so whoever
+creates the instrument decides, once and forever, which admin can bind a
+manager to it. This is the role EVM NTT's `setMinter` pointer plays, attached
+to the immutable instrument identity instead of a mutable token field
 (`TestNtt:testBurnMintInstrumentIsExclusiveToItsAdmin`). Two consequences: the
-namespace party must be durable (the binding cannot be re-pointed; recovery
-from a lost namespace party means a new instrument and a holder migration) —
-which it already is, since the namespace is the deployment's stable identity —
-and the instrument must be created with the binding already in its id, which is
-a deployment-setup requirement documented rather than enforced here.
+admin party must be durable (the binding cannot be re-pointed; recovery from a
+lost admin party means a new instrument and a holder migration), and the
+instrument must be created with the binding already in its id, which is a
+deployment-setup requirement documented rather than enforced here.
 
 **Synchronous settlement.** Lock and release require the registry's
 `TransferFactory_Transfer` to settle in the same transaction; a `Pending` or

@@ -28,7 +28,9 @@ import DA.Assert ((===))
 import DA.Foldable (forA_)
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
+import DA.Set qualified as Set
 import DA.Text (isInfixOf, isPrefixOf)
+import DA.Text qualified as T
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding, HoldingView(..))
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
@@ -44,7 +46,9 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.Setup (mkInitialCoreState, solanaGovernanceChainId, defaultGovernanceContract)
-import Wormhole.Core.State (Emitter, CoreState, WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..))
+import Wormhole.Core.State
+  ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
+  , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Payload
@@ -55,7 +59,7 @@ import Wormhole.Ntt.Governance
 import Test.MockToken (mintAndAllocate, mockBalance)
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 import Test.TestCore
-  ( setup, setupWithInstrument, registerEmitter
+  ( setup, setupWithInstrument
   , govSetFeeVAA, devnetGuardianPubKey )
 
 ----------------------------------------------------------------------
@@ -296,6 +300,26 @@ testNttInstrumentIdBinding = do
   assert (a0 /= a1)
   assert (a0 /= b0)
 
+-- | The derived replay-namespace formula (gg's replacement for the retired
+-- @namespace : Party@): pin the encoding against fixed text (68 chars —
+-- @"ntt:"@ plus a 64-char digest, under the core's 128-char bound), distinct
+-- per @managerId@, and confirm a real registration's manager carries exactly
+-- what 'nttNamespaceFor' predicts from its own committed inputs.
+testNamespaceVector : Script ()
+testNamespaceVector = do
+  let n0 = nttNamespaceFromText "vector-instrument-admin::1220deadbeef" "VECTOR" "vector-admin::1220cafebabe" 0
+      n1 = nttNamespaceFromText "vector-instrument-admin::1220deadbeef" "VECTOR" "vector-admin::1220cafebabe" 1
+  n0 === "ntt:ab792801446bfcbef62e6559bd83cae570df69488931273fd99820325a7b8af0"
+  T.length n0 === 68
+  assert ("ntt:" `isPrefixOf` n0)
+  assert (n0 /= n1)
+
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "NamespaceVectorAdmin"
+  d <- deploy operator gg admin LockUnlock
+  Some mgr <- queryContractId operator d.mgrCid
+  mgr.namespace === nttNamespaceFor d.instrumentId admin mgr.managerId
+
 ----------------------------------------------------------------------
 -- Setup + deployment
 ----------------------------------------------------------------------
@@ -339,14 +363,25 @@ theBurnMintFactory = \case
   BurnMintFactoryCid cid -> cid
   TransferFactoryCid _ -> error "not a burn/mint factory"
 
--- | Register a core Emitter for @admin@, create the gg-signed mock registry
--- factory, and register the manager through the shared 'NttGovernance' root.
--- For burn/mint the instrument id must be bound to the admin, so each
--- deployment gets its own instrument; lock/unlock uses the shared
--- 'bridgedInstrument'.
+-- | Resolve the operator's 'EmitterRegistry' and 'ReplayRootRegistry' anchors
+-- plus their static disclosures — served off-ledger by the disclosure
+-- service, simulated here (like 'govDisc') by querying as the operator.
+coreRegistries : Party -> Script (ContractId EmitterRegistry, Disclosure, ContractId ReplayRootRegistry, Disclosure)
+coreRegistries operator = do
+  [(emReg, _)] <- query @EmitterRegistry operator
+  emRegDisc <- fromSome <$> queryDisclosure operator emReg
+  [(rrReg, _)] <- query @ReplayRootRegistry operator
+  rrRegDisc <- fromSome <$> queryDisclosure operator rrReg
+  pure (emReg, emRegDisc, rrReg, rrRegDisc)
+
+-- | Create the gg-signed mock registry factory and register the manager
+-- through the shared 'NttGovernance' root — which atomically mints the
+-- gg-owned transceiver 'Emitter' and claims the gg-scoped replay root, so no
+-- separate emitter registration precedes this. For burn/mint the instrument
+-- id must be bound to the registering admin, so each deployment gets its own
+-- instrument; lock/unlock uses the shared 'bridgedInstrument'.
 deploy : Party -> Party -> Party -> NttTokenConfig -> Script Deployment
 deploy operator gg admin config = do
-  emitterCid <- registerEmitter operator admin
   (instrumentId, factory) <- case config of
     BurnMint -> do
       let inst = InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
@@ -357,17 +392,22 @@ deploy operator gg admin config = do
       pure (bridgedInstrument gg, TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
-  (_, mgrCid, ledgerCid) <- submit (actAs admin <> disclose govDisc) do
-    exerciseCmd govCid RegisterManager with
-      namespace = admin
-      admin
-      chainId = cantonChainId
-      transceiverEmitterCid = emitterCid
-      instrumentId
-      instrumentNonce = 0
-      tokenConfig = config
-      tokenDecimals = 8
-      factory
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  (_, mgrCid, emitterCid, ledgerCid) <-
+    submit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+      exerciseCmd govCid RegisterManager with
+        admin
+        chainId = cantonChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        instrumentId
+        instrumentNonce = 0
+        tokenConfig = config
+        tokenDecimals = 8
+        factory
+        coreStateCid = None
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
   pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid
 
 -- | Two deployments get distinct managers with sequential ids and owner-bound
@@ -398,27 +438,67 @@ testNttDeployment = do
   assert (derivedAddressFromText (DomainTag emitterAddressTag) (RegistrarText "p::1") (OwnerText "q::2") (RegistryId 0)
             /= derivedAddressFromText (DomainTag nttManagerAddressTag) (RegistrarText "p::1") (OwnerText "q::2") (RegistryId 0))
 
+-- | Registration mints one fresh gg-owned transceiver per deployment: two
+-- deployments' emitters share the same owner (gg) and operator but carry
+-- distinct emitter ids, and 'Transfer' rejects a foreign deployment's
+-- emitter — the emitterId check binds the transceiver to THIS manager even
+-- though ownership alone cannot tell the two apart.
+testTransceiverIsDeploymentBound : Script ()
+testTransceiverIsDeploymentBound = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "BoundAlice"
+  bob <- allocateParty "BoundBob"
+  (dA, discsA) <- sendScaffold operator gg alice LockUnlock csId
+  dB <- deploy operator gg bob LockUnlock
+  Some emA <- queryContractId operator dA.emitterCid
+  Some emB <- queryContractId operator dB.emitterCid
+  emA.owner === gg
+  emB.owner === gg
+  assert (emA.emitterId /= emB.emitterId)
+
+  holdingCid <- mkHolding gg alice dA.instrumentId 0.01
+  emitterBDisc <- fromSome <$> queryDisclosure operator dB.emitterCid
+  res <- trySubmitWithDiscs alice (emitterBDisc :: discsA) do
+    exerciseCmd dA.mgrCid Transfer with
+      user = alice
+      transceiverEmitterCid = dB.emitterCid
+      coreStateCid = csId
+      ledgerCid = dA.ledgerCid
+      recipientChain = 2
+      recipientAddress = b32 "ee"
+      sourceToken = b32 "dd"
+      rawAmount = 1000000
+      nonce = 0
+      consistencyLevel = 0
+      inputHoldingCids = [holdingCid]
+      feeAllocation = None
+      extraArgs = emptyExtraArgs
+  expectAbort "transceiver emitter is not this deployment's" res
+
 -- | Burn/mint registration rejects an instrument id that is not bound to the
 -- registering admin.
 testBurnMintRegistrationRequiresBoundInstrument : Script ()
 testBurnMintRegistrationRequiresBoundInstrument = do
   (operator, gg, _) <- nttSetup
   admin <- allocateParty "BindAdmin"
-  emitterCid <- registerEmitter operator admin
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
-  res <- trySubmit (actAs admin <> disclose govDisc) do
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  res <- trySubmit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
     exerciseCmd govCid RegisterManager with
-      namespace = admin
       admin
       chainId = cantonChainId
-      transceiverEmitterCid = emitterCid
+      emitterRegistryCid = emReg
+      replayRootRegistryCid = rrReg
       instrumentId = InstrumentId with admin = gg, id = "NTT"
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
-      factory = BurnMintFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
-  expectAbort "not bound to this namespace" res
+      factory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; registration fails first
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+  expectAbort "not bound to the registering admin" res
 
 -- | The exclusivity attack the binding exists to stop: mallory registers her
 -- own manager for an instrument that alice already bridges (it is
@@ -431,22 +511,25 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
   alice <- allocateParty "ExclAlice"
   mallory <- allocateParty "ExclMallory"
   d <- deploy operator gg alice BurnMint
-  emitterCid <- registerEmitter operator mallory
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
   forA_ [0, 1, 7] \nonce -> do
-    res <- trySubmit (actAs mallory <> disclose govDisc) do
+    res <- trySubmit (actAs mallory <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
       exerciseCmd govCid RegisterManager with
-        namespace = mallory
         admin = mallory
         chainId = cantonChainId
-        transceiverEmitterCid = emitterCid
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
         instrumentId = d.instrumentId
         instrumentNonce = nonce
         tokenConfig = BurnMint
         tokenDecimals = 8
-        factory = BurnMintFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
-    expectAbort "not bound to this namespace" res
+        factory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; registration fails first
+        coreStateCid = None
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+    expectAbort "not bound to the registering admin" res
 
 -- | Burn/mint registration rejects an instrument that gg does not administer
 -- (the manager could never mint it), and any registration rejects decimals a
@@ -456,63 +539,76 @@ testRegistrationBounds = do
   (operator, gg, _) <- nttSetup
   admin <- allocateParty "BoundsAdmin"
   outsider <- allocateParty "BoundsOutsider"
-  emitterCid <- registerEmitter operator admin
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc
 
-  res <- trySubmit (actAs admin <> disclose govDisc) do
+  res <- trySubmit (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
-      namespace = admin
       admin
       chainId = cantonChainId
-      transceiverEmitterCid = emitterCid
+      emitterRegistryCid = emReg
+      replayRootRegistryCid = rrReg
       instrumentId = InstrumentId with admin = outsider, id = nttInstrumentIdFor admin 0
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
-      factory = BurnMintFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
+      factory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; registration fails first
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
   expectAbort "requires guardianGovernance to administer" res
 
-  res <- trySubmit (actAs admin <> disclose govDisc) do
+  res <- trySubmit (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
-      namespace = admin
       admin
       chainId = cantonChainId
-      transceiverEmitterCid = emitterCid
+      emitterRegistryCid = emReg
+      replayRootRegistryCid = rrReg
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
       tokenConfig = LockUnlock
       tokenDecimals = 11
-      factory = TransferFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
+      factory = TransferFactoryCid (coerceContractId emReg)   -- unused; registration fails first
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
   expectAbort "tokenDecimals must be between 0 and 10" res
 
   -- The committed factory's type must match the mode: a lock/unlock
   -- registration with a burn/mint factory is rejected.
-  res <- trySubmit (actAs admin <> disclose govDisc) do
+  res <- trySubmit (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
-      namespace = admin
       admin
       chainId = cantonChainId
-      transceiverEmitterCid = emitterCid
+      emitterRegistryCid = emReg
+      replayRootRegistryCid = rrReg
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
       tokenConfig = LockUnlock
       tokenDecimals = 8
-      factory = BurnMintFactoryCid (coerceContractId emitterCid)
+      factory = BurnMintFactoryCid (coerceContractId emReg)
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
   expectAbort "factory type does not match" res
 
   -- The deployment's own chain id must be a positive uint16.
-  res <- trySubmit (actAs admin <> disclose govDisc) do
+  res <- trySubmit (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
-      namespace = admin
       admin
       chainId = 0
-      transceiverEmitterCid = emitterCid
+      emitterRegistryCid = emReg
+      replayRootRegistryCid = rrReg
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
       tokenConfig = LockUnlock
       tokenDecimals = 8
-      factory = TransferFactoryCid (coerceContractId emitterCid)
+      factory = TransferFactoryCid (coerceContractId emReg)   -- unused; registration fails first
+      coreStateCid = None
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
   expectAbort "chainId must be a positive uint16" res
 
 -- | 'SetPeer' rejects an out-of-range chain id, the deployment's own chain id
@@ -581,8 +677,10 @@ testLockedLedgerCap = do
 ----------------------------------------------------------------------
 
 -- | A deployment wired up for outbound sends at fee 0: peer set, plus the
--- disclosures a non-stakeholder sender needs (CoreState, factory, and the
--- ledger for lock/unlock).
+-- disclosures a non-stakeholder sender needs (CoreState, the gg-owned
+-- transceiver Emitter, factory, and the ledger for lock/unlock). The Emitter
+-- is now gg-owned, not the sender's own, so — unlike before the namespace
+-- party retired — it needs an explicit disclosure like everything else here.
 sendScaffold
   : Party -> Party -> Party -> NttTokenConfig -> ContractId CoreState
   -> Script (Deployment, [Disclosure])
@@ -593,6 +691,7 @@ sendScaffold operator gg admin config csId = do
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
   factoryDisc <- case config of
     BurnMint -> discloseBurnMintFactory gg
     LockUnlock -> discloseTransferFactory gg
@@ -601,7 +700,7 @@ sendScaffold operator gg admin config csId = do
       ld <- fromSome <$> queryDisclosure operator lcid
       pure [ld]
     None -> pure []
-  pure ((d with mgrCid), csDisc :: factoryDisc :: ledgerDiscs)
+  pure ((d with mgrCid), csDisc :: emitterDisc :: factoryDisc :: ledgerDiscs)
 
 -- | Submit as @p@ with a list of disclosures attached.
 submitWithDiscs : Party -> [Disclosure] -> Commands a -> Script a
@@ -644,7 +743,7 @@ testTransferLockAccounting = do
 
   [(ledgerCid, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
-  [(_, em)] <- query @Emitter alice
+  [(_, em)] <- query @Emitter gg
   em.sequence === 1
   custody <- cip56HoldingsOwnedBy gg alice
   potCid <- case custody of
@@ -658,12 +757,13 @@ testTransferLockAccounting = do
   -- The sender re-resolves the churned cids (emitter, ledger) and needs the
   -- pot holding disclosed too.
   holdingCid2 <- mkHolding gg alice d.instrumentId 0.005
-  [(emitterCid2, _)] <- query @Emitter alice
+  [(emitterCid2, _)] <- query @Emitter gg
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid2
   ledgerDisc <- fromSome <$> queryDisclosure operator ledgerCid
   potDisc <- fromSome <$> queryDisclosure gg potCid
   csDisc <- fromSome <$> queryDisclosure operator csId
   factoryDisc <- discloseTransferFactory gg
-  _ <- submitWithDiscs alice [ledgerDisc, potDisc, csDisc, factoryDisc] do
+  _ <- submitWithDiscs alice [emitterDisc, ledgerDisc, potDisc, csDisc, factoryDisc] do
     exerciseCmd d.mgrCid Transfer with
       user = alice
       transceiverEmitterCid = emitterCid2
@@ -759,8 +859,9 @@ testPauseHaltsRelease = do
   admin <- allocateParty "PauseRelAdmin"
   recipient <- allocateParty "PauseRelRecipient"
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  Some mgr <- queryContractId operator mgrCid
   pausedMgr <- submit admin do exerciseCmd mgrCid SetPaused with newPaused = True
-  (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
+  (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
 
   res <- trySubmit (actAs operator) do
     exerciseCmd pausedMgr Release with
@@ -781,7 +882,7 @@ testConsolidateCustody : Script ()
 testConsolidateCustody = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "ConsAlice"
-  (d, _) <- sendScaffold operator gg alice LockUnlock csId
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
   -- Two pre-existing custody fragments (owned by the unpromoted custodian:
   -- the admin), hint not set (as after a registry-side reorganization).
   frag1 <- mkHolding gg alice d.instrumentId 1.0
@@ -790,7 +891,10 @@ testConsolidateCustody = do
   f1Disc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding frag1)
   f2Disc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding frag2)
 
-  _ <- submitWithDiscs alice [factoryDisc, f1Disc, f2Disc] do
+  -- The ledger is gg-owned, not alice's, so — unlike before the namespace
+  -- party retired — alice needs it disclosed too ('discs' from 'sendScaffold'
+  -- already carries it).
+  _ <- submitWithDiscs alice (f1Disc :: f2Disc :: discs) do
     exerciseCmd d.mgrCid ConsolidateCustody with
       caller = alice
       ledgerCid = fromSome d.ledgerCid
@@ -809,10 +913,12 @@ testConsolidateCustody = do
 
   -- A stale hint over an intact single pot: one supplied holding just
   -- repoints the hint, with no registry transfer — note the submission
-  -- carries no factory disclosure, so a merge could not even run.
-  staleLedgerCid <- submit (actAs operator <> actAs alice <> actAs gg) do
+  -- carries no factory disclosure, so a merge could not even run. The ledger
+  -- is gg's and operator's alone now, so alice's authority is unneeded here.
+  staleLedgerCid <- submit (actAs operator <> actAs gg) do
     exerciseCmd freshLedgerCid SetCustodyHint with newCustodyHint = None
-  repairedLedgerCid <- submit alice do
+  staleLedgerDisc <- fromSome <$> queryDisclosure operator staleLedgerCid
+  repairedLedgerCid <- submitWithDiscs alice [staleLedgerDisc] do
     exerciseCmd d.mgrCid ConsolidateCustody with
       caller = alice
       ledgerCid = staleLedgerCid
@@ -828,7 +934,8 @@ testConsolidateCustody = do
   -- stands between it and spending gg's holdings — this is that check.
   ggHolding <- mkHolding gg gg d.instrumentId 1.0
   ghDisc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding ggHolding)
-  res <- trySubmitWithDiscs alice [factoryDisc, ghDisc] do
+  repairedLedgerDisc <- fromSome <$> queryDisclosure operator repairedLedgerCid
+  res <- trySubmitWithDiscs alice [factoryDisc, ghDisc, repairedLedgerDisc] do
     exerciseCmd d.mgrCid ConsolidateCustody with
       caller = alice
       ledgerCid = repairedLedgerCid
@@ -958,16 +1065,17 @@ testTransferAdminToGg = do
     _ -> abort ("expected one gg-owned custody holding, got: " <> show ggCustody)
   ledger.custodyHoldingCid === Some (toInterfaceContractId @Holding potCid)
 
-  -- A lock after the handoff merges into the gg pot; the emitter stays the
-  -- namespace's (alice's), so the wire identity is unchanged.
+  -- A lock after the handoff merges into the gg pot; the emitter was already
+  -- gg-owned before the handoff, so the wire identity is unaffected by it.
   holdingCid2 <- mkHolding gg alice d.instrumentId 0.005
-  [(emitterCid2, _)] <- query @Emitter alice
+  [(emitterCid2, _)] <- query @Emitter gg
   mgrDisc <- fromSome <$> queryDisclosure operator mgrCid
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid2
   ledgerDisc <- fromSome <$> queryDisclosure operator ledgerCid
   potDisc <- fromSome <$> queryDisclosure gg potCid
   csDisc <- fromSome <$> queryDisclosure operator csId
   factoryDisc <- discloseTransferFactory gg
-  _ <- submitWithDiscs alice [mgrDisc, ledgerDisc, potDisc, csDisc, factoryDisc] do
+  _ <- submitWithDiscs alice [mgrDisc, emitterDisc, ledgerDisc, potDisc, csDisc, factoryDisc] do
     exerciseCmd mgrCid Transfer with
       user = alice
       transceiverEmitterCid = emitterCid2
@@ -989,6 +1097,93 @@ testTransferAdminToGg = do
   case ggCustody2 of
     [(_, h)] -> h.amount === 0.015
     _ -> abort ("expected one merged gg custody holding, got: " <> show ggCustody2)
+
+-- | The property the whole rework exists for: replay protection is scoped to
+-- @(guardianGovernance, mgr.namespace)@, both of which are unaffected by
+-- 'TransferAdmin' (only @admin@ changes; 'RegisterManager' derives and stores
+-- @namespace@ once, at registration, from the REGISTERING admin — not the
+-- current one). After a real registration and a real admin handoff, a VAA
+-- still consumes into that exact scope and succeeds, and a replay of the same
+-- VAA against the fresh covering node still fails.
+--
+-- This drives 'Wormhole.Core.State.VerifyAndConsumeVAA' directly against the
+-- manager's own committed @(guardianGovernance, namespace)@ — exactly the two
+-- fields 'Wormhole.Ntt.Manager.verifyInboundTransfer' reads — rather than
+-- through 'NttManager.Release', because 'Release'/'Mint' additionally decode
+-- the VAA's wire payload and check it against @managerAddress@, which only a
+-- live two-step, Go-signed harness can bind to a freshly allocated Party's
+-- address (see the file header and 'integrationNttReceiveMatch').
+testReplaySurvivesAdminTransfer : Script ()
+testReplaySurvivesAdminTransfer = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "ReplaySurviveAlice"
+  newAdmin <- allocateParty "ReplaySurviveNewAdmin"
+  d <- deploy operator gg alice LockUnlock
+  Some mgrBefore <- queryContractId operator d.mgrCid
+  ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
+
+  (mgrCid, _) <- submit (actAs alice <> actAs newAdmin <> disclose ledgerDisc) do
+    exerciseCmd d.mgrCid TransferAdmin with
+      newAdmin
+      ledgerCid = d.ledgerCid
+      vettedFactory = d.factory
+      extraArgs = emptyExtraArgs
+  Some mgrAfter <- queryContractId operator mgrCid
+  mgrAfter.namespace === mgrBefore.namespace
+  mgrAfter.guardianGovernance === mgrBefore.guardianGovernance
+  mgrAfter.admin === newAdmin
+
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  (rootCid, _) <- coveringDisclosure operator gg mgrAfter.namespace "00"
+  (vaa, nodeCid) <- submit (actAs gg <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = gg
+      namespace = mgrAfter.namespace
+      replayNodeCid = rootCid
+  Some node <- queryContractId gg nodeCid
+  Set.member vaa.hash node.consumed === True
+  node.namespace === mgrAfter.namespace
+
+  -- Replay: resolve the fresh covering node, still rejected (membership).
+  (freshCid, freshDisc) <- coveringDisclosure operator gg mgrAfter.namespace vaa.hash
+  submitMustFail (actAs gg <> disclose csDisc <> disclose freshDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = gg
+      namespace = mgrAfter.namespace
+      replayNodeCid = freshCid
+
+-- | Outbound sends are unaffected by an admin handoff: the transceiver
+-- 'Emitter's owner authority is gg's, inherited from the manager's own
+-- signatories, so it never depended on the (now-departed) old admin's
+-- signature. A plain user — never the admin at any point — still publishes
+-- after the handoff.
+testOutboundTransferAfterAdminTransfer : Script ()
+testOutboundTransferAfterAdminTransfer = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "OutboundXferAlice"
+  bob <- allocateParty "OutboundXferBob"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  (mgrCid, Some ledgerCid) <- submit (actAs alice <> actAs gg) do
+    exerciseCmd d.mgrCid TransferAdmin with
+      newAdmin = gg
+      ledgerCid = d.ledgerCid
+      vettedFactory = d.factory
+      extraArgs = emptyExtraArgs
+  let d' = d with mgrCid, ledgerCid = Some ledgerCid
+
+  holdingCid <- mkHolding gg bob d.instrumentId 0.01
+  mgrDisc <- fromSome <$> queryDisclosure operator mgrCid
+  ledgerDisc <- fromSome <$> queryDisclosure operator ledgerCid
+  msg <- submitWithDiscs bob (mgrDisc :: ledgerDisc :: discs) do
+    sendTransfer bob d' csId [holdingCid]
+  msg.sequence === 0
+
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.01
 
 -- | The handoff refuses to leave custody behind: with a positive balance but
 -- no hint, or a pot smaller than the balance, the transfer aborts — the
@@ -1030,7 +1225,8 @@ testTransferAdminRequiresConsolidatedReserve = do
   -- handoff then goes through and gg holds the whole reserve.
   topUp <- mkHolding gg alice d.instrumentId 1.0
   factoryDisc <- discloseTransferFactory gg
-  lcid <- submitWithDiscs alice [factoryDisc] do
+  lcidDisc <- fromSome <$> queryDisclosure operator lcid
+  lcid <- submitWithDiscs alice [factoryDisc, lcidDisc] do
     exerciseCmd d.mgrCid ConsolidateCustody with
       caller = alice
       ledgerCid = lcid
@@ -1336,9 +1532,10 @@ testNttSend = do
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
   factoryDisc <- discloseTransferFactory gg
   ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
-  let discs = [csDisc, factoryDisc, ledgerDisc]
+  let discs = [csDisc, emitterDisc, factoryDisc, ledgerDisc]
 
   let doTransfer feeAlloc = exerciseCmd d'.mgrCid Transfer with
         user = alice
@@ -1364,7 +1561,7 @@ testNttSend = do
   msg <- submitWithDiscs alice discs do doTransfer (Some feePay)
   msg.sequence === 0
 
-  [(_, em)] <- query @Emitter alice
+  [(_, em)] <- query @Emitter gg
   em.sequence === 1
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
@@ -1416,7 +1613,7 @@ testNttTransferByDifferentUser = do
 
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 1000)
   dMgr     <- fromSome <$> queryDisclosure operator mgrCid
-  dEmitter <- fromSome <$> queryDisclosure admin d.emitterCid
+  dEmitter <- fromSome <$> queryDisclosure operator d.emitterCid
   dFactory <- discloseTransferFactory gg
   dCs      <- fromSome <$> queryDisclosure operator csId
   dLedger  <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
@@ -1436,7 +1633,7 @@ testNttTransferByDifferentUser = do
       feeAllocation = Some feePay
       extraArgs = emptyExtraArgs
 
-  [(_, em)] <- query @Emitter admin
+  [(_, em)] <- query @Emitter gg
   em.sequence === 1
   custody <- cip56HoldingsOwnedBy gg gg
   case custody of
@@ -1508,6 +1705,7 @@ setupFixedManagerOn
   -> Script (ContractId NttManager, NttFactory, Optional (ContractId LockedLedger))
 setupFixedManagerOn operator gg admin config chainId = do
   let instrumentId = bridgedInstrument gg
+      namespace = nttNamespaceFor instrumentId admin 999
   factory <- case config of
     BurnMint -> do
       fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
@@ -1518,7 +1716,7 @@ setupFixedManagerOn operator gg admin config chainId = do
   mgrCid <- submit (actAs operator <> actAs admin <> actAs gg) do
     createCmd NttManager with
       operator
-      namespace = admin
+      namespace
       admin
       guardianGovernance = gg
       chainId
@@ -1539,13 +1737,12 @@ setupFixedManagerOn operator gg admin config chainId = do
     LockUnlock -> Some <$> submit (actAs operator <> actAs admin <> actAs gg) do
       createCmd LockedLedger with
         operator
-        namespace = admin
         guardianGovernance = gg
         managerAddress = b32 "aa"
         balance = 0.0
         custodyHoldingCid = None
     BurnMint -> pure None
-  _ <- registerReplayRoot operator admin defaultSplitThreshold
+  _ <- registerReplayRoot operator gg namespace defaultSplitThreshold
   pure (mgrCid, factory, ledgerCid)
 
 -- | Anyone can relay: a third party (@relayer@), a stakeholder of nothing,
@@ -1560,7 +1757,8 @@ testReceiveByExecutorRecipientMismatchFails = do
   relayer <- allocateParty "Relayer"
   wrongRecipient <- allocateParty "WrongRecipient"
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
-  (nodeCid, nodeDisc) <- coveringDisclosure operator admin nttTransferDigest
+  Some mgr <- queryContractId operator mgrCid
+  (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
   dMgr <- fromSome <$> queryDisclosure operator mgrCid
   dCs  <- fromSome <$> queryDisclosure operator csId
   dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
@@ -1591,7 +1789,8 @@ testReceiveWrongChainRejected = do
   recipient <- allocateParty "WrongChainRecipient"
   -- Same fixed deployment, but its own chain id is 99, not the fixture's 72.
   (mgrCid, _, ledgerCid) <- setupFixedManagerOn operator gg admin LockUnlock 99
-  (nodeCid, nodeDisc) <- coveringDisclosure operator admin nttTransferDigest
+  Some mgr <- queryContractId operator mgrCid
+  (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
   dMgr <- fromSome <$> queryDisclosure operator mgrCid
   dCs  <- fromSome <$> queryDisclosure operator csId
   dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
@@ -1624,7 +1823,8 @@ testReceivePinsGuardianGovernance = do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
                  ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
-  (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
+  Some mgr <- queryContractId operator mgrCid
+  (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
 
   res <- trySubmit (actAs operator) do
     exerciseCmd mgrCid Release with
@@ -1649,12 +1849,12 @@ testReleaseRejectsForeignLedger = do
   other <- allocateParty "ForeignOther"
   recipient <- allocateParty "ForeignRecipient"
   (mgrCid, _, _) <- setupFixedManager operator gg admin LockUnlock
-  (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
+  Some mgr <- queryContractId operator mgrCid
+  (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
   -- A second deployment's ledger, owned by the same parties except the address.
   foreignLedger <- submit (actAs operator <> actAs admin <> actAs gg) do
     createCmd LockedLedger with
       operator
-      namespace = admin
       guardianGovernance = gg
       managerAddress = b32 "ff"
       balance = 100.0
@@ -1757,7 +1957,7 @@ integrationNttReceiveMatch input = do
 
   -- Replay: the digest is now consumed. Re-resolve the covering node and
   -- relay again — rejected on membership.
-  (freshNode, _) <- coveringDisclosure input.operator input.admin (parseVAA input.vaaBytes).hash
+  (freshNode, _) <- coveringDisclosure input.operator gg mgr.namespace (parseVAA input.vaaBytes).hash
   submitMustFail (actAs input.operator <> actAs input.admin <> actAs input.recipient <> actAs gg) do
     exerciseCmd input.mgrId Mint with
       executor = input.operator
