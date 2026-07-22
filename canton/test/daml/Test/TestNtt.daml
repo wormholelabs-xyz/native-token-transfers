@@ -1113,6 +1113,8 @@ testTransferAdminToGg = do
 -- the VAA's wire payload and check it against @managerAddress@, which only a
 -- live two-step, Go-signed harness can bind to a freshly allocated Party's
 -- address (see the file header and 'integrationNttReceiveMatch').
+-- 'testReleaseReplayPathAfterAdminTransfer' complements this by driving the
+-- same consume in-path through 'Release' on a fixed-address manager.
 testReplaySurvivesAdminTransfer : Script ()
 testReplaySurvivesAdminTransfer = do
   (operator, gg, csId) <- nttSetup
@@ -1121,6 +1123,8 @@ testReplaySurvivesAdminTransfer = do
   d <- deploy operator gg alice LockUnlock
   Some mgrBefore <- queryContractId operator d.mgrCid
   ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
+  let feeDigest = (parseVAA govSetFeeVAA).hash
+  (rootBefore, _) <- coveringDisclosure operator gg mgrBefore.namespace feeDigest
 
   (mgrCid, _) <- submit (actAs alice <> actAs newAdmin <> disclose ledgerDisc) do
     exerciseCmd d.mgrCid TransferAdmin with
@@ -1134,7 +1138,11 @@ testReplaySurvivesAdminTransfer = do
   mgrAfter.admin === newAdmin
 
   csDisc <- fromSome <$> queryDisclosure operator csId
-  (rootCid, _) <- coveringDisclosure operator gg mgrAfter.namespace "00"
+  -- The node covering the digest after the handoff is the very root claimed
+  -- at registration: 'TransferAdmin' never touches the trie, so the lookup
+  -- cannot be masking a scope change.
+  (rootCid, _) <- coveringDisclosure operator gg mgrAfter.namespace feeDigest
+  rootCid === rootBefore
   (vaa, nodeCid) <- submit (actAs gg <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
@@ -1807,6 +1815,58 @@ testReceiveWrongChainRejected = do
       inputHoldingCids = []
       extraArgs = emptyExtraArgs
   expectAbort "not destined for this chain" res
+
+-- | Companion to 'testReplaySurvivesAdminTransfer': the same replay consume,
+-- but in-path through 'NttManager.Release' on a post-'TransferAdmin' manager.
+-- 'setupFixedManager' bakes the fixture's recipientManager as the manager
+-- address, so the signed 'nttTransferVAA' clears every gate a script-registered
+-- manager cannot: guardian signatures, the @(guardianGovernance, namespace)@
+-- replay consume, and the peer/manager wire checks. The recipient binding is
+-- the LAST check in 'verifyInboundTransfer', downstream of the consume, so
+-- pinning that exact abort proves the consume succeeded in-path against the
+-- recreated manager — 'testReceiveByExecutorRecipientMismatchFails' after an
+-- admin handoff.
+testReleaseReplayPathAfterAdminTransfer : Script ()
+testReleaseReplayPathAfterAdminTransfer = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "ReleaseReplayAdmin"
+  newAdmin <- allocateParty "ReleaseReplayNewAdmin"
+  relayer <- allocateParty "ReleaseReplayRelayer"
+  wrongRecipient <- allocateParty "ReleaseReplayWrongRecipient"
+  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  Some mgrBefore <- queryContractId operator mgrCid
+  (rootBefore, _) <- coveringDisclosure operator gg mgrBefore.namespace nttTransferDigest
+  ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
+
+  (mgrCid, ledgerCid) <- submit (actAs admin <> actAs newAdmin <> disclose ledgerDisc) do
+    exerciseCmd mgrCid TransferAdmin with
+      newAdmin
+      ledgerCid
+      vettedFactory = factory
+      extraArgs = emptyExtraArgs
+  Some mgrAfter <- queryContractId operator mgrCid
+  mgrAfter.namespace === mgrBefore.namespace
+  mgrAfter.guardianGovernance === mgrBefore.guardianGovernance
+  mgrAfter.managerAddress === mgrBefore.managerAddress
+
+  (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgrAfter.namespace nttTransferDigest
+  nodeCid === rootBefore
+  dMgr <- fromSome <$> queryDisclosure operator mgrCid
+  dCs  <- fromSome <$> queryDisclosure operator csId
+  dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
+
+  res <- trySubmitWithDiscs relayer [dMgr, dCs, nodeDisc, dLedger] do
+    exerciseCmd mgrCid Release with
+      executor = relayer
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      vaaBytes = nttTransferVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      recipient = wrongRecipient
+      ledgerCid = fromSome ledgerCid
+      inputHoldingCids = []
+      extraArgs = emptyExtraArgs
+  expectAbort "recipient does not match" res
 
 -- | The guardian trust root is pinned to the committed @guardianGovernance@,
 -- not the operator. A compromised operator could co-sign a forged 'CoreState'
