@@ -55,6 +55,14 @@ template LockedLedger
     -- them is 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly
     -- one ledger per lock/unlock deployment. The manager checks the identity
     -- fields before using a caller-supplied ledger cid.
+    --
+    -- The operator co-signature is defence in depth: gg's signature lands on
+    -- third-party registry code (a burn/mint factory at asset onboarding,
+    -- custody holdings via promotion or fee settlement), so a malicious or
+    -- buggy registry choice body runs with gg's authority in scope. Were gg
+    -- the sole signatory, such a body could create or mutate any deployment's
+    -- ledger; requiring the operator — whose signature never leaves this
+    -- codebase — makes that an authorization failure.
     signatory operator, guardianGovernance
     observer admin
     ensure balance >= 0.0
