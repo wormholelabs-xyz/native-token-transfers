@@ -14,8 +14,12 @@
 --
 -- The ledger is named by @managerAddress@, which is unique per deployment and
 -- bound to the registering admin (not the current, transferable one), so an
--- admin handoff leaves the ledger contract (and its signatory set) untouched;
--- only the pot's owner changes.
+-- admin handoff leaves the ledger's signatory set untouched. The CURRENT
+-- @admin@ rides along as an observer — pure visibility, no authority — so the
+-- deployment's operator role sees its own reserve accounting on its ACS
+-- without a disclosure round-trip; 'Wormhole.Ntt.Manager.TransferAdmin' swaps
+-- the observer (via 'SetAdmin') in the same transaction that installs the new
+-- admin.
 --
 -- The ledger also carries @custodyHoldingCid@, a pointer to the deployment's
 -- single consolidated custody holding. The manager maintains a single-holding
@@ -39,17 +43,20 @@ template LockedLedger
   with
     operator           : Party
     guardianGovernance : Party
+    admin              : Party     -- CURRENT admin; observer only, kept in sync
+                                   -- by TransferAdmin
     managerAddress     : Bytes32   -- the owning NttManager
     balance            : Decimal
     custodyHoldingCid  : Optional (ContractId Holding)  -- hint: the consolidated pot
   where
     -- The manager's stable signatories (its transferable admin is deliberately
-    -- absent, so an admin handoff does not touch this contract). Creating a
-    -- ledger needs both signatures, and the only code path that has them is
-    -- 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
-    -- ledger per lock/unlock deployment. The manager checks the identity
+    -- NOT one, so an admin handoff never needs a departing admin's signature).
+    -- Creating a ledger needs both signatures, and the only code path that has
+    -- them is 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly
+    -- one ledger per lock/unlock deployment. The manager checks the identity
     -- fields before using a caller-supplied ledger cid.
     signatory operator, guardianGovernance
+    observer admin
     ensure balance >= 0.0
 
     -- The controllers are the full signatory set, so only a choice body that
@@ -86,3 +93,12 @@ template LockedLedger
         newCustodyHint : Optional (ContractId Holding)
       controller operator, guardianGovernance
       do create this with custodyHoldingCid = newCustodyHint
+
+    -- | Swap the observing admin; exercised by 'TransferAdmin' so ledger
+    -- visibility follows the role atomically. The departing admin keeps only
+    -- the archived states it already witnessed.
+    choice SetAdmin : ContractId LockedLedger
+      with
+        newAdmin : Party
+      controller operator, guardianGovernance
+      do create this with admin = newAdmin

@@ -153,6 +153,7 @@ template NttGovernance
           LockUnlock -> Some <$> create LockedLedger with
             operator
             guardianGovernance
+            admin
             managerAddress
             balance = 0.0
             custodyHoldingCid = None

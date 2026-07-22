@@ -262,8 +262,9 @@ nttNamespaceFor inst admin managerId =
 -- create a ledger (it needs the root's signatures), and it creates exactly one
 -- per lock/unlock deployment, so matching the identity fields suffices. The
 -- ledger is named by @managerAddress@, which is unique per deployment, so
--- (operator, guardianGovernance, managerAddress) alone identifies it — it
--- survives 'TransferAdmin' untouched.
+-- (operator, guardianGovernance, managerAddress) alone identifies it. The
+-- observer-sync check is a bug-catcher, not identity: 'TransferAdmin' is the
+-- only admin-changing path and updates both contracts atomically.
 resolveLedger : NttManager -> ContractId LockedLedger -> Update LockedLedger
 resolveLedger mgr ledgerCid = do
   ledger <- fetch ledgerCid
@@ -271,6 +272,7 @@ resolveLedger mgr ledgerCid = do
     (ledger.operator == mgr.operator
       && ledger.guardianGovernance == mgr.guardianGovernance
       && ledger.managerAddress == mgr.managerAddress)
+  assertMsg "ntt: ledger admin observer out of sync" (ledger.admin == mgr.admin)
   pure ledger
 
 -- | Validate custody holdings (owned by the deployment's current @admin@ —
@@ -437,8 +439,9 @@ template NttManager
     -- extra holdings of its own there to cover a shortfall. The deployment's
     -- identity — manager and transceiver addresses, the derived @namespace@
     -- replay scope, the transceiver owner (gg), the ledger — is unaffected by
-    -- who currently holds @admin@, so nothing changes on the wire, no replay
-    -- window opens, and the ledger contract is untouched.
+    -- who currently holds @admin@, so nothing changes on the wire and no
+    -- replay window opens; the ledger is recreated only to hand its admin
+    -- observership to @newAdmin@ ('SetAdmin').
     --
     -- Transferring to @guardianGovernance@ is the quorum's custody opt-in: the
     -- reserve becomes quorum-owned and every admin operation ('SetPeer',
@@ -462,11 +465,11 @@ template NttManager
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock admin transfer" ledgerCid
             ledger <- resolveLedger this lcid
-            case ledger.custodyHoldingCid of
+            lcid' <- case ledger.custodyHoldingCid of
               None -> do
                 assertMsg "ntt: reserve not consolidated; run ConsolidateCustody before the admin transfer"
                   (ledger.balance == 0.0)
-                pure (Some lcid)
+                pure lcid
               Some pot -> do
                 total <- sumCustodyHoldings this [pot]
                 assertMsg "ntt: custody pot does not cover the locked balance; run ConsolidateCustody first"
@@ -480,8 +483,10 @@ template NttManager
                     instrumentId
                   [pot]
                   extraArgs
-                Some <$> exercise lcid SetCustodyHint with
+                exercise lcid SetCustodyHint with
                   newCustodyHint = custodyHintFrom movedCids
+            -- Hand the ledger observership to the incoming admin atomically.
+            Some <$> exercise lcid' SetAdmin with newAdmin
         mgrCid' <- create this with admin = newAdmin
         pure (mgrCid', ledgerCid')
 

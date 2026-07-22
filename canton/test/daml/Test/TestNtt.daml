@@ -1122,11 +1122,11 @@ testReplaySurvivesAdminTransfer = do
   newAdmin <- allocateParty "ReplaySurviveNewAdmin"
   d <- deploy operator gg alice LockUnlock
   Some mgrBefore <- queryContractId operator d.mgrCid
-  ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
   let feeDigest = (parseVAA govSetFeeVAA).hash
   (rootBefore, _) <- coveringDisclosure operator gg mgrBefore.namespace feeDigest
 
-  (mgrCid, _) <- submit (actAs alice <> actAs newAdmin <> disclose ledgerDisc) do
+  -- No ledger disclosure: the admin observes its deployment's ledger.
+  (mgrCid, _) <- submit (actAs alice <> actAs newAdmin) do
     exerciseCmd d.mgrCid TransferAdmin with
       newAdmin
       ledgerCid = d.ledgerCid
@@ -1174,7 +1174,7 @@ testOutboundTransferAfterAdminTransfer = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "OutboundXferAlice"
   bob <- allocateParty "OutboundXferBob"
-  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  (d, _) <- sendScaffold operator gg alice LockUnlock csId
   (mgrCid, Some ledgerCid) <- submit (actAs alice <> actAs gg) do
     exerciseCmd d.mgrCid TransferAdmin with
       newAdmin = gg
@@ -1184,14 +1184,44 @@ testOutboundTransferAfterAdminTransfer = do
   let d' = d with mgrCid, ledgerCid = Some ledgerCid
 
   holdingCid <- mkHolding gg bob d.instrumentId 0.01
-  mgrDisc <- fromSome <$> queryDisclosure operator mgrCid
-  ledgerDisc <- fromSome <$> queryDisclosure operator ledgerCid
-  msg <- submitWithDiscs bob (mgrDisc :: ledgerDisc :: discs) do
+  -- Rebuild the disclosure set post-handoff: the scaffold's ledger disclosure
+  -- is of the archived predecessor (TransferAdmin recreates the ledger to
+  -- swap its admin observer).
+  csDisc      <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  factoryDisc <- discloseTransferFactory gg
+  mgrDisc     <- fromSome <$> queryDisclosure operator mgrCid
+  ledgerDisc  <- fromSome <$> queryDisclosure operator ledgerCid
+  msg <- submitWithDiscs bob [csDisc, emitterDisc, factoryDisc, mgrDisc, ledgerDisc] do
     sendTransfer bob d' csId [holdingCid]
   msg.sequence === 0
 
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
+
+-- | The ledger's admin observer follows the role: the registering admin sees
+-- the ledger from its own ACS (no disclosure), the handoff moves that
+-- visibility to the incoming admin atomically, and the departing admin does
+-- not see the successor.
+testLedgerObserverFollowsAdmin : Script ()
+testLedgerObserverFollowsAdmin = do
+  (operator, gg, _) <- nttSetup
+  alice <- allocateParty "ObsAlice"
+  newAdmin <- allocateParty "ObsNewAdmin"
+  d <- deploy operator gg alice LockUnlock
+  Some ledger <- queryContractId alice (fromSome d.ledgerCid)
+  ledger.admin === alice
+  (_, Some ledgerCid') <- submit (actAs alice <> actAs newAdmin) do
+    exerciseCmd d.mgrCid TransferAdmin with
+      newAdmin
+      ledgerCid = d.ledgerCid
+      vettedFactory = d.factory
+      extraArgs = emptyExtraArgs
+  Some ledger' <- queryContractId newAdmin ledgerCid'
+  ledger'.admin === newAdmin
+  ledger'.balance === ledger.balance
+  gone <- queryContractId @LockedLedger alice ledgerCid'
+  gone === None
 
 -- | The handoff refuses to leave custody behind: with a positive balance but
 -- no hint, or a pot smaller than the balance, the transfer aborts — the
@@ -1606,13 +1636,15 @@ testNttTransferByDifferentUser = do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
-  (mgrCid, _) <- submit (actAs admin <> actAs gg) do
+  -- TransferAdmin recreates the ledger (its admin observer moves to gg);
+  -- track the successor cid, the old one is archived.
+  (mgrCid, ledgerCid') <- submit (actAs admin <> actAs gg) do
     exerciseCmd mgrCid TransferAdmin with
       newAdmin = gg
       ledgerCid = Some (fromSome d.ledgerCid)
       vettedFactory = d.factory
       extraArgs = emptyExtraArgs
-  let d' = d with mgrCid
+  let d' = d with mgrCid, ledgerCid = ledgerCid'
 
   csId <- submit operator do
     exerciseCmd csId SubmitGovernanceVAA with
@@ -1624,7 +1656,7 @@ testNttTransferByDifferentUser = do
   dEmitter <- fromSome <$> queryDisclosure operator d.emitterCid
   dFactory <- discloseTransferFactory gg
   dCs      <- fromSome <$> queryDisclosure operator csId
-  dLedger  <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
+  dLedger  <- fromSome <$> queryDisclosure operator (fromSome d'.ledgerCid)
   _ <- submitWithDiscs bob [dMgr, dEmitter, dFactory, dCs, dLedger] do
     exerciseCmd mgrCid Transfer with
       user = bob
@@ -1746,6 +1778,7 @@ setupFixedManagerOn operator gg admin config chainId = do
       createCmd LockedLedger with
         operator
         guardianGovernance = gg
+        admin
         managerAddress = b32 "aa"
         balance = 0.0
         custodyHoldingCid = None
@@ -1836,9 +1869,9 @@ testReleaseReplayPathAfterAdminTransfer = do
   (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
   Some mgrBefore <- queryContractId operator mgrCid
   (rootBefore, _) <- coveringDisclosure operator gg mgrBefore.namespace nttTransferDigest
-  ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
 
-  (mgrCid, ledgerCid) <- submit (actAs admin <> actAs newAdmin <> disclose ledgerDisc) do
+  -- No ledger disclosure: the admin observes its deployment's ledger.
+  (mgrCid, ledgerCid) <- submit (actAs admin <> actAs newAdmin) do
     exerciseCmd mgrCid TransferAdmin with
       newAdmin
       ledgerCid
@@ -1916,6 +1949,7 @@ testReleaseRejectsForeignLedger = do
     createCmd LockedLedger with
       operator
       guardianGovernance = gg
+      admin
       managerAddress = b32 "ff"
       balance = 100.0
       custodyHoldingCid = None
