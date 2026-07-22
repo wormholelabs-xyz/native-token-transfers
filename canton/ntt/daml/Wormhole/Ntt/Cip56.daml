@@ -36,7 +36,11 @@ data SyncTransfer = SyncTransfer with
 -- the bridge continue as if value had moved.
 --
 -- Returns the receiver's new holdings and the sender's change holdings, which
--- the manager uses to keep the custody pot consolidated.
+-- the manager uses to keep the custody pot consolidated. The receiver's
+-- holdings are checked to sum to exactly the requested amount: the standard's
+-- convention is that fees are charged to the sender on top, and a registry
+-- that deducts them from the delivered amount instead would silently
+-- under-collateralize the bridge on every lock.
 executeSyncTransfer
   :  ContractId TIV1.TransferFactory
   -> SyncTransfer
@@ -58,6 +62,11 @@ executeSyncTransfer factoryCid t inputHoldingCids extraArgs = do
       meta = emptyMetadata
     extraArgs
   case res.output of
-    TIV1.TransferInstructionResult_Completed receiverHoldingCids ->
+    TIV1.TransferInstructionResult_Completed receiverHoldingCids -> do
+      delivered <- forA receiverHoldingCids \cid -> do
+        hv <- view <$> fetch cid
+        pure hv.amount
+      assertMsg "ntt: registry did not deliver the exact transfer amount"
+        (sum delivered == t.amount)
       pure (receiverHoldingCids, res.senderChangeCids)
     _ -> abort "ntt: transfer did not settle synchronously"

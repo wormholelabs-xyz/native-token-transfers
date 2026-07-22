@@ -135,13 +135,16 @@ template MockTransferInstruction
       transferInstruction_updateImpl _self _arg = error "unused"
 
 -- | A local 'TransferFactory'. In completed mode it archives the inputs and
--- creates a holding for the receiver; in pending mode it moves nothing and
+-- creates a holding for the receiver, short by @skim@ (nonzero models a
+-- registry that deducts its fee from the delivered amount, which must trip
+-- the manager's delivered-amount check); in pending mode it moves nothing and
 -- returns a placeholder instruction, which must trip the manager's
 -- synchronous-settlement check.
 template MockTransferFactory
   with
     admin   : Party
     pending : Bool
+    skim    : Decimal
   where
     signatory admin
 
@@ -169,7 +172,7 @@ template MockTransferFactory
               admin
               owner = arg.transfer.receiver
               instrument = arg.transfer.instrumentId
-              amount = arg.transfer.amount
+              amount = arg.transfer.amount - skim
             changeCids <-
               if total > arg.transfer.amount
                 then do
@@ -344,7 +347,7 @@ deploy operator gg admin config = do
       fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = inst
       pure (inst, BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
-      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
+      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
       pure (bridgedInstrument gg, TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
@@ -649,11 +652,28 @@ testConsolidateCustody = do
   [(freshLedgerCid, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.0   -- consolidation never touches the balance
   custody <- cip56HoldingsOwnedBy gg alice
-  case custody of
+  potCid <- case custody of
     [(cid, h)] -> do
       h.amount === 3.0
       ledger.custodyHoldingCid === Some (toInterfaceContractId @Holding cid)
+      pure (toInterfaceContractId @Holding cid)
     _ -> abort ("expected one merged custody holding, got: " <> show custody)
+
+  -- A stale hint over an intact single pot: one supplied holding just
+  -- repoints the hint, with no registry transfer — note the submission
+  -- carries no factory disclosure, so a merge could not even run.
+  staleLedgerCid <- submit (actAs operator <> actAs alice <> actAs gg) do
+    exerciseCmd freshLedgerCid SetCustodyHint with newCustodyHint = None
+  repairedLedgerCid <- submit alice do
+    exerciseCmd d.mgrCid ConsolidateCustody with
+      caller = alice
+      ledgerCid = staleLedgerCid
+      custodyHoldingCids = [potCid]
+      extraArgs = emptyExtraArgs
+  Some repaired <- queryContractId operator repairedLedgerCid
+  repaired.custodyHoldingCid === Some potCid
+  custodyAfter <- cip56HoldingsOwnedBy gg alice
+  map fst custodyAfter === [fromInterfaceContractId @Cip56MockHolding potCid]
 
   -- A gg-owned holding is not this (unpromoted) deployment's custody. The
   -- choice body carries gg's signature, so only the explicit custodian check
@@ -663,7 +683,7 @@ testConsolidateCustody = do
   res <- trySubmitWithDiscs alice [factoryDisc, ghDisc] do
     exerciseCmd d.mgrCid ConsolidateCustody with
       caller = alice
-      ledgerCid = freshLedgerCid
+      ledgerCid = repairedLedgerCid
       custodyHoldingCids = [ggHolding]
       extraArgs = emptyExtraArgs
   expectAbort "not owned by the custodian" res
@@ -677,7 +697,7 @@ testLockPendingSettlementRejected = do
   alice <- allocateParty "PendingAlice"
   (d, discs) <- sendScaffold operator gg alice LockUnlock csId
   holdingCid <- mkHolding gg alice d.instrumentId 0.01
-  pendingFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = True
+  pendingFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = True, skim = 0.0
   pendingDisc <- fromSome <$> queryDisclosure gg pendingFc
   let pendingFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory pendingFc)
   mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = pendingFactory
@@ -699,6 +719,26 @@ testLockPendingSettlementRejected = do
       extraArgs = emptyExtraArgs
   expectAbort "did not settle synchronously" res
 
+-- | A registry that deducts its fee from the delivered amount (instead of
+-- charging the sender on top, as the standard intends) would leave the
+-- custody short of the credited balance on every lock, so the
+-- delivered-amount check rejects the first lock against it.
+testLockShortDeliveryRejected : Script ()
+testLockShortDeliveryRejected = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "SkimAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  holdingCid <- mkHolding gg alice d.instrumentId 0.01
+  skimFc <- submit gg do
+    createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0001
+  skimDisc <- fromSome <$> queryDisclosure gg skimFc
+  let skimFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory skimFc)
+  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = skimFactory
+
+  res <- trySubmitWithDiscs alice (skimDisc :: discs) do
+    sendTransfer alice (d with mgrCid) csId [holdingCid]
+  expectAbort "did not deliver the exact transfer amount" res
+
 -- | Before promotion, admin alone can repoint the committed factory, and a
 -- send then routes through the new one (the upgrade path).
 testSetFactory : Script ()
@@ -714,7 +754,7 @@ testSetFactory = do
   submitMustFail gg do exerciseCmd d.mgrCid SetFactory with newFactory = d.factory
 
   -- Admin repoints to a fresh (working) factory; the send routes through it.
-  freshFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
+  freshFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
   freshDisc <- fromSome <$> queryDisclosure gg freshFc
   let freshFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory freshFc)
   mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = freshFactory
@@ -801,6 +841,60 @@ testTransferAdminToGg = do
   case ggCustody2 of
     [(_, h)] -> h.amount === 0.015
     _ -> abort ("expected one merged gg custody holding, got: " <> show ggCustody2)
+
+-- | The handoff refuses to leave custody behind: with a positive balance but
+-- no hint, or a pot smaller than the balance, the transfer aborts — the
+-- untracked reserve would otherwise stay with the old admin, unreachable for
+-- the deployment once the role changes hands. The cure is
+-- 'ConsolidateCustody', where the outgoing admin can add holdings of its own
+-- to cover a shortfall.
+testTransferAdminRequiresConsolidatedReserve : Script ()
+testTransferAdminRequiresConsolidatedReserve = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "SolvencyAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  holdingCid <- mkHolding gg alice d.instrumentId 0.01
+  _ <- submitWithDiscs alice discs do sendTransfer alice d csId [holdingCid]
+  [(lcid, ledger)] <- query @LockedLedger operator
+  potCid <- case ledger.custodyHoldingCid of
+    Some cid -> pure cid
+    None -> abort "expected a custody hint after the lock"
+  let trio = actAs operator <> actAs alice <> actAs gg
+      doTransfer lc = exerciseCmd d.mgrCid TransferAdmin with
+        newAdmin = gg
+        ledgerCid = Some lc
+        vettedFactory = d.factory
+        extraArgs = emptyExtraArgs
+
+  -- A positive balance with no hint: the whole reserve is untracked.
+  lcid <- submit trio do exerciseCmd lcid SetCustodyHint with newCustodyHint = None
+  res <- trySubmit (actAs alice <> actAs gg) do doTransfer lcid
+  expectAbort "reserve not consolidated" res
+
+  -- A pot smaller than the balance, as after fee erosion or an untracked
+  -- fragment (simulated by crediting the ledger past the pot).
+  lcid <- submit trio do
+    exerciseCmd lcid Credit with amount = 1.0, newCustodyHint = Some potCid
+  res <- trySubmit (actAs alice <> actAs gg) do doTransfer lcid
+  expectAbort "does not cover the locked balance" res
+
+  -- The cure: the admin tops the pot up through 'ConsolidateCustody'; the
+  -- handoff then goes through and gg holds the whole reserve.
+  topUp <- mkHolding gg alice d.instrumentId 1.0
+  factoryDisc <- discloseTransferFactory gg
+  lcid <- submitWithDiscs alice [factoryDisc] do
+    exerciseCmd d.mgrCid ConsolidateCustody with
+      caller = alice
+      ledgerCid = lcid
+      custodyHoldingCids = [potCid, topUp]
+      extraArgs = emptyExtraArgs
+  (_, Some lcid') <- submit (actAs alice <> actAs gg) do doTransfer lcid
+  Some ledger' <- queryContractId operator lcid'
+  ledger'.balance === 1.01
+  ggCustody <- cip56HoldingsOwnedBy gg gg
+  case ggCustody of
+    [(_, h)] -> h.amount === 1.01
+    _ -> abort ("expected the whole reserve with gg, got: " <> show ggCustody)
 
 -- | The handoff needs both admins and pins the vetted factory: neither party
 -- alone can transfer, a wrong vetted factory is rejected, a transfer to the
@@ -1263,7 +1357,7 @@ setupFixedManager operator gg admin config = do
       fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
       pure (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
-      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
+      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
       pure (TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   mgrCid <- submit (actAs operator <> actAs admin <> actAs gg) do
     createCmd NttManager with

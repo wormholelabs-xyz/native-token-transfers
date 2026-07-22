@@ -48,6 +48,13 @@
 -- ('nttInstrumentIdFor'), so no second deployment can register against an
 -- instrument that is already bridged.
 --
+-- The ledger cap is wire-level accounting, not physical solvency. On a
+-- registry that charges the sender fees or ages holdings, every release and
+-- consolidation pays those costs out of the reserve, so the pot drifts below
+-- the ledger balance over time. The custodian covers the drift by passing
+-- extra holdings of its own to 'ConsolidateCustody', and 'TransferAdmin'
+-- refuses to hand over a reserve that no longer covers the balance.
+--
 -- Because every choice body carries all four signatures, custody paths must
 -- never rely on ambient authority: 'sumCustodyHoldings' checks that each
 -- custody holding the manager spends is owned by the deployment's own current
@@ -342,8 +349,13 @@ template NttManager
     -- consent and its 'AcceptAdminTransfer' nests this choice), so the parties
     -- need not act in one submission; exercising this directly with both
     -- authorities works too. The pot is transferred to @newAdmin@ and the
-    -- ledger's hint repointed; if the hint is stale, run 'ConsolidateCustody'
-    -- first. The deployment's identity — manager and transceiver addresses,
+    -- ledger's hint repointed. The pot must cover the ledger balance:
+    -- custody the hint does not track — untracked fragments, or a reserve
+    -- eroded by registry fees — would stay with the old admin, out of the
+    -- deployment's reach once the role changes hands. If the coverage check
+    -- fails, run 'ConsolidateCustody' first; the outgoing admin can include
+    -- extra holdings of its own there to cover a shortfall. The deployment's
+    -- identity — manager and transceiver addresses,
     -- replay scope, the ledger — stays with the unchanged @namespace@, so
     -- nothing changes on the wire, no replay window opens, and the ledger
     -- contract is untouched.
@@ -371,9 +383,14 @@ template NttManager
                   "ntt: ledger cid required for a lock/unlock admin transfer" ledgerCid
             ledger <- resolveLedger this lcid
             case ledger.custodyHoldingCid of
-              None -> pure (Some lcid)
+              None -> do
+                assertMsg "ntt: reserve not consolidated; run ConsolidateCustody before the admin transfer"
+                  (ledger.balance == 0.0)
+                pure (Some lcid)
               Some pot -> do
                 total <- sumCustodyHoldings this [pot]
+                assertMsg "ntt: custody pot does not cover the locked balance; run ConsolidateCustody first"
+                  (total >= ledger.balance)
                 transferFactoryCid <- requireTransferFactory factory
                 (movedCids, _) <- executeSyncTransfer transferFactoryCid
                   SyncTransfer with
@@ -572,13 +589,21 @@ template NttManager
     -- | Merge custody holdings back into a single pot and repoint the
     -- ledger's hint at it: the repair path after a registry-side
     -- reorganization, an operation that left multiple change holdings, or
-    -- releases that used explicit inputs. Permissionless (the self-transfer
-    -- is value-neutral and the holdings are validated as the custodian's own
-    -- of this instrument), so relayer tooling can run it opportunistically. Note the
-    -- holdings carry no deployment tag, so callers should pass this
-    -- deployment's own fragments; merging another deployment's pot is
-    -- value-neutral but stales that deployment's hint, which it can repair
-    -- the same way.
+    -- releases that used explicit inputs. A single supplied holding just
+    -- repoints the hint, with no registry transfer; two or more are merged
+    -- through the factory. This is also the custodian's top-up path: the
+    -- holdings are only checked to be the custodian's own of this
+    -- instrument, so the admin can pass extra holdings to restore a reserve
+    -- eroded by registry fees.
+    --
+    -- Permissionless, so relayer tooling can run it opportunistically. On a
+    -- registry that charges the sender fees the merge itself costs the
+    -- reserve money, but a stranger cannot grind it down for free: the
+    -- single-holding call moves nothing, and a merge needs a second
+    -- admin-owned holding, which the stranger must donate. The holdings
+    -- carry no deployment tag, so callers should pass this deployment's own
+    -- fragments; merging another deployment's pot is value-neutral but
+    -- stales that deployment's hint, which it can repair the same way.
     nonconsuming choice ConsolidateCustody : ContractId LockedLedger
       with
         caller             : Party
@@ -589,21 +614,26 @@ template NttManager
       do
         assertMsg "ntt: consolidation is only for lock/unlock deployments"
           (tokenConfig == LockUnlock)
-        assertMsg "ntt: no custody holdings supplied" (not (null custodyHoldingCids))
         _ <- resolveLedger this ledgerCid
-        total <- sumCustodyHoldings this custodyHoldingCids
-        let custodian = admin
-        transferFactoryCid <- requireTransferFactory factory
-        (mergedCids, _) <- executeSyncTransfer transferFactoryCid
-          SyncTransfer with
-            sender = custodian
-            receiver = custodian
-            amount = total
-            instrumentId
-          custodyHoldingCids
-          extraArgs
-        exercise ledgerCid SetCustodyHint with
-          newCustodyHint = custodyHintFrom mergedCids
+        case custodyHoldingCids of
+          [] -> abort "ntt: no custody holdings supplied"
+          [single] -> do
+            _ <- sumCustodyHoldings this [single]
+            exercise ledgerCid SetCustodyHint with newCustodyHint = Some single
+          _ -> do
+            total <- sumCustodyHoldings this custodyHoldingCids
+            let custodian = admin
+            transferFactoryCid <- requireTransferFactory factory
+            (mergedCids, _) <- executeSyncTransfer transferFactoryCid
+              SyncTransfer with
+                sender = custodian
+                receiver = custodian
+                amount = total
+                instrumentId
+              custodyHoldingCids
+              extraArgs
+            exercise ledgerCid SetCustodyHint with
+              newCustodyHint = custodyHintFrom mergedCids
 
     -- | Inbound mint (burn/mint deployments), permissionless. Any @executor@
     -- relays the VAA; 'verifyInboundTransfer' is the gate. The mint runs
