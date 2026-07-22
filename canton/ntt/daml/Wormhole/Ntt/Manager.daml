@@ -6,32 +6,38 @@
 -- 'TIV1.TransferFactory', 'BurnMintFactory') directly, so any conforming token
 -- works without a per-token wrapper contract.
 --
--- Four parties sign the manager, and each signature has one job:
+-- Three parties sign the manager, and each signature has one job:
 --
---   * @namespace@ is the deployment's stable identity. It is in the manager
---     and transceiver address preimages, owns the transceiver 'Emitter', names
---     the 'LockedLedger', and scopes replay protection ('VerifyAndConsumeVAA'
---     runs with @consumer = namespace@). It never changes and never acts after
---     registration; it must be durable (losing the party means a new
---     deployment and a migration).
 --   * @admin@ is the operational role: it maintains the peer table, rotates
 --     the committed factory, and owns the lock/unlock reserve. It is
 --     transferable ('TransferAdmin'); transferring it to gg is the guardian
---     quorum's custody opt-in. At registration, namespace and admin may be the
---     same party.
+--     quorum's custody opt-in.
 --   * @guardianGovernance@ (gg), the guardians' k-of-n threshold party, is the
---     mint authority for burn/mint instruments and the quorum end-state of
---     'TransferAdmin': a gg-adminned deployment's reserve is quorum-owned and
---     its admin operations are governance actions.
+--     mint authority for burn/mint instruments, the owner of the deployment's
+--     transceiver 'Emitter', the replay-scope consumer, and the quorum
+--     end-state of 'TransferAdmin': a gg-adminned deployment's reserve is
+--     quorum-owned and its admin operations are governance actions.
 --   * @operator@ ties the deployment to its core bridge instance.
+--
+-- The deployment's stable identity is no longer a co-signing party — it is a
+-- derived @namespace : Text@ (see 'nttNamespaceFor'), committed at
+-- registration from the registering admin, the bridged instrument, and the
+-- manager id. It sub-scopes gg's replay trie ('VerifyAndConsumeVAA' runs with
+-- @consumer = guardianGovernance@, @namespace = mgr.namespace@) and never
+-- changes, but — unlike a party — needs no ceremony to mint or safeguard: gg
+-- is already a lifetime signatory of every manager, so the derived text rides
+-- along on gg's inherited authority. The manager and transceiver addresses are
+-- likewise bound to the registering admin at creation time and stored, so
+-- they too survive 'TransferAdmin' untouched (see 'nttManagerAddressFor').
 --
 -- gg signs actively only once, at the ceremony that creates the
 -- 'Wormhole.Ntt.Governance.NttGovernance' root; every manager inherits gg's
--- signature from that root. Value can only move inside the manager's fixed
--- choice bodies, and both inbound choices verify and consume a VAA first, so
--- no signatory can move bridged value alone, and relaying stays
--- permissionless: any executor may submit, but only the VAA-bound transfer can
--- happen.
+-- signature from that root, including for the transceiver 'Emitter' minted
+-- atomically inside 'Wormhole.Ntt.Governance.RegisterManager'. Value can only
+-- move inside the manager's fixed choice bodies, and both inbound choices
+-- verify and consume a VAA first, so no signatory can move bridged value
+-- alone, and relaying stays permissionless: any executor may submit, but only
+-- the VAA-bound transfer can happen.
 --
 -- Lock/unlock custody is owned by the current @admin@. A deployment registers
 -- fully operational and explicitly custodial — the admin owns the reserve and
@@ -153,11 +159,13 @@ nttManagerAddressTag : Text
 nttManagerAddressTag = "wormhole:ntt-manager:v1"
 
 -- | The 32-byte NTT manager address of the 'NttManager' allocated at
--- @managerId@ for @(operator, namespace)@. Bound to the namespace, not the
--- admin, so it survives 'TransferAdmin'.
+-- @managerId@ for @(operator, admin)@, where @admin@ is the REGISTERING
+-- admin. Bound to the registering admin at creation, so it survives
+-- 'TransferAdmin' — the address is computed once and stored, not recomputed
+-- against the current (transferable) admin.
 nttManagerAddressFor : Party -> Party -> Int -> Bytes32
-nttManagerAddressFor operator namespace managerId =
-  derivedAddress (DomainTag nttManagerAddressTag) operator namespace (RegistryId managerId)
+nttManagerAddressFor operator admin managerId =
+  derivedAddress (DomainTag nttManagerAddressTag) operator admin (RegistryId managerId)
 
 -- | Domain-separation tag for NTT recipient-address bindings.
 recipientAddressTag : Text
@@ -184,41 +192,71 @@ nttInstrumentIdTag = "wormhole:ntt-instrument:v1"
 -- | Text form of 'nttInstrumentIdFor'. Split out so tests can pin the encoding
 -- against a fixed string.
 nttInstrumentIdFromText : Text -> Int -> Text
-nttInstrumentIdFromText namespaceText nonce =
+nttInstrumentIdFromText adminText nonce =
   "wormhole-ntt:" <> normalizeHex (keccak256 (toHex nttInstrumentIdTag
-    <> unLenPrefixed (lenPrefixed (toHex namespaceText))
+    <> unLenPrefixed (lenPrefixed (toHex adminText))
     <> intToBytesN nonce 8))
 
 -- | The instrument id a burn/mint deployment's instrument must carry:
--- hash-committed to the registering @namespace@ (the deployment's stable
--- identity, not the transferable admin), with @nonce@ distinguishing multiple
--- deployments by the same namespace.
+-- hash-committed to the REGISTERING admin (present as a controller at
+-- registration, and whose signature co-signs the created manager), with
+-- @nonce@ distinguishing multiple deployments by the same admin.
 --
 -- This binding is what makes a burn/mint instrument exclusive to one
 -- deployment. Registration is permissionless and gg administers every
 -- burn/mint instrument, so without it anyone could register a second manager
 -- for an instrument that is already bridged and mint it against VAAs from a
 -- peer they control. A CIP-56 instrument's id is part of its identity and
--- fixed at creation, so committing the namespace into the id at creation and
--- checking the commitment at registration ('RegisterManager') means only that
--- namespace can ever bind a manager to the instrument. It plays the role of
--- EVM NTT's @setMinter@ pointer, attached to the immutable instrument identity
--- instead of a mutable token field.
+-- fixed at creation, so committing the registering admin into the id at
+-- creation and checking the commitment at registration ('RegisterManager')
+-- means only that
+-- registering admin can ever bind a manager to the instrument. It plays the
+-- role of EVM NTT's @setMinter@ pointer, attached to the immutable instrument
+-- identity instead of a mutable token field.
 nttInstrumentIdFor : Party -> Int -> Text
-nttInstrumentIdFor namespace nonce = nttInstrumentIdFromText (partyToText namespace) nonce
+nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) nonce
+
+-- | Domain-separation tag for the derived replay namespace.
+nttNamespaceTag : Text
+nttNamespaceTag = "wormhole:ntt-namespace:v1"
+
+-- | Text form of 'nttNamespaceFor'. Split out so tests can pin the encoding
+-- against fixed strings — the existing vector-pinning convention
+-- ('nttInstrumentIdFromText', 'recipientAddressFromText').
+nttNamespaceFromText : Text -> Text -> Text -> Int -> Text
+nttNamespaceFromText instrumentAdminText instrumentIdText adminText managerId =
+  "ntt:" <> normalizeHex (keccak256 (toHex nttNamespaceTag
+    <> unLenPrefixed (lenPrefixed (toHex instrumentAdminText))
+    <> unLenPrefixed (lenPrefixed (toHex instrumentIdText))
+    <> unLenPrefixed (lenPrefixed (toHex adminText))
+    <> intToBytesN managerId 8))
+
+-- | The derived replay-trie sub-scope committed on the manager at
+-- registration: @"ntt:" <> keccak256(tag ‖ instrument.admin ‖ instrument.id ‖
+-- registering-admin ‖ managerId)@ (68 chars, under the core's 128-char
+-- bound). This is gg's replacement for the retired @namespace : Party@ —
+-- gg is already a lifetime signatory of every manager, so the trie sub-scope
+-- needs no party of its own to mint or safeguard. The registering admin in
+-- the preimage binds the deployment identity to its creator (surviving
+-- 'TransferAdmin', which never recomputes it); @managerId@ guarantees
+-- exactly one namespace per deployment, closing the corner case where two
+-- deployments share both instrument and registering admin.
+nttNamespaceFor : InstrumentId -> Party -> Int -> Text
+nttNamespaceFor inst admin managerId =
+  nttNamespaceFromText (partyToText inst.admin) inst.id (partyToText admin) managerId
 
 -- | Check that a caller-supplied 'LockedLedger' is this deployment's own, and
 -- return its payload. Only 'Wormhole.Ntt.Governance.RegisterManager' can
 -- create a ledger (it needs the root's signatures), and it creates exactly one
 -- per lock/unlock deployment, so matching the identity fields suffices. The
--- ledger is named by the stable @namespace@, not the transferable @admin@, so
--- it survives 'TransferAdmin' untouched.
+-- ledger is named by @managerAddress@, which is unique per deployment, so
+-- (operator, guardianGovernance, managerAddress) alone identifies it — it
+-- survives 'TransferAdmin' untouched.
 resolveLedger : NttManager -> ContractId LockedLedger -> Update LockedLedger
 resolveLedger mgr ledgerCid = do
   ledger <- fetch ledgerCid
   assertMsg "ntt: locked ledger does not belong to this deployment"
     (ledger.operator == mgr.operator
-      && ledger.namespace == mgr.namespace
       && ledger.guardianGovernance == mgr.guardianGovernance
       && ledger.managerAddress == mgr.managerAddress)
   pure ledger
@@ -257,9 +295,9 @@ custodyHintFrom = \case
 --      trust anchor (its @guardianGovernance@). Pinning the operator instead
 --      would not help: a compromised operator can co-sign a forged 'CoreState'
 --      under a throwaway gg party, but cannot forge the real gg's signature.
---   2. Verify the VAA's guardian signatures and consume its digest in the
---      deployment's replay trie (scoped to the stable @namespace@, so replay
---      protection is unaffected by 'TransferAdmin'), atomically.
+--   2. Verify the VAA's guardian signatures and consume its digest in gg's
+--      replay trie, sub-scoped to the deployment's derived @namespace@ (so
+--      replay protection is unaffected by 'TransferAdmin'), atomically.
 --   3. Check the VAA emitter is the configured peer transceiver for its chain,
 --      and the nested message's source and recipient managers match the peer
 --      and this deployment.
@@ -283,7 +321,8 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
   (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
     encodedVAA = vaaBytes
     pubKeys
-    consumer = mgr.namespace
+    consumer = mgr.guardianGovernance
+    namespace = mgr.namespace
     replayNodeCid
   let peer = fromSomeNote ("ntt: no peer for source chain " <> show vaa.emitterChain)
                (Map.lookup vaa.emitterChain mgr.peers)
@@ -302,22 +341,23 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
 template NttManager
   with
     operator             : Party
-    namespace            : Party           -- stable identity: address preimages, replay scope, emitter owner
+    namespace            : Text            -- derived replay-trie sub-scope under gg; nttNamespaceFor at registration
     admin                : Party           -- operational role and lock/unlock custodian; transferable
-    guardianGovernance   : Party           -- gg: mint authority and trust anchor
+    guardianGovernance   : Party           -- gg: mint authority, transceiver owner, replay consumer, trust anchor
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
-    managerAddress       : Bytes32         -- nttManagerAddressFor operator namespace managerId
-    transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = namespace)
+    managerAddress       : Bytes32         -- nttManagerAddressFor operator <registering admin> managerId
+    transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = guardianGovernance)
     instrumentId         : InstrumentId    -- the bridged CIP-56 instrument
     tokenConfig          : NttTokenConfig
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
   where
-    -- See the module header for what each signature contributes. All four are
-    -- inherited from the NttGovernance root at registration (namespace and
-    -- admin from the registering caller); no signatory acts per transfer.
-    signatory operator, namespace, admin, guardianGovernance
+    -- See the module header for what each signature contributes. All three
+    -- are inherited from the NttGovernance root at registration (admin from
+    -- the registering caller); no signatory acts per transfer. @namespace@ is
+    -- derived data, not a party — it needs no signature of its own.
+    signatory operator, admin, guardianGovernance
 
     -- | Register or replace a peer deployment. Consuming, but only admin
     -- config changes it, so the manager cid is stable across transfer traffic.
@@ -355,10 +395,10 @@ template NttManager
     -- deployment's reach once the role changes hands. If the coverage check
     -- fails, run 'ConsolidateCustody' first; the outgoing admin can include
     -- extra holdings of its own there to cover a shortfall. The deployment's
-    -- identity — manager and transceiver addresses,
-    -- replay scope, the ledger — stays with the unchanged @namespace@, so
-    -- nothing changes on the wire, no replay window opens, and the ledger
-    -- contract is untouched.
+    -- identity — manager and transceiver addresses, the derived @namespace@
+    -- replay scope, the transceiver owner (gg), the ledger — is unaffected by
+    -- who currently holds @admin@, so nothing changes on the wire, no replay
+    -- window opens, and the ledger contract is untouched.
     --
     -- Transferring to @guardianGovernance@ is the quorum's custody opt-in: the
     -- reserve becomes quorum-owned and every admin operation ('SetPeer',
@@ -412,9 +452,13 @@ template NttManager
     --
     -- @user@ is the sole controller and self-pays the governance message fee
     -- (as payer it co-controls the nested 'PublishMessage', which draws the
-    -- fee from @feeAllocation@). Everything else the body exercises runs on
-    -- the manager's inherited signatory authority; the CIP-56 factory checks
-    -- that the input holdings belong to @user@.
+    -- fee from @feeAllocation@). The 'Emitter's owner authority (gg) is
+    -- inherited from the manager's own signatories, so 'TransferAdmin'
+    -- recreating the manager without the old admin never breaks this: gg's
+    -- signature is untouched regardless of who currently holds @admin@.
+    -- Everything else the body exercises runs on the manager's inherited
+    -- signatory authority; the CIP-56 factory checks that the input holdings
+    -- belong to @user@.
     --
     -- The message id is the transceiver's next sequence number, read from the
     -- fetched 'Emitter' in the same transaction that publishes, so it equals
@@ -443,7 +487,7 @@ template NttManager
         assertMsg "ntt: transfer amount is zero after trimming" (amount > 0.0)
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
-          (transceiver.owner == namespace
+          (transceiver.owner == guardianGovernance
             && transceiver.operator == operator
             && transceiver.emitterId == transceiverEmitterId)
         case tokenConfig of

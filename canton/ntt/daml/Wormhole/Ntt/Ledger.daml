@@ -12,9 +12,10 @@
 -- deposit and release, so the sum of those balances never exceeds gg's
 -- physical holdings.
 --
--- The ledger is named by the deployment's stable @namespace@, not its
--- transferable admin, so an admin handoff leaves the ledger contract (and its
--- signatory set) untouched; only the pot's owner changes.
+-- The ledger is named by @managerAddress@, which is unique per deployment and
+-- bound to the registering admin (not the current, transferable one), so an
+-- admin handoff leaves the ledger contract (and its signatory set) untouched;
+-- only the pot's owner changes.
 --
 -- The ledger also carries @custodyHoldingCid@, a pointer to the deployment's
 -- single consolidated custody holding. The manager maintains a single-holding
@@ -37,7 +38,6 @@ import Wormhole.Core.Bytes (Bytes32)
 template LockedLedger
   with
     operator           : Party
-    namespace          : Party     -- the deployment's stable identity party
     guardianGovernance : Party
     managerAddress     : Bytes32   -- the owning NttManager
     balance            : Decimal
@@ -45,21 +45,21 @@ template LockedLedger
   where
     -- The manager's stable signatories (its transferable admin is deliberately
     -- absent, so an admin handoff does not touch this contract). Creating a
-    -- ledger needs all three signatures, and the only code path that has them
-    -- is 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
-    -- ledger per lock/unlock deployment. The manager checks the four identity
+    -- ledger needs both signatures, and the only code path that has them is
+    -- 'Wormhole.Ntt.Governance.RegisterManager', which creates exactly one
+    -- ledger per lock/unlock deployment. The manager checks the identity
     -- fields before using a caller-supplied ledger cid.
-    signatory operator, namespace, guardianGovernance
+    signatory operator, guardianGovernance
     ensure balance >= 0.0
 
     -- The controllers are the full signatory set, so only a choice body that
-    -- already carries all three authorities (in practice: the owning manager's
+    -- already carries both authorities (in practice: the owning manager's
     -- choices) can update the ledger.
     choice Credit : ContractId LockedLedger
       with
         amount            : Decimal
         newCustodyHint    : Optional (ContractId Holding)
-      controller operator, namespace, guardianGovernance
+      controller operator, guardianGovernance
       do
         assertMsg "ntt: ledger credit must be positive" (amount > 0.0)
         create this with
@@ -70,7 +70,7 @@ template LockedLedger
       with
         amount            : Decimal
         newCustodyHint    : Optional (ContractId Holding)
-      controller operator, namespace, guardianGovernance
+      controller operator, guardianGovernance
       do
         assertMsg "ntt: ledger debit must be positive" (amount > 0.0)
         assertMsg "ntt: release exceeds this deployment's locked balance"
@@ -84,5 +84,5 @@ template LockedLedger
     choice SetCustodyHint : ContractId LockedLedger
       with
         newCustodyHint : Optional (ContractId Holding)
-      controller operator, namespace, guardianGovernance
+      controller operator, guardianGovernance
       do create this with custodyHoldingCid = newCustodyHint

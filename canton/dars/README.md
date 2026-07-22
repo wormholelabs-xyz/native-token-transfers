@@ -18,9 +18,10 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: [`canton-core-v0.2.0`](https://github.com/wormholelabs-xyz/wormhole/releases/tag/canton-core-v0.2.0)
-on `wormholelabs-xyz/wormhole`, built from `integration/canton` commit
-`b5f88c38b` (includes the `GetGuardianGovernance` trust-anchor pin, #41).
+Provenance: built from `wormholelabs-xyz/wormhole` branch `canton/replay-namespace`
+(open PR #52, unreleased 0.3.0) at commit `22f9216ea` — scopes the replay trie
+by `(consumer, namespace)` instead of `consumer` alone, and separates `payer`
+from `requester`/`consumer` on `RegisterEmitter`/`ClaimReplayRoot`.
 
 ## Splice token-standard interfaces (CIP-0056 / Token Standard V1)
 
@@ -43,7 +44,7 @@ packages target LF 2.3, which may data-depend on lower LF 2.x versions.
 
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
-| `wormhole-core-0.2.0.dar` | `ntt`, `ntt-test` | `2014cc0ba62cdae774030def051bbd77581a86eda45dae5f37507c2a9e191d8a` |
+| `wormhole-core-0.3.0.dar` | `ntt`, `ntt-test` | `7587fe8fecd3b61b3b1eddc3558c227fa97eb577302466fdf24c3bb2ed55a090` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar` | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
 | `splice-api-token-allocation-v1-1.0.0.dar` | `ntt`, `ntt-test` | `c3f3b447142577ea4fa7d912ca11cd6821de7588e324e8877425932a02fccaa1` |
