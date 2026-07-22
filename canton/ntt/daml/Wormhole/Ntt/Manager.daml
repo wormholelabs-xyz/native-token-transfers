@@ -50,7 +50,9 @@
 -- factory is a stateless service contract whose cid is stable (its choices are
 -- nonconsuming), so the manager commits it at registration and uses that cid
 -- for every operation. A caller therefore cannot route a lock, burn, unlock,
--- or mint through a look-alike factory to fake a token movement. @admin@
+-- or mint through a look-alike factory to fake a token movement. The
+-- commitment is typed by mode ('NttFactory'), matched against 'NttTokenConfig'
+-- at registration and rotation, so no call site coerces a contract id. @admin@
 -- refreshes it with 'SetFactory' on the rare occasion the registry is upgraded;
 -- after promotion that refresh needs gg too, since the pool's soundness rests
 -- on the factory the quorum vetted at 'Promote'.
@@ -63,7 +65,7 @@ import DA.Optional (fromSomeNote)
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs (..))
 import Splice.Api.Token.BurnMintV1
   (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
@@ -96,6 +98,37 @@ data NttCustody
   = AdminCustody
   | GuardianCustody
   deriving (Eq, Show)
+
+-- | The deployment's committed registry factory, typed by mode, so a
+-- lock/unlock deployment cannot even hold a burn/mint factory cid (or vice
+-- versa) and no call site needs an unchecked contract-id coercion.
+data NttFactory
+  = TransferFactoryCid (ContractId TIV1.TransferFactory)
+  | BurnMintFactoryCid (ContractId BurnMintFactory)
+  deriving (Eq, Show)
+
+-- | Does the committed factory's type match the deployment mode? Checked at
+-- registration and on every rotation, so the mismatch aborts at config time
+-- rather than at the first transfer.
+factoryMatchesConfig : NttTokenConfig -> NttFactory -> Bool
+factoryMatchesConfig config factory = case (config, factory) of
+  (LockUnlock, TransferFactoryCid _) -> True
+  (BurnMint, BurnMintFactoryCid _) -> True
+  _ -> False
+
+-- | The committed transfer factory; aborts if the deployment holds a burn/mint
+-- factory (impossible for a registered manager, which checks the mode match).
+requireTransferFactory : NttFactory -> Update (ContractId TIV1.TransferFactory)
+requireTransferFactory = \case
+  TransferFactoryCid cid -> pure cid
+  BurnMintFactoryCid _ -> abort "ntt: deployment's committed factory is not a transfer factory"
+
+-- | The committed burn/mint factory; aborts if the deployment holds a transfer
+-- factory (impossible for a registered manager, which checks the mode match).
+requireBurnMintFactory : NttFactory -> Update (ContractId BurnMintFactory)
+requireBurnMintFactory = \case
+  BurnMintFactoryCid cid -> pure cid
+  TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
 -- | The party that owns the deployment's custody in its current phase.
 custodianOf : NttManager -> Party
@@ -281,7 +314,7 @@ template NttManager
     tokenConfig          : NttTokenConfig
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
-    factoryCid           : AnyContractId   -- the registry's factory (TransferFactory or BurnMintFactory by mode)
+    factory              : NttFactory      -- the registry's committed factory, typed by mode
     custody              : NttCustody      -- who owns the lock/unlock reserve; AdminCustody until 'Promote'
   where
     -- See the module header for what each signature contributes. All three are
@@ -305,35 +338,38 @@ template NttManager
     -- soundness rests on its honesty, so rotation then needs gg too.
     choice SetFactory : ContractId NttManager
       with
-        newFactoryCid : AnyContractId
+        newFactory : NttFactory
       controller factoryRotationControllers this
-      do create this with factoryCid = newFactoryCid
+      do
+        assertMsg "ntt: factory type does not match the token config"
+          (factoryMatchesConfig tokenConfig newFactory)
+        create this with factory = newFactory
 
     -- | The guardian quorum's opt-in: move custody of the reserve from @admin@
-    -- to @gg@. The quorum names the factory it vetted (@vettedFactoryCid@ must
+    -- to @gg@. The quorum names the factory it vetted (@vettedFactory@ must
     -- equal the committed one), the admin-owned pot is transferred to gg, and
     -- the manager is recreated at 'GuardianCustody' — which also puts
     -- 'SetFactory' under governance. If the ledger's pot hint is stale, run
     -- 'ConsolidateCustody' first.
     choice Promote : (ContractId NttManager, ContractId LockedLedger)
       with
-        ledgerCid        : ContractId LockedLedger
-        vettedFactoryCid : AnyContractId
-        extraArgs        : ExtraArgs
+        ledgerCid     : ContractId LockedLedger
+        vettedFactory : NttFactory
+        extraArgs     : ExtraArgs
       controller admin, guardianGovernance
       do
         assertMsg "ntt: only lock/unlock deployments are promoted"
           (tokenConfig == LockUnlock)
         assertMsg "ntt: deployment is already promoted" (custody == AdminCustody)
         assertMsg "ntt: committed factory is not the one the quorum vetted"
-          (factoryCid == vettedFactoryCid)
+          (factory == vettedFactory)
         ledger <- resolveLedger this ledgerCid
         ledgerCid' <- case ledger.custodyHoldingCid of
           None -> pure ledgerCid
           Some pot -> do
             total <- sumCustodyHoldings this [pot]
-            (movedCids, _) <- executeSyncTransfer
-              (coerceFactory @TIV1.TransferFactory factoryCid)
+            transferFactoryCid <- requireTransferFactory factory
+            (movedCids, _) <- executeSyncTransfer transferFactoryCid
               SyncTransfer with
                 sender = admin
                 receiver = guardianGovernance
@@ -395,7 +431,7 @@ template NttManager
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
                 custodian = custodianOf this
-                transferFactoryCid = coerceFactory @TIV1.TransferFactory factoryCid
+            transferFactoryCid <- requireTransferFactory factory
             ledger <- resolveLedger this lcid
             (depositCids, _) <- executeSyncTransfer transferFactoryCid
               SyncTransfer with
@@ -427,7 +463,7 @@ template NttManager
           -- Burn: spend the user's holdings for exactly the wire amount and
           -- return the rest as change.
           BurnMint -> do
-            let burnMintFactoryCid = coerceFactory @BurnMintFactory factoryCid
+            burnMintFactoryCid <- requireBurnMintFactory factory
             holdingAmounts <- forA inputHoldingCids \cid -> do
               hv <- view <$> fetch cid
               assertMsg "ntt: burn holding not owned by sender" (hv.owner == user)
@@ -513,8 +549,8 @@ template NttManager
         -- the holdings being spent are the current custodian's — a caller must
         -- not be able to steer the release into the other party's holdings.
         _ <- sumCustodyHoldings this inputs
-        (_, changeCids) <- executeSyncTransfer
-          (coerceFactory @TIV1.TransferFactory factoryCid)
+        transferFactoryCid <- requireTransferFactory factory
+        (_, changeCids) <- executeSyncTransfer transferFactoryCid
           SyncTransfer with
             sender = custodianOf this
             receiver = recipient
@@ -551,8 +587,8 @@ template NttManager
         _ <- resolveLedger this ledgerCid
         total <- sumCustodyHoldings this custodyHoldingCids
         let custodian = custodianOf this
-        (mergedCids, _) <- executeSyncTransfer
-          (coerceFactory @TIV1.TransferFactory factoryCid)
+        transferFactoryCid <- requireTransferFactory factory
+        (mergedCids, _) <- executeSyncTransfer transferFactoryCid
           SyncTransfer with
             sender = custodian
             receiver = custodian
@@ -596,8 +632,9 @@ template NttManager
             mintAmount = untrimToDecimal wireAmount tokenDecimals
         assertMsg "ntt: received amount is zero at this token's decimals"
           (mintAmount > 0.0)
+        burnMintFactoryCid <- requireBurnMintFactory factory
         exercise depositPreapprovalCid Deposit with
           amount = mintAmount
-          factoryCid
+          factoryCid = burnMintFactoryCid
           extraArgs
         pure ntt

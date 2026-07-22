@@ -16,7 +16,6 @@ module Wormhole.Ntt.Governance where
 
 import DA.Map qualified as Map
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (AnyContractId)
 import Wormhole.Core.State (Emitter)
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
@@ -57,7 +56,7 @@ template NttGovernance
         instrumentNonce       : Int   -- the nonce in the burn/mint instrument-id binding
         tokenConfig           : NttTokenConfig
         tokenDecimals         : Int
-        factoryCid            : AnyContractId  -- the registry factory (TransferFactory or BurnMintFactory by mode)
+        factory               : NttFactory  -- the registry's factory, typed by mode
       controller admin
       do
         transceiver <- fetch transceiverEmitterCid
@@ -77,6 +76,8 @@ template NttGovernance
             assertMsg "ntt: burn/mint instrument id is not bound to this admin"
               (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
           LockUnlock -> pure ()
+        assertMsg "ntt: factory type does not match the token config"
+          (factoryMatchesConfig tokenConfig factory)
         reg' <- create this with nextId = nextId + 1
         let managerAddress = nttManagerAddressFor operator admin nextId
         mgr <- create NttManager with
@@ -90,7 +91,7 @@ template NttGovernance
           tokenConfig
           tokenDecimals
           peers = Map.empty
-          factoryCid
+          factory
           custody = AdminCustody
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with

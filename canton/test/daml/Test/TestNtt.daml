@@ -30,7 +30,7 @@ import DA.Optional (fromSome)
 import DA.Text (isInfixOf, isPrefixOf)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding, HoldingView(..))
-import Splice.Api.Token.MetadataV1 (AnyContractId, emptyMetadata)
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.BurnMintV1
   (BurnMintFactory, BurnMintFactory_BurnMintResult(..), BurnMintFactoryView(..))
 import Splice.Api.Token.TransferInstructionV1
@@ -316,12 +316,18 @@ nttSetupFee = do
 
 -- | A registered deployment and the handles its tests need.
 data Deployment = Deployment with
-    mgrCid        : ContractId NttManager
-    emitterCid    : ContractId Emitter
-    factoryAnyCid : AnyContractId
-    instrumentId  : InstrumentId
-    ledgerCid     : Optional (ContractId LockedLedger)  -- lock/unlock only
+    mgrCid       : ContractId NttManager
+    emitterCid   : ContractId Emitter
+    factory      : NttFactory
+    instrumentId : InstrumentId
+    ledgerCid    : Optional (ContractId LockedLedger)  -- lock/unlock only
   deriving (Eq, Show)
+
+-- | Unwrap a burn/mint deployment's typed factory.
+theBurnMintFactory : NttFactory -> ContractId BurnMintFactory
+theBurnMintFactory = \case
+  BurnMintFactoryCid cid -> cid
+  TransferFactoryCid _ -> error "not a burn/mint factory"
 
 -- | Register a core Emitter for @admin@, create the gg-signed mock registry
 -- factory, and register the manager through the shared 'NttGovernance' root.
@@ -331,14 +337,14 @@ data Deployment = Deployment with
 deploy : Party -> Party -> Party -> NttTokenConfig -> Script Deployment
 deploy operator gg admin config = do
   emitterCid <- registerEmitter operator admin
-  (instrumentId, factoryAnyCid) <- case config of
+  (instrumentId, factory) <- case config of
     BurnMint -> do
       let inst = InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
       fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = inst
-      pure (inst, coerceContractId (toInterfaceContractId @BurnMintFactory fc))
+      pure (inst, BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
       fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
-      pure (bridgedInstrument gg, coerceContractId (toInterfaceContractId @TransferFactory fc))
+      pure (bridgedInstrument gg, TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (_, mgrCid, ledgerCid) <- submit (actAs admin <> disclose govDisc) do
@@ -349,8 +355,8 @@ deploy operator gg admin config = do
       instrumentNonce = 0
       tokenConfig = config
       tokenDecimals = 8
-      factoryCid = factoryAnyCid
-  pure Deployment with mgrCid, emitterCid, factoryAnyCid, instrumentId, ledgerCid
+      factory
+  pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid
 
 -- | Two deployments get distinct managers with sequential ids and owner-bound
 -- addresses; a lock/unlock deployment gets a zero-balance ledger.
@@ -397,7 +403,7 @@ testBurnMintRegistrationRequiresBoundInstrument = do
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
-      factoryCid = coerceContractId emitterCid   -- unused; registration fails first
+      factory = BurnMintFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
   expectAbort "not bound to this admin" res
 
 -- | The exclusivity attack the binding exists to stop: mallory registers her
@@ -423,7 +429,7 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
         instrumentNonce = nonce
         tokenConfig = BurnMint
         tokenDecimals = 8
-        factoryCid = coerceContractId emitterCid   -- unused; registration fails first
+        factory = BurnMintFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
     expectAbort "not bound to this admin" res
 
 -- | Burn/mint registration rejects an instrument that gg does not administer
@@ -446,7 +452,7 @@ testRegistrationBounds = do
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
-      factoryCid = coerceContractId emitterCid   -- unused; registration fails first
+      factory = BurnMintFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
   expectAbort "requires guardianGovernance to administer" res
 
   res <- trySubmit (actAs admin <> disclose govDisc) do
@@ -457,8 +463,21 @@ testRegistrationBounds = do
       instrumentNonce = 0
       tokenConfig = LockUnlock
       tokenDecimals = 11
-      factoryCid = coerceContractId emitterCid   -- unused; registration fails first
+      factory = TransferFactoryCid (coerceContractId emitterCid)   -- unused; registration fails first
   expectAbort "tokenDecimals must be between 0 and 10" res
+
+  -- The committed factory's type must match the mode: a lock/unlock
+  -- registration with a burn/mint factory is rejected.
+  res <- trySubmit (actAs admin <> disclose govDisc) do
+    exerciseCmd govCid RegisterManager with
+      admin
+      transceiverEmitterCid = emitterCid
+      instrumentId = bridgedInstrument gg
+      instrumentNonce = 0
+      tokenConfig = LockUnlock
+      tokenDecimals = 8
+      factory = BurnMintFactoryCid (coerceContractId emitterCid)
+  expectAbort "factory type does not match" res
 
 ----------------------------------------------------------------------
 -- The locked ledger
@@ -653,8 +672,8 @@ testLockPendingSettlementRejected = do
   holdingCid <- mkHolding gg alice d.instrumentId 0.01
   pendingFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = True
   pendingDisc <- fromSome <$> queryDisclosure gg pendingFc
-  let pendingAny = coerceContractId (toInterfaceContractId @TransferFactory pendingFc)
-  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactoryCid = pendingAny
+  let pendingFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory pendingFc)
+  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = pendingFactory
 
   res <- trySubmitWithDiscs alice (pendingDisc :: discs) do
     exerciseCmd mgrCid Transfer with
@@ -684,14 +703,14 @@ testSetFactory = do
 
   -- The other manager signatories see the contract but cannot repoint the
   -- factory; before promotion only admin controls 'SetFactory'.
-  submitMustFail operator do exerciseCmd d.mgrCid SetFactory with newFactoryCid = d.factoryAnyCid
-  submitMustFail gg do exerciseCmd d.mgrCid SetFactory with newFactoryCid = d.factoryAnyCid
+  submitMustFail operator do exerciseCmd d.mgrCid SetFactory with newFactory = d.factory
+  submitMustFail gg do exerciseCmd d.mgrCid SetFactory with newFactory = d.factory
 
   -- Admin repoints to a fresh (working) factory; the send routes through it.
   freshFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
   freshDisc <- fromSome <$> queryDisclosure gg freshFc
-  let freshAny = coerceContractId (toInterfaceContractId @TransferFactory freshFc)
-  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactoryCid = freshAny
+  let freshFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory freshFc)
+  mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = freshFactory
 
   _ <- submitWithDiscs alice (freshDisc :: discs) do
     sendTransfer alice (d with mgrCid) csId [holdingCid]
@@ -727,7 +746,7 @@ testPromote = do
   (mgrCid, ledgerCid) <- submit (actAs alice <> actAs gg) do
     exerciseCmd d.mgrCid Promote with
       ledgerCid
-      vettedFactoryCid = d.factoryAnyCid
+      vettedFactory = d.factory
       extraArgs = emptyExtraArgs
 
   Some ledger <- queryContractId operator ledgerCid
@@ -785,18 +804,18 @@ testPromoteAuthority = do
   let lcid = fromSome d.ledgerCid
       doPromote mgr vetted = exerciseCmd mgr Promote with
         ledgerCid = lcid
-        vettedFactoryCid = vetted
+        vettedFactory = vetted
         extraArgs = emptyExtraArgs
 
-  submitMustFail alice do doPromote d.mgrCid d.factoryAnyCid
-  submitMustFail gg do doPromote d.mgrCid d.factoryAnyCid
+  submitMustFail alice do doPromote d.mgrCid d.factory
+  submitMustFail gg do doPromote d.mgrCid d.factory
 
   res <- trySubmit (actAs alice <> actAs gg) do
-    doPromote d.mgrCid (coerceContractId d.emitterCid)
+    doPromote d.mgrCid (TransferFactoryCid (coerceContractId d.emitterCid))
   expectAbort "not the one the quorum vetted" res
 
-  (mgrCid, _) <- submit (actAs alice <> actAs gg) do doPromote d.mgrCid d.factoryAnyCid
-  res <- trySubmit (actAs alice <> actAs gg) do doPromote mgrCid d.factoryAnyCid
+  (mgrCid, _) <- submit (actAs alice <> actAs gg) do doPromote d.mgrCid d.factory
+  res <- trySubmit (actAs alice <> actAs gg) do doPromote mgrCid d.factory
   expectAbort "already promoted" res
 
   bob <- allocateParty "PromAuthBob"
@@ -804,7 +823,7 @@ testPromoteAuthority = do
   res <- trySubmit (actAs bob <> actAs gg) do
     exerciseCmd dB.mgrCid Promote with
       ledgerCid = lcid
-      vettedFactoryCid = dB.factoryAnyCid
+      vettedFactory = dB.factory
       extraArgs = emptyExtraArgs
   expectAbort "only lock/unlock deployments" res
 
@@ -818,12 +837,12 @@ testPromotedSetFactoryGovernance = do
   (mgrCid, _) <- submit (actAs alice <> actAs gg) do
     exerciseCmd d.mgrCid Promote with
       ledgerCid = fromSome d.ledgerCid
-      vettedFactoryCid = d.factoryAnyCid
+      vettedFactory = d.factory
       extraArgs = emptyExtraArgs
 
-  submitMustFail alice do exerciseCmd mgrCid SetFactory with newFactoryCid = d.factoryAnyCid
+  submitMustFail alice do exerciseCmd mgrCid SetFactory with newFactory = d.factory
   _ <- submit (actAs alice <> actAs gg) do
-    exerciseCmd mgrCid SetFactory with newFactoryCid = d.factoryAnyCid
+    exerciseCmd mgrCid SetFactory with newFactory = d.factory
   pure ()
 
 -- | A lock/unlock transfer without the deployment's ledger cid is rejected;
@@ -928,7 +947,7 @@ testDepositMintSucceeds = do
   _ <- submit gg do
     exerciseCmd preCid Deposit with
       amount = 0.01
-      factoryCid = d.factoryAnyCid
+      factoryCid = theBurnMintFactory d.factory
       extraArgs = emptyExtraArgs
 
   holdings <- cip56HoldingsOwnedBy gg alice
@@ -950,7 +969,7 @@ testRevokedPreapprovalFails = do
   res <- trySubmit gg do
     exerciseCmd preCid Deposit with
       amount = 0.01
-      factoryCid = d.factoryAnyCid
+      factoryCid = theBurnMintFactory d.factory
       extraArgs = emptyExtraArgs
   case res of
     Left _ -> pure ()
@@ -1049,7 +1068,7 @@ testNttTransferByDifferentUser = do
   (mgrCid, _) <- submit (actAs admin <> actAs gg) do
     exerciseCmd mgrCid Promote with
       ledgerCid = fromSome d.ledgerCid
-      vettedFactoryCid = d.factoryAnyCid
+      vettedFactory = d.factory
       extraArgs = emptyExtraArgs
   let d' = d with mgrCid
 
@@ -1141,16 +1160,16 @@ nttTransferDigest = (parseVAA nttTransferVAA).hash
 -- created directly with all three signatures rather than registered.
 setupFixedManager
   : Party -> Party -> Party -> NttTokenConfig
-  -> Script (ContractId NttManager, AnyContractId, Optional (ContractId LockedLedger))
+  -> Script (ContractId NttManager, NttFactory, Optional (ContractId LockedLedger))
 setupFixedManager operator gg admin config = do
   let instrumentId = bridgedInstrument gg
-  factoryAnyCid <- case config of
+  factory <- case config of
     BurnMint -> do
       fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
-      pure (coerceContractId (toInterfaceContractId @BurnMintFactory fc))
+      pure (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
       fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False
-      pure (coerceContractId (toInterfaceContractId @TransferFactory fc))
+      pure (TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   mgrCid <- submit (actAs operator <> actAs admin <> actAs gg) do
     createCmd NttManager with
       operator
@@ -1163,7 +1182,7 @@ setupFixedManager operator gg admin config = do
       tokenConfig = config
       tokenDecimals = 8
       peers = Map.empty
-      factoryCid = factoryAnyCid
+      factory
       custody = AdminCustody
   mgrCid <- submit admin do
     exerciseCmd mgrCid SetPeer with
@@ -1180,7 +1199,7 @@ setupFixedManager operator gg admin config = do
         custodyHoldingCid = None
     BurnMint -> pure None
   _ <- registerReplayRoot operator admin defaultSplitThreshold
-  pure (mgrCid, factoryAnyCid, ledgerCid)
+  pure (mgrCid, factory, ledgerCid)
 
 -- | Anyone can relay: a third party (@relayer@), a stakeholder of nothing,
 -- submits 'Release' with only disclosed contracts and no recipient action. The
@@ -1304,7 +1323,7 @@ integrationNttReceiveMatchSetup = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "MatchAdmin"
   recipient <- allocateParty "MatchRecipient"
-  (mgrId, factoryAnyCid, _) <- setupFixedManager operator gg admin BurnMint
+  (mgrId, factory, _) <- setupFixedManager operator gg admin BurnMint
   -- The recipient opts in once (a single self-signed create), then can stay
   -- offline.
   depositPreapprovalCid <- submit recipient do
@@ -1319,7 +1338,7 @@ integrationNttReceiveMatchSetup = do
     replayNodeCid = nodeCid
     recipientAddress = recipientAddressFor recipient
     depositPreapprovalCid
-    factoryCid = coerceContractId factoryAnyCid
+    factoryCid = theBurnMintFactory factory
 
 data NttReceiveMatchInput = NttReceiveMatchInput with
     mgrId                 : ContractId NttManager

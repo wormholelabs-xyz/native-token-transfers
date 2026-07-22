@@ -19,10 +19,9 @@
 module Wormhole.Ntt.Deposit where
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs (..))
 import Splice.Api.Token.BurnMintV1
   (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
-import Wormhole.Ntt.Cip56 (coerceFactory)
 
 template DepositPreapproval
   with
@@ -43,11 +42,11 @@ template DepositPreapproval
     nonconsuming choice Deposit : ()
       with
         amount      : Decimal
-        factoryCid  : AnyContractId
+        factoryCid  : ContractId BurnMintFactory
         extraArgs   : ExtraArgs
       controller instrumentId.admin
       do
-        _ <- exercise (coerceFactory @BurnMintFactory factoryCid) BurnMintFactory_BurnMint with
+        _ <- exercise factoryCid BurnMintFactory_BurnMint with
           expectedAdmin = instrumentId.admin
           instrumentId
           inputHoldingCids = [] : [ContractId Holding]
