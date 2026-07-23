@@ -33,9 +33,10 @@ type Config struct {
 	// Disclose is the allow-list of templates the CLI is permitted to fetch and attach an
 	// explicit disclosure for. A template NOT in this list is simply never fetched, so a
 	// cross-participant submit needing it fails on-ledger with CONTRACT_NOT_FOUND -- the
-	// user-controlled dial the plan's §4 describes. Empty (the zero value, and what a
-	// missing config file resolves to -- see Load below) means "disclose nothing": the
-	// deliberately-failing default posture.
+	// user-controlled dial the plan's §4 describes. An EXPLICIT config file that sets this to
+	// `[]` (or omits it) genuinely means "disclose nothing" -- see testdata/topology-empty.json,
+	// used specifically to pin that failing posture. A MISSING config file is different (see
+	// Load's DefaultDisclose below): it is not the same as an explicit empty list.
 	Disclose []Entry `json:"disclose"`
 }
 
@@ -52,22 +53,53 @@ func DefaultPartyHosting() map[string]string {
 	}
 }
 
+// DefaultDisclose is the built-in localnet disclosure allow-list used ONLY when no
+// --topology-config file is present at all (see Load) -- reconciled against the CIP-56/
+// namespace-retirement rework (integration plan §8): guardianGovernance (gg) is now a genuine,
+// separate participant from operator/admin on LocalNet, and gg co-signs/owns every contract a
+// Mock-kind transferOut/receiveVaa needs (NttManager, CoreState, Emitter, ReplayNode, the
+// committed factory, and the recipient's preapproval -- see Playground.Prepare's header). Since
+// this crossing happens for the DEFAULT executor/sender on every deployment, not just an
+// explicitly-routed hint like Bob, an empty default here would make the CLI's basic `deploy`/
+// `transfer`/`receive` flow fail out of the box on LocalNet absent a hand-written config file --
+// clearly not the intent (the "user-controlled dial" is for DELIBERATELY narrowing disclosure,
+// e.g. testdata/topology-empty.json/topology-missing-corestate.json, not for gating the common
+// case). An explicit file (even one that just omits "disclose") still means exactly what it
+// says -- this default applies only to a config path that does not exist at all.
+func DefaultDisclose() []Entry {
+	return []Entry{
+		{Template: "Wormhole.Ntt.Manager:NttManager", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Ntt.Governance:NttGovernance", FetchAs: "Operator"},
+		{Template: "Wormhole.Ntt.Ledger:LockedLedger", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Core.State:CoreState", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Core.State:Emitter", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Core.Replay:ReplayNode", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Ntt.Deposit:DepositPreapproval", FetchAs: "GuardianGovernance"},
+		{Template: "Playground.MockRegistry:MockTransferPreapproval", FetchAs: "GuardianGovernance"},
+		{Template: "Playground.MockRegistry:MockPreapprovedTransferFactory", FetchAs: "GuardianGovernance"},
+		{Template: "Test.TestNtt:MockBurnMintFactory", FetchAs: "GuardianGovernance"},
+		{Template: "Test.TestNtt:Cip56MockHolding", FetchAs: "GuardianGovernance"},
+	}
+}
+
 // Load reads and parses the topology config file at path.
 //
 // Decision (documented per the phase-1 plan, since the plan text left this ambiguous): a
 // MISSING file is not an error -- Load returns the built-in defaults (DefaultPartyHosting,
-// empty Disclose) so a caller can pass the CLI's default --topology-config path
-// unconditionally, whether or not the user ever created one; this matches the plan's "absent
-// file ⇒ built-in localnet defaults for partyHosting, empty disclose list" phrasing in §4
-// more directly than making every caller special-case a not-found error. A file that DOES
-// exist but fails to parse (malformed JSON, or an unknown top-level key -- rejected via
-// json.Decoder.DisallowUnknownFields so a typo like "partyHostng" fails loudly instead of
-// silently falling back to defaults) still returns an error.
+// DefaultDisclose) so a caller can pass the CLI's default --topology-config path
+// unconditionally, whether or not the user ever created one. This matches the plan's original
+// "absent file ⇒ built-in localnet defaults" phrasing in §4 for partyHosting; for Disclose,
+// the integration plan's §8 reconciliation revised the DEFAULT itself (see DefaultDisclose's
+// doc comment) once gg's own participant became load-bearing for the common case, not just an
+// explicitly-routed hint. A file that DOES exist but fails to parse (malformed JSON, or an
+// unknown top-level key -- rejected via json.Decoder.DisallowUnknownFields so a typo like
+// "partyHostng" fails loudly instead of silently falling back to defaults) still returns an
+// error.
 func Load(path string) (Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Config{PartyHosting: DefaultPartyHosting()}, nil
+			return Config{PartyHosting: DefaultPartyHosting(), Disclose: DefaultDisclose()}, nil
 		}
 		return Config{}, fmt.Errorf("disclosure: read %s: %w", path, err)
 	}

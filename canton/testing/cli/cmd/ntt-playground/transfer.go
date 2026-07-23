@@ -261,18 +261,27 @@ func newTransferCmd(a *app) *cobra.Command {
 			// operator's: guardianGovernance co-signs/owns everything transferOut needs
 			// (NttManager/CoreState/Emitter/the committed factory/preapproval -- see
 			// Playground.Prepare's header), which operator's participant cannot serve for the
-			// gg-sole-owned factory/preapproval templates.
+			// gg-sole-owned factory/preapproval templates. "amulet" is exempt: it never touches
+			// the playground's own gg-owned mock registry (its committed factory is the real
+			// Splice registry's, handled entirely by the amuletSeam above), so
+			// prepareTransferOut -- which only knows how to resolve MOCK factory/preapproval
+			// shapes -- must never run for it (an amulet sender is also never routed through
+			// resolveParty, so it would otherwise always look cross-participant here and
+			// wrongly trigger the mock-only prepare path).
+			var remoteSeam json.RawMessage
 			actorRole := s.UserParticipants[userHint]
-			ownerRole := participantRoleForParty(s, s.GuardianGovernance)
-			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, ownerRole, "Playground.Prepare:prepareTransferOut", func(templates []string) any {
-				return prepareTransferOutInput{
-					GuardianGovernance: s.GuardianGovernance,
-					ManagerID:          d.ManagerID,
-					DiscloseTemplates:  templates,
+			if d.TokenKind != "amulet" {
+				ownerRole := participantRoleForParty(s, s.GuardianGovernance)
+				remoteSeam, err = prepareRemoteSeam(ctx, cmd, a, s, actorRole, ownerRole, "Playground.Prepare:prepareTransferOut", func(templates []string) any {
+					return prepareTransferOutInput{
+						GuardianGovernance: s.GuardianGovernance,
+						ManagerID:          d.ManagerID,
+						DiscloseTemplates:  templates,
+					}
+				})
+				if err != nil {
+					return fmt.Errorf("transfer: prepare remote disclosure: %w", err)
 				}
-			})
-			if err != nil {
-				return fmt.Errorf("transfer: prepare remote disclosure: %w", err)
 			}
 
 			userRunner, userCleanup, err := a.newScriptRunnerFor(ctx, actorRole)

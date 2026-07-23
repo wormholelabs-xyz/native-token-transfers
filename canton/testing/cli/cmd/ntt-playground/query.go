@@ -241,15 +241,15 @@ func newBalanceCmd(a *app) *cobra.Command {
 			}
 
 			// Route to whichever party the underlying script actually queries AS: amuletBalance
-			// reads as the owner itself (input.owner); balances reads as the deployment's admin
-			// (input.reader, "typically the deployment's admin" -- Playground/Query.daml), never
-			// the party being checked. Either way that querying party must be hosted on the
-			// participant the script runs against (plan §3: "route the read-only script to the
-			// party's home participant"); participantRoleForParty falls back to "" (the default/
-			// app-provider participant) for the admin and for cip56-custody wallet parties
-			// (never routed through resolveParty/UserParticipants), matching today's behavior.
-			readerRole := participantRoleForParty(s, d.Admin)
-			if d.TokenKind == "cip56-custody" {
+			// reads as the owner itself (input.owner: real Amulet Holdings are queried via the
+			// token-standard interface directly, no gg/mock registry involved); balances reads
+			// as gg (input.reader -- Cip56MockHolding's signatory is gg, not admin, post the
+			// CIP-56/namespace-retirement rework -- see Playground.Query.daml's BalancesInput
+			// doc comment), never the party being checked or the deployment's admin. Either way
+			// that querying party must be hosted on the participant the script runs against
+			// (plan §3: "route the read-only script to the party's home participant").
+			readerRole := participantRoleForParty(s, s.GuardianGovernance)
+			if d.TokenKind == "amulet" {
 				readerRole = participantRoleForParty(s, party)
 			}
 			runner, cleanup, err := a.newScriptRunnerFor(ctx, readerRole)

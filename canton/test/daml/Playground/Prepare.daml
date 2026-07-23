@@ -188,6 +188,7 @@ prepareReceive input = do
         TransferFactoryCid _ -> abort "playground: burn/mint deployment has a lock/unlock factory -- inconsistent state"
       pure emptyRemoteSeam with
         mgrCid = Some mgrCid
+        mgr = Some mgr
         csCid = Some csCid
         replayNodeCid = Some nodeCid
         preapprovalCid = Some preCid
@@ -221,6 +222,7 @@ prepareReceive input = do
       preDisc <- fromSome <$> queryDisclosure gg preCid
       pure emptyRemoteSeam with
         mgrCid = Some mgrCid
+        mgr = Some mgr
         csCid = Some csCid
         replayNodeCid = Some nodeCid
         ledgerCid = Some ledgerCid

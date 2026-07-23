@@ -132,8 +132,13 @@ fundUser input = do
     [cid] -> pure cid
     [] -> abort "playground: no MockBurnMintFactory for this deployment's instrument -- run `deploy` first"
     _ -> abort "playground: more than one MockBurnMintFactory for this instrument"
-  pres <- query @DepositPreapproval input.owner
-  preCid <- case [ cid | (cid, p) <- pres, p.instrumentId == instrumentId ] of
+  -- Queried as gg (the observer), not owner: fundUser runs entirely on gg's OWN participant
+  -- (routed there since the Deposit exercise below submits as gg), which cannot query as an
+  -- arbitrary owner hosted elsewhere -- gg being DepositPreapproval's observer is exactly what
+  -- makes it visible here regardless of which participant owner lives on (same reasoning as
+  -- transferOut/receiveVaa's gg-side factory/preapproval resolution).
+  pres <- query @DepositPreapproval gg
+  preCid <- case [ cid | (cid, p) <- pres, p.owner == input.owner, p.instrumentId == instrumentId ] of
     [cid] -> pure cid
     [] -> abort "playground: owner has no DepositPreapproval for this instrument -- run `preapprove` first"
     _ -> abort "playground: more than one DepositPreapproval for this instrument"

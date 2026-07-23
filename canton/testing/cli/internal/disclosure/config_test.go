@@ -59,14 +59,17 @@ func TestLoad_ValidConfig(t *testing.T) {
 // ----------------------------------------------------------------------
 
 // TestLoad_MissingFile pins the documented decision in Load's doc comment: a nonexistent
-// config path is NOT an error -- it resolves to the built-in defaults (empty Disclose,
-// DefaultPartyHosting), matching the plan's "absent file ⇒ built-in localnet defaults" wording
-// so callers can pass the default --topology-config path unconditionally.
+// config path is NOT an error -- it resolves to the built-in defaults (DefaultPartyHosting,
+// DefaultDisclose), so callers can pass the default --topology-config path unconditionally.
+// Disclose is NOT empty here (unlike an explicit config that sets "disclose": [] -- see
+// testdata/topology-empty.json) -- see DefaultDisclose's doc comment for why the integration
+// plan's §8 reconciliation revised this default once guardianGovernance became a genuinely
+// separate participant for the common case, not just an explicitly-routed hint.
 func TestLoad_MissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.json")
 	c, err := Load(path)
 	require.NoError(t, err)
-	require.Empty(t, c.Disclose)
+	require.Equal(t, DefaultDisclose(), c.Disclose)
 	require.Equal(t, DefaultPartyHosting(), c.PartyHosting)
 }
 
