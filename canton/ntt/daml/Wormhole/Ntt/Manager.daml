@@ -136,15 +136,20 @@ requireBurnMintFactory = \case
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
 -- | A peer NTT deployment on another chain: its manager address (the
--- @recipientManager@/@sourceManager@ in the transceiver message) and its
--- transceiver address (the emitter of inbound VAAs). Both 32 bytes.
+-- @recipientManager@/@sourceManager@ in the transceiver message), its
+-- transceiver address (the emitter of inbound VAAs, both 32 bytes), and the
+-- number of decimals of the peer's token. The decimals let an outbound
+-- transfer trim to the precision the peer can represent, so no dust is silently
+-- dropped when the far side rescales; this mirrors the peer @decimals@ the
+-- reference @setPeer@ stores.
 data Peer = Peer with
     managerAddress     : Bytes32
     transceiverAddress : Bytes32
+    decimals           : Int
   deriving (Eq, Show)
 
 normalizePeer : Peer -> Peer
-normalizePeer p = Peer with
+normalizePeer p = p with
     managerAddress = normalizeHex p.managerAddress
     transceiverAddress = normalizeHex p.transceiverAddress
 
@@ -341,6 +346,8 @@ template NttManager
           (chainId > 0 && chainId <= 65535)
         assertMsg "ntt: peer chain id must not be this deployment's own chain"
           (chainId /= this.chainId)
+        assertMsg "ntt: peer decimals must be a positive uint8"
+          (peer.decimals > 0 && peer.decimals <= 255)
         assertMsg "ntt: peer manager address must be non-zero"
           (not (isZeroAddress peer.managerAddress))
         assertMsg "ntt: peer transceiver address must be non-zero"
@@ -457,9 +464,15 @@ template NttManager
       do
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
                      (Map.lookup recipientChain peers)
-            trimmed = trimAmount rawAmount tokenDecimals
+            trimmed = trimAmountTo rawAmount tokenDecimals peer.decimals
             amount = trimmedToDecimal trimmed
         assertMsg "ntt: transfer amount is zero after trimming" (amount > 0.0)
+        -- Reject dust the peer cannot represent: the trimmed amount must
+        -- rescale back to exactly what the user asked to send, so the amount
+        -- locked or burned here equals the amount the peer will release or
+        -- mint. Without this a low-decimals peer would silently drop precision.
+        assertMsg "ntt: transfer amount has dust the peer cannot represent"
+          (untrimAmount trimmed tokenDecimals == rawAmount)
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
           (transceiver.owner == namespace

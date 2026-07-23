@@ -524,7 +524,7 @@ testSetPeerGuards = do
   (operator, gg, _) <- nttSetup
   admin <- allocateParty "SetPeerAdmin"
   d <- deploy operator gg admin LockUnlock
-  let goodPeer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+  let goodPeer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
 
   res <- trySubmit admin do
     exerciseCmd d.mgrCid SetPeer with chainId = 70000, peer = goodPeer
@@ -537,8 +537,14 @@ testSetPeerGuards = do
   res <- trySubmit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "", transceiverAddress = b32 "cc", decimals = 8
   expectAbort "manager address must be non-zero" res
+
+  res <- trySubmit admin do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 0
+  expectAbort "peer decimals must be a positive uint8" res
 
   -- A well-formed peer on another chain is accepted.
   _ <- submit admin do exerciseCmd d.mgrCid SetPeer with chainId = 2, peer = goodPeer
@@ -585,7 +591,7 @@ sendScaffold operator gg admin config csId = do
   mgrCid <- submit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   csDisc <- fromSome <$> queryDisclosure operator csId
   factoryDisc <- case config of
     BurnMint -> discloseBurnMintFactory gg
@@ -681,6 +687,49 @@ testTransferLockAccounting = do
       h.amount === 0.015
       ledger2.custodyHoldingCid === Some (toInterfaceContractId @Holding cid)
     _ -> abort ("expected one merged custody holding, got: " <> show custody2)
+
+-- | A send to a peer whose token has fewer decimals than the amount carries is
+-- trimmed to the peer's decimals, and any leftover dust is rejected up front so
+-- the amount locked here always equals the amount the peer will release. A
+-- round amount the peer can represent goes through. (Token decimals 8, peer
+-- decimals 3.)
+testTransferTrimsToPeerDecimals : Script ()
+testTransferTrimsToPeerDecimals = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "DustAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  mgrCid <- submit alice do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 5
+      peer = Peer with managerAddress = b32 "b5", transceiverAddress = b32 "c5", decimals = 3
+  let d' = d with mgrCid
+      sendTo chainId rawAmount holding =
+        exerciseCmd d'.mgrCid Transfer with
+          user = alice
+          transceiverEmitterCid = d'.emitterCid
+          coreStateCid = csId
+          ledgerCid = d'.ledgerCid
+          recipientChain = chainId
+          recipientAddress = b32 "ee"
+          sourceToken = b32 "dd"
+          rawAmount
+          nonce = 0
+          consistencyLevel = 0
+          inputHoldingCids = [holding]
+          feeAllocation = None
+          extraArgs = emptyExtraArgs
+
+  -- 0.00158434 at 8 decimals cannot be represented at 3 decimals: rejected.
+  dustHolding <- mkHolding gg alice d.instrumentId 0.00158434
+  res <- trySubmitWithDiscs alice discs do sendTo 5 158434 dustHolding
+  expectAbort "dust the peer cannot represent" res
+
+  -- 0.001 is representable at 3 decimals: locked, and the ledger is credited
+  -- by exactly that amount.
+  roundHolding <- mkHolding gg alice d.instrumentId 0.001
+  _ <- submitWithDiscs alice discs do sendTo 5 100000 roundHolding
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.001
 
 -- | Anyone can merge custody fragments back into one pot and repoint the
 -- ledger's hint: the repair path for stale hints and explicit-input releases.
@@ -1026,11 +1075,11 @@ testGgAdminnedOps = do
   submitMustFail alice do
     exerciseCmd mgrCid SetPeer with
       chainId = 3
-      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1"
+      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1", decimals = 8
   _ <- submit gg do
     exerciseCmd mgrCid SetPeer with
       chainId = 3
-      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1"
+      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1", decimals = 8
   pure ()
 
 -- | The propose-accept handoff: the current admin leaves a standing
@@ -1233,7 +1282,7 @@ testNttSend = do
   _ <- submit alice do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   [(mgrCid, _)] <- query @NttManager operator
   let d' = d with mgrCid
 
@@ -1307,7 +1356,7 @@ testNttTransferByDifferentUser = do
   mgrCid <- submit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   (mgrCid, _) <- submit (actAs admin <> actAs gg) do
     exerciseCmd mgrCid TransferAdmin with
       newAdmin = gg
@@ -1363,7 +1412,7 @@ testNttTransferRequiresUserAuthority = do
   mgrCid <- submit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   let doTransfer = exerciseCmd mgrCid Transfer with
         user = bob
         transceiverEmitterCid = d.emitterCid
@@ -1440,7 +1489,7 @@ setupFixedManagerOn operator gg admin config chainId = do
   mgrCid <- submit admin do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   ledgerCid <- case config of
     LockUnlock -> Some <$> submit (actAs operator <> actAs admin <> actAs gg) do
       createCmd LockedLedger with

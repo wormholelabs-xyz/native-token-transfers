@@ -187,34 +187,36 @@ testTrimVectorsMatching = do
   let t5 = trimAmount 100555555555555555 18
   untrimAmount t5 18 === 100555550000000000
 
--- | Cases where the destination decimals are below min(8, fromDecimals). The
--- reference trims further (to the destination decimals) and the EVM manager
--- rejects any leftover dust at send time (TransferAmountHasDust). Canton
--- cannot: it does not know the peer's decimals, so it trims only to
--- min(8, fromDecimals) and sends more precision than a low-decimal peer can
--- represent. The peer then truncates on receive, so value is lost relative to
--- what the sender committed. These asserts pin Canton's actual (divergent)
--- output.
-testTrimVectorsPeerDecimalDivergence : Script ()
-testTrimVectorsPeerDecimalDivergence = do
+-- | The destination-decimals cases. The reference trims to
+-- min(8, fromDecimals, toDecimals) so no precision is put on the wire that the
+-- peer cannot represent, and rejects any leftover dust at send time. The
+-- manager now uses 'trimAmountTo' for exactly this, so it matches the reference
+-- here. (The bare two-argument 'trimAmount' still trims by source decimals
+-- only and is retained for the codec-level round-trip vectors; the manager does
+-- not use it on the send path.)
+testTrimToPeerDecimals : Script ()
+testTrimToPeerDecimals = do
   -- reference trim(158434, from=6, to=3) == {amount 158, decimals 3}.
-  -- Canton trims only by fromDecimals=6:
+  trimAmountTo 158434 6 3 === TrimmedAmount with decimals = 3, amount = 158
+  -- The bare source-only helper keeps all 6 decimals (why the manager must not
+  -- use it against a lower-decimals peer).
   trimAmount 158434 6 === TrimmedAmount with decimals = 6, amount = 158434
-  -- (reference would be decimals = 3, amount = 158)
 
   -- reference trim(100555555555555555, from=18, to=1).untrim(18)
   --   == 100000000000000000 (trimmed to 1 decimal).
-  -- Canton trims to 8 decimals and preserves far more precision:
-  let t = trimAmount 100555555555555555 18
-  untrimAmount t 18 === 100555550000000000
-  -- (reference, trimming to min(8,18,1)=1, would yield 100000000000000000)
+  let t = trimAmountTo 100555555555555555 18 1
+  untrimAmount t 18 === 100000000000000000
 
-  -- Demonstration of end-to-end value loss to a 3-decimal peer:
-  -- sender at 6 decimals sends 158434 units (= 0.158434). Canton puts
-  -- {amount 158434, decimals 6} on the wire; a 3-decimal peer untrims to
-  -- 158434 / 10^3 = 158 units (= 0.158), silently dropping 0.000434.
-  let onWire = trimAmount 158434 6
-  untrimAmount onWire 3 === 158
+  -- A round amount for a 3-decimal peer survives with no dust: 158000 units at
+  -- 6 decimals (= 0.158) trims to {158, dec 3} and round-trips exactly, so the
+  -- manager's dust check (untrim == raw) passes.
+  let onWire = trimAmountTo 158000 6 3
+  onWire === TrimmedAmount with decimals = 3, amount = 158
+  untrimAmount onWire 6 === 158000
+
+  -- 158434 does NOT round-trip to a 3-decimal peer (untrim gives 158000, not
+  -- 158434), which is exactly the dust the manager's Transfer now rejects.
+  assert (untrimAmount (trimAmountTo 158434 6 3) 6 /= 158434)
 
 -- | The wire amount field is a uint64 (0 .. 2^64-1). Daml's Int is signed
 -- 64-bit, so its max is 2^63-1 (about 9.2e18). Amounts in [2^63, 2^64) are
