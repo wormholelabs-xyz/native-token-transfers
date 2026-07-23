@@ -1,9 +1,12 @@
 // Package state persists the playground's stable identities -- parties, the guardian key,
 // and per-deployment addresses/peers -- across CLI invocations. It never stores a contract
-// id: CoreState, NttManager, and Emitter all churn on every consuming exercise, so every
-// `dpm script` entrypoint re-resolves them from the ACS by identity instead (see
-// canton/test/daml/Playground/Types.daml's resolvers). This file is the only thing that
-// makes the CLI feel like a long-running session rather than a pile of one-shot scripts.
+// id: NttManager is consumed only by its admin config choices (SetPeer, SetFactory, the rare
+// TransferAdmin), so its cid stays stable across ordinary transfer/receive traffic, but
+// CoreState, Emitter, LockedLedger, and the covering replay-trie node all still churn on
+// every consuming exercise -- so every `dpm script` entrypoint re-resolves them from the ACS
+// by identity instead (see canton/test/daml/Playground/Types.daml's resolvers). This file is
+// the only thing that makes the CLI feel like a long-running session rather than a pile of
+// one-shot scripts.
 package state
 
 import (
