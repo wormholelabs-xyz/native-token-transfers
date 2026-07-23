@@ -101,6 +101,17 @@ type State struct {
 	// cmd/ntt-playground/party.go).
 	Users map[string]string `json:"users"`
 
+	// UserParticipants maps a CLI-facing party hint (e.g. "Alice") to the participant role
+	// (internal/profile.Profile.Participants key, e.g. "app-user") it was allocated on, so
+	// routing stays stable across invocations even if the disclosure/topology config's
+	// partyHosting map later changes. Populated at allocation time; consulted BEFORE the
+	// config's partyHosting map and its "*" fallback (see the plan's §3 precedence:
+	// state.UserParticipants > config partyHosting > "*").
+	//
+	// TODO(phase 3): populate this in resolveParty (cmd/ntt-playground/party.go) when
+	// allocating a party against a routed participant; nothing writes it yet.
+	UserParticipants map[string]string `json:"userParticipants,omitempty"`
+
 	// GuardianSequences tracks the next VAA sequence number this CLI hands out per
 	// (kind, emitterChain) pair -- e.g. "transfer:2" -- so repeated `guardian sign-transfer`
 	// calls never collide digests (Wormhole.Core.Replay's trie rejects exact repeats, and a
@@ -115,6 +126,7 @@ func New() *State {
 		Emitters:          map[string]Emitter{},
 		GuardianSequences: map[string]uint64{},
 		Users:             map[string]string{},
+		UserParticipants:  map[string]string{},
 	}
 }
 
@@ -142,6 +154,9 @@ func Load(path string) (*State, error) {
 	}
 	if s.Users == nil {
 		s.Users = map[string]string{}
+	}
+	if s.UserParticipants == nil {
+		s.UserParticipants = map[string]string{}
 	}
 	return &s, nil
 }

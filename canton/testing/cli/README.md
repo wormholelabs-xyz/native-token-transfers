@@ -125,7 +125,11 @@ with a `[v] ` prefix. stdout is unchanged whether or not the flag is set, so
 Party hints (`--user`, `--recipient`, `--to-recipient`, `--party`, `--executor`)
 are display names the CLI allocates fresh Canton parties for on first use and
 remembers thereafter (`playground.state.json`'s `users` map) — the same hint
-always resolves to the same party across commands.
+always resolves to the same party across commands. On the `localnet` profile
+the hint also decides which participant the party is allocated on and
+routed to thereafter (`--topology-config`'s `partyHosting` map — see
+[Topology](#topology)); the resolved participant is persisted in state
+alongside the party id, so it stays stable even if the config changes later.
 
 ### Deploy config
 
@@ -195,12 +199,126 @@ otherwise: `"cip56-custody requires a profile with real Amulet (localnet)"`).
   with only `CanReadAs(guardianObserver)`, not by recomputing the payload a
   second time.
 
+## Topology
+
+On the `localnet` profile the playground runs across **five participants**,
+not one — this is what makes Daml's privacy model observable: a party only
+sees the contracts it is a stakeholder or disclosure-recipient on, and only
+its own home participant can act as it.
+
+| participant | hosts | gRPC ledger | JSON API | validator API |
+| --- | --- | --- | --- | --- |
+| `app-provider` | Operator, deployment admins, wallet/custody users, and the default for any unmapped party hint | 3901 | 3975 | 3903 |
+| `app-user` | Alice | 2901 | 2975 | 2903 |
+| `bob` | Bob | 5901 | 5975 | 5903 |
+| `guardian-governance` | GuardianGovernance | 6901 | 6975 | 6903 |
+| `guardian-observer` | GuardianObserver | 7901 | 7975 | 7903 |
+
+`app-provider` and `app-user` are participants the Splice LocalNet bundle
+already runs; `bob`, `guardian-governance`, and `guardian-observer` are added
+by a compose override the CLI writes into the LocalNet directory (alongside
+the existing Postgres-container override) — the vendored bundle itself is
+never edited. Every participant runs the same unsafe shared-secret HS256
+auth as `app-provider` and is reachable through the same `ledger-api-user`
+admin user, so `party list`, `balance --party`, and every other per-party
+command transparently target the right participant.
+
+`--topology-config` (see below) controls which party hint lands on which
+participant; the table above is the built-in default when no config file
+maps a hint. `party list` reflects the real topology: each line is prefixed
+`participant=<role>`, and a party's `isLocal=true` only on its home
+participant.
+
+The `sandbox` profile is unaffected by any of this — see
+[sandbox](#sandbox-default) below.
+
+### `--topology-config`
+
+A root persistent flag, `--topology-config PATH`, points at a JSON file that
+controls two things: which participant a party hint is allocated/routed to
+(`partyHosting`), and which Daml templates the CLI is allowed to fetch an
+explicit disclosure for before a cross-participant submit (`disclose`).
+
+Default path when the flag is omitted: `playground.topology.json` next to
+the state file. A missing file is not an error — it resolves to the
+built-in `partyHosting` default (the table above) and an **empty**
+`disclose` list, i.e. the "everything fails closed" posture: no disclosures
+are ever fetched, so any submit that needs to read a contract off another
+participant fails on-ledger with `CONTRACT_NOT_FOUND`. A file that exists
+but is malformed (bad JSON, or an unrecognized top-level key) is a hard
+error rather than a silent fallback, so a typo doesn't quietly disable
+disclosure.
+
+Shape:
+
+```json
+{
+  "partyHosting": {
+    "Alice": "app-user",
+    "Bob": "bob",
+    "GuardianGovernance": "guardian-governance",
+    "GuardianObserver": "guardian-observer",
+    "*": "app-provider"
+  },
+  "disclose": [
+    { "template": "Wormhole.Ntt.Manager:NttManager", "fetchAs": "Operator" },
+    { "template": "Wormhole.Core.State:CoreState", "fetchAs": "Operator" },
+    { "template": "Wormhole.Core.State:Emitter", "fetchAs": "admin" },
+    { "template": "Playground.MockToken:MockToken", "fetchAs": "admin" }
+  ]
+}
+```
+
+- `partyHosting` maps a party hint to a participant role; `"*"` is the
+  fallback for any hint not listed explicitly.
+- `disclose` is an allow-list of `Module:Entity`-qualified templates. Only
+  templates on this list are fetched (as a disclosure payload, via a
+  read-only Daml script run against the data owner's own participant) and
+  attached to a cross-participant submit; a template not on the list is
+  simply never fetched. `fetchAs` names the party a template's data is
+  conceptually read as (`"Operator"`, or the `"admin"` placeholder resolved
+  per-deployment); today every playground template the CLI knows about is
+  operator- or admin-owned, and both always live on the same participant, so
+  the field is carried through the config for forward compatibility rather
+  than driving a per-entry participant choice yet.
+
+This is a deliberate, user-controlled dial: pulling an entry out of
+`disclose` turns a specific cross-participant operation back into a
+`CONTRACT_NOT_FOUND` failure without touching any other template's
+visibility. See `testdata/topology-empty.json` (nothing disclosed),
+`testdata/topology-localnet.json` (the set the e2e suite runs against), and
+`testdata/topology-missing-corestate.json` (the localnet set minus one
+entry, for exercising per-template granularity) for worked examples.
+
+When a command's actor and the data it needs both resolve to the same
+participant, none of this applies — the command takes the same local path
+it always has, disclosure-free.
+
+### Genesis and the 2-of-2 requirement
+
+`init` bootstraps `CoreState` as a two-step propose/accept across two
+different participants, not a single co-signed create: the operator
+proposes a `CoreStateBootstrapProposal` on its own participant, and
+`GuardianGovernance` accepts it — the step that actually creates
+`CoreState` — on its own, separate participant. Because no participant
+hosts both parties, this genuinely requires two independent participants to
+confirm the transaction, which is the concrete "2-of-2" property the
+topology split delivers: an operator acting alone cannot produce a
+`CoreState` GuardianGovernance never saw and never authorized, and vice
+versa.
+
 ## Profiles
 
 ### sandbox (default)
 
 A bare `dpm sandbox`, no authentication, no Docker. This is the CI-viable path
 and what `go test -tags e2e ./e2e` exercises by default.
+
+The [Topology](#topology) split and `--topology-config` are LocalNet-only
+concepts. `dpm sandbox` is a single in-process participant — every party is
+always co-located with every actor, so there is never a cross-participant
+submit to gate, and `--topology-config`/disclosure has no effect here: every
+command takes the same local, disclosure-free path it always has.
 
 ### LocalNet
 
@@ -241,10 +359,10 @@ instead; set `LOCALNET_POSTGRES_CONTAINER_NAME` / `LOCALNET_POSTGRES_HOST_PORT`
 to change either. In-network connectivity is unaffected — services resolve the
 database by compose service name. Requires docker compose >= 2.24 (`!override`).
 
-The `app-provider` participant is used throughout: gRPC Ledger API 3901, JSON
-Ledger API v2 3975, validator API 3903. Auth is LocalNet's documented
-"unsafe" shared-secret HS256 mode (never valid against a real participant);
-the CLI mints tokens for `ledger-api-user` automatically.
+See [Topology](#topology) above for the five-participant layout this profile
+runs. Auth is LocalNet's documented "unsafe" shared-secret HS256 mode (never
+valid against a real participant); the CLI mints tokens for
+`ledger-api-user` automatically, on every participant.
 
 Amulet (Canton Coin) does not implement `BurnMintFactory`, so only the
 lock/unlock path is exercisable against it directly — see

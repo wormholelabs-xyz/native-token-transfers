@@ -45,9 +45,15 @@ just check           # unit + daml + e2e-sandbox      (the non-Docker gate)
 just e2e-localnet    # full e2e on real LocalNet      (Docker, ~15 min)
 ```
 
-`e2e-sandbox` runs the whole suite in-process; the LocalNet-only subtests self-skip.
-`e2e-localnet` runs the complete suite including the real Canton Coin/Amulet custody
-transfer and the Ledger API v2 stream observer.
+`e2e-sandbox` runs the whole suite in-process, against a single in-process
+participant; the LocalNet-only subtests self-skip. `e2e-localnet` runs the
+complete suite against the real 5-participant topology (see the CLI
+README's [Topology](README.md#topology) section) including the real Canton
+Coin/Amulet custody transfer, the Ledger API v2 stream observer (read from
+the guardian-observer participant), and the cross-participant disclosure
+mechanism (`--topology-config`, exercised via `testdata/topology-*.json`) —
+this is the only tier that actually proves a party allocated on one
+participant is invisible to another absent an explicit disclosure entry.
 
 ## Step by step: the LocalNet run
 

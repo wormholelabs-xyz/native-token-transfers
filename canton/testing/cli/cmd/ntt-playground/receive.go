@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -18,6 +19,9 @@ type receiveVaaInput struct {
 	Recipient string              `json:"recipient"`
 	VaaBytes  string              `json:"vaaBytes"`
 	PubKeys   []ledger.PubKeyHint `json:"pubKeys"`
+	// Remote carries a pre-fetched Playground.Prepare:prepareReceive RemoteSeam, as raw JSON --
+	// see transferOutInput.Remote's doc comment (transfer.go).
+	Remote json.RawMessage `json:"remote"`
 }
 
 type receiveVaaOutput struct {
@@ -49,18 +53,39 @@ func newReceiveCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// executor defaults to the Operator (stays on the default/app-provider
+			// participant, executorRole=""); an explicit --executor routes the submit to
+			// THAT hint's own participant instead (plan §3).
 			executorParty := s.Operator
+			executorRole := ""
 			if executorHint != "" {
 				executorParty, err = resolveParty(cmd, a, s, executorHint)
 				if err != nil {
 					return err
 				}
+				executorRole = s.UserParticipants[executorHint]
 			}
 			if pubKeyHex == "" {
 				return fmt.Errorf("receive: --pubkey is required (the signing guardian's 65-byte uncompressed pubkey)")
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// The data owner for a Mock-kind prepare fetch is gg's OWN participant, not
+			// operator's -- see remote.go's doc comment and transfer.go's identical reasoning.
+			ownerRole := participantRoleForParty(s, s.GuardianGovernance)
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, executorRole, ownerRole, "Playground.Prepare:prepareReceive", func(templates []string) any {
+				return prepareReceiveInput{
+					GuardianGovernance: s.GuardianGovernance,
+					ManagerID:          d.ManagerID,
+					Recipient:          recipientParty,
+					VaaBytes:           vaaHex,
+					DiscloseTemplates:  templates,
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("receive: prepare remote disclosure: %w", err)
+			}
+
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, executorRole)
 			if err != nil {
 				return err
 			}
@@ -77,6 +102,7 @@ func newReceiveCmd(a *app) *cobra.Command {
 				Recipient: recipientParty,
 				VaaBytes:  vaaHex,
 				PubKeys:   []ledger.PubKeyHint{{Index: 0, Key: pubKeyHex}},
+				Remote:    remoteSeam,
 			}, &out); err != nil {
 				return err
 			}

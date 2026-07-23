@@ -22,13 +22,12 @@ import Splice.Round qualified as Round
 import Splice.ExternalPartyAmuletRules qualified as ExternalPartyAmuletRules
 import Splice.ExternalPartyConfigState qualified as ExternalPartyConfigState
 
--- | One registry-format disclosed contract, as Go's internal/amulet.DisclosedContract sends
--- it (minus @synchronizerId@, which 'Daml.Script.Disclosure' has no field for).
-data DisclosedContractIn = DisclosedContractIn with
-    templateId : Text          -- registry format: "<packageId>:<Module>:<Entity>"
-    contractId : ContractId () -- the registry's opaque contract-id string, Daml-JSON decoded
-    blob       : Text          -- createdEventBlob (base64)
-  deriving (Eq, Show)
+import Playground.Disclose (DisclosedContractIn)
+
+-- 'DisclosedContractIn' (one registry-format disclosed contract, as Go's
+-- internal/amulet.DisclosedContract sends it -- minus @synchronizerId@, which
+-- 'Daml.Script.Disclosure' has no field for) now lives in 'Playground.Disclose', which both
+-- this Amulet-specific seam and the general playground-template seam share.
 
 -- | Everything 'Playground.Ops:transferOut''s "amulet" branch needs, resolved off-ledger by
 -- Go (internal/amulet.GetTransferFactory) and passed through verbatim.

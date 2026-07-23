@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/disclosure"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/profile"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
@@ -25,6 +26,10 @@ type app struct {
 	runDir    string
 	profile   profile.Name
 	verbose   bool
+
+	// topologyConfigPath is the --topology-config flag's value; empty means "use the default
+	// path next to the state file" (see resolvedTopologyConfigPath).
+	topologyConfigPath string
 
 	// stderr is the invoked command's error stream, captured once in PersistentPreRun so
 	// helpers constructed without a *cobra.Command in scope (the script runner and network
@@ -62,6 +67,7 @@ func newRootCmdForApp(a *app) *cobra.Command {
 	root.PersistentFlags().StringVar(&a.runDir, "run-dir", "", "directory for network run-state and script I/O files (default: alongside the state file)")
 	root.PersistentFlags().StringVar((*string)(&a.profile), "profile", string(profile.Sandbox), "network profile: sandbox|localnet")
 	root.PersistentFlags().BoolVar(&a.verbose, "verbose", false, "narrate every sub-step (network bring-up, party allocation, each dpm script run) on stderr")
+	root.PersistentFlags().StringVar(&a.topologyConfigPath, "topology-config", "", "path to the topology/disclosure config file (default: playground.topology.json next to the state file)")
 
 	root.AddCommand(
 		newNetworkCmd(a),
@@ -175,6 +181,31 @@ func (a *app) saveState(s *state.State) error {
 
 func (a *app) resolvedProfile() (profile.Profile, error) {
 	return profile.Get(a.profile)
+}
+
+// resolvedTopologyConfigPath returns a.topologyConfigPath if set, else the default path
+// (playground.topology.json alongside the state file) -- mirrors resolvedRunDir's pattern.
+func (a *app) resolvedTopologyConfigPath() string {
+	if a.topologyConfigPath != "" {
+		return a.topologyConfigPath
+	}
+	dir := filepath.Dir(a.stateFile)
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "playground.topology.json")
+}
+
+// topologyConfig loads the party-hosting/disclosure config used to route a hint to its
+// participant (see resolveParticipantRole in party.go) and to gate which templates a
+// cross-participant submit is allowed to fetch a disclosure for (see cmd/ntt-playground/
+// remote.go). A missing file at the resolved path is not an error -- disclosure.Load already
+// degrades to the built-in localnet defaults (empty Disclose list, default partyHosting) --
+// but a PRESENT, malformed file is: propagated to the caller rather than silently ignored, so
+// a typo in a hand-written --topology-config fails loudly instead of quietly disclosing
+// nothing.
+func (a *app) topologyConfig() (disclosure.Config, error) {
+	return disclosure.Load(a.resolvedTopologyConfigPath())
 }
 
 // resolveProfileFromState defaults a.profile to the profile recorded in the state file at

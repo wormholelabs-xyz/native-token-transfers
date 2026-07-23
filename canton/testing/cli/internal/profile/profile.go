@@ -53,6 +53,62 @@ type Profile struct {
 	// transfer-instruction registry's scan-proxy, DSO party lookup) -- internal/amulet's
 	// target. Empty for the sandbox, which has no validator/DSO at all.
 	ValidatorBaseURL string
+
+	// Participants maps a participant role (e.g. "app-provider", "app-user", "bob",
+	// "guardian-governance", "guardian-observer") to that participant's connection details.
+	// LocalNet has all five (see the plan's §2 port table); the sandbox -- a single
+	// in-process participant, per internal/network/sandbox.go -- has exactly one, keyed
+	// "default".
+	//
+	// TODO(phase 3): nothing routes through this map yet. The existing top-level
+	// LedgerHost/LedgerPort/JSONAPIBaseURL/ValidatorBaseURL/UserID fields above remain the
+	// single source of truth every other package reads today (internal/ledger, party.go,
+	// runner.go, ...); they always mirror Participants[DefaultParticipant]. Rewiring callers
+	// to go through Endpoint(role) instead is phase 3's job.
+	Participants map[string]Endpoint
+
+	// DefaultParticipant is the Participants key the top-level fields above mirror --
+	// "app-provider" for LocalNet, "default" for the sandbox.
+	DefaultParticipant string
+}
+
+// Endpoint is one participant's connection details: everything internal/ledger and
+// internal/network need to submit `dpm script` calls and JSON-API/validator-API requests
+// against that specific participant.
+type Endpoint struct {
+	LedgerHost string
+	LedgerPort int
+
+	// JSONAPIBaseURL is empty for the sandbox (no auth, no JSON API needed there).
+	JSONAPIBaseURL string
+
+	// ValidatorBaseURL is empty for the sandbox (no validator/DSO at all).
+	ValidatorBaseURL string
+
+	// UserID is the daml-script --user-id to run as against this participant. "ledger-api-
+	// user" on every LocalNet participant (see the plan's §2 provenance column); empty for
+	// the sandbox.
+	UserID string
+}
+
+// Endpoint returns the connection details for role, falling back to the profile's default
+// participant when role is "" or does not name a configured participant (e.g. an unmapped
+// party hint on a --topology-config whose partyHosting map doesn't cover it). It never
+// errors: the error return exists only so a future stricter mode (e.g. an explicit
+// --require-known-participant flag) can be added without a signature change.
+func (p Profile) Endpoint(role string) (Endpoint, error) {
+	if role == "" {
+		role = p.DefaultParticipant
+	}
+	if ep, ok := p.Participants[role]; ok {
+		return ep, nil
+	}
+	// Unknown role: fall back to the default endpoint rather than erroring. The plan's §3
+	// sketch is ambiguous between erroring and falling back here; falling back is what makes
+	// DefaultParticipant meaningful as a genuine fallback target (matching how
+	// disclosure.Config's "*" wildcard degrades to app-provider), and keeps an unrecognized
+	// hint from hard-failing a command outright.
+	return p.Participants[p.DefaultParticipant], nil
 }
 
 // SandboxPort returns the sandbox gRPC port: CANTON_SANDBOX_PORT if set (matching the
@@ -73,13 +129,19 @@ func SandboxPort() int {
 func Get(name Name) (Profile, error) {
 	switch name {
 	case Sandbox, "":
+		ep := Endpoint{
+			LedgerHost: "localhost",
+			LedgerPort: SandboxPort(),
+		}
 		return Profile{
-			Name:            Sandbox,
-			LedgerHost:      "localhost",
-			LedgerPort:      SandboxPort(),
-			RequiresAuth:    false,
-			UploadDAR:       true,
-			AmuletAvailable: false,
+			Name:               Sandbox,
+			LedgerHost:         ep.LedgerHost,
+			LedgerPort:         ep.LedgerPort,
+			RequiresAuth:       false,
+			UploadDAR:          true,
+			AmuletAvailable:    false,
+			Participants:       map[string]Endpoint{"default": ep},
+			DefaultParticipant: "default",
 		}, nil
 	case LocalNet:
 		host := envOr("LOCALNET_LEDGER_HOST", "localhost")
@@ -87,6 +149,32 @@ func Get(name Name) (Profile, error) {
 		if v := os.Getenv("LOCALNET_LEDGER_PORT"); v != "" {
 			_, _ = fmt.Sscanf(v, "%d", &port)
 		}
+		jsonAPI := envOr("LOCALNET_JSON_API_URL", "http://localhost:3975")
+		validatorAPI := envOr("LOCALNET_VALIDATOR_URL", "http://localhost:3903")
+		const userID = "ledger-api-user"
+
+		// app-provider is the only endpoint the LOCALNET_* env overrides ever touch (see
+		// TestGet_LocalNet_EnvOverrides_HitDefaultOnly) -- it is both the top-level
+		// LedgerHost/... fields above AND Participants["app-provider"]. The other four
+		// participants (see the plan's §2 port table) are localnet-only, bundle-fixed
+		// ports with no env override of their own yet.
+		appProvider := Endpoint{
+			LedgerHost:       host,
+			LedgerPort:       port,
+			JSONAPIBaseURL:   jsonAPI,
+			ValidatorBaseURL: validatorAPI,
+			UserID:           userID,
+		}
+		localEndpoint := func(ledgerPort, jsonAPIPort, validatorPort int) Endpoint {
+			return Endpoint{
+				LedgerHost:       "localhost",
+				LedgerPort:       ledgerPort,
+				JSONAPIBaseURL:   fmt.Sprintf("http://localhost:%d", jsonAPIPort),
+				ValidatorBaseURL: fmt.Sprintf("http://localhost:%d", validatorPort),
+				UserID:           userID,
+			}
+		}
+
 		return Profile{
 			Name:             LocalNet,
 			LedgerHost:       host,
@@ -94,9 +182,17 @@ func Get(name Name) (Profile, error) {
 			RequiresAuth:     true,
 			UploadDAR:        true,
 			AmuletAvailable:  true,
-			UserID:           "ledger-api-user",
-			JSONAPIBaseURL:   envOr("LOCALNET_JSON_API_URL", "http://localhost:3975"),
-			ValidatorBaseURL: envOr("LOCALNET_VALIDATOR_URL", "http://localhost:3903"),
+			UserID:           userID,
+			JSONAPIBaseURL:   jsonAPI,
+			ValidatorBaseURL: validatorAPI,
+			Participants: map[string]Endpoint{
+				"app-provider":        appProvider,
+				"app-user":            localEndpoint(2901, 2975, 2903),
+				"bob":                 localEndpoint(5901, 5975, 5903),
+				"guardian-governance": localEndpoint(6901, 6975, 6903),
+				"guardian-observer":   localEndpoint(7901, 7975, 7903),
+			},
+			DefaultParticipant: "app-provider",
 		}, nil
 	default:
 		return Profile{}, fmt.Errorf("profile: unknown profile %q (want sandbox|localnet)", name)

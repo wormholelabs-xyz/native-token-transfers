@@ -129,7 +129,7 @@ testPlaygroundDeployMockBurnMint = do
   (operator, gg, _csId) <- nttSetup
   admin <- allocateParty "PlaygroundDeployBMAdmin"
 
-  _regOut <- deployRegistry DeployRegistryInput with
+  regOut <- deployRegistry DeployRegistryInput with
     guardianGovernance = gg
     admin
     mode = "burn-mint"
@@ -146,6 +146,7 @@ testPlaygroundDeployMockBurnMint = do
     instrumentNonce = 0
     instrumentAdmin = None
     amuletFactoryCid = None
+    factoryCid = regOut.factoryCid
 
   (_, mgr) <- resolveManager operator deployOut.managerId
   mgr.tokenConfig === BurnMint
@@ -161,7 +162,7 @@ testPlaygroundDeployMockLockUnlock = do
   (operator, gg, _csId) <- nttSetup
   admin <- allocateParty "PlaygroundDeployLUAdmin"
 
-  _regOut <- deployRegistry DeployRegistryInput with
+  regOut <- deployRegistry DeployRegistryInput with
     guardianGovernance = gg
     admin
     mode = "lock-unlock"
@@ -178,6 +179,7 @@ testPlaygroundDeployMockLockUnlock = do
     instrumentNonce = 0
     instrumentAdmin = None
     amuletFactoryCid = None
+    factoryCid = regOut.factoryCid
 
   (_, mgr) <- resolveManager operator deployOut.managerId
   mgr.tokenConfig === LockUnlock
@@ -256,6 +258,7 @@ testPlaygroundTransferRecomputeMatches = do
     consistencyLevel = 0
     inputHoldingCids = [holdingCid]
     amulet = None
+    remote = None
 
   out.outboundSequence === emBefore.sequence
 

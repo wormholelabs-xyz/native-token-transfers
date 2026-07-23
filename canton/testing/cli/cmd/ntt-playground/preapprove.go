@@ -7,6 +7,10 @@ import (
 )
 
 // preapproveInput/preapproveOutput mirror Playground.Ops.daml's PreapproveInput/PreapproveOutput.
+// No RemoteSeam field: preapprove is a self-signed create by the user (owner), with only plain
+// Party values as arguments -- no cross-participant contract fetch is ever needed, so it always
+// routes to the user's own participant and runs there unassisted (see Ops.daml's doc comment on
+// 'preapprove').
 type preapproveInput struct {
 	Admin              string `json:"admin"`
 	GuardianGovernance string `json:"guardianGovernance"`
@@ -41,7 +45,7 @@ func newPreapproveCmd(a *app) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "preapprove",
-		Short: "Pre-approve a recipient's inbound deposits (NttToken.PreApproveDeposit)",
+		Short: "Pre-approve a recipient's inbound deliveries (DepositPreapproval or MockTransferPreapproval, per mode)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			s, err := a.loadState()
@@ -57,7 +61,10 @@ func newPreapproveCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// preapprove is a recipient-authorized opt-in, so it routes to the user's own
+			// participant (plan §3) -- and needs no RemoteSeam (see preapproveInput's doc
+			// comment): a self-signed create by the user, no cross-participant contract fetch.
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants[userHint])
 			if err != nil {
 				return err
 			}
@@ -113,7 +120,8 @@ func newPreapproveRevokeCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// revoke, like preapprove, routes to the user's own participant (plan §3).
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants[userHint])
 			if err != nil {
 				return err
 			}

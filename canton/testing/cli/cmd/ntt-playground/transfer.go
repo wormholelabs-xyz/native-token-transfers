@@ -40,6 +40,11 @@ type transferOutInput struct {
 	ConsistencyLevel int             `json:"consistencyLevel"`
 	InputHoldingCids []string        `json:"inputHoldingCids"`
 	Amulet           *amuletSeamJSON `json:"amulet"` // "amulet" only; null otherwise
+	// Remote carries a pre-fetched Playground.Prepare:prepareTransferOut RemoteSeam, as raw
+	// JSON -- nil marshals to `null` (Daml's None), the unchanged same-participant fast path.
+	// See cmd/ntt-playground/remote.go: the CLI never parses or constructs this value, only
+	// relays it between two `dpm script` calls.
+	Remote json.RawMessage `json:"remote"`
 }
 
 // amuletSeamJSON/disclosedContractInJSON mirror Playground.Amulet.daml's
@@ -140,7 +145,7 @@ func newTransferCmd(a *app) *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("transfer: onboard sender wallet user %q: %w", userHint, err)
 					}
-					if err := grantActAs(cmd, a, party); err != nil {
+					if err := grantActAs(cmd, a, "", party); err != nil {
 						return fmt.Errorf("transfer: grant actAs on sender party %s: %w", party, err)
 					}
 					s.Users[userHint] = party
@@ -163,12 +168,6 @@ func newTransferCmd(a *app) *cobra.Command {
 			}
 			a.vlogf(cmd, "transfer: user %q → %s, deployment %q (managerId=%d)", userHint, userParty, deployment, d.ManagerID)
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-
 			// Daml's `[ContractId Holding]` needs a JSON array, never `null` -- must start
 			// non-nil (a nil Go slice marshals to `null`).
 			holdingCids := []string{}
@@ -181,28 +180,46 @@ func newTransferCmd(a *app) *cobra.Command {
 				// lock-unlock mock sender needs no MockTransferPreapproval of its own to lock;
 				// only the admin-as-custodian needs one, self-created at deploy time), so
 				// passing d.Mode here would ensure the wrong template for lock-unlock deployments.
+				// preapprove is a self-signed create by the sender, so it routes to the
+				// sender's own participant (plan §3).
+				preRunner, preCleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants[userHint])
+				if err != nil {
+					return err
+				}
 				a.vlogf(cmd, "transfer: ensuring sender %q has a standing pre-approval (Playground.Ops:preapprove)", userHint)
 				var preOut preapproveOutput
-				if err := runner.Run(ctx, "Playground.Ops:preapprove", preapproveInput{
+				preErr := preRunner.Run(ctx, "Playground.Ops:preapprove", preapproveInput{
 					Admin:              d.Admin,
 					GuardianGovernance: s.GuardianGovernance,
 					TokenKind:          d.TokenKind,
 					Mode:               "burn-mint",
 					User:               userParty,
-				}, &preOut); err != nil {
-					return fmt.Errorf("transfer: ensure sender pre-approval: %w", err)
+				}, &preOut)
+				preCleanup()
+				if preErr != nil {
+					return fmt.Errorf("transfer: ensure sender pre-approval: %w", preErr)
 				}
 
+				// fundUser submits (and queries the faucet factory/preapproval) as gg alone --
+				// see Playground.Ops:fundUser -- so it routes to gg's OWN participant, not the
+				// sender's or the default one (plan §8's "fundUser stays two routed calls").
+				ggRole := participantRoleForParty(s, s.GuardianGovernance)
+				fundRunner, fundCleanup, err := a.newScriptRunnerFor(ctx, ggRole)
+				if err != nil {
+					return err
+				}
 				decimals := wire.TrimDecimals(d.TokenDecimals)
 				a.vlogf(cmd, "transfer: funding sender with %s via Playground.Ops:fundUser (holding cid feeds transferOut)", formatDecimal(amount, decimals))
 				var fundOut fundUserOutput
-				if err := runner.Run(ctx, "Playground.Ops:fundUser", fundUserInput{
+				fundErr := fundRunner.Run(ctx, "Playground.Ops:fundUser", fundUserInput{
 					GuardianGovernance: s.GuardianGovernance,
 					Admin:              d.Admin,
 					Owner:              userParty,
 					Amount:             decimalLiteral(formatDecimal(amount, decimals)),
-				}, &fundOut); err != nil {
-					return fmt.Errorf("transfer: funding user for a mock deployment: %w", err)
+				}, &fundOut)
+				fundCleanup()
+				if fundErr != nil {
+					return fmt.Errorf("transfer: funding user for a mock deployment: %w", fundErr)
 				}
 				holdingCids = []string{fundOut.HoldingCid}
 			}
@@ -233,8 +250,39 @@ func newTransferCmd(a *app) *cobra.Command {
 				}
 			}
 
+			// transferOut submits AS the user, so it routes to the user's home participant
+			// (plan §3) -- s.UserParticipants[userHint] was just populated (if not already
+			// set) by resolveParty above; an amulet sender never goes through resolveParty
+			// (it's a validator wallet user, see the branch above), so its UserParticipants
+			// entry is unset and this correctly falls back to the default (app-provider),
+			// matching "amulet wallet senders remain app-provider wallet users -- unchanged".
+			//
+			// The data owner for a Mock-kind prepare fetch is gg's OWN participant, not
+			// operator's: guardianGovernance co-signs/owns everything transferOut needs
+			// (NttManager/CoreState/Emitter/the committed factory/preapproval -- see
+			// Playground.Prepare's header), which operator's participant cannot serve for the
+			// gg-sole-owned factory/preapproval templates.
+			actorRole := s.UserParticipants[userHint]
+			ownerRole := participantRoleForParty(s, s.GuardianGovernance)
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, ownerRole, "Playground.Prepare:prepareTransferOut", func(templates []string) any {
+				return prepareTransferOutInput{
+					GuardianGovernance: s.GuardianGovernance,
+					ManagerID:          d.ManagerID,
+					DiscloseTemplates:  templates,
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("transfer: prepare remote disclosure: %w", err)
+			}
+
+			userRunner, userCleanup, err := a.newScriptRunnerFor(ctx, actorRole)
+			if err != nil {
+				return err
+			}
+			defer userCleanup()
+
 			var out transferOutOutput
-			if err := runner.Run(ctx, "Playground.Ops:transferOut", transferOutInput{
+			if err := userRunner.Run(ctx, "Playground.Ops:transferOut", transferOutInput{
 				Operator:         s.Operator,
 				ManagerID:        d.ManagerID,
 				Admin:            d.Admin,
@@ -248,6 +296,7 @@ func newTransferCmd(a *app) *cobra.Command {
 				ConsistencyLevel: consistencyLevel,
 				InputHoldingCids: holdingCids,
 				Amulet:           amuletSeam,
+				Remote:           remoteSeam,
 			}, &out); err != nil {
 				return err
 			}

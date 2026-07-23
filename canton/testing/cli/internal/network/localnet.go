@@ -14,10 +14,11 @@ package network
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -42,6 +43,28 @@ var postgresOverride []byte
 
 // postgresOverrideFile is the override's filename inside ComposeDir.
 const postgresOverrideFile = "wormhole-postgres-override.yaml"
+
+// participantsOverride adds three new Canton participants -- bob, guardian-governance,
+// guardian-observer -- hosted inside the bundle's existing `canton`/`splice` containers (see
+// the plan's §2 port table, .claude/tasks/e2e-separate-participants.md). A fourth candidate,
+// app-user (Alice), needs no override: verified live that it already runs today under the
+// bundle's own default (see the Up doc comment below).
+//
+//go:embed localnet_participants_override.yaml
+var participantsOverride []byte
+
+// participantsOverrideFile is the override's filename inside ComposeDir.
+const participantsOverrideFile = "wormhole-participants-override.yaml"
+
+// participantConfFS holds the per-participant Canton/Splice conf files and wrapper app.conf
+// files/health-check scripts the participants override mounts -- see ensureParticipantConfs.
+//
+//go:embed localnet_conf
+var participantConfFS embed.FS
+
+// participantConfRoot is participantConfFS's root directory, and also the ComposeDir
+// subdirectory ensureParticipantConfs mirrors it into (as wormhole-conf/).
+const participantConfRoot = "localnet_conf"
 
 // LocalNetAudience is the unsafe shared-secret JWT audience Splice LocalNet expects.
 const LocalNetAudience = "https://canton.network.global"
@@ -119,6 +142,7 @@ func (m *LocalNetManager) composeArgs(rest ...string) []string {
 		"-f", filepath.Join(m.ComposeDir, "compose.yaml"),
 		"-f", filepath.Join(m.ComposeDir, "resource-constraints.yaml"),
 		"-f", filepath.Join(m.ComposeDir, postgresOverrideFile),
+		"-f", filepath.Join(m.ComposeDir, participantsOverrideFile),
 		"--profile", "sv",
 		"--profile", "app-provider",
 	}
@@ -140,6 +164,77 @@ func (m *LocalNetManager) ensurePostgresOverride() error {
 	return nil
 }
 
+// ensureParticipantsOverride writes the embedded participants override into ComposeDir (or
+// refreshes it if stale), mirroring ensurePostgresOverride exactly.
+func (m *LocalNetManager) ensureParticipantsOverride() error {
+	path := filepath.Join(m.ComposeDir, participantsOverrideFile)
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, participantsOverride) {
+		m.logf("localnet: participants override up-to-date (%s)", path)
+		return nil
+	}
+	if err := os.WriteFile(path, participantsOverride, 0o644); err != nil {
+		return fmt.Errorf("network: writing participants override: %w", err)
+	}
+	m.logf("localnet: participants override written (%s)", path)
+	return nil
+}
+
+// ensureParticipantConfs writes every embedded file under participantConfFS into
+// ComposeDir/wormhole-conf/, preserving the embedded tree's relative layout (the participants
+// override's volume mounts reference these paths -- e.g. wormhole-conf/canton-app.conf,
+// wormhole-conf/canton/bob/app.conf). Each file is skipped when the on-disk copy already
+// matches (same up-to-date-else-rewrite idempotency as ensurePostgresOverride); shell scripts
+// are written executable.
+func (m *LocalNetManager) ensureParticipantConfs() error {
+	root := filepath.Join(m.ComposeDir, "wormhole-conf")
+	return fs.WalkDir(participantConfFS, participantConfRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(participantConfRoot, path)
+		if err != nil {
+			return fmt.Errorf("network: relativize embedded conf path %s: %w", path, err)
+		}
+		content, err := participantConfFS.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("network: read embedded conf %s: %w", path, err)
+		}
+		dest := filepath.Join(root, rel)
+		if existing, statErr := os.ReadFile(dest); statErr == nil && bytes.Equal(existing, content) {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return fmt.Errorf("network: mkdir for %s: %w", dest, err)
+		}
+		mode := os.FileMode(0o644)
+		if strings.HasSuffix(dest, ".sh") {
+			mode = 0o755
+		}
+		if err := os.WriteFile(dest, content, mode); err != nil {
+			return fmt.Errorf("network: writing %s: %w", dest, err)
+		}
+		m.logf("localnet: participant conf written (%s)", dest)
+		return nil
+	})
+}
+
+// ensureOverrides writes/refreshes every generated compose override and conf file this
+// manager depends on (postgres rename, new participants, their conf files) -- the single
+// entry point Up/Down/Status call before touching docker compose, so every invocation sees
+// the same generated config regardless of which subcommand ran first.
+func (m *LocalNetManager) ensureOverrides() error {
+	if err := m.ensurePostgresOverride(); err != nil {
+		return err
+	}
+	if err := m.ensureParticipantsOverride(); err != nil {
+		return err
+	}
+	return m.ensureParticipantConfs()
+}
+
 func (m *LocalNetManager) env() []string {
 	env := os.Environ()
 	if m.ImageTag != "" {
@@ -148,18 +243,27 @@ func (m *LocalNetManager) env() []string {
 	return env
 }
 
-// Up brings the smallest useful LocalNet topology up (sv + app-provider profiles,
-// APP_USER_PROFILE=off per compose.env's default) and waits for docker compose's own
-// healthchecks (--wait), then polls the validator readyz endpoint as a belt-and-braces
+// Up brings the LocalNet topology up (sv + app-provider profiles passed to `docker
+// compose`, plus this package's participants override) and waits for docker compose's own
+// healthchecks (--wait), then polls the validator readyz endpoints as a belt-and-braces
 // check. First boot bootstraps the DSO (the network's Decentralized Synchronizer Operator
 // party) and is documented at 2-6 minutes, so the timeout should be generous.
+//
+// Despite only "sv" and "app-provider" being passed as --profile flags, FIVE participants
+// come up: app-provider and sv (named by the passed profiles), app-user (verified live --
+// compose.env defaults APP_USER_PROFILE=on, and conf/canton/app.conf's
+// `include file("/app/app-user/on/app.conf")` is unconditional once the canton container
+// starts under any profile, since Compose's --profile flag only gates which SERVICES start,
+// not which conf/env-file paths a running service's own volume mounts resolve to -- so
+// app-user's participant and validator run today with no override needed), plus this
+// package's own bob/guardian-governance/guardian-observer additions (participantsOverride).
 func (m *LocalNetManager) Up(ctx context.Context, timeout time.Duration) error {
 	tag := m.ImageTag
 	if tag == "" {
 		tag = "default"
 	}
-	m.logf("localnet: compose dir=%s image-tag=%s profiles=[sv app-provider]", m.ComposeDir, tag)
-	if err := m.ensurePostgresOverride(); err != nil {
+	m.logf("localnet: compose dir=%s image-tag=%s profiles=[sv app-provider] (app-user, bob, guardian-governance, guardian-observer also come up -- see Up's doc comment)", m.ComposeDir, tag)
+	if err := m.ensureOverrides(); err != nil {
 		return err
 	}
 	m.logf("localnet: docker compose up -d --wait (first boot's DSO bootstrap takes 2-6 minutes)")
@@ -203,7 +307,7 @@ func (m *LocalNetManager) logComposeServices(ctx context.Context) {
 // Down tears the stack down and wipes state (parties/DARs/ledger data) with `down -v`, so
 // the next Up starts from a clean genesis.
 func (m *LocalNetManager) Down(ctx context.Context) error {
-	if err := m.ensurePostgresOverride(); err != nil {
+	if err := m.ensureOverrides(); err != nil {
 		return err
 	}
 	m.logf("localnet: docker compose down -v (wipes parties/DARs/ledger state)")
@@ -231,7 +335,7 @@ type ComposeService struct {
 // since the stack only requires >= 2.24 for the override's `!override` tag, not an exact
 // version. An empty result means the stack is down (`ps` lists nothing after `down`).
 func (m *LocalNetManager) Status(ctx context.Context) ([]ComposeService, error) {
-	if err := m.ensurePostgresOverride(); err != nil {
+	if err := m.ensureOverrides(); err != nil {
 		return nil, err
 	}
 	m.logf("localnet: docker compose ps --format json (listing running services)")
@@ -282,38 +386,72 @@ func (m *LocalNetManager) Status(ctx context.Context) ([]ComposeService, error) 
 // returned). Requiring a short stable window catches that before the suite starts submitting.
 const readyStabilityStreak = 3
 
+// participantProbe is one participant's readiness targets: its validator API base (for
+// readyz) and its gRPC Ledger API address (for the TCP probe `dpm script` itself dials).
+type participantProbe struct {
+	role         string
+	ledgerAddr   string
+	validatorURL string
+}
+
+// allParticipantProbes lists every participant waitReady must see stably ready before a
+// LocalNet `network up` returns: the two named by --profile (app-provider via the manager's
+// own configurable ledgerAddr/validatorBaseURL, sv has no user-facing participant of its
+// own), app-user (already running today -- see Up's doc comment), and this package's three
+// additions. Ports are the plan's §2 table; localnet-only fixed ports, no env override (only
+// app-provider's has one, matching profile.Profile's existing LOCALNET_* env vars).
+func (m *LocalNetManager) allParticipantProbes() []participantProbe {
+	return []participantProbe{
+		{role: "app-provider", ledgerAddr: m.ledgerAddr(), validatorURL: m.validatorBaseURL()},
+		{role: "app-user", ledgerAddr: "localhost:2901", validatorURL: "http://localhost:2903"},
+		{role: "bob", ledgerAddr: "localhost:5901", validatorURL: "http://localhost:5903"},
+		{role: "guardian-governance", ledgerAddr: "localhost:6901", validatorURL: "http://localhost:6903"},
+		{role: "guardian-observer", ledgerAddr: "localhost:7901", validatorURL: "http://localhost:7903"},
+	}
+}
+
 func (m *LocalNetManager) waitReady(ctx context.Context, timeout time.Duration) error {
 	// readyz is unauthenticated, but the v0 scan-proxy endpoint rejects bare requests with
-	// a 401 (verified against a live 0.6.12 stack), so the second probe must carry an
+	// a 401 (verified against a live 0.6.12 stack), so the scan-proxy probe must carry an
 	// admin bearer token -- without it this loop spins until the timeout even though the
-	// validator is fully ready.
+	// validator is fully ready. scan-proxy is only probed once (against app-provider,
+	// today's default participant): it answers with the same DSO-wide party id regardless
+	// of which validator answers, so checking it per-participant would be redundant.
 	token, err := MintUnsafeToken(LocalNetAdminUser, timeout+time.Hour)
 	if err != nil {
 		return err
 	}
-	ledgerAddr := m.ledgerAddr()
-	m.logf("localnet: polling readyz + scan-proxy (validator %s) + ledger gRPC port (%s), requiring %d consecutive clean checks",
-		m.validatorBaseURL(), ledgerAddr, readyStabilityStreak)
+	probes := m.allParticipantProbes()
+	roles := make([]string, len(probes))
+	for i, p := range probes {
+		roles[i] = p.role
+	}
+	m.logf("localnet: polling readyz + ledger gRPC port for %d participants (%s) + scan-proxy, requiring %d consecutive clean checks",
+		len(probes), strings.Join(roles, ", "), readyStabilityStreak)
 	start := time.Now()
 	client := &http.Client{Timeout: 10 * time.Second}
 	deadline := time.Now().Add(timeout)
 	streak := 0
 	for {
-		ok := probeGET(ctx, client, m.validatorBaseURL()+"/api/validator/readyz", "") &&
-			probeGET(ctx, client, m.validatorBaseURL()+"/api/validator/v0/scan-proxy/dso-party-id", token) &&
-			probeTCP(ctx, ledgerAddr, 5*time.Second)
+		ok := probeGET(ctx, client, m.validatorBaseURL()+"/api/validator/v0/scan-proxy/dso-party-id", token)
+		for _, p := range probes {
+			if !ok {
+				break
+			}
+			ok = probeGET(ctx, client, p.validatorURL+"/api/validator/readyz", "") && probeTCP(ctx, p.ledgerAddr, 5*time.Second)
+		}
 		if ok {
 			streak++
 			m.logf("localnet: readiness check %d/%d clean", streak, readyStabilityStreak)
 			if streak >= readyStabilityStreak {
-				m.logf("localnet: validator ready (%s); participant endpoints: ledger-gRPC :3901, JSON-API :3975, validator :3903", time.Since(start).Round(time.Second))
+				m.logf("localnet: all %d participants ready (%s): %s", len(probes), time.Since(start).Round(time.Second), roles)
 				return nil
 			}
 		} else {
 			streak = 0
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("network: LocalNet validator API never became stably ready within %s", timeout)
+			return fmt.Errorf("network: LocalNet validator APIs never became stably ready within %s (participants: %s)", timeout, strings.Join(roles, ", "))
 		}
 		select {
 		case <-ctx.Done():
@@ -437,6 +575,56 @@ func (m *LocalNetManager) UploadDAR(ctx context.Context, jsonLedgerAPIBaseURL, d
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("network: upload DAR: HTTP %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// allParticipantJSONAPIBaseURLs lists every participant's JSON Ledger API v2 base URL --
+// app-provider (via the manager's own configurable ValidatorBaseURL-adjacent JSON API,
+// mirrored from the port table) plus the four others, all fixed localnet ports (plan §2).
+func (m *LocalNetManager) allParticipantJSONAPIBaseURLs() map[string]string {
+	return map[string]string{
+		"app-provider":        m.jsonAPIBaseURL(),
+		"app-user":            "http://localhost:2975",
+		"bob":                 "http://localhost:5975",
+		"guardian-governance": "http://localhost:6975",
+		"guardian-observer":   "http://localhost:7975",
+	}
+}
+
+// jsonAPIBaseURL mirrors ledgerAddr's precedence (struct field, then LOCALNET_JSON_API_URL,
+// then the bundle default) for app-provider's JSON API -- the one participant whose port is
+// env-overridable.
+func (m *LocalNetManager) jsonAPIBaseURL() string {
+	if v := os.Getenv("LOCALNET_JSON_API_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:3975"
+}
+
+// UploadDARToAllParticipants uploads darPath to every participant's JSON Ledger API v2, not
+// just app-provider's. Informee/confirming participants (e.g. guardian-observer, which only
+// ever receives CoreState/Emitter as an observer projection) must have the package vetted
+// locally to process a transaction referencing it even if no script ever submits there --
+// `dpm script --upload-dar true` only covers the one participant a given script call targets,
+// so this closes the gap for `network up`. Failures are collected and returned together
+// (rather than stopping at the first) so a single unreachable participant doesn't hide
+// failures on the others -- useful when this is used as an up-front sanity check.
+func (m *LocalNetManager) UploadDARToAllParticipants(ctx context.Context, darPath string) error {
+	token, err := MintUnsafeToken(LocalNetAdminUser, time.Hour)
+	if err != nil {
+		return err
+	}
+	var errs []string
+	for role, jsonAPI := range m.allParticipantJSONAPIBaseURLs() {
+		if err := m.UploadDAR(ctx, jsonAPI, darPath, token); err != nil {
+			errs = append(errs, fmt.Sprintf("%s (%s): %v", role, jsonAPI, err))
+		} else {
+			m.logf("localnet: DAR uploaded to %s (%s)", role, jsonAPI)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("network: uploading DAR to all participants: %s", strings.Join(errs, "; "))
 	}
 	return nil
 }

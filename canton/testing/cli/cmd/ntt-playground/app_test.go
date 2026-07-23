@@ -318,8 +318,133 @@ func TestGrantActAs_NoAuthProfileIsNoOp(t *testing.T) {
 	a := &app{profile: profile.Sandbox}
 	root := newRootCmd()
 	root.SetContext(context.Background())
-	if err := grantActAs(root, a, "some::party"); err != nil {
+	if err := grantActAs(root, a, "", "some::party"); err != nil {
 		t.Fatalf("grantActAs on the sandbox profile must be a no-op, got %v", err)
 	}
 }
 
+// ----------------------------------------------------------------------
+// resolveParty: fresh-allocation branch routes via resolveParticipantRole and persists
+// s.UserParticipants (plan §3, phase 3 routing wiring).
+// ----------------------------------------------------------------------
+
+// fakeDpmAllocatingParty writes an executable POSIX shell script standing in for `dpm script`:
+// it pulls --output-file from argv and always succeeds, writing a single allocatePlaygroundParty-
+// shaped JSON output (`{"party": "<hint>::<partyIDSuffix>"}`) derived from the input file's
+// "hint" field, so distinct hints produce distinct, inspectable party ids without needing a
+// real ledger.
+func fakeDpmAllocatingParty(t *testing.T, partyIDSuffix string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dpm")
+	script := `#!/bin/sh
+out="" inp=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output-file) out="$2"; shift 2;;
+    --input-file) inp="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+hint=$(sed -n 's/.*"hint" *: *"\([^"]*\)".*/\1/p' "$inp")
+echo "{\"party\": \"${hint}::` + partyIDSuffix + `\"}" > "$out"
+exit 0
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dpm script: %v", err)
+	}
+	return path
+}
+
+// newTestAppForResolveParty builds an *app wired to a fake dpm binary and a throwaway
+// canton-dir fixture (multi-package.yaml-free -- a.cantonDir is set explicitly, so
+// resolvedCantonDir's discovery walk never runs) containing a placeholder DAR at the path
+// a.darPath() expects, so newScriptRunnerFor's DAR-exists check passes without a real build.
+func newTestAppForResolveParty(t *testing.T, prof profile.Name) *app {
+	t.Helper()
+	cantonDir := t.TempDir()
+	darDir := filepath.Join(cantonDir, "test", ".daml", "dist")
+	if err := os.MkdirAll(darDir, 0o755); err != nil {
+		t.Fatalf("mkdir dar dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(darDir, "ntt-test-0.1.0.dar"), []byte("placeholder"), 0o644); err != nil {
+		t.Fatalf("write placeholder DAR: %v", err)
+	}
+	return &app{
+		profile:   prof,
+		cantonDir: cantonDir,
+		dpmPath:   fakeDpmAllocatingParty(t, "abc"),
+		stateFile: filepath.Join(t.TempDir(), "playground.state.json"),
+	}
+}
+
+// TestResolveParty_FreshAllocation_PersistsResolvedParticipant proves a fresh allocation
+// resolves the hint's participant role via resolveParticipantRole's precedence (the built-in
+// localnet default hosting map, since no --topology-config is wired yet -- see
+// app.topologyConfig) and persists that CONCRETE role (never "") into s.UserParticipants, so a
+// later invocation stays pinned to it even if the config changes. Uses the sandbox profile
+// (RequiresAuth=false) so grantActAs's HTTP call is a no-op and the test needs no ledger/HTTP
+// mocking -- resolveParticipantRole's OWN computed role ("app-user" for "Alice", "bob" for
+// "Bob", "app-provider" for the "*" wildcard) is still what gets persisted regardless of
+// profile, exactly matching the plan's §2 note that sandbox routing "degenerates" at the
+// Endpoint() lookup layer, not at the routing-decision layer this test exercises.
+func TestResolveParty_FreshAllocation_PersistsResolvedParticipant(t *testing.T) {
+	cases := []struct {
+		hint     string
+		wantRole string
+	}{
+		{"Alice", "app-user"},
+		{"Bob", "bob"},
+		{"GuardianGovernance", "guardian-governance"},
+		{"GuardianObserver", "guardian-observer"},
+		{"SomeoneNotListed", "app-provider"}, // falls through to the "*" wildcard
+	}
+	for _, c := range cases {
+		t.Run(c.hint, func(t *testing.T) {
+			a := newTestAppForResolveParty(t, profile.Sandbox)
+			root := newRootCmd()
+			root.SetContext(context.Background())
+			s := state.New()
+
+			party, err := resolveParty(root, a, s, c.hint)
+			if err != nil {
+				t.Fatalf("resolveParty(%s): %v", c.hint, err)
+			}
+			wantParty := c.hint + "::abc"
+			if party != wantParty {
+				t.Fatalf("party mismatch: got %q, want %q", party, wantParty)
+			}
+			if got := s.Users[c.hint]; got != wantParty {
+				t.Fatalf("s.Users[%s] = %q, want %q", c.hint, got, wantParty)
+			}
+			if got := s.UserParticipants[c.hint]; got != c.wantRole {
+				t.Fatalf("s.UserParticipants[%s] = %q, want %q", c.hint, got, c.wantRole)
+			}
+		})
+	}
+}
+
+// TestResolveParty_CacheHit_DoesNotOverwriteUserParticipants proves a cached hint (already in
+// s.Users) returns immediately without touching s.UserParticipants -- a fresh allocation's
+// routing decision, once persisted, is never silently re-derived from the config on a later
+// invocation (plan §3's whole point: "routing stays stable across invocations even if the
+// topology config changes").
+func TestResolveParty_CacheHit_DoesNotOverwriteUserParticipants(t *testing.T) {
+	a := &app{} // never touches the ledger on the cache-hit path -- no dpm/DAR fixture needed
+	root := newRootCmd()
+	root.SetContext(context.Background())
+	s := state.New()
+	s.Users["Alice"] = "alice::abc"
+	s.UserParticipants["Alice"] = "some-stale-role"
+
+	party, err := resolveParty(root, a, s, "Alice")
+	if err != nil {
+		t.Fatalf("resolveParty: %v", err)
+	}
+	if party != "alice::abc" {
+		t.Fatalf("expected the cached party, got %q", party)
+	}
+	if got := s.UserParticipants["Alice"]; got != "some-stale-role" {
+		t.Fatalf("cache hit must not touch s.UserParticipants, got %q", got)
+	}
+}

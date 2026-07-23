@@ -15,9 +15,7 @@ module Playground.Deploy where
 import Daml.Script
 import DA.Optional (fromSome, fromSomeNote)
 
-import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Splice.Api.Token.TransferInstructionV1 (TransferFactory)
 import Wormhole.Core.State (EmitterRegistry, ReplayRootRegistry)
 import Wormhole.Ntt.Governance (RegisterManager (..))
 import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..), nttInstrumentIdFor)
@@ -42,6 +40,16 @@ data DeployRegistryOutput = DeployRegistryOutput with
     -- False for "amulet": the real Splice registry's factory already exists, so there is
     -- nothing for this deployment to stand up.
     registered : Bool
+    -- The deployment's own committed factory cid this same script just created (mock only;
+    -- 'None' for "amulet"), untyped ('coerceContractId'-only, like
+    -- 'Playground.Amulet.AmuletSeam.factoryCid'/'DeployInput.amuletFactoryCid') -- handed back
+    -- to the Go CLI and threaded into 'deployNtt' below via 'DeployInput.factoryCid'. This is
+    -- deliberately NOT re-resolved via a fresh 'query' inside 'deployNtt': gg (this factory's
+    -- sole signatory) lives on its own participant in the multi-participant topology, which
+    -- 'deployNtt''s admin-hosted participant cannot query as gg from -- the exact same
+    -- cross-participant gap 'Playground.MockRegistry' closes for RECEIVER visibility, but here
+    -- for the CLI's OWN two-step call sequence instead.
+    factoryCid : Optional (ContractId ())
   deriving (Eq, Show)
 
 -- | Stand up this deployment's mock registry factory contract(s), gg-submitted (per plan
@@ -55,7 +63,7 @@ deployRegistry : DeployRegistryInput -> Script DeployRegistryOutput
 deployRegistry input =
   case parseTokenKind input.tokenKind of
     -- The real Splice registry's factory already exists; nothing to stand up.
-    Amulet -> pure DeployRegistryOutput with registered = False
+    Amulet -> pure DeployRegistryOutput with registered = False, factoryCid = None
     Mock -> do
       let gg = input.guardianGovernance
           instrumentId = InstrumentId with
@@ -64,13 +72,13 @@ deployRegistry input =
       -- The burn/mint mock factory: the deployment's own bridged factory for "burn-mint", or
       -- the funding faucet 'Playground.Ops.fundUser' mints from for "lock-unlock" (both bound
       -- to the same instrument the deployment ends up using -- see 'deployNtt').
-      _ <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
-      case parseTokenMode input.mode of
-        BurnMint -> pure ()
+      bmCid <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
+      committedCid <- case parseTokenMode input.mode of
+        BurnMint -> pure (coerceContractId bmCid)
         LockUnlock -> do
-          _ <- submit gg do createCmd MockPreapprovedTransferFactory with admin = gg
-          pure ()
-      pure DeployRegistryOutput with registered = True
+          tfCid <- submit gg do createCmd MockPreapprovedTransferFactory with admin = gg
+          pure (coerceContractId tfCid)
+      pure DeployRegistryOutput with registered = True, factoryCid = Some committedCid
 
 ----------------------------------------------------------------------
 -- deployNtt (admin-submitted)
@@ -94,6 +102,14 @@ data DeployInput = DeployInput with
     -- registry cid, like Playground.Amulet.AmuletSeam.factoryCid); 'coerceContractId' gives
     -- it the 'TIV1.TransferFactory' type 'RegisterManager' wants.
     amuletFactoryCid   : Optional (ContractId ())
+    -- "mock" only: the deployment's committed factory cid, as returned by THIS SAME CLI
+    -- invocation's earlier 'deployRegistry' call ('DeployRegistryOutput.factoryCid') -- 'None'
+    -- for "amulet" (uses amuletFactoryCid instead). Threaded through Go rather than re-resolved
+    -- via a fresh 'query @MockBurnMintFactory gg'/'query @MockPreapprovedTransferFactory gg'
+    -- here: gg (the factory's sole signatory) lives on its own participant in the
+    -- multi-participant topology, which this admin-hosted script cannot query as gg from (see
+    -- 'DeployRegistryOutput.factoryCid''s doc comment).
+    factoryCid         : Optional (ContractId ())
   deriving (Eq, Show)
 
 data DeployOutput = DeployOutput with
@@ -106,8 +122,9 @@ data DeployOutput = DeployOutput with
   deriving (Eq, Show)
 
 -- | Resolve the core registries (EmitterRegistry, ReplayRootRegistry), the deployment's
--- typed committed factory (query as gg for "mock"; from the CLI-resolved registry cid for
--- "amulet"), and this deployment's bound instrument id, then a single
+-- typed committed factory (from the CLI-resolved 'DeployInput.factoryCid'/'amuletFactoryCid',
+-- per kind -- see those fields' doc comments for why this is never a fresh gg-side query), and
+-- this deployment's bound instrument id, then a single
 -- 'Wormhole.Ntt.Governance.RegisterManager' call (fee-0 devnet: every fee arg 'None').
 -- Lock-unlock "mock" additionally self-creates the admin's own
 -- 'Playground.MockRegistry.MockTransferPreapproval' in this same script -- the admin is the
@@ -179,19 +196,12 @@ deployNtt input =
       [(rrReg, _)] <- query @ReplayRootRegistry input.operator
       rrRegDisc <- fromSome <$> queryDisclosure input.operator rrReg
 
-      factory <- case config of
-        BurnMint -> do
-          facs <- query @MockBurnMintFactory gg
-          case [ cid | (cid, f) <- facs, f.instrument == instrumentId ] of
-            [cid] -> pure (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory cid))
-            [] -> abort "playground: no MockBurnMintFactory for this instrument -- run deployRegistry first"
-            _ -> abort "playground: more than one MockBurnMintFactory for this instrument"
-        LockUnlock -> do
-          facs <- query @MockPreapprovedTransferFactory gg
-          case facs of
-            [(cid, _)] -> pure (TransferFactoryCid (toInterfaceContractId @TransferFactory cid))
-            [] -> abort "playground: no MockPreapprovedTransferFactory -- run deployRegistry first"
-            _ -> abort "playground: more than one MockPreapprovedTransferFactory visible to gg"
+      let factoryCid = fromSomeNote
+            "playground: mock deployNtt needs a CLI-resolved factory cid -- run deployRegistry first"
+            input.factoryCid
+          factory = case config of
+            BurnMint -> BurnMintFactoryCid (coerceContractId factoryCid)
+            LockUnlock -> TransferFactoryCid (coerceContractId factoryCid)
 
       (_, mgrCid, emitterCid, _ledgerCid) <-
         submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do

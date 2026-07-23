@@ -85,6 +85,12 @@ type deployRegistryInput struct {
 
 type deployRegistryOutput struct {
 	Registered bool `json:"registered"`
+	// FactoryCid is the deployment's committed factory cid, created by THIS call (mock only;
+	// null for "amulet") -- threaded straight into deployInput.FactoryCid below rather than
+	// re-resolved by deployNtt via a fresh query: gg (the factory's sole signatory) lives on
+	// its own participant in the multi-participant topology, invisible to a query running on
+	// admin's (see Playground.Deploy.daml's DeployRegistryOutput.factoryCid doc comment).
+	FactoryCid *string `json:"factoryCid"`
 }
 
 // deployInput/deployOutput mirror Playground.Deploy.daml's DeployInput/DeployOutput.
@@ -98,6 +104,7 @@ type deployInput struct {
 	InstrumentNonce    int     `json:"instrumentNonce"`
 	InstrumentAdmin    *string `json:"instrumentAdmin"`  // "amulet" only (the real DSO party); null otherwise
 	AmuletFactoryCid   *string `json:"amuletFactoryCid"` // "amulet" only (setupAmuletAdmin's resolved transfer-factory cid); null otherwise
+	FactoryCid         *string `json:"factoryCid"`       // "mock" only (deployRegistryOutput.FactoryCid, passed straight through); null otherwise
 }
 
 // amuletTapUSD is the belt-and-braces amount tapped to the validator's own wallet
@@ -221,10 +228,20 @@ func newDeployCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			// deployRegistry submits AS gg (it creates gg-signed mock factory contracts), so
+			// it routes to gg's OWN participant -- not the default one deployNtt/setPeerOnLedger
+			// use below (admin stays co-located with operator under this topology's "*"
+			// wildcard, plan §8's bullet 2).
+			ggRunner, ggCleanup, err := a.newScriptRunnerFor(ctx, participantRoleForParty(s, s.GuardianGovernance))
+			if err != nil {
+				return err
+			}
+			defer ggCleanup()
+
 			a.vlogf(cmd, "deploy %q: deployRegistry (gg) = stand up the mock registry factory for mode=%s tokenKind=%s",
 				deploymentName, cfg.Mode, cfg.TokenKind)
 			var regOut deployRegistryOutput
-			if err := runner.Run(ctx, "Playground.Deploy:deployRegistry", deployRegistryInput{
+			if err := ggRunner.Run(ctx, "Playground.Deploy:deployRegistry", deployRegistryInput{
 				GuardianGovernance: s.GuardianGovernance,
 				Admin:              admin,
 				Mode:               cfg.Mode,
@@ -246,6 +263,7 @@ func newDeployCmd(a *app) *cobra.Command {
 				InstrumentNonce:    0,
 				InstrumentAdmin:    instrumentAdminPtr,
 				AmuletFactoryCid:   amuletFactoryCidPtr,
+				FactoryCid:         regOut.FactoryCid,
 			}, &out); err != nil {
 				return err
 			}
@@ -319,7 +337,9 @@ func setupAmuletAdmin(ctx context.Context, cmd *cobra.Command, a *app, adminHint
 	if err != nil {
 		return "", "", "", fmt.Errorf("onboard admin wallet user %q: %w", adminHint, err)
 	}
-	if err := grantActAs(cmd, a, adminParty); err != nil {
+	// setupAmuletAdmin's admin stays on the default participant (amulet wallet users are never
+	// routed by --topology-config's partyHosting map, plan §3) -- role="" targets it.
+	if err := grantActAs(cmd, a, "", adminParty); err != nil {
 		return "", "", "", fmt.Errorf("grant actAs on admin party %s: %w", adminParty, err)
 	}
 
