@@ -11,12 +11,21 @@
 --
 -- Lending gg's signature this way is safe because 'RegisterManager' only ever
 -- creates the fixed 'NttManager' (and 'LockedLedger') templates, whose choices
--- gate every movement of gg's value behind VAA verification.
+-- gate every movement of gg's value behind VAA verification, plus (now) a
+-- fresh gg-owned transceiver 'Emitter' and a gg-scoped replay-trie root — both
+-- minted atomically in the same registration transaction, contending on the
+-- core's 'EmitterRegistry' and 'ReplayRootRegistry' anchors in addition to
+-- this root.
 module Wormhole.Ntt.Governance where
 
 import DA.Map qualified as Map
+import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Wormhole.Core.State (Emitter)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
+import Wormhole.Core.State
+  ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
+  , RegisterEmitter (..), ClaimReplayRoot (..) )
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 
@@ -28,12 +37,22 @@ template NttGovernance
   where
     signatory guardianGovernance, operator
 
-    -- | Stand up a deployment: allocate the next manager id and create the
-    -- 'NttManager' (plus, for lock/unlock, its zero-balance 'LockedLedger').
-    -- The caller supplies two parties — @namespace@, the deployment's stable
-    -- identity, and @admin@, the transferable operational role; they may be
-    -- the same party — and passes the namespace's already-registered core
-    -- 'Emitter' as the deployment's transceiver.
+    -- | Stand up a deployment, atomically: allocate the next manager id, mint
+    -- the deployment's gg-owned transceiver 'Emitter' and claim its gg-scoped
+    -- replay-trie root, then create the 'NttManager' (plus, for lock/unlock,
+    -- its zero-balance 'LockedLedger'). @admin@ is the transferable
+    -- operational role — the sole controller, since gg's authority (the
+    -- transceiver owner, the replay consumer) is inherited from this
+    -- contract's own signatories, and no separate namespace party exists
+    -- anymore.
+    --
+    -- The deployment's stable identity is the derived @namespace : Text@:
+    -- @"ntt:" <> keccak256(tag ‖ instrument.admin ‖ instrument.id ‖
+    -- registering admin ‖ managerId)@ ('nttNamespaceFor'). The manager and
+    -- transceiver addresses are likewise bound to the registering @admin@
+    -- ('nttManagerAddressFor'). Both survive 'Wormhole.Ntt.Manager.TransferAdmin'
+    -- because they are computed once, here, and stored, never recomputed
+    -- against the current admin.
     --
     -- A lock/unlock reserve is owned by the registering @admin@ (explicitly
     -- custodial) until the role is handed to the guardian quorum with
@@ -44,30 +63,38 @@ template NttGovernance
     -- For burn/mint, two checks make the mint capability sound:
     -- @guardianGovernance@ must administer the instrument (otherwise the
     -- manager could never mint it), and the instrument id must be
-    -- hash-committed to @namespace@ via 'nttInstrumentIdFor' — see there for
-    -- why this keeps a bridged instrument exclusive to one deployment.
+    -- hash-committed to the registering admin via 'nttInstrumentIdFor' — see
+    -- there for why this keeps a bridged instrument exclusive to one
+    -- deployment.
     --
-    -- Consuming, so concurrent registrations contend on this root; the loser
-    -- re-resolves the fresh cid and retries.
+    -- @coreStateCid@/@emitterFeeAllocation@/@claimFeeAllocation@ fund the
+    -- registries' onboarding fees; @None@ when a registry charges none.
+    -- INVARIANT: gg never pays fees. It is the requester/consumer of the
+    -- nested 'RegisterEmitter'/'ClaimReplayRoot' for authority reasons only;
+    -- @admin@ is the co-controlling @payer@ on both, so every charge draws
+    -- from the registering admin's allocations.
+    --
+    -- Consuming, so concurrent registrations contend on this root (and, via
+    -- the nested exercises, on the core's 'EmitterRegistry' and
+    -- 'ReplayRootRegistry' anchors); a loser re-resolves the fresh cids and
+    -- retries.
     choice RegisterManager
-      : (ContractId NttGovernance, ContractId NttManager, Optional (ContractId LockedLedger))
+      : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
       with
-        namespace             : Party
         admin                 : Party
         chainId               : Int   -- this deployment's own Wormhole chain id (uint16)
-        transceiverEmitterCid : ContractId Emitter
+        emitterRegistryCid    : ContractId EmitterRegistry
+        replayRootRegistryCid : ContractId ReplayRootRegistry
         instrumentId          : InstrumentId
         instrumentNonce       : Int   -- the nonce in the burn/mint instrument-id binding
         tokenConfig           : NttTokenConfig
         tokenDecimals         : Int
         factory               : NttFactory  -- the registry's factory, typed by mode
-      controller namespace, admin
+        coreStateCid          : Optional (ContractId CoreState)  -- required iff either onboarding fee > 0
+        emitterFeeAllocation  : Optional (ContractId Allocation, ExtraArgs)
+        claimFeeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+      controller admin
       do
-        transceiver <- fetch transceiverEmitterCid
-        assertMsg "ntt: transceiver emitter is not owned by the namespace"
-          (transceiver.owner == namespace)
-        assertMsg "ntt: transceiver emitter is not from this operator"
-          (transceiver.operator == operator)
         -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
         -- fractional digits a Daml Decimal carries.
         assertMsg "ntt: tokenDecimals must be between 0 and 10"
@@ -79,13 +106,40 @@ template NttGovernance
             assertMsg
               "ntt: burn/mint requires guardianGovernance to administer the instrument"
               (guardianGovernance == instrumentId.admin)
-            assertMsg "ntt: burn/mint instrument id is not bound to this namespace"
-              (instrumentId.id == nttInstrumentIdFor namespace instrumentNonce)
+            assertMsg "ntt: burn/mint instrument id is not bound to the registering admin"
+              (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
           LockUnlock -> pure ()
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig factory)
+
+        -- Mint the deployment's transceiver: gg's requester authority is
+        -- inherited from this contract's own signatories; @admin@ pays.
+        (_, emitterCid) <- exercise emitterRegistryCid RegisterEmitter with
+          requester = guardianGovernance
+          payer = admin
+          coreStateCid
+          feeAllocation = emitterFeeAllocation
+        emitter <- fetch emitterCid
+        assertMsg "ntt: emitter registry is not this bridge instance's"
+          (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
+
+        let managerAddress = nttManagerAddressFor operator admin nextId
+            namespace = nttNamespaceFor instrumentId admin nextId
+
+        -- Claim the deployment's replay-trie root, sub-scoped under gg by the
+        -- derived namespace.
+        rootCid <- exercise replayRootRegistryCid ClaimReplayRoot with
+          consumer = guardianGovernance
+          namespace
+          splitThreshold = defaultSplitThreshold
+          payer = admin
+          coreStateCid
+          feeAllocation = claimFeeAllocation
+        root <- fetch rootCid
+        assertMsg "ntt: replay root registry is not this bridge instance's"
+          (root.operator == operator)
+
         reg' <- create this with nextId = nextId + 1
-        let managerAddress = nttManagerAddressFor operator namespace nextId
         mgr <- create NttManager with
           operator
           namespace
@@ -94,7 +148,7 @@ template NttGovernance
           chainId
           managerId = nextId
           managerAddress
-          transceiverEmitterId = transceiver.emitterId
+          transceiverEmitterId = emitter.emitterId
           instrumentId
           tokenConfig
           tokenDecimals
@@ -104,10 +158,10 @@ template NttGovernance
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with
             operator
-            namespace
             guardianGovernance
+            admin
             managerAddress
             balance = 0.0
             custodyHoldingCid = None
           BurnMint -> pure None
-        pure (reg', mgr, ledger)
+        pure (reg', mgr, emitterCid, ledger)
