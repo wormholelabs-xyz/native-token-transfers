@@ -1,5 +1,18 @@
 # NTT Canton Implementation — Compliance Evaluation
 
+NOTE: this audit was done by Claude, with the following prompt:
+
+      ultracode this branch implements the NTT standard for Canton. it is instrumental that
+      our NTT implementation is compliant with the standard. The standard is loosely
+      specified via invariants, documentation, and reference implementations. your task
+      is to distill the spec and verify that the Canton implementation matches it. the first
+      thing to verify is functional: is it compatible with the NTT flow (can it be connected
+      into an existing NTT mesh, and if so, how?). second is security (this is where the
+      invariants come in). finally, the access control component. some things you might want
+      to do is adopt the deserialisation tests from the other runtime implementations.
+      I want you to just evaluate the current state, and you're free to
+      implement tests to verify any property.
+
 Date: 2026-07-23. Audited commit: `c41edbf6cb97499fd39933a542c798a0981492f4`
 ("canton: enforce reserve coverage on admin handoff and exact registry delivery"),
 the tip of branch `canton/ntt-cip56-rework` at the time of evaluation. All file and
