@@ -54,6 +54,7 @@ template NttGovernance
       with
         namespace             : Party
         admin                 : Party
+        chainId               : Int   -- this deployment's own Wormhole chain id (uint16)
         transceiverEmitterCid : ContractId Emitter
         instrumentId          : InstrumentId
         instrumentNonce       : Int   -- the nonce in the burn/mint instrument-id binding
@@ -71,6 +72,8 @@ template NttGovernance
         -- fractional digits a Daml Decimal carries.
         assertMsg "ntt: tokenDecimals must be between 0 and 10"
           (tokenDecimals >= 0 && tokenDecimals <= 10)
+        assertMsg "ntt: chainId must be a positive uint16"
+          (chainId > 0 && chainId <= 65535)
         case tokenConfig of
           BurnMint -> do
             assertMsg
@@ -88,6 +91,7 @@ template NttGovernance
           namespace
           admin
           guardianGovernance
+          chainId
           managerId = nextId
           managerAddress
           transceiverEmitterId = transceiver.emitterId

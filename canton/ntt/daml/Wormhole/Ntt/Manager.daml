@@ -148,6 +148,13 @@ normalizePeer p = Peer with
     managerAddress = normalizeHex p.managerAddress
     transceiverAddress = normalizeHex p.transceiverAddress
 
+-- | Whether a 32-byte address is all zeros (the unset/sentinel address the
+-- reference @setPeer@ rejects).
+isZeroAddress : Bytes32 -> Bool
+isZeroAddress b =
+  normalizeHex (leftPadTo 32 b)
+    == "0000000000000000000000000000000000000000000000000000000000000000"
+
 -- | Domain-separation tag for NTT manager addresses.
 nttManagerAddressTag : Text
 nttManagerAddressTag = "wormhole:ntt-manager:v1"
@@ -295,6 +302,8 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
     (wm.sourceManager == peer.managerAddress)
   let mm = decodeNttManagerMessage wm.managerPayload
       ntt = decodeNativeTokenTransfer mm.payload
+  assertMsg "ntt: transfer is not destined for this chain"
+    (ntt.recipientChain == mgr.chainId)
   assertMsg "ntt: recipient does not match VAA recipientAddress"
     (recipientAddressFor recipient == normalizeHex ntt.recipientAddress)
   pure ntt
@@ -305,6 +314,7 @@ template NttManager
     namespace            : Party           -- stable identity: address preimages, replay scope, emitter owner
     admin                : Party           -- operational role and lock/unlock custodian; transferable
     guardianGovernance   : Party           -- gg: mint authority and trust anchor
+    chainId              : Int             -- this deployment's own Wormhole chain id (uint16)
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
     managerAddress       : Bytes32         -- nttManagerAddressFor operator namespace managerId
     transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = namespace)
@@ -326,7 +336,16 @@ template NttManager
         chainId : Int
         peer    : Peer
       controller admin
-      do create this with peers = Map.insert chainId (normalizePeer peer) peers
+      do
+        assertMsg "ntt: peer chain id must be a positive uint16"
+          (chainId > 0 && chainId <= 65535)
+        assertMsg "ntt: peer chain id must not be this deployment's own chain"
+          (chainId /= this.chainId)
+        assertMsg "ntt: peer manager address must be non-zero"
+          (not (isZeroAddress peer.managerAddress))
+        assertMsg "ntt: peer transceiver address must be non-zero"
+          (not (isZeroAddress peer.transceiverAddress))
+        create this with peers = Map.insert chainId (normalizePeer peer) peers
 
     -- | Repoint the committed registry factory. Needed only when the registry
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
