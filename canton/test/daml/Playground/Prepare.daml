@@ -1,0 +1,269 @@
+-- | Read-only "prepare" scripts (phase 5 of the participant-split redesign, plan §4/§7 step 5
+-- at .claude/tasks/e2e-separate-participants.md, reconciled against the CIP-56/namespace-
+-- retirement rework per the integration plan's §8): the resolver half of
+-- 'Playground.Ops''s cross-participant-capable entrypoints (transferOut/receiveVaa), split
+-- out to run standalone as guardianGovernance (gg) on GG'S OWN home participant, producing a
+-- 'Playground.Disclose.RemoteSeam' the Go CLI hands back to the corresponding submit-side
+-- entrypoint running on the ACTOR's participant.
+--
+-- Why gg, not operator: the rework made guardianGovernance a genuine stakeholder of
+-- everything a "mock" deployment's transfer/receive path touches --
+-- 'Wormhole.Ntt.Manager:NttManager' is co-signed by operator/admin/guardianGovernance,
+-- 'Wormhole.Core.State:CoreState' by operator/guardianGovernance, the deployment's own
+-- transceiver 'Wormhole.Core.State:Emitter' is gg-owned, 'Wormhole.Core.Replay:ReplayNode' is
+-- co-signed by (consumer=gg, operator), and the mock registry's own factory/preapproval/
+-- holding templates ('Playground.MockRegistry', 'Test.TestNtt', 'Wormhole.Ntt.Deposit') are gg
+-- SOLE signatory/observer -- operator is not a stakeholder of those at all. So gg's own
+-- participant is the one place that can resolve and disclose everything these two entrypoints
+-- need in a single pass; operator's participant cannot (it never receives the gg-only
+-- factory/preapproval/holding contracts). 'Playground.Ops:preapprove' needs no prepare step
+-- at all: it is a self-signed create by the user with
+-- only plain Party values as arguments, no cross-owned contract to fetch -- see that
+-- function's own doc comment.
+--
+-- The only new behavior beyond mirroring Playground.Ops's own resolver logic verbatim is the
+-- disclosure gate ('gated'): a resolved contract's disclosure is included in the output only
+-- when its qualified template name is in the caller-supplied @discloseTemplates@ list (the
+-- CLI's --topology-config `disclose` entries) -- enforced HERE, on the fetch side, so nothing
+-- is ever over-disclosed by construction. The identity fields (mgrCid/mgr/emCid/em/csCid/...)
+-- are always populated when resolved (the actor-side pure computations need the real data
+-- regardless of what is disclosed); only the @disclosed@ list itself is gated.
+module Playground.Prepare where
+
+import Daml.Script
+import DA.Optional (fromSome)
+import Wormhole.Core.VAA (parseVAA)
+import Wormhole.Ntt.Deposit (DepositPreapproval)
+import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..))
+import Test.TestNtt (Cip56MockHolding, MockBurnMintFactory)
+import Test.TestReplay (coveringDisclosure)
+
+import Playground.Disclose (RemoteSeam (..), DisclosedContractIn (..))
+import Playground.MockRegistry (MockPreapprovedTransferFactory, MockTransferPreapproval)
+import Playground.Types
+
+----------------------------------------------------------------------
+-- shared helpers
+----------------------------------------------------------------------
+
+-- | Convert a genuine 'Disclosure' (from 'queryDisclosure') into the Go-facing wire shape,
+-- tagging it with the STATICALLY KNOWN qualified template name of the contract it was resolved
+-- for -- every call site below always knows this by construction (e.g. 'resolveManager' always
+-- resolves a 'Wormhole.Ntt.Manager:NttManager'), so there is no need to introspect
+-- 'Disclosure''s opaque 'TemplateTypeRep' at runtime.
+toDisclosedContractIn : Text -> Disclosure -> DisclosedContractIn
+toDisclosedContractIn templateId d = DisclosedContractIn with
+  templateId
+  contractId = d.contractId
+  blob = d.blob
+
+-- | Include @d@'s disclosure in the output only when @templateId@ is in @allowed@ (the
+-- caller's --topology-config `disclose` allow-list) -- the config-driven gate.
+gated : [Text] -> Text -> Disclosure -> [DisclosedContractIn]
+gated allowed templateId d
+  | templateId `elem` allowed = [toDisclosedContractIn templateId d]
+  | otherwise = []
+
+emptyRemoteSeam : RemoteSeam
+emptyRemoteSeam = RemoteSeam with
+  mgrCid = None; mgr = None; emCid = None; em = None; csCid = None
+  ledgerCid = None; ledger = None
+  replayNodeCid = None; preapprovalCid = None; mockPreapprovalCid = None
+  disclosed = []
+
+----------------------------------------------------------------------
+-- prepareTransferOut (Playground.Ops:transferOut's Mock-kind resolver half)
+----------------------------------------------------------------------
+
+data PrepareTransferOutInput = PrepareTransferOutInput with
+    guardianGovernance : Party
+    managerId          : Int
+    discloseTemplates  : [Text]
+  deriving (Eq, Show)
+
+-- | Resolves everything a Mock-kind 'Playground.Ops:transferOut' needs, as gg (see the module
+-- header). "amulet" deployments never route through this in practice -- their sender is always
+-- a validator wallet user on the default participant (plan §3) -- so this assumes Mock; a
+-- caller that somehow reaches this for an amulet deployment gets whatever 'resolveManager'
+-- returns (harmless: the amulet branch never touches this seam's mock-specific fields).
+prepareTransferOut : PrepareTransferOutInput -> Script RemoteSeam
+prepareTransferOut input = do
+  let gg = input.guardianGovernance
+      allowed = input.discloseTemplates
+  (mgrCid, mgr) <- resolveManager gg input.managerId
+  (emCid, em) <- resolveEmitter gg mgr.transceiverEmitterId
+  csCid <- resolveCoreState gg
+  dMgr <- fromSome <$> queryDisclosure gg mgrCid
+  dEmitter <- fromSome <$> queryDisclosure gg emCid
+  dCs <- fromSome <$> queryDisclosure gg csCid
+
+  (ledgerCid, ledger, ledgerDisclosed) <- case mgr.tokenConfig of
+    BurnMint -> pure (None, None, [])
+    LockUnlock -> do
+      (lcid, ldgr) <- resolveLedger gg mgr.managerAddress
+      ld <- fromSome <$> queryDisclosure gg lcid
+      potDisclosed <- case ldgr.custodyHoldingCid of
+        None -> pure []
+        Some potCid -> do
+          d <- fromSome <$> queryDisclosure gg (coerceContractId potCid : ContractId Cip56MockHolding)
+          pure (gated allowed "Test.TestNtt:Cip56MockHolding" d)
+      pure (Some lcid, Some ldgr, gated allowed "Wormhole.Ntt.Ledger:LockedLedger" ld <> potDisclosed)
+
+  facDisclosed <- case mgr.factory of
+    BurnMintFactoryCid cid -> do
+      d <- fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+      pure (gated allowed "Test.TestNtt:MockBurnMintFactory" d)
+    TransferFactoryCid cid -> do
+      d <- fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
+      pure (gated allowed "Playground.MockRegistry:MockPreapprovedTransferFactory" d)
+
+  (mockPreapprovalCid, preDisclosed) <- case mgr.tokenConfig of
+    BurnMint -> pure (None, [])
+    LockUnlock -> do
+      -- The admin is the lock's custodian/receiver; its standing preapproval is what lets ANY
+      -- sender's lock deliver to it (mirrors Playground.Ops:transferOut's own resolution).
+      pres <- query @MockTransferPreapproval gg
+      preCid <- case [ cid | (cid, p) <- pres, p.owner == mgr.admin, p.instrument == mgr.instrumentId ] of
+        [cid] -> pure cid
+        [] -> abort "playground: admin has no standing transfer pre-approval -- run `deploy` first"
+        _ -> abort "playground: more than one MockTransferPreapproval for the admin"
+      d <- fromSome <$> queryDisclosure gg preCid
+      pure (Some preCid, gated allowed "Playground.MockRegistry:MockTransferPreapproval" d)
+
+  pure emptyRemoteSeam with
+    mgrCid = Some mgrCid
+    mgr = Some mgr
+    emCid = Some emCid
+    em = Some em
+    csCid = Some csCid
+    ledgerCid
+    ledger
+    mockPreapprovalCid
+    disclosed =
+      gated allowed "Wormhole.Ntt.Manager:NttManager" dMgr
+      <> gated allowed "Wormhole.Core.State:Emitter" dEmitter
+      <> gated allowed "Wormhole.Core.State:CoreState" dCs
+      <> ledgerDisclosed
+      <> facDisclosed
+      <> preDisclosed
+
+----------------------------------------------------------------------
+-- prepareReceive (Playground.Ops:receiveVaa's Mock-kind resolver half)
+----------------------------------------------------------------------
+
+data PrepareReceiveInput = PrepareReceiveInput with
+    guardianGovernance : Party
+    managerId          : Int
+    recipient          : Party
+    vaaBytes           : Text
+    discloseTemplates  : [Text]
+  deriving (Eq, Show)
+
+-- | Resolves everything a Mock-kind 'Playground.Ops:receiveVaa' needs, as gg (see the module
+-- header). Aborts with the SAME messages 'Playground.Ops:receiveVaa's own local-fast-path
+-- resolution would, if the recipient has no standing pre-approval yet -- keeping the "receive
+-- without preapproval is rejected, VAA stays deliverable" behavior identical regardless of
+-- which participant relays it.
+prepareReceive : PrepareReceiveInput -> Script RemoteSeam
+prepareReceive input = do
+  let gg = input.guardianGovernance
+      allowed = input.discloseTemplates
+  (mgrCid, mgr) <- resolveManager gg input.managerId
+  csCid <- resolveCoreState gg
+  dMgr <- fromSome <$> queryDisclosure gg mgrCid
+  dCs <- fromSome <$> queryDisclosure gg csCid
+  let digest = (parseVAA input.vaaBytes).hash
+  (nodeCid, nodeDisc) <- coveringDisclosure gg gg mgr.namespace digest
+
+  case mgr.tokenConfig of
+    BurnMint -> do
+      pres <- query @DepositPreapproval gg
+      preCid <- case [ cid | (cid, p) <- pres, p.owner == input.recipient, p.instrumentId == mgr.instrumentId ] of
+        [cid] -> pure cid
+        [] -> abort "playground: recipient has no DepositPreapproval -- run `preapprove` first"
+        _ -> abort "playground: more than one DepositPreapproval for the recipient"
+      preDisc <- fromSome <$> queryDisclosure gg preCid
+      facDisc <- case mgr.factory of
+        BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+        TransferFactoryCid _ -> abort "playground: burn/mint deployment has a lock/unlock factory -- inconsistent state"
+      pure emptyRemoteSeam with
+        mgrCid = Some mgrCid
+        mgr = Some mgr
+        csCid = Some csCid
+        replayNodeCid = Some nodeCid
+        preapprovalCid = Some preCid
+        disclosed =
+          gated allowed "Wormhole.Ntt.Manager:NttManager" dMgr
+          <> gated allowed "Wormhole.Core.State:CoreState" dCs
+          <> gated allowed "Wormhole.Core.Replay:ReplayNode" nodeDisc
+          <> gated allowed "Test.TestNtt:MockBurnMintFactory" facDisc
+          <> gated allowed "Wormhole.Ntt.Deposit:DepositPreapproval" preDisc
+
+    LockUnlock -> do
+      (ledgerCid, ledger) <- resolveLedger gg mgr.managerAddress
+      ledgerDisc <- fromSome <$> queryDisclosure gg ledgerCid
+      potDisclosed <- case ledger.custodyHoldingCid of
+        None -> pure []
+        Some potCid -> do
+          d <- fromSome <$> queryDisclosure gg (coerceContractId potCid : ContractId Cip56MockHolding)
+          pure (gated allowed "Test.TestNtt:Cip56MockHolding" d)
+      facDisclosed <- case mgr.factory of
+        BurnMintFactoryCid cid -> do
+          d <- fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+          pure (gated allowed "Test.TestNtt:MockBurnMintFactory" d)
+        TransferFactoryCid cid -> do
+          d <- fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
+          pure (gated allowed "Playground.MockRegistry:MockPreapprovedTransferFactory" d)
+      pres <- query @MockTransferPreapproval gg
+      preCid <- case [ cid | (cid, p) <- pres, p.owner == input.recipient, p.instrument == mgr.instrumentId ] of
+        [cid] -> pure cid
+        [] -> abort "playground: recipient has no standing transfer pre-approval -- run `preapprove` first"
+        _ -> abort "playground: more than one MockTransferPreapproval for the recipient"
+      preDisc <- fromSome <$> queryDisclosure gg preCid
+      pure emptyRemoteSeam with
+        mgrCid = Some mgrCid
+        mgr = Some mgr
+        csCid = Some csCid
+        replayNodeCid = Some nodeCid
+        ledgerCid = Some ledgerCid
+        ledger = Some ledger
+        mockPreapprovalCid = Some preCid
+        disclosed =
+          gated allowed "Wormhole.Ntt.Manager:NttManager" dMgr
+          <> gated allowed "Wormhole.Core.State:CoreState" dCs
+          <> gated allowed "Wormhole.Core.Replay:ReplayNode" nodeDisc
+          <> gated allowed "Wormhole.Ntt.Ledger:LockedLedger" ledgerDisc
+          <> potDisclosed
+          <> facDisclosed
+          <> gated allowed "Playground.MockRegistry:MockTransferPreapproval" preDisc
+
+----------------------------------------------------------------------
+-- preparePublish (Playground.Ops:publishMessage's resolver half)
+----------------------------------------------------------------------
+
+-- | Unlike prepareTransferOut/prepareReceive, this reads as OPERATOR, not gg: a standalone
+-- emitter's owner (`emitter register --owner X`) is not necessarily gg -- only the deployment's
+-- own NTT transceiver emitter is gg-owned -- but the registry OPERATOR co-signs every emitter
+-- (`Wormhole.Core.State:Emitter`'s `signatory operator, owner`) and every CoreState
+-- (`signatory operator, guardianGovernance`), so operator's own participant is the one place
+-- that can resolve both regardless of who registered the emitter.
+data PreparePublishInput = PreparePublishInput with
+    operator          : Party
+    emitterId         : Int
+    discloseTemplates : [Text]
+  deriving (Eq, Show)
+
+preparePublish : PreparePublishInput -> Script RemoteSeam
+preparePublish input = do
+  (emCid, em) <- resolveEmitter input.operator input.emitterId
+  csCid <- resolveCoreState input.operator
+  dCs <- fromSome <$> queryDisclosure input.operator csCid
+
+  let allowed = input.discloseTemplates
+      disclosed = gated allowed "Wormhole.Core.State:CoreState" dCs
+
+  pure emptyRemoteSeam with
+    emCid = Some emCid
+    em = Some em
+    csCid = Some csCid
+    disclosed

@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
 
@@ -26,7 +25,7 @@ type setPeerOutput struct {
 
 // setPeerOnLedger runs Playground.Ops:setPeer against an already-open runner -- shared by
 // `deploy` (config-file peers) and the standalone `peer set` command.
-func setPeerOnLedger(ctx context.Context, a *app, runner *ledger.Runner, operator string, managerID int, admin string, chain int, peerManager, peerTransceiver string) error {
+func setPeerOnLedger(ctx context.Context, a *app, runner scriptRunner, operator string, managerID int, admin string, chain int, peerManager, peerTransceiver string) error {
 	var out setPeerOutput
 	return runner.Run(ctx, "Playground.Ops:setPeer", setPeerInput{
 		Operator:        operator,

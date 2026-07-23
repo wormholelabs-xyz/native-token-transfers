@@ -9,10 +9,10 @@ second real chain involved (outbound transfers are verified by recomputing and
 signing the published message; inbound transfers are signed as if from a
 fictitious peer chain).
 
-This is a development/testing tool. It is not part of the production NTT
-packages (`ntt-token`, `ntt`, `ntt-cip56`) and is never uploaded to a real
-network — see [MainNet path](#mainnet-path) for what porting this to
-production actually requires.
+This is a development/testing tool. It is not part of the production `ntt`
+package and is never uploaded to a real network — see
+[MainNet path](#mainnet-path) for what porting this to production actually
+requires.
 
 ## Prerequisites
 
@@ -94,17 +94,17 @@ instead of per-service compose state.
 | Command | Purpose |
 | --- | --- |
 | `network up\|down\|status [--profile sandbox\|localnet]` | Start/stop/check the backing network. `status` on localnet reports each compose service's state/health and exits non-zero when nothing is running. |
-| `init [--guardian-key HEX] [--fee N]` | Bootstrap a fresh `CoreState` + registries with a 1/1 guardian set. Generates a random guardian key unless `--guardian-key` is given. `--fee` self-signs and applies an initial `SetMessageFee` governance VAA. |
+| `init [--guardian-key HEX] [--fee N]` | Bootstrap a fresh `CoreState` + core registries + the NTT root `NttGovernance` with a 1/1 guardian set (propose/accept — see [Genesis](#genesis-and-the-2-of-2-requirement)). Generates a random guardian key unless `--guardian-key` is given. `--fee` self-signs and applies an initial `SetMessageFee` governance VAA. |
 | `party list` | List every party the participant knows (`party=... isLocal=...`), annotating the hints of playground-allocated ones (`hint=Alice`). |
 | `party allocate --hint HINT` | Allocate a party under a hint. Idempotent: an already-known hint returns its existing party. |
-| `deploy --config FILE [--name NAME]` | Deploy an NTT (registers the transceiver `Emitter`, stands up the token interface, registers the `NttManager`, claims a replay-trie root, and pre-sets any peers listed in the config). |
+| `deploy --config FILE [--name NAME]` | Deploy an NTT in two steps: `deployRegistry` (gg-submitted) stands up the deployment's mock registry factory contract(s), then `deployNtt` (admin-submitted) resolves them and makes one `RegisterManager` call that atomically registers the `NttManager`, mints its gg-owned transceiver `Emitter`, and claims its replay-trie root — then pre-sets any peers listed in the config. For `amulet` `deployRegistry` is a no-op (the real Splice registry's factory already exists) and `deployNtt` onboards the admin as a validator wallet user first. |
 | `emitter register --name NAME --owner HINT` | Register a standalone core-bridge `Emitter` (not tied to an NTT deployment), keyed under a CLI-local name in state. |
 | `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
-| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD]` | Outbound `NttManager.Transfer`. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `cip56-custody` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved. |
-| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Receive`. A replayed VAA exits non-zero. For owner-signed token kinds the recipient must have run `preapprove` first, else the mint gate rejects the delivery (the VAA stays deliverable). |
-| `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deposits via `NttToken.PreApproveDeposit` (a standing `DepositPreapproval`). For the admin-signed mock kind this is a ledger-surfaced no-op (`preapproved=false`). |
-| `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing deposit pre-approval (owner-only `DepositPreapproval.Revoke`). |
+| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD]` | Outbound `NttManager.Transfer`. For `mock`, ensures the sender has a standing pre-approval (`preapprove`) and funds it (`fundUser`) before transferring. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `amulet` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved; the receiver is the deployment's admin (custody is admin-owned). |
+| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Mint`/`Release`, executor-only. A replayed VAA exits non-zero. The recipient must have run `preapprove` first — for both burn-mint and lock-unlock `mock` deployments — else the delivery is rejected and the VAA stays deliverable. Rejected outright for `amulet` (receiving against real Amulet is out of scope). |
+| `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deliveries: a standing `DepositPreapproval` (burn-mint `mock`) or `MockTransferPreapproval` (lock-unlock `mock`), created self-signed by the recipient. Idempotent. For `amulet` this is a ledger-surfaced no-op (`preapproved=false`); real Amulet's own `TransferPreapproval` is out of scope here. |
+| `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing pre-approval (owner-only `Revoke`, either template). |
 | `guardian sign-transfer --deployment NAME --to-recipient HINT --amount N [--source-chain N] [--sequence N]` | Sign an inbound NTT transfer VAA as if it came from the deployment's configured peer. |
 | `guardian sign-vaa --emitter-chain N --emitter HEX --sequence N --payload HEX` | Sign an arbitrary payload as a VAA (not NTT-specific). |
 | `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72); `--apply` also submits it via `SubmitGovernanceVAA`. |
@@ -113,7 +113,7 @@ instead of per-service compose state.
 | `contracts list` | Print every live `CoreState`/`Emitter`/`NttManager` (plus the replay-node count) as JSON. |
 | `observe --deployment NAME` | Print one deployment's current outbound sequence and peers. |
 | `observe stream --deployment NAME [--from-offset N] [--count N] [--timeout DUR] [--print-offset] [--any-emitter]` | LocalNet only. Read the REAL Ledger API v2 update stream as a dedicated `guardian-watcher` reader user (granted only `CanReadAs(guardianObserver)`, never `actAs`) and print every observed `WormholeMessage` as JSON. `--print-offset` prints the current ledger end (`ledgerEnd=<n>`) and exits, for recording a starting point before a transfer. Filters by the deployment's derived transceiver address unless `--any-emitter`. |
-| `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment, or (for `cip56-custody`) its real Amulet holdings (`amuletHoldingTotal=...`). A deployment's own `"<name>-custody"` hint resolves directly (it's a wallet user's real party, not one the CLI allocated). |
+| `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment, or (for `amulet`) its real Amulet holdings (`amuletHoldingTotal=...`). Custody is admin-owned, so a deployment's own admin hint (the config's `adminHint`, or `<name>-admin` by default) resolves the custodian's own balance — it's a wallet user's real party for `amulet`, an ordinary CLI-allocated party otherwise. |
 
 Every command accepts `--verbose`: each sub-step — network bring-up details,
 party allocation/actAs grants, every `dpm script` invocation with its input and
@@ -125,7 +125,11 @@ with a `[v] ` prefix. stdout is unchanged whether or not the flag is set, so
 Party hints (`--user`, `--recipient`, `--to-recipient`, `--party`, `--executor`)
 are display names the CLI allocates fresh Canton parties for on first use and
 remembers thereafter (`playground.state.json`'s `users` map) — the same hint
-always resolves to the same party across commands.
+always resolves to the same party across commands. On the `localnet` profile
+the hint also decides which participant the party is allocated on and
+routed to thereafter (`--topology-config`'s `partyHosting` map — see
+[Topology](#topology)); the resolved participant is persisted in state
+alongside the party id, so it stays stable even if the config changes later.
 
 ### Deploy config
 
@@ -133,7 +137,7 @@ always resolves to the same party across commands.
 {
   "name": "burnmint",
   "mode": "burn-mint",
-  "tokenKind": "mock-admin-signed",
+  "tokenKind": "mock",
   "decimals": 8,
   "peers": [
     { "chain": 2, "manager": "00..bb", "transceiver": "00..cc" }
@@ -141,52 +145,74 @@ always resolves to the same party across commands.
 }
 ```
 
-- `mode`: `"burn-mint"` or `"lock-unlock"` (`"cip56-custody"` only supports
+- `mode`: `"burn-mint"` or `"lock-unlock"` (`"amulet"` only supports
   `"lock-unlock"` — Amulet has no `BurnMintFactory`).
-- `tokenKind`: `"mock-admin-signed"` (default choice for testing — `LockOrBurn`
-  always succeeds regardless of the caller's actual holdings, so `transfer`
-  needs no funding step), `"cip56-burn-mint-mock"` or `"cip56-custody-mock"`
-  (both drive the real production `Cip56BurnMintToken`/`Cip56CustodyToken`
-  implementations over a local mock registry, and DO need `transfer` to fund
-  the sender first — the CLI does this automatically), or `"cip56-custody"`
-  (the same `Cip56CustodyToken` hook against **real Canton Coin (Amulet)** on
-  the LocalNet profile — see [Real Amulet (`cip56-custody`)](#real-amulet-cip56-custody)).
-- `decimals`: Amulet has 10 decimals, so `"cip56-custody"` deploy configs use
-  `10` (the NTT wire still trims to 8, per `internal/wire.TrimDecimals`).
+- `tokenKind`: `"mock"` (a local mock registry — see
+  [Receive: mock-registry pre-approvals](#receive-mock-registry-pre-approvals)
+  — `transfer` funds the sender automatically before sending) or `"amulet"`
+  (the manager's real production token-standard interfaces against **real
+  Canton Coin (Amulet)** on the LocalNet profile — see
+  [Real Amulet (`amulet`)](#real-amulet-amulet)).
+- `decimals`: Amulet has 10 decimals, so `"amulet"` deploy configs use `10`
+  (the NTT wire still trims to 8, per `internal/wire.TrimDecimals`).
+- `adminHint`: optional display name for the deployment's admin party
+  (default `<name>-admin`) — the lock/unlock custodian and the burn/mint
+  instrument-binding admin. For `"amulet"` this party is validator-onboarded
+  rather than bare-allocated (see [Real Amulet](#real-amulet-amulet)).
 - `peers`: optional; pre-configures peers at deploy time (equivalent to
   `peer set` calls after the fact).
 
 See `testdata/deploy-burnmint.json`, `testdata/deploy-lockunlock.json`, and
-`testdata/deploy-cip56-custody.json`.
+`testdata/deploy-amulet.json`.
 
-### Real Amulet (`cip56-custody`)
+### Receive: mock-registry pre-approvals
 
-`cip56-custody` deploys `Cip56CustodyToken` against the real DSO's live
-Amulet `InstrumentId` on Splice LocalNet — real Canton Coin locks/unlocks,
-not a mock registry. Requires `--profile localnet` (`deploy` rejects it
-otherwise: `"cip56-custody requires a profile with real Amulet (localnet)"`).
+Daml authority is not transitive through nested exercises, so a factory's
+transfer implementation can only create a receiver's holding when the
+receiver's own signature (or the factory-signing party's) is reachable
+inside the choice body — an executor relaying a VAA has neither. The
+playground closes this gap the same way real registries do: a receiver
+signs a standing pre-approval once, up front, and the factory delivers
+through it. `Playground.MockRegistry` (`canton/test/daml/Playground/`)
+supplies the missing piece for `"mock"` lock/unlock: `MockTransferPreapproval`
+(signed by its `owner`, observed by `guardianGovernance` so the registry can
+resolve it) and `MockPreapprovedTransferFactory`, whose delivery choice is
+controlled by `guardianGovernance` — inside it, both the owner's signature
+(from the pre-approval) and gg's (the controller) are in scope, closing the
+gap. Burn/mint uses the model's own `DepositPreapproval` for the same
+purpose. Either way, `preapprove` is the one-time recipient opt-in and
+`receive` (any executor) is the permissionless relay — see the Commands
+table above.
 
-- **Party model.** Unlike every other kind, both the custody party and the
-  sending user must be **validator wallet users**, not bare script-allocated
-  parties — only wallet users can be tapped or hold a `TransferPreapproval`.
-  `deploy` onboards the deployment's custody wallet user
-  (`<name>-custody`, e.g. `cc-custody-custody`), taps the validator's own
-  wallet (it pays the `TransferPreapproval`'s creation fee), and creates that
-  preapproval. `transfer --user HINT` onboards the sender the same way and
-  taps it (`--tap-usd`, USD-denominated — the devnet tap divides by the open
-  mining round's Amulet price server-side, so don't assert the resulting CC
-  amount of a tap itself).
+### Real Amulet (`amulet`)
+
+`amulet` drives the manager's real production token-standard interfaces
+against the real DSO's live Amulet `InstrumentId` on Splice LocalNet — real
+Canton Coin locks/unlocks, not a mock registry. Requires `--profile localnet`
+(`deploy`/`transfer` reject it otherwise:
+`"amulet requires a profile with real Amulet (localnet)"`).
+
+- **Party model.** Custody is admin-owned — there is no separate custody
+  party. `deploy` onboards the deployment's **admin** as a validator wallet
+  user (`setupAmuletAdmin`), taps the validator's own wallet (it pays the
+  admin's own `TransferPreapproval`'s creation fee), creates that
+  preapproval, and resolves the registry's current transfer-factory cid via
+  a probe transfer. `transfer --user HINT` onboards the sending user the
+  same way and taps it (`--tap-usd`, USD-denominated — the devnet tap
+  divides by the open mining round's Amulet price server-side, so don't
+  assert the resulting CC amount of a tap itself); every lock's receiver is
+  the deployment's admin.
 - **Registry resolution happens off-ledger, per call.** `internal/amulet`
   resolves the real transfer-factory cid, its choice context, and its
   disclosed contracts (`AmuletRules`, `TransferPreapproval`, `OpenMiningRound`,
   `ExternalPartyConfigState`, `ExternalPartyAmuletRules`) from the validator's
-  scan-proxy immediately before every `transfer`, asserting `transferKind ==
-  "direct"` (anything else means the receiver's preapproval is missing/expired
-  and would settle `Pending`, which the custody hook rejects).
+  scan-proxy immediately before every `transfer`; if the resolved factory cid
+  no longer matches the manager's committed one, the CLI submits `SetFactory`
+  as admin first, then proceeds.
 - **Receiving is out of scope.** `receive --deployment NAME` hard-errors for
-  this kind (`"receiving network out of scope for real Amulet
-  (cip56-custody)"`) — there is no mock factory to unlock against.
-- **Balances.** `balance --party <name>-custody --deployment NAME` prints
+  this kind (`"receiving is out of scope for real Amulet (amulet)"`) — there
+  is no mock factory to unlock against.
+- **Balances.** `balance --party <adminHint> --deployment NAME` prints
   `amuletHoldingTotal=<decimal>`, read directly off the token-standard
   `Holding` interface (`Playground.Query:amuletBalance`), not an HTTP call.
 - **Observing the guardian's actual observation.** `observe stream` (see the
@@ -195,12 +221,141 @@ otherwise: `"cip56-custody requires a profile with real Amulet (localnet)"`).
   with only `CanReadAs(guardianObserver)`, not by recomputing the payload a
   second time.
 
+## Topology
+
+On the `localnet` profile the playground runs across **five participants**,
+not one — this is what makes Daml's privacy model observable: a party only
+sees the contracts it is a stakeholder or disclosure-recipient on, and only
+its own home participant can act as it.
+
+| participant | hosts | gRPC ledger | JSON API | validator API |
+| --- | --- | --- | --- | --- |
+| `app-provider` | Operator, deployment admins (custody-owning; validator-onboarded wallet users for `amulet`), and the default for any unmapped party hint | 3901 | 3975 | 3903 |
+| `app-user` | Alice | 2901 | 2975 | 2903 |
+| `bob` | Bob | 5901 | 5975 | 5903 |
+| `guardian-governance` | GuardianGovernance | 6901 | 6975 | 6903 |
+| `guardian-observer` | GuardianObserver | 7901 | 7975 | 7903 |
+
+`app-provider` and `app-user` are participants the Splice LocalNet bundle
+already runs; `bob`, `guardian-governance`, and `guardian-observer` are added
+by a compose override the CLI writes into the LocalNet directory (alongside
+the existing Postgres-container override) — the vendored bundle itself is
+never edited. Every participant runs the same unsafe shared-secret HS256
+auth as `app-provider` and is reachable through the same `ledger-api-user`
+admin user, so `party list`, `balance --party`, and every other per-party
+command transparently target the right participant.
+
+`--topology-config` (see below) controls which party hint lands on which
+participant; the table above is the built-in default when no config file
+maps a hint. `party list` reflects the real topology: each line is prefixed
+`participant=<role>`, and a party's `isLocal=true` only on its home
+participant.
+
+The `sandbox` profile is unaffected by any of this — see
+[sandbox](#sandbox-default) below.
+
+### `--topology-config`
+
+A root persistent flag, `--topology-config PATH`, points at a JSON file that
+controls two things: which participant a party hint is allocated/routed to
+(`partyHosting`), and which Daml templates the CLI is allowed to fetch an
+explicit disclosure for before a cross-participant submit (`disclose`).
+
+Default path when the flag is omitted: `playground.topology.json` next to
+the state file. A missing file is not an error — it resolves to the
+built-in `partyHosting` default (the table above) and a built-in `disclose`
+default covering every template a `mock` deployment's `transfer`/`receive`
+path needs (`NttManager`, `NttGovernance`, `LockedLedger`, `CoreState`,
+`Emitter`, the covering `ReplayNode`, `DepositPreapproval`,
+`MockTransferPreapproval`, `MockPreapprovedTransferFactory`,
+`MockBurnMintFactory`, `Cip56MockHolding`) — otherwise the CLI's basic
+`deploy`/`transfer`/`receive` flow would fail out of the box on LocalNet with
+no config file at all. The "everything fails closed" posture (no disclosures
+ever fetched, so any submit that needs to read a contract off another
+participant fails on-ledger with `CONTRACT_NOT_FOUND`) is what an *explicit*
+config with `"disclose": []` gets you (see
+`testdata/topology-empty.json`) — a present file always means exactly what
+it says, even if that's less than the built-in default. A file that exists
+but is malformed (bad JSON, or an unrecognized top-level key) is a hard
+error rather than a silent fallback, so a typo doesn't quietly disable
+disclosure.
+
+Shape:
+
+```json
+{
+  "partyHosting": {
+    "Alice": "app-user",
+    "Bob": "bob",
+    "GuardianGovernance": "guardian-governance",
+    "GuardianObserver": "guardian-observer",
+    "*": "app-provider"
+  },
+  "disclose": [
+    { "template": "Wormhole.Ntt.Manager:NttManager", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Core.State:CoreState", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Core.State:Emitter", "fetchAs": "GuardianGovernance" },
+    { "template": "Test.TestNtt:MockBurnMintFactory", "fetchAs": "GuardianGovernance" }
+  ]
+}
+```
+
+- `partyHosting` maps a party hint to a participant role; `"*"` is the
+  fallback for any hint not listed explicitly.
+- `disclose` is an allow-list of `Module:Entity`-qualified templates. Only
+  templates on this list are fetched (as a disclosure payload, via a
+  read-only Daml script run against the data owner's own participant) and
+  attached to a cross-participant submit; a template not on the list is
+  simply never fetched. `fetchAs` names the party a template's data is
+  conceptually read as — today that's `guardianGovernance` for nearly
+  everything a `mock` deployment's transfer/receive path touches (it
+  co-signs/owns the manager, `CoreState`, the transceiver `Emitter`, the
+  replay trie, and the mock registry's factory/preapproval/holding
+  templates outright) and `operator` for `NttGovernance`. The field is
+  carried through the config rather than driving participant selection
+  itself: each `prepare*` script (`Playground.Prepare`) always reads as one
+  fixed party for a given entrypoint, so a config only ever names which
+  templates to fetch, not where from.
+
+This is a deliberate, user-controlled dial: pulling an entry out of
+`disclose` turns a specific cross-participant operation back into a
+`CONTRACT_NOT_FOUND` failure without touching any other template's
+visibility. See `testdata/topology-empty.json` (nothing disclosed),
+`testdata/topology-localnet.json` (the set the e2e suite runs against), and
+`testdata/topology-missing-corestate.json` (the localnet set minus one
+entry, for exercising per-template granularity) for worked examples.
+
+When a command's actor and the data it needs both resolve to the same
+participant, none of this applies — the command takes the same local path
+it always has, disclosure-free.
+
+### Genesis and the 2-of-2 requirement
+
+`init` bootstraps `CoreState` **and** the NTT root `NttGovernance` together,
+as a two-step propose/accept across two different participants rather than a
+single co-signed create: the operator proposes a
+`CoreStateBootstrapProposal` on its own participant, and `GuardianGovernance`
+accepts it — the step that actually creates both `CoreState` and
+`NttGovernance`, in the same ceremony, so gg signs once for both roots — on
+its own, separate participant. Because no participant hosts both parties,
+this genuinely requires two independent participants to
+confirm the transaction, which is the concrete "2-of-2" property the
+topology split delivers: an operator acting alone cannot produce a
+`CoreState` GuardianGovernance never saw and never authorized, and vice
+versa.
+
 ## Profiles
 
 ### sandbox (default)
 
 A bare `dpm sandbox`, no authentication, no Docker. This is the CI-viable path
 and what `go test -tags e2e ./e2e` exercises by default.
+
+The [Topology](#topology) split and `--topology-config` are LocalNet-only
+concepts. `dpm sandbox` is a single in-process participant — every party is
+always co-located with every actor, so there is never a cross-participant
+submit to gate, and `--topology-config`/disclosure has no effect here: every
+command takes the same local, disclosure-free path it always has.
 
 ### LocalNet
 
@@ -241,15 +396,15 @@ instead; set `LOCALNET_POSTGRES_CONTAINER_NAME` / `LOCALNET_POSTGRES_HOST_PORT`
 to change either. In-network connectivity is unaffected — services resolve the
 database by compose service name. Requires docker compose >= 2.24 (`!override`).
 
-The `app-provider` participant is used throughout: gRPC Ledger API 3901, JSON
-Ledger API v2 3975, validator API 3903. Auth is LocalNet's documented
-"unsafe" shared-secret HS256 mode (never valid against a real participant);
-the CLI mints tokens for `ledger-api-user` automatically.
+See [Topology](#topology) above for the five-participant layout this profile
+runs. Auth is LocalNet's documented "unsafe" shared-secret HS256 mode (never
+valid against a real participant); the CLI mints tokens for
+`ledger-api-user` automatically, on every participant.
 
 Amulet (Canton Coin) does not implement `BurnMintFactory`, so only the
 lock/unlock path is exercisable against it directly — see
-[Real Amulet (`cip56-custody`)](#real-amulet-cip56-custody) for the real
-(not mock) registry client this profile enables.
+[Real Amulet (`amulet`)](#real-amulet-amulet) for the real (not mock)
+registry client this profile enables.
 
 **Verification status:** the sandbox profile runs in CI on every push and pull
 request (the `playground CLI (go vet/test + sandbox e2e)` job in
@@ -290,7 +445,10 @@ show:
   --input-file/--output-file`. Disclosures, multi-party `actAs`, and interface
   exercising are already solved in Daml Script; sandbox and LocalNet differ
   only in host/port/auth/upload flags.
-- **Never persist contract ids.** `CoreState`, `NttManager`, and `Emitter` all
+- **Never persist contract ids.** `NttManager` is consumed only by its admin
+  config choices (`SetPeer`, `SetFactory`, the rare `TransferAdmin`), so its
+  cid stays stable across ordinary transfer/receive traffic; `CoreState`,
+  `Emitter`, `LockedLedger`, and the covering replay-trie node all still
   churn on every consuming exercise. `playground.state.json` stores only
   stable identities (parties, `managerId`) — every script re-resolves
   contracts from the ACS by identity.
@@ -322,26 +480,27 @@ Documented, not implemented — this CLI is devnet-only throughout.
   participant's ledger endpoint, use OAuth client-credentials JWTs instead of
   the unsafe HS256 mode, and skip `allocateParty` (parties pre-exist, onboarded
   through the validator).
-- **Genesis/governance.** `initPlayground` stands in for a real ceremony:
-  `guardianGovernance` becomes an external/threshold party via topology
-  transactions, the guardian set is installed at genesis co-signed by
-  operator + guardianGovernance, and evolves only through real guardian-set-
-  upgrade governance VAAs (`SubmitGovernanceVAA`). This CLI's 1/1 signer
-  (`internal/guardian`) never becomes production code — a real guardian set
-  is k-of-n and the keys never touch a CLI.
-- **DARs.** Only the production DARs (`ntt-token`, `ntt`, `ntt-cip56`) are
-  ever uploaded to a real network — never `ntt-test` (it drags in
-  `daml-script`). Playground ops would need to be re-expressed against
-  production package-ids, either via the JSON Ledger API/gRPC directly or a
-  script-only companion DAR with zero templates.
+- **Genesis/governance.** `init`'s propose/accept pair
+  (`Playground.Init:proposeGenesis`/`acceptGenesis`) stands in for a real
+  ceremony: `guardianGovernance` becomes an external/threshold party via
+  topology transactions, the guardian set is installed at genesis co-signed
+  by operator + guardianGovernance, and evolves only through real
+  guardian-set-upgrade governance VAAs (`SubmitGovernanceVAA`). This CLI's
+  1/1 signer (`internal/guardian`) never becomes production code — a real
+  guardian set is k-of-n and the keys never touch a CLI.
+- **DARs.** Only the production `ntt` DAR is ever uploaded to a real network —
+  never `ntt-test` (it drags in `daml-script`). Playground ops would need to
+  be re-expressed against production package-ids, either via the JSON Ledger
+  API/gRPC directly or a script-only companion DAR with zero templates.
 - **Fees/token.** The fee instrument becomes Canton Coin; a real `Allocation`
-  is drawn from the user's wallet per `Transfer`/`PublishMessage`. The token
-  interface becomes a real Amulet (or other CIP-56) registry client. Only
-  lock/unlock (`Cip56CustodyToken`) works against Amulet directly — burn/mint
-  needs a registry implementing `BurnMintFactory`.
-- **Disclosures.** The operator-as-oracle `queryDisclosure`/`coveringNode`
-  pattern this CLI uses is replaced by an off-ledger disclosure service over
-  an ACS index, as described in the core bridge's README.
+  is drawn from the user's wallet per `Transfer`/`PublishMessage`. The manager
+  already drives the CIP-0056 `TransferFactory`/`BurnMintFactory` interfaces
+  directly against a real registry — only lock/unlock is exercisable against
+  Amulet directly (it has no `BurnMintFactory`).
+- **Disclosures.** The `queryDisclosure`/`coveringDisclosure` pattern this CLI
+  uses (reading as guardianGovernance or operator, whichever party owns the
+  data) is replaced by an off-ledger disclosure service over an ACS index, as
+  described in the core bridge's README.
 
 ## Follow-ups
 

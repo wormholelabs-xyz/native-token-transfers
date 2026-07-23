@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,9 @@ type publishMessageInput struct {
 	Payload          string `json:"payload"`
 	Nonce            int    `json:"nonce"`
 	ConsistencyLevel int    `json:"consistencyLevel"`
+	// Remote carries a pre-fetched Playground.Prepare:preparePublish RemoteSeam, as raw JSON --
+	// see transferOutInput.Remote's doc comment (transfer.go).
+	Remote json.RawMessage `json:"remote"`
 }
 
 type publishMessageOutput struct {
@@ -43,7 +47,27 @@ func newPublishCmd(a *app) *cobra.Command {
 				return fmt.Errorf("publish: unknown emitter %q -- run `emitter register` first", emitterName)
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// PublishMessage submits as the emitter's owner, so it routes to the owner's
+			// home participant (plan §3), resolved via a reverse lookup of em.Owner (Emitter
+			// only persists the party id, not the allocating hint). The DATA this needs
+			// (Emitter/CoreState) lives on operator's own participant -- operator co-signs
+			// both, regardless of who registered the standalone emitter (contrast
+			// transferOut/receiveVaa, whose data owner is guardianGovernance -- see
+			// remote.go's doc comment).
+			actorRole := participantRoleForParty(s, em.Owner)
+			dataOwnerRole := participantRoleForParty(s, s.Operator)
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, dataOwnerRole, "Playground.Prepare:preparePublish", func(templates []string) any {
+				return preparePublishInput{
+					Operator:          s.Operator,
+					EmitterID:         em.EmitterID,
+					DiscloseTemplates: templates,
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("publish: prepare remote disclosure: %w", err)
+			}
+
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, actorRole)
 			if err != nil {
 				return err
 			}
@@ -58,6 +82,7 @@ func newPublishCmd(a *app) *cobra.Command {
 				Payload:          payloadHex,
 				Nonce:            nonce,
 				ConsistencyLevel: consistencyLevel,
+				Remote:           remoteSeam,
 			}, &out); err != nil {
 				return err
 			}

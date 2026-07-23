@@ -1,37 +1,115 @@
--- | Parameterized deployment: registers a transceiver 'Emitter', stands up (or wires) an
--- 'NttToken' impl, registers the 'NttManager' (crankless, admin-driven per
--- Wormhole.Ntt.Manager:RegisterManager), and claims a replay-trie root for the new admin --
--- steps 1-4 of "Deploying an NTT on Canton" (canton/README.md), reusing the already-tested
--- Test.TestCore/Test.TestNtt/Test.TestReplay helpers rather than reimplementing them.
+-- | Parameterized deployment, split in two steps per the new 'Wormhole.Ntt.Governance'
+-- model:
+--
+--   1. 'deployRegistry' (gg-submitted): stand up this deployment's mock registry factory
+--      contract(s) -- nothing for "amulet" (the real Splice registry's factory already
+--      exists).
+--   2. 'deployNtt' (admin-submitted): resolve the core registries and the committed
+--      factory, then a single 'Wormhole.Ntt.Governance.RegisterManager' call that
+--      atomically mints the deployment's gg-owned transceiver 'Emitter', claims its
+--      gg-scoped replay-trie root, and creates the 'NttManager' (plus, for lock/unlock, its
+--      zero-balance 'LockedLedger'). No more separate `registerEmitter`/`registerReplayRoot`
+--      steps -- see 'Wormhole.Ntt.Governance.RegisterManager'.
 module Playground.Deploy where
 
 import Daml.Script
 import DA.Optional (fromSome, fromSomeNote)
+
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Wormhole.Core.Replay (defaultSplitThreshold)
-import Wormhole.Ntt.Manager
-import Wormhole.Ntt.Token (NttToken)
-import Wormhole.Ntt.TokenCip56 (Cip56CustodyToken (..))
-import Test.TestCore (registerEmitter)
-import Test.TestNtt (mkBurnMintToken, mkCustodyToken)
-import Test.TestReplay (registerReplayRoot)
+import Wormhole.Core.State (EmitterRegistry, ReplayRootRegistry)
+import Wormhole.Ntt.Governance (RegisterManager (..))
+import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..), nttInstrumentIdFor)
 
-import Playground.MockToken (MockToken (..))
-
+import Playground.MockRegistry (MockPreapprovedTransferFactory (..), MockTransferPreapproval (..))
 import Playground.Types
+import Test.TestNtt (MockBurnMintFactory (..))
+
+----------------------------------------------------------------------
+-- deployRegistry (gg-submitted)
+----------------------------------------------------------------------
+
+data DeployRegistryInput = DeployRegistryInput with
+    guardianGovernance : Party
+    admin              : Party  -- the deployment's registering admin (burn/mint instrument binding target)
+    mode               : Text   -- "burn-mint" | "lock-unlock"
+    tokenKind          : Text   -- "mock" | "amulet"
+    instrumentNonce    : Int    -- the nonce in the burn/mint instrument-id binding
+  deriving (Eq, Show)
+
+data DeployRegistryOutput = DeployRegistryOutput with
+    -- False for "amulet": the real Splice registry's factory already exists, so there is
+    -- nothing for this deployment to stand up.
+    registered : Bool
+    -- The deployment's own committed factory cid this same script just created (mock only;
+    -- 'None' for "amulet"), untyped ('coerceContractId'-only, like
+    -- 'Playground.Amulet.AmuletSeam.factoryCid'/'DeployInput.amuletFactoryCid') -- handed back
+    -- to the Go CLI and threaded into 'deployNtt' below via 'DeployInput.factoryCid'. This is
+    -- deliberately NOT re-resolved via a fresh 'query' inside 'deployNtt': gg (this factory's
+    -- sole signatory) lives on its own participant in the multi-participant topology, which
+    -- 'deployNtt''s admin-hosted participant cannot query as gg from -- the exact same
+    -- cross-participant gap 'Playground.MockRegistry' closes for RECEIVER visibility, but here
+    -- for the CLI's OWN two-step call sequence instead.
+    factoryCid : Optional (ContractId ())
+  deriving (Eq, Show)
+
+-- | Stand up this deployment's mock registry factory contract(s), gg-submitted (per plan
+-- §4.2/§5): for "mock" burn-mint, a 'Test.TestNtt.MockBurnMintFactory' bound to
+-- @InstrumentId gg (nttInstrumentIdFor admin instrumentNonce)@; for "mock" lock-unlock, a
+-- 'Playground.MockRegistry.MockPreapprovedTransferFactory' PLUS a
+-- 'Test.TestNtt.MockBurnMintFactory' (the funding faucet 'Playground.Ops.fundUser' mints
+-- from, per the deposit-preapproval-based funding design); no-op ("amulet") for the real
+-- registry.
+deployRegistry : DeployRegistryInput -> Script DeployRegistryOutput
+deployRegistry input =
+  case parseTokenKind input.tokenKind of
+    -- The real Splice registry's factory already exists; nothing to stand up.
+    Amulet -> pure DeployRegistryOutput with registered = False, factoryCid = None
+    Mock -> do
+      let gg = input.guardianGovernance
+          instrumentId = InstrumentId with
+            admin = gg
+            id = nttInstrumentIdFor input.admin input.instrumentNonce
+      -- The burn/mint mock factory: the deployment's own bridged factory for "burn-mint", or
+      -- the funding faucet 'Playground.Ops.fundUser' mints from for "lock-unlock" (both bound
+      -- to the same instrument the deployment ends up using -- see 'deployNtt').
+      bmCid <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
+      committedCid <- case parseTokenMode input.mode of
+        BurnMint -> pure (coerceContractId bmCid)
+        LockUnlock -> do
+          tfCid <- submit gg do createCmd MockPreapprovedTransferFactory with admin = gg
+          pure (coerceContractId tfCid)
+      pure DeployRegistryOutput with registered = True, factoryCid = Some committedCid
+
+----------------------------------------------------------------------
+-- deployNtt (admin-submitted)
+----------------------------------------------------------------------
 
 data DeployInput = DeployInput with
     operator           : Party
     guardianGovernance : Party
     admin              : Party  -- CLI-allocated (with actAs rights granted; see Playground.Init's note)
     mode               : Text   -- "burn-mint" | "lock-unlock"
-    tokenKind          : Text   -- "mock-admin-signed" | "cip56-burn-mint-mock" | "cip56-custody-mock" | "cip56-custody"
+    tokenKind          : Text   -- "mock" | "amulet"
     tokenDecimals      : Int
-    -- 'Cip56Custody' only: the custody wallet-user party (holds locked funds between
-    -- send/receive) and the real DSO party (the Amulet instrument's admin). 'None' for every
+    instrumentNonce    : Int    -- the nonce in the burn/mint instrument-id binding (matches deployRegistry's)
+    -- "amulet" only: the real DSO party (InstrumentId.admin for "Amulet"). 'None' for every
     -- other kind -- the Go CLI always sends the field, null when unused.
-    custody            : Optional Party
     instrumentAdmin    : Optional Party
+    -- "amulet" only: the real Amulet registry's CLI-resolved transfer-factory cid
+    -- (internal/amulet.GetTransferFactory's FactoryID, resolved by setupAmuletAdmin against
+    -- the now-onboarded admin's own standing TransferPreapproval). 'None' for every other
+    -- kind -- the Go CLI always sends the field, null when unused. Untyped here (a raw
+    -- registry cid, like Playground.Amulet.AmuletSeam.factoryCid); 'coerceContractId' gives
+    -- it the 'TIV1.TransferFactory' type 'RegisterManager' wants.
+    amuletFactoryCid   : Optional (ContractId ())
+    -- "mock" only: the deployment's committed factory cid, as returned by THIS SAME CLI
+    -- invocation's earlier 'deployRegistry' call ('DeployRegistryOutput.factoryCid') -- 'None'
+    -- for "amulet" (uses amuletFactoryCid instead). Threaded through Go rather than re-resolved
+    -- via a fresh 'query @MockBurnMintFactory gg'/'query @MockPreapprovedTransferFactory gg'
+    -- here: gg (the factory's sole signatory) lives on its own participant in the
+    -- multi-participant topology, which this admin-hosted script cannot query as gg from (see
+    -- 'DeployRegistryOutput.factoryCid''s doc comment).
+    factoryCid         : Optional (ContractId ())
   deriving (Eq, Show)
 
 data DeployOutput = DeployOutput with
@@ -39,53 +117,126 @@ data DeployOutput = DeployOutput with
     managerAddress     : Text
     transceiverAddress : Text
     admin              : Party
+    instrumentAdmin    : Party  -- gg for "mock"; the real DSO for "amulet"
+    instrumentId        : Text
   deriving (Eq, Show)
 
+-- | Resolve the core registries (EmitterRegistry, ReplayRootRegistry), the deployment's
+-- typed committed factory (from the CLI-resolved 'DeployInput.factoryCid'/'amuletFactoryCid',
+-- per kind -- see those fields' doc comments for why this is never a fresh gg-side query), and
+-- this deployment's bound instrument id, then a single
+-- 'Wormhole.Ntt.Governance.RegisterManager' call (fee-0 devnet: every fee arg 'None').
+-- Lock-unlock "mock" additionally self-creates the admin's own
+-- 'Playground.MockRegistry.MockTransferPreapproval' in this same script -- the admin is the
+-- lock's custodian/receiver (Manager.daml's admin-owned custody), so this is what makes "lock
+-- by any user works with admin-owned custody, no promotion needed" (plan §4.2).
 deployNtt : DeployInput -> Script DeployOutput
-deployNtt input = do
-  let admin = input.admin
-  emitterCid <- registerEmitter input.operator admin
-  Some em <- queryContractId admin emitterCid
-  let mode = parseTokenMode input.mode
-      instrumentId = InstrumentId with admin, id = playgroundInstrumentId
-
-  tokenCid <- case parseTokenKind input.tokenKind of
-    MockAdminSigned -> do
-      mockCid <- submit admin do createCmd MockToken with admin, manager = input.operator, mode
-      pure (toInterfaceContractId @NttToken mockCid)
-    Cip56BurnMintMock -> fst <$> mkBurnMintToken admin input.operator instrumentId
-    Cip56CustodyMock -> fst <$> mkCustodyToken admin input.operator admin instrumentId False -- custody = admin; Completed mode
-    Cip56Custody -> do
-      -- Real Amulet: no mock factory. The registry's real transfer factory cid,
-      -- choice-context, and disclosures arrive per-call from Go (see
-      -- Playground.Ops:transferOut's Cip56Custody branch) -- this deployment step only
-      -- creates the token hook itself, admin-signed as usual.
-      let custody = fromSomeNote "playground: cip56-custody needs a custody party" input.custody
-          dso = fromSomeNote "playground: cip56-custody needs the DSO party" input.instrumentAdmin
-      cid <- submit admin do
-        createCmd Cip56CustodyToken with
-          admin, manager = input.operator, custody
+deployNtt input =
+  case parseTokenKind input.tokenKind of
+    -- The admin is already onboarded as a Splice wallet user with its own standing
+    -- TransferPreapproval by the time this runs (Go's setupAmuletAdmin, plan §4.3's spike --
+    -- verified live against a real LocalNet validator, not just type-checked). The CLI
+    -- resolves the registry's current transfer-factory cid the same way (plan §4.4);
+    -- 'RegisterManager' only ever stores 'factory' as a field, never fetches/exercises it, so
+    -- no disclosure is needed here (contrast 'Playground.Ops:transferOut', which does fetch
+    -- it at transfer time).
+    Amulet -> do
+      let dso = fromSomeNote
+            "playground: amulet deployNtt requires instrumentAdmin (the real DSO party)"
+            input.instrumentAdmin
+          config = parseTokenMode input.mode
           instrumentId = InstrumentId with admin = dso, id = "Amulet"
-      pure (toInterfaceContractId @NttToken cid)
 
-  [(regCid, _)] <- query @NttManagerRegistry input.operator
-  regDisc <- fromSome <$> queryDisclosure input.operator regCid
-  (_, mgrId) <- submit (actAs admin <> disclose regDisc) do
-    exerciseCmd regCid RegisterManager with
-      admin
-      guardianGovernance = input.guardianGovernance
-      transceiverEmitterCid = emitterCid
-      tokenCid
-      mode
-      tokenDecimals = input.tokenDecimals
-  Some mgr <- queryContractId input.operator mgrId
+      govCid <- resolveGovernance input.operator
+      govDisc <- fromSome <$> queryDisclosure input.operator govCid
+      [(emReg, _)] <- query @EmitterRegistry input.operator
+      emRegDisc <- fromSome <$> queryDisclosure input.operator emReg
+      [(rrReg, _)] <- query @ReplayRootRegistry input.operator
+      rrRegDisc <- fromSome <$> queryDisclosure input.operator rrReg
 
-  -- Every deployment's admin gets its own replay-protection trie scope (consumer = admin),
-  -- matching Test.TestNtt:setupReceiveManager.
-  _ <- registerReplayRoot input.operator admin defaultSplitThreshold
+      factory <- case input.amuletFactoryCid of
+        None -> abort "playground: amulet deployNtt needs a CLI-resolved transfer-factory cid -- run setupAmuletAdmin first"
+        Some cid -> pure (TransferFactoryCid (coerceContractId cid))
 
-  pure DeployOutput with
-    managerId = mgr.managerId
-    managerAddress = mgr.managerAddress
-    transceiverAddress = em.emitterAddress
-    admin
+      (_, mgrCid, emitterCid, _ledgerCid) <-
+        submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+          exerciseCmd govCid RegisterManager with
+            admin = input.admin
+            emitterRegistryCid = emReg
+            replayRootRegistryCid = rrReg
+            instrumentId
+            instrumentNonce = input.instrumentNonce
+            tokenConfig = config
+            tokenDecimals = input.tokenDecimals
+            factory
+            coreStateCid = None
+            emitterFeeAllocation = None
+            claimFeeAllocation = None
+
+      Some mgr <- queryContractId input.operator mgrCid
+      Some em <- queryContractId input.operator emitterCid
+      pure DeployOutput with
+        managerId = mgr.managerId
+        managerAddress = mgr.managerAddress
+        transceiverAddress = em.emitterAddress
+        admin = input.admin
+        instrumentAdmin = dso
+        instrumentId = instrumentId.id
+    Mock -> do
+      let gg = input.guardianGovernance
+          config = parseTokenMode input.mode
+          instrumentId = InstrumentId with
+            admin = gg
+            id = nttInstrumentIdFor input.admin input.instrumentNonce
+
+      govCid <- resolveGovernance input.operator
+      govDisc <- fromSome <$> queryDisclosure input.operator govCid
+      [(emReg, _)] <- query @EmitterRegistry input.operator
+      emRegDisc <- fromSome <$> queryDisclosure input.operator emReg
+      [(rrReg, _)] <- query @ReplayRootRegistry input.operator
+      rrRegDisc <- fromSome <$> queryDisclosure input.operator rrReg
+
+      let factoryCid = fromSomeNote
+            "playground: mock deployNtt needs a CLI-resolved factory cid -- run deployRegistry first"
+            input.factoryCid
+          factory = case config of
+            BurnMint -> BurnMintFactoryCid (coerceContractId factoryCid)
+            LockUnlock -> TransferFactoryCid (coerceContractId factoryCid)
+
+      (_, mgrCid, emitterCid, _ledgerCid) <-
+        submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+          exerciseCmd govCid RegisterManager with
+            admin = input.admin
+            emitterRegistryCid = emReg
+            replayRootRegistryCid = rrReg
+            instrumentId
+            instrumentNonce = input.instrumentNonce
+            tokenConfig = config
+            tokenDecimals = input.tokenDecimals
+            factory
+            coreStateCid = None
+            emitterFeeAllocation = None
+            claimFeeAllocation = None
+
+      -- Lock/unlock: the admin is the lock's custodian/receiver (Manager.daml's admin-owned
+      -- custody), so it self-creates its own standing preapproval here -- this is what makes
+      -- "lock by any user works with admin-owned custody, no promotion needed" (plan §4.2).
+      case config of
+        LockUnlock -> do
+          _ <- submit input.admin do
+            createCmd MockTransferPreapproval with
+              owner = input.admin
+              registryAdmin = gg
+              instrument = instrumentId
+          pure ()
+        BurnMint -> pure ()
+
+      Some mgr <- queryContractId input.operator mgrCid
+      Some em <- queryContractId input.operator emitterCid
+      pure DeployOutput with
+        managerId = mgr.managerId
+        managerAddress = mgr.managerAddress
+        transceiverAddress = em.emitterAddress
+        admin = input.admin
+        instrumentAdmin = gg
+        instrumentId = instrumentId.id

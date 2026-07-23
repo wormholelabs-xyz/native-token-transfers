@@ -1,7 +1,7 @@
 {
   "name": "burnmint",
   "mode": "burn-mint",
-  "tokenKind": "mock-admin-signed",
+  "tokenKind": "mock",
   "decimals": 8,
   "peers": [
     {

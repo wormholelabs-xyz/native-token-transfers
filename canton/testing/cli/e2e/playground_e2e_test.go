@@ -222,17 +222,22 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	var guardianKeyHex string
+	var initOut string
 	t.Run("init with a fresh 1/1 guardian", func(t *testing.T) {
 		priv, err := crypto.GenerateKey()
 		require.NoError(t, err)
 		guardianKeyHex = hex.EncodeToString(crypto.FromECDSA(priv))
 
-		out := h.mustRun(t, "init", "--guardian-key", guardianKeyHex)
+		initOut = h.mustRun(t, "init", "--guardian-key", guardianKeyHex)
+		out := initOut
 
-		// Stable verbose markers only (messages may evolve): a party allocation and the
-		// genesis script invocation must both have been narrated.
+		// Stable verbose markers only (messages may evolve): a party allocation and both
+		// genesis script invocations (propose on operator's participant, accept on
+		// guardianGovernance's participant -- phase 4's propose/accept split, plan §5.1)
+		// must have been narrated.
 		require.Contains(t, out, "[v] allocated party")
-		require.Contains(t, out, "[v] script Playground.Init:initPlayground")
+		require.Contains(t, out, "[v] script Playground.Init:proposeGenesis")
+		require.Contains(t, out, "[v] script Playground.Init:acceptGenesis")
 
 		s := h.loadState(t)
 		require.Equal(t, guardianKeyHex, s.Guardian.PrivateKeyHex)
@@ -258,7 +263,14 @@ func TestPlaygroundE2E(t *testing.T) {
 
 	var inboundVaaHex, inboundPubKeyHex string
 	t.Run("inbound transfer mints to the recipient", func(t *testing.T) {
-		out := h.mustRun(t, "guardian", "sign-transfer",
+		// Both modes now require the recipient's prior opt-in (executor-only delivery
+		// mirrors real Amulet and this package's own burn/mint Mint -- see
+		// Playground.MockRegistry / Wormhole.Ntt.Deposit): one-time preapprove before the
+		// first receive on this deployment.
+		out := h.mustRun(t, "preapprove", "--deployment", "burnmint", "--user", "Alice")
+		require.Contains(t, out, "preapproved=true")
+
+		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "1000000", "--source-chain", "2")
 		inboundVaaHex = extractField(t, out, "vaa")
 		inboundPubKeyHex = extractField(t, out, "pubkey")
@@ -270,7 +282,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "amount=1000000")
 
 		out = h.mustRun(t, "balance", "--party", "Alice", "--deployment", "burnmint")
-		require.Contains(t, out, "mockHoldingTotal=1000000")
+		require.Contains(t, out, "cip56HoldingTotal=")
 	})
 
 	t.Run("replay is rejected", func(t *testing.T) {
@@ -289,9 +301,18 @@ func TestPlaygroundE2E(t *testing.T) {
 	// verification cannot be steered by the untrusted pubKeys hint -- if hint-handling ever
 	// went vacuous, every other (happy-path) test in this suite would stay green.
 	t.Run("adversarial VAAs are rejected on-ledger", func(t *testing.T) {
+		// Eve is this subtest's (and "layered gates"' below) wrong-recipient foil: she needs a
+		// standing burnmint pre-approval too, purely so the on-ledger recipient/manager-binding
+		// gates below are what actually fires -- without it, receive's own client-side
+		// pre-approval-existence check (the recipient's prior opt-in requirement, see the
+		// module-level note above) would short-circuit before any of these VAAs are even
+		// submitted, masking the gate this subtest exists to pin.
+		out := h.mustRun(t, "preapprove", "--deployment", "burnmint", "--user", "Eve")
+		require.Contains(t, out, "preapproved=true")
+
 		// Fresh VAA (auto-incremented sequence, so it can't collide with the inbound-mint
 		// subtest's already-consumed one): a valid inbound transfer to Alice.
-		out := h.mustRun(t, "guardian", "sign-transfer",
+		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "burnmint", "--to-recipient", "Alice", "--amount", "10000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
 		pubKeyHex := extractField(t, out, "pubkey")
@@ -349,7 +370,12 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	t.Run("outbound transfer recomputes the message and signs it", func(t *testing.T) {
+		// Bob lives on his own participant (plan §2/§3); transferOut's prepare step needs the
+		// NttManager/CoreState/Emitter/MockBurnMintFactory disclosures from
+		// topology-localnet.json to fetch and attach the gg-owned contracts across
+		// participants (integration plan §8; gg, not operator, is the data owner post-rework).
 		out := h.mustRun(t, "transfer", "--deployment", "burnmint",
+			"--topology-config", testdataPath("topology-localnet.json"),
 			"--user", "Bob", "--chain", "2",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
 			"--amount", "500000", "--sign")
@@ -413,6 +439,26 @@ func TestPlaygroundE2E(t *testing.T) {
 	t.Run("lock-unlock deployment: abbreviated receive + transfer", func(t *testing.T) {
 		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-lockunlock.json"))
 
+		// Receive (Release) requires the recipient's prior opt-in for lock-unlock "mock"
+		// too now (Playground.MockRegistry's MockTransferPreapproval) -- preapprove(Carol)
+		// before fund(sender)/transfer(lock)/receive(release), per plan §7(c)'s flipped
+		// lock-unlock flow order.
+		out = h.mustRun(t, "preapprove", "--deployment", "lockunlock", "--user", "Carol")
+		require.Contains(t, out, "preapproved=true")
+
+		// The lock leg comes FIRST now: admin-owned custody enforces a real reserve cap
+		// (Ledger.daml's over-release assertion), so an inbound release needs at least as
+		// much already locked on this Canton chain as it asks to unlock. Dave is a fresh,
+		// non-admin sender -- lock/unlock custody is admin-owned by construction now (no
+		// "promoted custodian" workaround needed for a non-admin sender to lock; see the
+		// dedicated subtest below for the direct pin). Locks comfortably more than the
+		// receive below asks to release.
+		out = h.mustRun(t, "transfer", "--deployment", "lockunlock",
+			"--user", "Dave", "--chain", "2",
+			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
+			"--amount", "500000", "--sign")
+		require.Contains(t, out, "emitterChain=72")
+
 		out = h.mustRun(t, "guardian", "sign-transfer",
 			"--deployment", "lockunlock", "--to-recipient", "Carol", "--amount", "250000", "--source-chain", "2")
 		vaaHex := extractField(t, out, "vaa")
@@ -421,168 +467,67 @@ func TestPlaygroundE2E(t *testing.T) {
 		out = h.mustRun(t, "receive", "--deployment", "lockunlock",
 			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
+	})
+
+	// New: pins the admin-owned custody path for a lock/unlock deployment's non-admin
+	// senders directly (plan §7(c)) -- upstream's own Test.TestNtt suite can only exercise
+	// this scenario with a PROMOTED custodian (custodian == gg, testNttTransferByDifferentUser);
+	// the playground's admin-owned-by-default custody needs no promotion at all.
+	t.Run("lock-unlock: non-admin sender lock succeeds without promotion", func(t *testing.T) {
+		out := h.mustRun(t, "balance", "--party", "lockunlock-admin", "--deployment", "lockunlock")
+		before := extractField(t, out, "cip56HoldingTotal")
 
 		out = h.mustRun(t, "transfer", "--deployment", "lockunlock",
-			"--user", "Dave", "--chain", "2",
-			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
-			"--amount", "100000", "--sign")
-		require.Contains(t, out, "emitterChain=72")
-	})
-
-	// The only subtest driving a real production NttToken implementation end to end: the
-	// CIP-56 burn/mint token (Cip56BurnMintToken.MintOrUnlock on inbound, LockOrBurn on
-	// outbound) over the local mock registry. It exercises the auto-funding path, the Daml
-	// Decimal JSON boundary, and the suite's only value-conservation check.
-	var cip56Total string
-	t.Run("cip56 burn-mint deployment: funded transfer round-trip", func(t *testing.T) {
-		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-burnmint.json"))
-		require.Contains(t, out, "[v] set peer chain=2")
-
-		s := h.loadState(t)
-		d, ok := s.Deployment("cip56bm")
-		require.True(t, ok)
-		require.Equal(t, "cip56-burn-mint-mock", d.TokenKind, "the deployment must use the real CIP-56 burn/mint impl")
-
-		// Inbound path (owner-signed kind): the recipient must first opt in via a standing
-		// DepositPreapproval, otherwise Cip56BurnMintToken.MintOrUnlock aborts. This proves three
-		// things at once: (1) a fresh recipient can't be minted to without consent, (2) opting in
-		// makes the SAME VAA deliverable, because the failed receive did not burn the digest, and
-		// (3) the recipient is passive at delivery time.
-		out = h.mustRun(t, "guardian", "sign-transfer",
-			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "750000", "--source-chain", "2")
-		vaaHex := extractField(t, out, "vaa")
-		pubKeyHex := extractField(t, out, "pubkey")
-		require.NotEmpty(t, vaaHex)
-
-		// (1) No pre-approval yet: the on-ledger mint gate must reject the delivery cleanly.
-		out, err := h.run(t, "receive", "--deployment", "cip56bm",
-			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
-		require.Error(t, err, "an owner-signed mint to a recipient with no deposit pre-approval must be rejected")
-		require.Contains(t, out, "deposit pre-approval required")
-
-		// (2) Frank opts in: creates his standing Cip56DepositPreapproval (dual-signed).
-		out = h.mustRun(t, "preapprove", "--deployment", "cip56bm", "--user", "Frank")
-		require.Contains(t, out, "preapproved=true")
-
-		// (3) The SAME VAA now succeeds -- the earlier failure did not consume the digest, and
-		// Frank is not an actor of this submission (executor-only receive).
-		out = h.mustRun(t, "receive", "--deployment", "cip56bm",
-			"--vaa", vaaHex, "--recipient", "Frank", "--pubkey", pubKeyHex)
-		require.Contains(t, out, "recipientChain=72")
-		require.Contains(t, out, "amount=750000")
-
-		// The mock (admin-signed) kind needs no pre-approval: `preapprove` there is a ledger-
-		// surfaced no-op (PreApproveDeposit returns None), proving the CLI reads kind policy
-		// from the ledger rather than gating client-side.
-		out = h.mustRun(t, "preapprove", "--deployment", "burnmint", "--user", "Alice")
-		require.Contains(t, out, "preapproved=false")
-		require.Contains(t, out, "no pre-approval required")
-
-		// The mint landed: 750000 wire units at 8 decimals = 0.0075 CIP-56 units, rendered by
-		// dpm script as a full-scale Daml Numeric 10 literal (pinned to the observed form).
-		out = h.mustRun(t, "balance", "--party", "Frank", "--deployment", "cip56bm")
-		cip56Total = extractField(t, out, "cip56HoldingTotal")
-		require.Equal(t, "0.0075000000", cip56Total, "the receive should have minted 750000 units (0.0075 at 8 decimals)")
-
-		// Outbound: the CLI auto-funds Frank a fresh 0.003 holding, then LockOrBurn burns it
-		// in full (exact cover, no change). Frank's receive-minted 0.0075 is a separate
-		// holding and is untouched.
-		out = h.mustRun(t, "transfer", "--deployment", "cip56bm",
 			"--user", "Frank", "--chain", "2",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
-			"--amount", "300000", "--sign")
-		require.Equal(t, "72", extractField(t, out, "emitterChain"), "outbound messages are published from Canton (chain 72)")
-		require.True(t, strings.HasPrefix(extractField(t, out, "payload"), "9945ff10"),
-			"recomputed payload should carry the transceiver prefix")
-
-		// Value conservation: the auto-funded 0.003 was burned in full, so Frank's balance is
-		// exactly what the inbound mint left -- unchanged from the pre-transfer reading.
-		out = h.mustRun(t, "balance", "--party", "Frank", "--deployment", "cip56bm")
-		require.Equal(t, cip56Total, extractField(t, out, "cip56HoldingTotal"),
-			"the funded holding must have been consumed in full by the burn, leaving the minted balance intact")
-
-		// Revoke arc: the owner tears down its consent, a fresh VAA then fails on the mint gate
-		// (re-pinning that a failed delivery does not burn the digest), and re-approving makes
-		// that same fresh VAA deliverable again -- the full opt-in/opt-out lifecycle end to end.
-		out = h.mustRun(t, "preapprove", "revoke", "--deployment", "cip56bm", "--user", "Frank")
-		require.Contains(t, out, "revoked=true")
-
-		out = h.mustRun(t, "guardian", "sign-transfer",
-			"--deployment", "cip56bm", "--to-recipient", "Frank", "--amount", "250000", "--source-chain", "2")
-		freshVaaHex := extractField(t, out, "vaa")
-		freshPubKeyHex := extractField(t, out, "pubkey")
-		require.NotEmpty(t, freshVaaHex)
-
-		out, err = h.run(t, "receive", "--deployment", "cip56bm",
-			"--vaa", freshVaaHex, "--recipient", "Frank", "--pubkey", freshPubKeyHex)
-		require.Error(t, err, "after revoke, an owner-signed mint must be rejected again")
-		require.Contains(t, out, "deposit pre-approval required")
-
-		out = h.mustRun(t, "preapprove", "--deployment", "cip56bm", "--user", "Frank")
-		require.Contains(t, out, "preapproved=true")
-
-		out = h.mustRun(t, "receive", "--deployment", "cip56bm",
-			"--vaa", freshVaaHex, "--recipient", "Frank", "--pubkey", freshPubKeyHex)
-		require.Contains(t, out, "recipientChain=72")
-		require.Contains(t, out, "amount=250000")
-	})
-
-	// Sandbox-viable coverage of the CIP-56 custody token's mock kind (Cip56CustodyToken over
-	// Test.TestNtt:MockTransferFactory; the real-Amulet "real amulet cip56-custody" subtest
-	// below needs the localnet profile). Playground.Deploy:deployNtt's Cip56CustodyMock branch
-	// hardcodes custody = admin, and the deployment's admin party is cached in state under the
-	// "<name>-admin" hint (deploy.go's default adminHint), so that same cached hint doubles as
-	// the custody party for both `guardian sign-transfer --to-recipient` and `receive
-	// --recipient`. This is required, not incidental: Cip56MockHolding is owner-signed and
-	// `receive` is executor-only (no actAs recipient), so the unlock's receiver-owned holding
-	// create only has valid authority when recipient == custody == admin (see
-	// Test.TestNtt:testCustodyUnlockCompletedSucceeds).
-	t.Run("cip56 custody deployment (mock): lock-unlock through the custody party", func(t *testing.T) {
-		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-custody-mock.json"))
-		require.Contains(t, out, "[v] set peer chain=2")
-
-		s := h.loadState(t)
-		d, ok := s.Deployment("cip56cumock")
-		require.True(t, ok)
-		require.Equal(t, "cip56-custody-mock", d.TokenKind)
-
-		const custodyHint = "cip56cumock-admin"
-		custodyParty, ok := s.Users[custodyHint]
-		require.True(t, ok, "deploy should have cached the admin/custody party under %q", custodyHint)
-		require.NotEmpty(t, custodyParty)
-
-		// Unlock leg (custody -> recipient): MintOrUnlock via NttManager.Receive, executor-only.
-		// recipient must be the custody hint itself for the reasons above.
-		out = h.mustRun(t, "guardian", "sign-transfer",
-			"--deployment", "cip56cumock", "--to-recipient", custodyHint, "--amount", "500000", "--source-chain", "2")
-		vaaHex := extractField(t, out, "vaa")
-		pubKeyHex := extractField(t, out, "pubkey")
-		require.NotEmpty(t, vaaHex)
-
-		out = h.mustRun(t, "receive", "--deployment", "cip56cumock",
-			"--vaa", vaaHex, "--recipient", custodyHint, "--pubkey", pubKeyHex)
-		require.Contains(t, out, "recipientChain=72")
-		require.Contains(t, out, "amount=500000")
-
-		out = h.mustRun(t, "balance", "--party", custodyHint, "--deployment", "cip56cumock")
-		require.Equal(t, "0.0050000000", extractField(t, out, "cip56HoldingTotal"),
-			"the unlock should have moved 500000 units (0.005 at 8 decimals) to the custody party")
-
-		// Lock leg (sender -> custody): LockOrBurn via NttManager.Transfer. The CLI auto-funds
-		// the sender via Playground.Ops:fundUser (any tokenKind other than
-		// mock-admin-signed/cip56-custody), so no separate funding step is needed here.
-		out = h.mustRun(t, "transfer", "--deployment", "cip56cumock",
-			"--user", "cip56cumock-sender", "--chain", "2",
-			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
-			"--amount", "200000", "--sign")
+			"--amount", "50000", "--sign")
 		require.Contains(t, out, "emitterChain=72")
 
-		// Value conservation: custody now holds the earlier unlock (0.005) PLUS the freshly
-		// locked funding (0.002) -- proving the lock leg actually moved funds into custody
-		// rather than merely emitting the outbound message.
-		out = h.mustRun(t, "balance", "--party", custodyHint, "--deployment", "cip56cumock")
-		require.Equal(t, "0.0070000000", extractField(t, out, "cip56HoldingTotal"),
-			"custody should hold the unlocked 0.005 plus the newly locked 0.002")
+		out = h.mustRun(t, "balance", "--party", "lockunlock-admin", "--deployment", "lockunlock")
+		after := extractField(t, out, "cip56HoldingTotal")
+		require.NotEqual(t, before, after,
+			"a non-admin sender's lock must move funds into the admin-owned custody pot with no promotion step")
+	})
+
+	// New negative subtest (plan §7(c)): receive without the recipient's prior opt-in is
+	// rejected cleanly, and the VAA stays deliverable once the recipient opts in --
+	// exercised for BOTH modes (burn-mint pins Wormhole.Ntt.Manager's Mint gate; lock-unlock
+	// pins Playground.MockRegistry's factory gate, reached through Manager.Release).
+	t.Run("receive without preapproval is rejected and the VAA stays deliverable", func(t *testing.T) {
+		for _, tc := range []struct {
+			deployment, recipient string
+		}{
+			{"burnmint", "Grace"},
+			{"lockunlock", "Heidi"},
+		} {
+			t.Run(tc.deployment, func(t *testing.T) {
+				out := h.mustRun(t, "guardian", "sign-transfer",
+					"--deployment", tc.deployment, "--to-recipient", tc.recipient, "--amount", "12345", "--source-chain", "2")
+				vaaHex := extractField(t, out, "vaa")
+				pubKeyHex := extractField(t, out, "pubkey")
+				require.NotEmpty(t, vaaHex)
+
+				// No preapprove yet: the on-ledger gate must reject the delivery cleanly,
+				// without consuming the VAA's replay digest. The two modes' abort messages
+				// differ slightly ("no DepositPreapproval" for burn-mint vs. "no standing
+				// transfer pre-approval" for lock-unlock -- see Playground.Ops:receiveVaa), so
+				// assert on the phrase both share instead of "pre-approval" (present only in
+				// the lock-unlock wording).
+				out, err := h.run(t, "receive", "--deployment", tc.deployment,
+					"--vaa", vaaHex, "--recipient", tc.recipient, "--pubkey", pubKeyHex)
+				require.Error(t, err, "a receive with no prior recipient opt-in must be rejected")
+				require.Contains(t, out, "run `preapprove` first")
+
+				out = h.mustRun(t, "preapprove", "--deployment", tc.deployment, "--user", tc.recipient)
+				require.Contains(t, out, "preapproved=true")
+
+				// The SAME VAA now succeeds -- the earlier failure did not burn the digest.
+				out = h.mustRun(t, "receive", "--deployment", tc.deployment,
+					"--vaa", vaaHex, "--recipient", tc.recipient, "--pubkey", pubKeyHex)
+				require.Contains(t, out, "recipientChain=72")
+				require.Contains(t, out, "amount=12345")
+			})
+		}
 	})
 
 	t.Run("party list shows allocated parties", func(t *testing.T) {
@@ -675,12 +620,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
 		require.Equal(t, 0, listed.GuardianSetIndex)
-		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment",
-		// "cip56 burn-mint deployment", and "cip56 custody deployment (mock)". Bump these
-		// counts whenever a deploy subtest is added. (The real-Amulet "cip56 custody" deploy
-		// runs after this subtest, and only on localnet, so it is not counted here.)
-		require.Len(t, listed.Managers, 4, "burnmint + lockunlock + cip56bm + cip56cumock managers")
-		require.GreaterOrEqual(t, len(listed.Emitters), 4, "three transceiver emitters + the standalone one")
+		// One manager per deploy subtest: "deploy burn-mint" and "lock-unlock deployment".
+		// Bump this count whenever a deploy subtest is added. (The real-Amulet "amulet"
+		// deploy runs after this subtest, and only on localnet, so it is not counted here.)
+		require.Len(t, listed.Managers, 2, "burnmint + lockunlock managers")
+		require.GreaterOrEqual(t, len(listed.Emitters), 2, "two transceiver emitters + the standalone one")
 	})
 
 	// The suite's remaining Receive gate coverage: Manager.daml's Receive choice
@@ -694,12 +638,19 @@ func TestPlaygroundE2E(t *testing.T) {
 	// evaluated together, malformed-byte parsing, and the `peer set` command (previously
 	// unexercised).
 	t.Run("inbound receive enforces peer and manager binding", func(t *testing.T) {
+		// This subtest's controls receive into Alice on "lockunlock" (she was only preapproved
+		// on "burnmint" earlier) -- both modes now gate receive on the recipient's prior opt-in
+		// (see the module-level note above), so she needs a standing lockunlock pre-approval
+		// too before any of the A3/A4 controls below can succeed.
+		out := h.mustRun(t, "preapprove", "--deployment", "lockunlock", "--user", "Alice")
+		require.Contains(t, out, "preapproved=true")
+
 		// A1 -- gate 2: chain 7 has never been configured as a burnmint peer. sign-vaa lets us
 		// sign an arbitrary payload for a chain/emitter pair that sign-transfer could never
 		// reach (sign-transfer requires a configured peer client-side); the signature is
 		// genuinely valid, so this isolates the peer-lookup gate before the payload is ever
 		// decoded.
-		out := h.mustRun(t, "guardian", "sign-vaa",
+		out = h.mustRun(t, "guardian", "sign-vaa",
 			"--emitter-chain", "7", "--emitter", addr32("cc"), "--sequence", "9001", "--payload", "deadbeef")
 		vaaHex := extractField(t, out, "vaa")
 		pubKeyHex := extractField(t, out, "pubkey")
@@ -1003,36 +954,36 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	// The only subtest driving REAL Canton Coin (Amulet) rather than a local mock registry:
-	// a CIP-56 custody (lock/unlock) deployment, a real tap + TransferPreapproval, an outbound
+	// an "amulet" (lock/unlock) deployment, a real tap + TransferPreapproval, an outbound
 	// lock of 1 CC, and the guardian observation proved off a real Ledger API v2 update stream
 	// (not the recompute path). LocalNet-only: the sandbox has no DSO/Amulet, so `deploy` gates
 	// on prof.AmuletAvailable and this subtest self-skips rather than duplicating that gate's own
 	// coverage (see the sandbox-rejection subtest below).
-	t.Run("real amulet cip56-custody: transfer 1 CC observed on stream", func(t *testing.T) {
+	t.Run("real amulet: transfer 1 CC observed on stream", func(t *testing.T) {
 		if playgroundProfile != "localnet" {
 			t.Skip("real Amulet requires the localnet profile")
 		}
 
-		// 1. deploy: onboards the custody wallet user, creates its TransferPreapproval, and
-		// deploys the real Cip56CustodyToken hook against the real DSO's Amulet instrument.
-		h.mustRun(t, "deploy", "--config", testdataPath("deploy-cip56-custody.json"))
+		// 1. deploy: onboards the admin as a wallet user (admin IS the custody party now --
+		// lock/unlock custody is admin-owned by construction, no separate custody party),
+		// creates its TransferPreapproval, and deploys against the real DSO's Amulet instrument.
+		h.mustRun(t, "deploy", "--config", testdataPath("deploy-amulet.json"))
 		s := h.loadState(t)
-		d, ok := s.Deployment("cc-custody")
+		d, ok := s.Deployment("amulet")
 		require.True(t, ok)
-		require.Equal(t, "cip56-custody", d.TokenKind)
-		require.NotEmpty(t, d.CustodyParty)
+		require.Equal(t, "amulet", d.TokenKind)
 		require.Contains(t, d.InstrumentAdmin, "DSO::", "instrument admin must be the real DSO party")
 
 		// 2. record the pre-transfer ledger end so the stream read below only sees this
 		// transfer's own publish.
-		out := h.mustRun(t, "observe", "stream", "--deployment", "cc-custody", "--print-offset")
+		out := h.mustRun(t, "observe", "stream", "--deployment", "amulet", "--print-offset")
 		fromOffset := extractField(t, out, "ledgerEnd")
 
 		// 3. transfer 1 CC (raw 10^10 at 10 decimals). The CLI auto-onboards and taps the
 		// sender, fetches the real transfer factory and choice context from the scan-proxy, and
 		// runs Playground.Ops:transferOut against the real Amulet registry.
-		out = h.mustRun(t, "transfer", "--deployment", "cc-custody",
-			"--user", "cc-sender", "--chain", "2",
+		out = h.mustRun(t, "transfer", "--deployment", "amulet",
+			"--user", "amulet-sender", "--chain", "2",
 			"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "10000000000", "--sign")
 		payloadHex := extractField(t, out, "payload")
 		seq := extractField(t, out, "sequence")
@@ -1041,7 +992,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// 4. the observation: read the real update stream as guardian-watcher (readAs
 		// guardianObserver only -- never the operator/admin) and prove the streamed message
 		// matches the recomputed one bit-for-bit.
-		out = h.mustRun(t, "observe", "stream", "--deployment", "cc-custody",
+		out = h.mustRun(t, "observe", "stream", "--deployment", "amulet",
 			"--from-offset", fromOffset, "--count", "1", "--timeout", "3m")
 		var observed []struct {
 			EmitterChain     int    `json:"emitterChain"`
@@ -1072,21 +1023,21 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Equal(t, uint8(8), ntt.Decimals)
 		require.Equal(t, uint16(2), ntt.RecipientChain)
 
-		// 5. custody actually holds the locked 1.0 CC.
-		out = h.mustRun(t, "balance", "--party", "cc-custody-custody", "--deployment", "cc-custody")
+		// 5. the admin (custody) actually holds the locked 1.0 CC.
+		out = h.mustRun(t, "balance", "--party", "amulet-admin", "--deployment", "amulet")
 		require.Equal(t, "1.0000000000", extractField(t, out, "amuletHoldingTotal"))
 	})
 
 	// Sandbox-viable coverage of the AmuletAvailable gate: the sandbox has no DSO/Amulet, so
-	// `deploy` must reject a cip56-custody deployment with a clear error rather than trying (and
+	// `deploy` must reject an "amulet" deployment with a clear error rather than trying (and
 	// failing confusingly) to resolve a DSO party that doesn't exist there.
-	t.Run("cip56-custody is rejected without real Amulet", func(t *testing.T) {
+	t.Run("amulet is rejected without real Amulet", func(t *testing.T) {
 		if playgroundProfile == "localnet" {
 			t.Skip("this pins the sandbox gating error; localnet exercises the real path above")
 		}
-		out, err := h.run(t, "deploy", "--config", testdataPath("deploy-cip56-custody.json"), "--name", "cc-custody-rejected")
-		require.Error(t, err, "cip56-custody must be rejected on a profile without real Amulet")
-		require.Contains(t, out, "cip56-custody requires a profile with real Amulet (localnet)")
+		out, err := h.run(t, "deploy", "--config", testdataPath("deploy-amulet.json"), "--name", "amulet-rejected")
+		require.Error(t, err, "amulet must be rejected on a profile without real Amulet")
+		require.Contains(t, out, "amulet requires a profile with real Amulet (localnet)")
 	})
 
 	t.Run("network status reports running localnet services", func(t *testing.T) {
@@ -1095,6 +1046,144 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		out := h.mustRun(t, "network", "status")
 		require.Contains(t, out, "localnet: service=", "status should report the running compose services")
+	})
+
+	// ----------------------------------------------------------------------
+	// Phase-1 placeholders for the participant-split redesign
+	// (.claude/tasks/e2e-separate-participants.md). These call the CLI exactly as it exists
+	// TODAY -- no new flags, no new output -- and pin today's behavior with a TODO(phase N)
+	// comment describing what the assertion becomes once that phase lands. Do not fabricate
+	// CLI flags that don't exist yet (--topology-config, etc.); see the plan's §6(c)/§7.
+	// ----------------------------------------------------------------------
+
+	t.Run("parties live on separate participants", func(t *testing.T) {
+		// Multi-participant routing is a localnet-only concept -- the sandbox profile
+		// degenerates every role to its single "default" participant (plan §2), so
+		// `party list` there would show every hint under one participant name, which this
+		// assertion isn't shaped to check.
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+
+		// Genesis (`init`, earlier in this suite) now crosses participants for real
+		// (Playground/Init.daml's propose/accept split, phase 4's redesign, plan §5.1):
+		// proposeGenesis submits as operator alone on operator's participant, acceptGenesis
+		// submits as guardianGovernance alone on guardianGovernance's participant. Both
+		// resolveParty (party.go) persists s.Users[hint] and s.UserParticipants[hint] as
+		// soon as each party is allocated, and init.go assigns state.Operator/
+		// GuardianGovernance/GuardianObserver from proposeGenesis's own output -- so
+		// s.Users["Operator"]/["GuardianGovernance"]/["GuardianObserver"] are exactly the
+		// party ids this subtest relies on. Bob is (re-)allocated explicitly so this subtest
+		// doesn't depend on an earlier transfer/receive subtest having reached him first.
+		h.mustRun(t, "party", "allocate", "--hint", "Bob")
+		s := h.loadState(t)
+		require.NotEmpty(t, s.Users["Operator"], "the operator hint should have been allocated during init")
+		require.NotEmpty(t, s.Users["GuardianGovernance"])
+		require.NotEmpty(t, s.Users["GuardianObserver"])
+		require.NotEmpty(t, s.Users["Bob"])
+
+		out := h.mustRun(t, "party", "list")
+		lines := strings.Split(stripVerbose(out), "\n")
+
+		// requireRoutedTo asserts that every "participant=... party=<party> ... isLocal=..."
+		// line in `party list`'s output agrees with wantParticipant: isLocal=true on that
+		// participant, isLocal=false everywhere else the same party shows up (it is
+		// topology-visible domain-wide; only its HOME participant actually hosts it).
+		requireRoutedTo := func(party, wantParticipant string) {
+			matched := 0
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				var gotParty, gotParticipant, gotIsLocal string
+				for _, f := range fields {
+					switch {
+					case strings.HasPrefix(f, "party="):
+						gotParty = strings.TrimPrefix(f, "party=")
+					case strings.HasPrefix(f, "participant="):
+						gotParticipant = strings.TrimPrefix(f, "participant=")
+					case strings.HasPrefix(f, "isLocal="):
+						gotIsLocal = strings.TrimPrefix(f, "isLocal=")
+					}
+				}
+				if gotParty != party {
+					continue
+				}
+				matched++
+				if gotParticipant == wantParticipant {
+					require.Equal(t, "true", gotIsLocal, "party %s on its home participant=%s should be local: %q", party, wantParticipant, line)
+				} else {
+					require.Equal(t, "false", gotIsLocal, "party %s under a foreign participant=%s should not be local: %q", party, gotParticipant, line)
+				}
+			}
+			require.Positivef(t, matched, "expected party %s to appear in `party list` output at all:\n%s", party, out)
+		}
+
+		requireRoutedTo(s.Users["Operator"], "app-provider")
+		requireRoutedTo(s.Users["GuardianGovernance"], "guardian-governance")
+		requireRoutedTo(s.Users["GuardianObserver"], "guardian-observer")
+		requireRoutedTo(s.Users["Bob"], "bob")
+	})
+
+	t.Run("cross-participant transfer fails without disclosure config", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+		// Bob lives on the "bob" participant (default partyHosting), a different participant
+		// than guardianGovernance -- the data owner for a Mock-kind transferOut post-rework
+		// (integration plan §8: gg co-signs/owns everything transferOut needs, including the
+		// gg-sole-owned committed factory). An empty `disclose` list (testdata/
+		// topology-empty.json) means Playground.Prepare:prepareTransferOut still resolves real
+		// cids/records as gg on gg's own participant, but discloses NONE of them, so the
+		// submit-side Playground.Ops:transferOut (running on Bob's own participant) fails
+		// on-ledger: the NttManager/CoreState/Emitter it must exercise/read are genuinely
+		// invisible there.
+		out, err := h.run(t, "--topology-config", testdataPath("topology-empty.json"),
+			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "1")
+		require.Error(t, err, "a cross-participant transfer with no configured disclosures must fail on-ledger")
+		require.Contains(t, out, "CONTRACT_NOT_FOUND")
+	})
+
+	t.Run("disclosure config recovers the transfer", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+		// The SAME command as above, but with testdata/topology-localnet.json (NttManager,
+		// CoreState, Emitter, MockBurnMintFactory -- everything burnmint's transferOut needs,
+		// per the integration plan's §8) succeeds.
+		out := h.mustRun(t, "--topology-config", testdataPath("topology-localnet.json"),
+			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "1")
+		require.Contains(t, out, "emitterChain=72")
+
+		// Removing one entry (CoreState) from a copy of that config and re-running the SAME
+		// command must fail again, proving per-template granularity -- the mechanism isn't an
+		// all-or-nothing switch.
+		out, err := h.run(t, "--topology-config", testdataPath("topology-missing-corestate.json"),
+			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "1")
+		require.Error(t, err, "removing one required disclosure entry must make the SAME command fail again")
+		require.Contains(t, out, "CONTRACT_NOT_FOUND")
+	})
+
+	t.Run("genesis requires both guardian participants", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+
+		// `init` is a one-time genesis operation -- init.go always starts from a brand new,
+		// empty state.New() (deliberately: genesis has no prior identities to resume from),
+		// so resolveParty always attempts a FRESH party allocation for the Operator/
+		// GuardianGovernance/GuardianObserver hints regardless of what an earlier CLI
+		// invocation already persisted. Calling `init` a second time against the SAME live
+		// ledger therefore fails ("Party already exists") -- it is not meant to be re-run
+		// mid-suite. Rather than re-invoke it, this asserts against the SAME output the
+		// earlier "init with a fresh 1/1 guardian" subtest already captured: `init` narrates
+		// BOTH the propose script run (on operator's participant) and the accept script run
+		// (on guardian-governance's participant) -- proving genesis now needs two
+		// independent participant authorizations rather than one single-participant
+		// co-signed submit.
+		require.Contains(t, initOut, "[v] script Playground.Init:proposeGenesis")
+		require.Contains(t, initOut, "[v] script Playground.Init:acceptGenesis")
 	})
 
 	t.Run("network down", func(t *testing.T) {

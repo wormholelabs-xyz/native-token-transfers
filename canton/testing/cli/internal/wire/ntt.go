@@ -31,10 +31,10 @@ var NativeTokenTransferPrefix = [4]byte{0x99, 0x4e, 0x54, 0x54}
 // WormholeTransceiverPrefix is the Wormhole transceiver message prefix, 0x9945FF10.
 var WormholeTransceiverPrefix = [4]byte{0x99, 0x45, 0xff, 0x10}
 
-// MaxTrimmedDecimals is the NTT wire's maximum amount scale (Wormhole.Ntt.Token:maxTrimmedDecimals).
+// MaxTrimmedDecimals is the NTT wire's maximum amount scale (Wormhole.Ntt.Amount:maxTrimmedDecimals).
 const MaxTrimmedDecimals = 8
 
-// TrimDecimals mirrors Wormhole.Ntt.Token:trimAmount's decimals clamp: the wire scale for a
+// TrimDecimals mirrors Wormhole.Ntt.Amount:trimAmount's decimals clamp: the wire scale for a
 // token of tokenDecimals decimals is min(tokenDecimals, 8).
 func TrimDecimals(tokenDecimals int) int {
 	if tokenDecimals <= MaxTrimmedDecimals {

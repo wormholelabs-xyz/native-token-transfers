@@ -1,49 +1,49 @@
 # Native Token Transfers (NTT) on Canton
 
-This directory is the **Canton/Daml** implementation of Wormhole
-[NTT](https://github.com/wormhole-foundation/native-token-transfers) — the same
-NTT protocol implemented for EVM, Solana, and Sui elsewhere in this repository,
-ported to the Canton Network.
+This directory is the Canton/Daml implementation of Wormhole
+[NTT](https://github.com/wormhole-foundation/native-token-transfers), the same
+protocol implemented for EVM, Solana, and Sui elsewhere in this repository.
 
-It is an **uploadable package set built on top of the Wormhole core bridge**. The
-core bridge itself (the `wormhole-core` Daml package: `Emitter`, VAA
-parse/verify, guardian-set and replay machinery) is **not** in this repository —
-it lives in
+It builds on the Wormhole core bridge. The core itself (the `wormhole-core`
+Daml package: `Emitter`, VAA parsing and verification, guardian sets, replay
+protection) is not in this repository. It lives in
 [`wormholelabs-xyz/wormhole`](https://github.com/wormholelabs-xyz/wormhole)
-under `canton/`, and its design is documented in that repo's
-[`canton/README.md`](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/canton/README.md).
-The core is consumed here **as a pinned, vendored DAR** (see
-[`dars/README.md`](dars/README.md)) and used as two primitives: **publish** and
-**verify**. On Canton the NTT "Wormhole transceiver" *is* a core `Emitter`.
+under `canton/`, is documented in that repo's
+[`canton/README.md`](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/canton/README.md),
+and is consumed here as a pinned, vendored DAR (see
+[`dars/README.md`](dars/README.md)). NTT uses two core primitives: publish a
+message, and verify-and-consume a VAA. The NTT "Wormhole transceiver" on
+Canton is simply a core `Emitter`.
 
-Like the core, NTT uses **no contract keys**: every contract is resolved by an
-explicit, disclosed contract-id (see "No contract keys / disclosed cids" in the
-core README).
-
-> For core-bridge background referenced below (message publishing & fees, the
-> replay trie, disclosed-cid submission, on-chain signature verification, the
-> trust model), see the corresponding sections of the
-> [core `canton/README.md`](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/canton/README.md).
+Like the core, NTT uses no contract keys: every contract is resolved
+off-ledger and passed as an explicit, disclosed contract id. Background for
+the core concepts referenced below (message publishing and fees, the replay
+trie, disclosed-cid submission, the trust model) is in the core
+`canton/README.md`.
 
 ## Packages
 
 | Directory (Daml package) | Contents |
 | --- | --- |
-| `ntt-token` (`ntt-token`) | The `NttToken` interface (token effect seam) + `TokenMode`, `TrimmedAmount`. Interface-only, per Daml's upgradeability rule. Depends on the CIP-0056 `holding`/`metadata` interfaces (the seam carries `[ContractId Holding]` + `ExtraArgs`). |
-| `ntt` (`ntt`) | `Payload` (wire codec) and `Manager` (`NttManagerRegistry`, `NttManager`, deploy/send/receive/peers). |
-| `ntt-cip56` (`ntt-cip56`) | Real CIP-0056 implementations of `NttToken` — `Cip56CustodyToken` (lock/unlock via `TransferFactory`) and `Cip56BurnMintToken` (burn/mint via `BurnMintFactory`). Works for Canton Coin (Amulet) or any conforming token. |
-| `test` (`ntt-test`) | Daml Script test suite (`Test.TestNtt`) plus a minimal copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) needed to exercise NTT end to end under `dpm test`. |
-| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR + the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
+| `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
+| `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
+| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
+
+The manager drives the CIP-0056 token-standard interfaces (`Holding`,
+`TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
+without a per-token wrapper contract. (An earlier design had a bespoke
+`NttToken` interface with per-token implementations; it was dropped for this
+reason.)
 
 ## Build & test
 
-Requires the `dpm` toolchain (Daml SDK 3.5.1, declared in every `daml.yaml`) and
-a JDK. All four packages build against the vendored core DAR — **core is never
-rebuilt here**.
+Requires the `dpm` toolchain (Daml SDK 3.5.1, declared in every `daml.yaml`)
+and a JDK. Both packages build against the vendored core and CIP-0056
+interface DARs; core is never rebuilt here.
 
 ```sh
 # from this directory
-dpm build --all        # builds ntt-token, ntt, ntt-cip56, then test (in dep order)
+dpm build --all        # builds ntt, then test (in dep order)
 cd test && dpm test    # runs the Daml Script suite
 ```
 
@@ -51,168 +51,365 @@ A live-sandbox Go integration harness (the recipient-binding match test) lives
 in [`testing/go/`](testing/go/); see its build tag and comments to run it
 against a `dpm sandbox`.
 
-## Deployment — permissionless and crankless
+## Parties and the trust model
 
-Anyone stands up a deployment (bring your own token, pick a mode), mirroring core
-`RegisterEmitter`. The deployer (`admin`) first registers a core `Emitter` (the
-transceiver), then exercises `RegisterManager` directly on the disclosed
-`NttManagerRegistry`, which allocates a stable `managerId` and creates the
-`NttManager`. `operator`'s co-signature is **inherited from the registry
-signatory** — no approval crank — and `operator` and `admin` both co-sign the
-manager (mirroring `Emitter`); neither has power over transfer contents.
+Three parties sign every `NttManager`, and each signature has one job:
 
-**Two key-derived identities**, both owner-bound (see the core README's message
+- `operator` runs the core bridge instance and ties the deployment to it.
+- `admin` is the operational role: it maintains the peer table, rotates the
+  committed factory, and owns the lock/unlock reserve. It is transferable
+  (`TransferAdmin`, usually via the propose-accept `AdminTransferProposal`);
+  handing it to `gg` is the guardian quorum's custody opt-in.
+- `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
+  same party that anchors the core and receives message fees. It administers
+  burn/mint instruments, owns the deployment's transceiver `Emitter`, is the
+  replay-trie consumer for every deployment, and a deployment whose admin role
+  was handed to it has a quorum-owned reserve and governance-run admin
+  operations.
+
+The deployment's stable identity is no longer a co-signing party. It is a
+derived `namespace : Text`, computed once at registration and stored on the
+manager:
+
+```
+namespace = "ntt:" <> keccak256(tag ‖ lp(instrument.admin) ‖ lp(instrument.id) ‖ lp(registeringAdmin) ‖ managerId)
+```
+
+(`lp` is the 4-byte length prefix used throughout this package's address
+preimages.) It sub-scopes `gg`'s replay trie — inbound VAAs are consumed with
+`consumer = gg, namespace = mgr.namespace` — and never changes, but unlike a
+party it needs no ceremony to mint or safeguard: `gg` is already a lifetime
+signatory of every manager, so the derived text rides along on `gg`'s
+inherited authority. The registering admin in the preimage binds the
+deployment's identity to its creator, and `managerId` guarantees exactly one
+namespace per deployment (closing the corner case where two deployments would
+otherwise share both instrument and registering admin).
+
+`gg` acts exactly once: a guardian quorum ceremony (the same external-signing
+flow that creates the genesis `CoreState`) creates the `NttGovernance` root.
+Everything afterwards runs on inherited authority. `RegisterManager` lends the
+root's signatures to create managers — and, atomically, to mint the
+deployment's `gg`-owned transceiver `Emitter` and claim its `gg`-scoped replay
+root — and the manager's choice bodies lend the manager's signatures to move
+tokens. Value can only move inside fixed template code, and every inbound
+movement first verifies and consumes a VAA, so no single signatory can move
+bridged value, and nobody has to co-sign at transfer time. That is what keeps
+both deployment and relaying permissionless.
+
+A rogue movement of a `gg`-owned reserve would take either a native spend by
+the guardian quorum or a new `gg`-signed contract, which is also a quorum act.
+The model ultimately rests on `gg`'s key namespace being quorum-governed at
+the topology layer, so its threshold cannot be quietly lowered. That is a
+deployment requirement; the contracts cannot check it.
+
+## Deployment
+
+Anyone can stand up a deployment: bring a CIP-0056 token and pick a mode,
+lock/unlock or burn/mint. The deployer exercises `RegisterManager` on the
+disclosed `NttGovernance` root, passing along the core's `EmitterRegistry` and
+`ReplayRootRegistry` anchors (also disclosed). This one transaction:
+allocates a stable `managerId`; mints the deployment's transceiver `Emitter`
+(owned by `gg`, `gg`'s requester authority inherited from `NttGovernance`);
+claims the deployment's replay-trie root (`consumer = gg`, sub-scoped by the
+derived `namespace`); and creates the manager — with no separate approval
+step. The caller supplies only the `admin` signature; the root supplies
+`operator`'s and `gg`'s, and `admin` co-controls (pays) both nested core
+onboarding fees so `gg` is never made to fund a deployment's registration. For
+lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
+with the reserve starting admin-owned (see "Custody follows the admin"
+below). For burn/mint it checks the mint capability: `gg` must administer the
+instrument, and the instrument id must be bound to the registering admin (see
+"Instrument binding" below).
+
+Two key-derived identities, both bound to the REGISTERING admin — present as a
+controller at registration, and whose signature co-signs the created manager —
+so they survive later admin handoffs (see the core README's message
 publishing section):
-- **transceiver address** = `keccak256("wormhole:emitter:v1" ‖ operator ‖ admin ‖ emitterId)`
-  — the VAA emitter other chains register; derived by the watcher, not stored. It
-  must be a **single shared** `Emitter` per deployment (its address is the peer
-  identity), so it cannot be per-user.
-- **manager address** = `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ admin ‖ managerId)`,
-  computed on-ledger at registration and stored in `managerAddress`. The distinct
-  domain tag keeps an emitter and a manager with the same ordinals from colliding;
-  `admin` is in the preimage and co-signs, so a compromised operator cannot forge
-  an existing manager's address to consume that peer's inbound VAAs.
+
+- transceiver address =
+  `keccak256("wormhole:emitter:v1" ‖ operator ‖ gg ‖ emitterId)`. This is the
+  VAA emitter other chains register as the peer. It is derived by the
+  watcher, not stored, and must be a single shared `Emitter` per deployment,
+  since its address is the peer identity. (The preimage's owner ordinal is
+  `gg`, not the registering admin — `gg` co-signs every `Emitter` it mints.)
+- manager address =
+  `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ registeringAdmin ‖ managerId)`,
+  computed once at registration and stored in `managerAddress`. The distinct
+  domain tag keeps an emitter and a manager with the same ordinals from
+  colliding. The registering admin's signature co-signs the manager at
+  creation, so a compromised operator cannot forge an existing manager's
+  address to consume that deployment's inbound VAAs; because the address is
+  computed once and stored, not recomputed, it is unaffected by any later
+  `TransferAdmin`.
+
+Because registration is permissionless, anyone can create junk managers
+co-signed by `gg` and the operator. They are inert (their choices cannot move
+anything the creator could not already move), but they do occupy the
+signatories' participants; that is ordinary spam, bounded by synchronizer
+costs rather than by this package.
 
 ## Wire codec (`Wormhole.Ntt.Payload`)
 
-Big-endian encoders for the three nested structures (`NativeTokenTransfer` prefix
-`0x994E5454`; `NttManagerMessage`; `WormholeTransceiverMessage` prefix
-`0x9945FF10`), built on `Bytes.daml`. Amounts use the NTT **TrimmedAmount** (≤ 8
-decimals + a scale byte). Round-trips are tested in `TestNtt:testNttCodec`.
+Big-endian encoders for the three nested structures (`NativeTokenTransfer`,
+prefix `0x994E5454`; `NttManagerMessage`; `WormholeTransceiverMessage`, prefix
+`0x9945FF10`). Amounts travel as the NTT `TrimmedAmount`: an integer plus a
+scale byte, at most 8 decimals. Round-trips are covered by
+`TestNtt:testNttCodec`.
 
-## Send (`NttManager.Transfer`, controller `user`) — the sender self-pays
+## Send (`NttManager.Transfer`)
 
-Trims the amount, drives the token seam's `LockOrBurn` (attributed to `user`, the
-actual caller), assembles the nested message, and publishes it via
-`Emitter.PublishMessage` — so the guardian watcher observes an **ordinary core
-message** (no NTT-specific watcher code). The transceiver `Emitter` and the
-`CoreState` are caller-supplied disclosed cids; the transceiver is fetched and
-bound to the deployment before publishing.
+`Transfer` is controlled by `user`, the token owner, alone; no admin or
+operator involvement. It trims the amount to the wire form, moves the user's
+tokens (lock or burn, see "Custody" below), assembles the nested message, and
+publishes it through the deployment's transceiver with
+`Emitter.PublishMessage`. The guardian watcher therefore observes an ordinary
+core message; there is no NTT-specific watcher code.
 
-`user` is the **sole** controller of `Transfer` — no admin/operator sign-off.
-Exercising `Transfer` consumes `NttManager` (signatories `operator, admin`), so
-the nested `PublishMessage` (controller = the Emitter's `owner`, i.e. `admin`)
-runs on inherited signatory authority. `LockOrBurn`'s controller is `manager,
-sender`; since `user` (the `Transfer` controller) is passed as `sender`, its
-authority reaches the token seam — so an owner-signed holding can actually be
-spent/burned, not just an admin-signed mock. The CIP-0056 factory separately
-asserts the input holding's owner matches `user`, so a caller can never lock/burn
-a holding it doesn't control.
+The choice is nonconsuming. Everything its body exercises runs on the
+manager's inherited signatory authority, while the CIP-0056 factory
+independently checks that the input holdings belong to `user`, so a caller can
+never lock or burn a holding it does not own. The message id is the
+transceiver's next sequence number, read from the fetched `Emitter` in the
+same transaction that publishes, so it equals the resulting VAA's sequence and
+is unique per transceiver.
 
-**The sender pays the message fee itself.** `PublishMessage` charges the
-governance-set `messageFee` to its `payer`, and `Transfer` passes `payer = user`,
-whose authority reaches the fee's `Allocation_ExecuteTransfer` because as payer it
-**co-controls** `PublishMessage`. The user attaches a fee allocation from its own
-wallet (empty at fee 0) — the same fee every core publish pays, so an NTT send is
-never fee-exempt (`TestNtt:testNttSend`, `testNttTransferByDifferentUser`).
-Without this `payer` co-controller seam the fee could not be drawn from the user,
-since the transceiver is a shared, admin-owned emitter.
+The sender pays the message fee itself. `PublishMessage` charges the
+governance-set `messageFee` to its `payer`, and `Transfer` passes
+`payer = user`. As payer, the user co-controls the nested `PublishMessage`,
+which is what lets the fee be drawn from the user's own allocation
+(`feeAllocation`; pass `None` at fee 0). An NTT send is never fee-exempt
+(`TestNtt:testNttSend`, `testNttTransferByDifferentUser`).
 
-The one non-fee requirement is **visibility, not authorization**: `user` is not a
-stakeholder of `NttManager`, the transceiver `Emitter`, the token, or the
-`CoreState`, so a submission attaches those as explicit disclosures (in Daml
-Script, `submitWithDisclosures`). The manager and its transceiver churn their cids
-on every send, so a sender re-resolves the fresh cids per send — the same
-fail-closed retry the core publish path uses.
+The user is not a stakeholder of the manager, the transceiver, the
+`CoreState`, the `LockedLedger`, the custody pot holding, or the registry
+factory, so a submission attaches them as explicit disclosures. This is a
+visibility requirement, not an authorization one.
 
-## Receive (`NttManager.Receive`, controller `executor`) — permissionless
+## Receive (`NttManager.Release` / `NttManager.Mint`)
 
-Any `executor` — a relayer, the recipient, anyone — relays an inbound VAA on the
-recipient's behalf. The choice is `nonconsuming`, so its body inherits
-`NttManager`'s `operator, admin` authority regardless of who submits; the
-executor's identity carries **no authority**, only the disclosures it attaches
-(the `CoreState`, the covering `ReplayNode`, the token). It verifies + claims the
-VAA atomically via the core `VerifyAndConsumeVAA` — the per-consumer replay trie,
-scoped to `admin`, so each deployment claims a VAA at most once — then enforces
-the peer, decodes, binds the recipient, and mints/unlocks.
-(`TestNtt:testNttReceiveByExecutorRecipientMismatchFails` drives a real receive by
-a third-party relayer, all the way to the recipient gate.)
+Inbound delivery is permissionless: any `executor` (a relayer, the recipient,
+anyone) submits with only disclosed contracts. The executor's identity carries
+no authority; verification is the gate. Both inbound choices run the same
+checks, in order:
 
-**Recipient deposit pre-approval — how an owner-signed mint gets the recipient's
-authority without the recipient online.** `Receive` is `executor`-only, yet an
-owner-signed holding (signatory `admin, owner`) cannot be created without the
-recipient's authority. A choice body runs with the exercised contract's
-signatories plus the choice's controllers — never the submission's `actAs` set and
-never across nested nodes outward — so the recipient's authority must originate
-from a contract it signed. A recipient therefore exercises `PreApproveDeposit` on
-the token once, creating a standing dual-signed `DepositPreapproval` (recipient +
-`admin`, the Canton Coin `TransferPreapproval` analog). `MintOrUnlock` runs the
-mint *inside* that pre-approval's `Deposit` choice, borrowing the recipient's
-signatory authority; the recipient need not be online at relay time. A missing (or
-revoked) pre-approval aborts the whole transaction atomically — the VAA digest is
-**not** consumed, so the same VAA is deliverable once the recipient opts in
-(`TestNtt:testMintOrUnlockPreapprovedSucceeds` /
-`testMintOrUnlockWithoutPreapprovalFails` / `testRevokedPreapprovalFails`). The
-`Deposit` choice is `nonconsuming` (one approval, unlimited deliveries); the
-recipient alone holds `Revoke` (no expiry, no admin-side cancel).
+1. Pin the disclosed `CoreState` to the deployment's committed
+   `guardianGovernance` (via `GetGuardianGovernance`). Pinning the operator
+   instead would not help: a compromised operator can co-sign a forged
+   `CoreState` under a throwaway gg party, but cannot forge the real `gg`'s
+   signature (`TestNtt:testReceivePinsGuardianGovernance`).
+2. Verify the VAA's guardian signatures and consume its digest, atomically,
+   with the core `VerifyAndConsumeVAA` (`consumer = gg`, sub-scoped to the
+   deployment's derived `namespace`, so each deployment consumes a VAA at most
+   once, independently of every other deployment under the same `gg`).
+3. Check the VAA emitter is the configured peer transceiver for its source
+   chain, and that the nested message's source and recipient manager addresses
+   match the peer and this deployment.
+4. Bind the caller-supplied `recipient` to the VAA's `recipientAddress` (see
+   below), so a relayer cannot steer the payout.
 
-**Guardian trust root — pinned to `guardianGovernance`, not the operator.** The
-disclosed `CoreState` is authenticated by checking its `guardianGovernance`
-against the anchor `admin` committed at deployment (via `GetGuardianGovernance`).
-A `CoreState` requires only *some* `(operator, gg)` signature pair, so pinning the
-operator would not stop a compromised operator co-signing a forged `CoreState`
-(throwaway gg party, attacker guardian set); pinning `guardianGovernance` — the
-guardians' k-of-n external threshold party, unforgeable by a single hot operator
-key — closes that (`TestNtt:testNttReceivePinsGuardianGovernance`). This mirrors
-EVM NTT verifying against an immutable core address, and soundly replaces the old
-key-maintainer trust (a manager keyed to `guardianGovernance`).
+`Release` (lock/unlock) then debits the deployment's `LockedLedger`, which
+rejects any amount above the balance, and transfers custody holdings from `gg`
+to the recipient. `Mint` (burn/mint) mints through the recipient's standing
+`DepositPreapproval`. Any submitter can only cause the VAA-bound transfer to
+the VAA-bound recipient. The received wire amount is rescaled to the local
+token's decimals before paying out, truncating precision the token cannot
+represent, so a receive never pays out more than was sent.
 
-**Recipient binding.** A Canton `Party` id has no fixed-size form to bind against
-the VAA's `Bytes32` `recipientAddress`, so `Receive` checks
-`recipientAddressFor recipient == ntt.recipientAddress`, where `recipientAddressFor`
-is `keccak256("wormhole:ntt-recipient:v1" ‖ lp(partyToText recipient))`. A sender
-computes the same hash off-chain over the recipient's exact Party-id string; since
-it lives inside the VAA it is covered by the guardian signature, so no relayer can
-steer the mint elsewhere. **Tradeoff, deliberate:** a Party id is permanent, so a
-VAA is bound to the recipient party as it existed when the sender hashed it; a
-recipient needing a *different* party (lost key, custodial migration) requires a
-re-send. Pinned by `testRecipientAddressForVector`; the matching-recipient path
-(no static fixture can match a nondeterministic Party fingerprint) is covered by a
-live two-step harness (`testing/go/ntt_recipient_match_integration_test.go`).
+**The deposit pre-approval.** A CIP-0056 holding is signed by its owner, and a
+Daml choice body carries only the exercised contract's signatories plus the
+choice's controllers, never the submission's `actAs` set. A relayer therefore
+cannot supply the recipient's signature for a mint, and the recipient may be
+offline. The recipient instead signs once, up front: it creates a
+`DepositPreapproval` (a single self-signed create, the NTT analog of Canton
+Coin's `TransferPreapproval`). `Mint` runs the mint inside that contract's
+`Deposit` choice, where the recipient's stored signature and `gg`'s
+instrument-admin authority (supplied by the manager) are both in scope. A
+missing, revoked, or mismatched pre-approval aborts the whole transaction
+before the VAA digest is consumed, so the same VAA is deliverable once the
+recipient opts in. `Deposit` is nonconsuming (one approval, unlimited
+deliveries) and only the owner can `Revoke`.
 
-## Token seam (`NttToken`) and modes
+**Recipient binding.** A Canton `Party` id has no fixed-size form to put in
+the VAA's 32-byte `recipientAddress`, so the sender hashes it:
+`recipientAddressFor recipient =
+keccak256("wormhole:ntt-recipient:v1" ‖ lp(partyToText recipient))`. The
+inbound path recomputes the hash from the caller-supplied `recipient` and
+checks it against the VAA. The binding lives inside the guardian-signed VAA,
+so no relayer can redirect it. The deliberate tradeoff: a Party id is
+permanent, so a VAA is bound to the recipient party as it existed when the
+sender hashed it, and a recipient who needs a different party (lost key,
+custodial migration) needs a re-send. The encoding is pinned by
+`testRecipientAddressForVector`; the matching-recipient path is covered by the
+live harness in `testing/go/` (a static fixture cannot name a freshly
+allocated Party).
 
-`NttManager` never references a concrete token; it holds a `ContractId NttToken`
-and calls `LockOrBurn` / `MintOrUnlock`, isolating the token detail the way
-`VAA.daml` isolates crypto. `TokenMode` selects lock/unlock or burn/mint. The seam
-choices carry the CIP-0056 runtime handles the manager threads through:
-`[ContractId Holding]`, `ExtraArgs`, and `registryCid` — the registry's own
-runtime dependency (e.g. its factory contract), resolved off-ledger and
-disclosed fresh by the caller on every `Transfer`/`Receive`, the same as
-`coreStateCid`/`transceiverEmitterCid`. No contract is ever pinned inside the
-token itself, so a registry can replace its factory without stranding any
-already-created token or `DepositPreapproval`. Real implementations live in
-`ntt-cip56` (`Cip56CustodyToken`, `Cip56BurnMintToken`); the test package
-(`Test.TestNtt`) exercises the whole protocol against them under `dpm test`.
-**Counterparty authority.**
-Each leg reaches the token holder's authority differently. Outbound `LockOrBurn`
-lists the live `sender` as a co-controller, so the sender's authority spends its
-own holdings. Inbound `MintOrUnlock` is `manager`-only; for an owner-signed token
-the recipient's authority arrives through its standing `DepositPreapproval`
-(see Receive above), so a relayer drives receipt with no live recipient
-co-signature. `Cip56CustodyToken`'s lock/unlock additionally asserts the registry's
-`TransferFactory_Transfer` settled synchronously
-(`TransferInstructionResult_Completed`); a `Pending`/`Failed` result aborts instead
-of letting the seam continue with tokens not actually moved. The custody kind takes
-no NTT-level pre-approval: `TransferFactory_Transfer` has no `extraActors` and its
-controller is `transfer.sender = custody`, so the recipient's authority cannot
-reach the receiver holding — a synchronous unlock to an arbitrary recipient depends
-on *registry-level* receiver pre-approval (e.g. Amulet's own `TransferPreapproval`)
-instead.
+## Token integration and custody
+
+The manager calls the CIP-0056 factories directly: `TransferFactory` for
+lock/unlock, `BurnMintFactory` for burn/mint.
+
+**The factory is deployment config, not per-call input.** A registry's factory
+is a stateless service contract — a reified dictionary — whose choices are all
+nonconsuming, so its cid is stable and changes only when the registry itself is
+upgraded. The manager therefore commits the factory cid at registration and
+uses that committed cid for every lock, burn, unlock, and mint; `admin`
+refreshes it with `SetFactory` on the rare occasion of a registry upgrade.
+
+This is what stops an untrusted caller from substituting a look-alike factory.
+Because holdings are interface-only, the factory is the sole actuator of any
+token movement, and a caller-supplied cid can't be authenticated on-ledger (an
+interface view is implementation-controlled and can lie, and there are no
+contract keys). If the sender chose the factory, a malicious one could report a
+lock or burn that never happened while the manager still emitted a genuine,
+value-bearing VAA — bridge inflation. Committing the factory removes caller
+choice: the trust collapses to the deployment `admin`, which every peer already
+trusts by registering it as a peer (the same trust EVM and Solana NTT place in
+a peer's configured token), and whose reach ends at its own reserve (see
+below). On a gg-adminned deployment the committed factory is the one the
+quorum vetted when it accepted the role, and rotation is automatically a
+governance action. The other residual is liveness: if the registry rotates its
+factory before the committed cid is refreshed, transfers pause (they never
+mis-settle).
+
+**Custody follows the admin.** A deployment registers with its reserve owned
+by its own `admin`: fully operational and explicitly custodial — the admin
+owns the reserve outright, so users trust it the way they would a custodial
+bridge, and wallets should surface who the admin is. The role is handed over
+with `TransferAdmin`, normally as propose-accept: the current admin leaves a
+standing `AdminTransferProposal`, and the new admin accepts at its own pace,
+naming the committed factory it vetted; the pot moves with the role. Handing
+the role to `gg` is the guardian quorum's custody opt-in: the reserve becomes
+quorum-owned — the old admin can no longer touch it, every inbound movement is
+VAA-gated, and all admin operations (peers, factory rotation, a further
+handoff) become governance actions. The handoff changes nothing on the wire:
+the manager and transceiver addresses are bound to the registering admin (not
+the current one), the replay scope is the derived `namespace` under `gg` (both
+unaffected by who currently holds `admin`), and the transceiver `Emitter`'s
+owner authority is `gg`'s own, inherited from the manager's signatories rather
+than from `admin` — so peers, in-flight VAAs, the ledger contract, and outbound
+sends are all untouched by the handoff. The same choice serves plain admin
+succession between ordinary parties, and lets `gg` hand the role back.
+
+**Why the partition is by owner.** Isolation between deployments follows from
+ownership, not from accounting or holding topology. Reserves of distinct
+admins cannot mix, no matter what any factory reports: a deployment that
+commits a dishonest factory can inflate only its own ledger and drain only its
+own admin-owned reserve. The `gg` pool is shared only among deployments whose
+admin role the quorum accepted, whose factories it vetted. Ownership is also
+the one partition a registry cannot churn away: registries reorganize holdings
+out from under the bridge (Canton Coin's rounds merge, expire, and recreate
+contracts), which erases any partition built out of specific contract ids — a
+pinned pot cid, an escrow — but never changes who owns the value. Finally,
+because every choice body carries all four signatures, the manager checks that
+each custody holding it spends is owned by the deployment's own current
+`admin`, so the ambient `gg` authority in another deployment's choices can
+never reach the `gg` pool.
+
+**The locked ledger.** Wormhole attests only that an emitter emitted bytes,
+not that a transfer is backed. A deployment that trusts a hostile peer must
+therefore not be able to release more than it locked: each deployment's
+`LockedLedger` is credited on every lock and debited on every release, and
+`Debit` rejects amounts above the balance. Within the `gg` pool, where
+reserves of one instrument are fungible across gg-adminned deployments, this
+cap is what keeps a hostile-peer deployment away from the others' collateral:
+credits and debits are atomic with the corresponding deposit and release, so
+the sum of those balances never exceeds `gg`'s physical holdings, and every
+deployment's cap stays satisfiable no matter which holdings a release spends.
+One consequence of the shared pool: `gg` also custodies message fees, so a
+release may physically spend fee holdings of the same instrument. That is
+value-neutral (change returns to `gg` and the cap still binds), but worth
+knowing when auditing `gg`'s holdings.
+
+**The custody pot (single-holding invariant).** Custody holdings are visible
+only to their stakeholders (the custodian and the registry admin), so an
+executor can only spend what someone discloses to it. To avoid an off-chain
+index and coin selection over custody fragments, the manager keeps each
+deployment's custody consolidated into one holding, and the ledger carries a
+pointer to it (`custodyHoldingCid`): a lock merges the fresh deposit into the
+pot with a custodian self-transfer, and a release spends the pot and records
+the single change holding as the new pot. The pointer updates in exactly the
+transactions the ledger already changes in, so a relayer's disclosure bundle
+(manager, ledger, pot) is complete and self-refreshing. The pointer is a hint,
+not a trust anchor: every holding is validated at use time as the current
+custodian's own, unlocked, of this instrument; `Release` accepts explicit
+holding cids as an override (validated the same way); and the permissionless
+`ConsolidateCustody` choice re-merges fragments and repoints the hint after a
+registry-side reorganization (registries may restructure their holdings
+without us, which is why the cid can go stale and why storing it is safe only
+as a hint). One open consideration for real registries: transfer fees charged
+out of custody inputs would bleed the physical pot below the ledger sum, so a
+fee-charging registry needs a per-registry answer (fee waivers, top-ups, or
+debiting fees from the ledger).
+
+**Instrument binding (burn/mint exclusivity).** Burn/mint deployments are
+isolated by instrument: a manager only ever mints its own `instrumentId`. That
+is only meaningful if an instrument belongs to at most one deployment, and
+registration is permissionless, so exclusivity has to be enforced, not
+assumed. It cannot be enforced by lookup (no contract keys, so "nobody has
+claimed this instrument yet" is not an on-ledger-checkable fact), and a
+claimed-instruments set on the root would grow without bound. Instead the
+binding lives in the instrument's identity: `RegisterManager` requires
+`instrumentId.id == nttInstrumentIdFor admin nonce`, a hash commitment to the
+registering admin. A CIP-0056 instrument id is fixed at creation, so whoever
+creates the instrument decides, once and forever, which admin can bind a
+manager to it. This is the role EVM NTT's `setMinter` pointer plays, attached
+to the immutable instrument identity instead of a mutable token field
+(`TestNtt:testBurnMintInstrumentIsExclusiveToItsAdmin`). Two consequences: the
+admin party must be durable (the binding cannot be re-pointed; recovery from a
+lost admin party means a new instrument and a holder migration), and the
+instrument must be created with the binding already in its id, which is a
+deployment-setup requirement documented rather than enforced here.
+
+**Synchronous settlement.** Lock and release require the registry's
+`TransferFactory_Transfer` to settle in the same transaction; a `Pending` or
+`Failed` result aborts, so a two-step registry flow can never leave the bridge
+thinking value moved when it did not. Delivering to an arbitrary receiver (the
+custodian on lock, the recipient on unlock) still depends on registry-level
+receiver pre-approval (for example Amulet's own `TransferPreapproval`), which
+is outside NTT's control. One practical upside of admin custody: the lock's
+receiver is the admin itself, which can self-serve that pre-approval; a
+gg-adminned deployment needs it arranged for `gg`, which is part of what the
+quorum takes on by accepting the role.
+
+## Contention and contract churn
+
+The manager itself is consumed only by its config choices (`SetPeer`,
+`SetFactory`, and the rare `TransferAdmin`), so across transfer traffic its
+cid is stable and disclosures of it stay valid. What serializes is:
+
+- Sends, on the transceiver `Emitter` (consumed by every publish). Inherent to
+  Wormhole sequence numbering.
+- Lock-mode value movement, on the `LockedLedger` and the custody pot holding
+  (both `Transfer` and `Release` touch them, in the same transactions).
+  Burn/mint deployments have no ledger, so their sends contend only on the
+  emitter and their mints only on the replay trie.
+- VAA consumption, on the covering replay-trie node.
+
+A submission that loses a race re-resolves the fresh cid and retries, the same
+fail-closed pattern the core publish path uses.
 
 ## Follow-ups
 
-- **Third-party-executor + owner-signed token**: done — the recipient's standing
-  `DepositPreapproval` (see Receive above) lends its authority to the mint, so a
-  relayer drives a fully hands-off receive with no live recipient co-signature.
-- **Never-opted-in recipients**: a pending+claim fallback (mint a pending
-  instruction the recipient later claims) would let delivery proceed before opt-in;
-  deliberately out of scope, but the seam's `Optional` pre-approval cid and
-  kind-specific impl bodies leave room for a pending arm later.
-- **Send contention / message id**: `Transfer` is consuming (per-manager
-  `outboundSequence`), so concurrent sends serialize on the manager cid. Sourcing
-  the NTT message id from the transceiver `Emitter`'s sequence would let `Transfer`
-  be nonconsuming, removing that contention point.
-- **Hint-free verification** (persist guardian pubkeys) so `Receive` needs no
-  `pubKeys` hints — core-wide, orthogonal to NTT; tracked in the core repo.
-- **Recipient-address change**: the permanent Party-id binding above.
+- Never-opted-in recipients: a pending+claim fallback (mint a pending
+  instruction the recipient later claims) would let delivery proceed before
+  opt-in. Deliberately out of scope for now.
+- Foreign-admin lock/unlock against a real registry: the mock factory cannot
+  model a real registry's receiver pre-approval, so the tests make `gg` every
+  instrument's admin, run most lock tests with the sender as the deployment
+  admin, and hand the admin role to gg first in the different-user lock test.
+  A real lock/unlock deployment bridges a token whose admin is not `gg` and
+  relies on that registry's `TransferPreapproval`; exercising that end to end
+  is future work.
+- Accepting an admin handoff by governance VAA: `gg` accepts an
+  `AdminTransferProposal` by acting on it, which today means a quorum action
+  per acceptance. A guardian-signed acceptance VAA, verified on-ledger like
+  other governance actions, would let anyone submit the quorum's standing
+  approval.
+- Inbound rate limits (EVM NTT parity): a governance-set cap on inbound
+  release/mint rate would bound the damage from a compromised peer beyond the
+  `LockedLedger` cap. Not required for isolation, so deferred.
+- Sharding the `LockedLedger` if lock-mode send/release contention ever
+  matters in practice.
+- Hint-free verification (persist guardian pubkeys) so the inbound path needs
+  no `pubKeys` hints. Core-wide, tracked in the core repo.
+- The permanent recipient-address binding (see "Recipient binding").

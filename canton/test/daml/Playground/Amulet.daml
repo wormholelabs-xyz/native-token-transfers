@@ -3,8 +3,10 @@
 -- CLI resolves three values off-ledger from the token registry and passes them in: the
 -- transfer factory contract id (the registry contract that moves tokens), its choice
 -- context, and the contracts that must be disclosed alongside it. This module turns those
--- into the 'Disclosure' values 'Playground.Ops:transferOut' submits to lock Amulet via
--- 'Wormhole.Ntt.TokenCip56.Cip56CustodyToken'.
+-- into the 'Disclosure' values 'Playground.Ops:transferOut' submits to lock Amulet through
+-- the deployment's committed 'Wormhole.Ntt.Manager.NttFactory' (a
+-- 'Splice.Api.Token.TransferInstructionV1.TransferFactory' for an "amulet" lock/unlock
+-- deployment).
 --
 -- It imports 'splice-amulet' (see canton/dars/README.md) only to name the concrete template
 -- types 'toDisclosure' needs a 'templateTypeRep' for; it never creates or exercises
@@ -20,16 +22,15 @@ import Splice.Round qualified as Round
 import Splice.ExternalPartyAmuletRules qualified as ExternalPartyAmuletRules
 import Splice.ExternalPartyConfigState qualified as ExternalPartyConfigState
 
--- | One registry-format disclosed contract, as Go's internal/amulet.DisclosedContract sends
--- it (minus @synchronizerId@, which 'Daml.Script.Disclosure' has no field for).
-data DisclosedContractIn = DisclosedContractIn with
-    templateId : Text          -- registry format: "<packageId>:<Module>:<Entity>"
-    contractId : ContractId () -- the registry's opaque contract-id string, Daml-JSON decoded
-    blob       : Text          -- createdEventBlob (base64)
-  deriving (Eq, Show)
+import Playground.Disclose (DisclosedContractIn)
 
--- | Everything 'Playground.Ops:transferOut''s @Cip56Custody@ branch needs, resolved
--- off-ledger by Go (internal/amulet.GetTransferFactory) and passed through verbatim.
+-- 'DisclosedContractIn' (one registry-format disclosed contract, as Go's
+-- internal/amulet.DisclosedContract sends it -- minus @synchronizerId@, which
+-- 'Daml.Script.Disclosure' has no field for) now lives in 'Playground.Disclose', which both
+-- this Amulet-specific seam and the general playground-template seam share.
+
+-- | Everything 'Playground.Ops:transferOut''s "amulet" branch needs, resolved off-ledger by
+-- Go (internal/amulet.GetTransferFactory) and passed through verbatim.
 data AmuletSeam = AmuletSeam with
     factoryCid    : ContractId () -- the registry's transfer-factory cid (factoryId)
     choiceContext : ChoiceContext -- decoded Daml-JSON of the registry's choiceContextData.

@@ -1,42 +1,54 @@
 -- | Per-deployment operations: peer configuration, outbound transfers (with the
 -- recompute-outbound-message pattern -- see the module-level note below), inbound relaying,
--- and mock-registry funding for the Cip56 token kinds. Every entrypoint resolves its
--- contracts fresh by identity (Playground.Types resolvers); none takes or returns a
--- long-lived contract id, except where a cid is threaded between two calls the CLI makes
--- back-to-back within a single logical operation (fundUser's holding cid feeding straight
--- into the following transferOut) -- never persisted to the CLI's state file.
+-- and mock-registry funding/pre-approval for the "mock" token kind. Every entrypoint resolves
+-- its contracts fresh by identity (Playground.Types resolvers); no cid is ever persisted to
+-- the CLI's state file.
 --
 -- ## Outbound observation without an event stream
 --
 -- 'Wormhole.Core.State.WormholeMessage' is a choice result, not a template, so nothing can
--- query it after 'Transfer' returns. 'transferOut' instead reads the manager's
--- @outboundSequence@ *before* exercising 'Transfer' and recomputes the exact published
--- payload with the same 'Wormhole.Ntt.Payload' encoders 'Wormhole.Ntt.Manager.Transfer' uses
+-- query it after 'Wormhole.Ntt.Manager.Transfer' returns. 'transferOut' instead reads the
+-- deployment's transceiver 'Emitter' sequence *before* exercising 'Transfer' and recomputes
+-- the exact published payload with the same 'Wormhole.Ntt.Payload' encoders 'Transfer' uses
 -- internally -- bit-exact input for `guardian sign-vaa`, matching what a real off-ledger
 -- watcher would have observed.
+--
+-- ## Receive requires prior recipient opt-in, both modes
+--
+-- Both 'Wormhole.Ntt.Manager.Mint' (burn/mint) and 'Wormhole.Ntt.Manager.Release'
+-- (lock/unlock, "mock" kind, via 'Playground.MockRegistry') need the recipient's standing
+-- pre-approval to supply the recipient's own signature to a nested create/exercise the
+-- executor-only relay itself cannot reach -- see 'Playground.MockRegistry' and
+-- 'Wormhole.Ntt.Deposit'. If the recipient hasn't opted in, the on-ledger gate aborts before
+-- the VAA digest is consumed, so the same VAA stays deliverable once the recipient opts in.
 module Playground.Ops where
 
-import Daml.Script hiding (AnyContractId)
+import Daml.Script
 import DA.Action (when)
 import DA.Map qualified as Map
 import DA.Optional (fromSome, fromSomeNote, isSome)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (AnyContractId, ExtraArgs (..), emptyMetadata)
-import Wormhole.Core.Bytes (leftPadTo, intToBytesN, normalizeHex)
+import Splice.Api.Token.MetadataV1 (AnyValue (..), ChoiceContext (..), ExtraArgs (..), emptyMetadata)
+import Wormhole.Core.Bytes (normalizeHex, leftPadTo, intToBytesN)
+import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
-import Wormhole.Ntt.Manager (Peer (..), Transfer (..), Receive (..), SetPeer (..))
+import Wormhole.Ntt.Amount (trimAmount)
+import Wormhole.Ntt.Deposit
+import Wormhole.Ntt.Deposit qualified as Deposit
+import Wormhole.Ntt.Manager hiding (resolveLedger)
 import Wormhole.Ntt.Payload
-import Wormhole.Ntt.Token
-  ( trimAmount, emptyExtraArgs, NttToken, DepositPreapproval
-  , PreApproveDeposit (..), Revoke (..) )
-import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken, Cip56CustodyToken, Cip56DepositPreapproval)
 import Test.TestCore qualified as TestCore
-import Test.TestNtt (mkHolding, MockBurnMintFactory, MockTransferFactory)
+import Test.TestNtt (Cip56MockHolding (..), MockBurnMintFactory (..))
 import Test.TestReplay (coveringDisclosure)
 
-import Playground.Amulet (AmuletSeam, toDisclosure, amuletHoldings)
-import Playground.MockToken (MockToken)
+import Playground.Amulet (AmuletSeam (..), amuletHoldings, toDisclosure)
+import Playground.Disclose (RemoteSeam (..), toDisclosureByName, mkSeedDisclosure)
+import Playground.MockRegistry
+import Playground.MockRegistry qualified as MockRegistry
 import Playground.Types
 
 ----------------------------------------------------------------------
@@ -87,13 +99,14 @@ setPeer input = do
   pure SetPeerOutput with managerId = input.managerId
 
 ----------------------------------------------------------------------
--- fundUser (Cip56 mock kinds only; MockAdminSigned needs no funding)
+-- fundUser ("mock" kind only; "amulet" funds via a real Amulet tap, off-ledger)
 ----------------------------------------------------------------------
 
 data FundUserInput = FundUserInput with
-    admin  : Party
-    owner  : Party
-    amount : Decimal
+    guardianGovernance : Party  -- the funding faucet's Deposit-controlling instrument admin (gg)
+    admin              : Party  -- the deployment's admin, to resolve its committed faucet factory
+    owner              : Party
+    amount             : Decimal
   deriving (Eq, Show)
 
 data FundUserOutput = FundUserOutput with
@@ -101,13 +114,48 @@ data FundUserOutput = FundUserOutput with
   deriving (Eq, Show)
 
 -- | Mint a 'Test.TestNtt.Cip56MockHolding' of @amount@ (CIP-56 decimal units) owned by
--- @owner@, under this deployment's 'playgroundInstrumentId'. The returned cid is only ever
--- valid for the immediately-following `transfer --sign`; the CLI must not cache it.
+-- @owner@, via the recipient's standing 'Wormhole.Ntt.Deposit.DepositPreapproval' and this
+-- deployment's committed burn/mint factory (the funding faucet -- see
+-- 'Playground.Deploy.deployRegistry'; a lock/unlock deployment's users hold a
+-- 'DepositPreapproval' purely for this). @owner@'s pre-approval must already exist; the CLI
+-- ensures it (via 'preapprove') before calling this. The returned cid is only ever valid for
+-- the immediately-following `transfer --sign`; the CLI must not cache it.
 fundUser : FundUserInput -> Script FundUserOutput
 fundUser input = do
-  let instrument = InstrumentId with admin = input.admin, id = playgroundInstrumentId
-  cid <- mkHolding input.admin input.owner instrument input.amount
-  pure FundUserOutput with holdingCid = cid
+  let gg = input.guardianGovernance
+      -- The faucet's nonce is fixed at 0 -- fundUser/preapprove/revoke are per-operation
+      -- calls with no instrumentNonce input, so (like 'Test.TestNtt.deploy') this playground
+      -- phase only supports one bridged instrument per admin. See this file's header.
+      instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor input.admin 0
+  facs <- query @MockBurnMintFactory gg
+  facCid <- case [ cid | (cid, f) <- facs, f.instrument == instrumentId ] of
+    [cid] -> pure cid
+    [] -> abort "playground: no MockBurnMintFactory for this deployment's instrument -- run `deploy` first"
+    _ -> abort "playground: more than one MockBurnMintFactory for this instrument"
+  -- Queried as gg (the observer), not owner: fundUser runs entirely on gg's OWN participant
+  -- (routed there since the Deposit exercise below submits as gg), which cannot query as an
+  -- arbitrary owner hosted elsewhere -- gg being DepositPreapproval's observer is exactly what
+  -- makes it visible here regardless of which participant owner lives on (same reasoning as
+  -- transferOut/receiveVaa's gg-side factory/preapproval resolution).
+  pres <- query @DepositPreapproval gg
+  preCid <- case [ cid | (cid, p) <- pres, p.owner == input.owner, p.instrumentId == instrumentId ] of
+    [cid] -> pure cid
+    [] -> abort "playground: owner has no DepositPreapproval for this instrument -- run `preapprove` first"
+    _ -> abort "playground: more than one DepositPreapproval for this instrument"
+
+  before <- query @Cip56MockHolding gg
+  _ <- submit gg do
+    exerciseCmd preCid Deposit with
+      amount = input.amount
+      factoryCid = toInterfaceContractId @BurnMintFactory facCid
+      extraArgs = emptyExtraArgs
+  after <- query @Cip56MockHolding gg
+  let beforeCids = map fst before
+  holdingCid <- case
+    [ cid | (cid, h) <- after, cid `notElem` beforeCids, h.owner == input.owner, h.instrument == instrumentId ] of
+    [cid] -> pure (toInterfaceContractId @Holding cid)
+    _ -> abort "playground: fundUser could not uniquely resolve the freshly minted holding"
+  pure FundUserOutput with holdingCid
 
 ----------------------------------------------------------------------
 -- transferOut
@@ -117,7 +165,7 @@ data TransferOutInput = TransferOutInput with
     operator         : Party
     managerId        : Int
     admin            : Party
-    tokenKind        : Text
+    tokenKind        : Text  -- "mock" | "amulet"
     user             : Party
     recipientChain   : Int
     recipientAddress : Text
@@ -126,10 +174,15 @@ data TransferOutInput = TransferOutInput with
     nonce            : Int
     consistencyLevel : Int
     inputHoldingCids : [ContractId Holding]
-    -- "cip56-custody" only: the real Amulet registry's transfer-factory cid, choice context,
-    -- and disclosures, resolved off-ledger by Go (internal/amulet.GetTransferFactory) for
-    -- THIS call -- never cached across calls. 'None' for every other kind.
+    -- "amulet" only: the real Amulet registry's transfer-factory cid, choice context, and
+    -- disclosures, resolved off-ledger by Go (internal/amulet.GetTransferFactory) for THIS
+    -- call -- never cached across calls. 'None' for "mock".
     amulet           : Optional AmuletSeam
+    -- 'None' when this submit runs on the same participant as the operator/admin (today's
+    -- unchanged fast path); 'Some' when the CLI ran 'Playground.Prepare:prepareTransferOut' on
+    -- the data-owning parties' own participant first (phase 5, plan §4) because @user@'s
+    -- participant differs from theirs.
+    remote           : Optional RemoteSeam
   deriving (Eq, Show)
 
 -- | Bit-exact recomputation of the published VAA payload -- what `guardian sign-vaa` needs.
@@ -142,80 +195,144 @@ data TransferOutOutput = TransferOutOutput with
     payload          : Text  -- encoded WormholeTransceiverMessage, hex
   deriving (Eq, Show)
 
--- | Resolve the token contracts a nested LockOrBurn/MintOrUnlock needs visible to the
--- submitter even though they aren't choice arguments (Wormhole.Ntt.Manager's NttManager
--- stores only the interface cid). For the Cip56 kinds this is BOTH the token hook AND its
--- underlying registry factory: the mock factories (Test.TestNtt:MockBurnMintFactory /
--- MockTransferFactory) are @signatory admin@ with no observer, so a non-admin submitter can't
--- resolve them without an explicit disclosure -- exactly the gap that made cip56 receive fail
--- with CONTRACT_NOT_FOUND. Mirrors Test.TestNtt:testLockOrBurnOwnerSignedSucceeds's factory
--- disclosure, generalized per tokenKind. Read as @admin@ (the sole signatory of both).
---
--- Also returns the resolved factory cid itself (erased to 'AnyContractId'), not just its
--- disclosure: the token no longer stores it (Wormhole.Ntt.TokenCip56), so every
--- Transfer/Receive/PreApproveDeposit call must pass it fresh as 'registryCid'. 'None' for
--- 'MockAdminSigned', which has no underlying registry.
-resolveTokenSeam : Party -> TokenKind -> Script (ContractId NttToken, Optional AnyContractId, [Disclosure])
-resolveTokenSeam admin kind = case kind of
-  MockAdminSigned -> do
-    [(cid, _)] <- query @MockToken admin
-    dTok <- fromSome <$> queryDisclosure admin cid
-    pure (toInterfaceContractId @NttToken cid, None, [dTok])
-  Cip56BurnMintMock -> do
-    [(cid, _)] <- query @Cip56BurnMintToken admin
-    dTok <- fromSome <$> queryDisclosure admin cid
-    -- The token stores the factory as an interface cid; disclosure needs the concrete
-    -- template cid, so resolve MockBurnMintFactory directly (one per fresh deployment admin).
-    [(facCid, _)] <- query @MockBurnMintFactory admin
-    dFactory <- fromSome <$> queryDisclosure admin facCid
-    pure (toInterfaceContractId @NttToken cid, Some (coerceContractId facCid), [dTok, dFactory])
-  Cip56CustodyMock -> do
-    [(cid, _)] <- query @Cip56CustodyToken admin
-    dTok <- fromSome <$> queryDisclosure admin cid
-    [(facCid, _)] <- query @MockTransferFactory admin
-    dFactory <- fromSome <$> queryDisclosure admin facCid
-    pure (toInterfaceContractId @NttToken cid, Some (coerceContractId facCid), [dTok, dFactory])
-  Cip56Custody -> do
-    -- Real Amulet: no on-ledger mock factory to resolve here. The real transfer-factory cid
-    -- is resolved off-ledger (the scan-proxy registry call) and disclosed fresh per call by
-    -- transferOut's Cip56Custody branch, not by this generic resolver -- only the token
-    -- hook's own disclosure is returned; registryCid is 'None' here on purpose (a caller that
-    -- doesn't override it, e.g. receiveVaa, aborts with a clear "not supported" message
-    -- rather than silently trying to lock/unlock against nothing).
-    [(cid, _)] <- query @Cip56CustodyToken admin
-    dTok <- fromSome <$> queryDisclosure admin cid
-    pure (toInterfaceContractId @NttToken cid, None, [dTok])
-
-resolveTokenDisclosure : Party -> TokenKind -> Script [Disclosure]
-resolveTokenDisclosure admin kind = do
-  (_, _, disc) <- resolveTokenSeam admin kind
-  pure disc
-
--- | Resolve @recipient@'s standing 'DepositPreapproval' for an owner-signed kind,
--- as seen by @admin@ (a signatory). Returns 'Some' cid + its disclosure if one
--- exists, else 'None' (so the on-ledger mint gate aborts with "pre-approval
--- required" rather than a script-side shortcut). Only the burn/mint kind carries
--- one; the mock needs none and the custody kind takes none.
-resolvePreapproval : Party -> TokenKind -> Party -> Script (Optional (ContractId DepositPreapproval), [Disclosure])
-resolvePreapproval admin kind recipient = case kind of
-  Cip56BurnMintMock -> do
-    pres <- query @Cip56DepositPreapproval admin
-    case [ cid | (cid, p) <- pres, p.owner == recipient ] of
-      cid :: _ -> do
-        dPre <- fromSome <$> queryDisclosure admin cid
-        pure (Some (toInterfaceContractId @DepositPreapproval cid), [dPre])
-      [] -> pure (None, [])
-  _ -> pure (None, [])
-
+-- | Resolve the manager/emitter/(lock-unlock) ledger/committed-factory contracts, submit
+-- @user@'s 'Wormhole.Ntt.Manager.Transfer', and recompute the exact published payload from
+-- the emitter's pre-exercise sequence -- see the module header. "amulet" additionally
+-- compares the CLI-resolved factory cid against @mgr.factory@ and submits 'SetFactory' as
+-- admin first on a mismatch (plan §4.4's upgrade path).
 transferOut : TransferOutInput -> Script TransferOutOutput
 transferOut input = do
-  (mgrCid, mgr) <- resolveManager input.operator input.managerId
-  (emCid, em) <- resolveEmitter input.admin mgr.transceiverEmitterId
-  csCid <- resolveCoreState input.operator
+  -- Resolve the manager/emitter/core-state/(lock-unlock) ledger cids + records, and gather
+  -- the Mock-kind committed-factory/preapproval material (context + disclosures). 'None'
+  -- queries fresh, exactly as before phase 5 (the fast path that keeps sandbox/same-
+  -- participant flows unchanged, reading everything as operator/gg); 'Some' takes a
+  -- pre-fetched RemoteSeam ('Playground.Prepare:prepareTransferOut', run as gg on gg's OWN
+  -- participant -- see that module's header for why gg, not operator, is the fetch reader)
+  -- instead of querying locally -- the actor's participant may not be able to see
+  -- operator/admin/gg at all.
+  (mgrCid, mgr, emCid, em, csCid, ledgerCidOpt, mockExtraArgs, submitOpts0) <- case input.remote of
+    None -> do
+      (mgrCid0, mgr0) <- resolveManager input.operator input.managerId
+      (emCid, em) <- resolveEmitter input.operator mgr0.transceiverEmitterId
+      csCid <- resolveCoreState input.operator
+      csDisc <- fromSome <$> queryDisclosure input.operator csCid
+      emDisc <- fromSome <$> queryDisclosure input.operator emCid
+      mgrDisc <- fromSome <$> queryDisclosure input.operator mgrCid0
 
+      -- Lock/unlock (either kind) needs the ledger cid + its disclosure; burn/mint has none.
+      -- A non-first lock also needs the EXISTING custody pot holding disclosed: 'Transfer'
+      -- merges the fresh deposit into it (Wormhole.Ntt.Manager.daml's
+      -- 'sumCustodyHoldings'/consolidation step, run with the sending user's own authority
+      -- alone), and that pot is owned by the admin/custodian -- not the sender -- so the
+      -- sender's participant has no other way to see it (same reasoning as receiveVaa's
+      -- potDiscs).
+      (ledgerCidOpt, ledgerDiscs) <- case mgr0.tokenConfig of
+        BurnMint -> pure (None, [])
+        LockUnlock -> do
+          (lcid, ledger) <- resolveLedger input.operator mgr0.managerAddress
+          ld <- fromSome <$> queryDisclosure input.operator lcid
+          potDiscs <- case ledger.custodyHoldingCid of
+            None -> pure []
+            Some potCid -> do
+              d <- fromSome <$> queryDisclosure mgr0.guardianGovernance (coerceContractId potCid : ContractId Cip56MockHolding)
+              pure [d]
+          pure (Some lcid, ld :: potDiscs)
+
+      -- Mock kind's committed-factory/preapproval disclosures; Amulet is handled entirely
+      -- below (via input.amulet) and needs none of this.
+      (mockExtraArgs, mockDiscs) <- case parseTokenKind input.tokenKind of
+        Amulet -> pure (emptyExtraArgs, [])
+        Mock -> do
+          let gg = mgr0.guardianGovernance
+          facDisc <- case mgr0.factory of
+            BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+            TransferFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
+          (ea, preDiscs) <- case mgr0.tokenConfig of
+            BurnMint -> pure (emptyExtraArgs, [])
+            LockUnlock -> do
+              -- The admin is the lock's custodian/receiver; its standing preapproval is what
+              -- lets ANY sender's lock deliver to it (plan §4.2 -- no promotion needed).
+              pres <- query @MockTransferPreapproval gg
+              preCid <- case [ cid | (cid, p) <- pres, p.owner == mgr0.admin, p.instrument == mgr0.instrumentId ] of
+                [cid] -> pure cid
+                [] -> abort "playground: admin has no standing transfer pre-approval -- run `deploy` first"
+                _ -> abort "playground: more than one MockTransferPreapproval for the admin"
+              preDisc <- fromSome <$> queryDisclosure gg preCid
+              let ctx = ExtraArgs with
+                    context = ChoiceContext with
+                      values = TextMap.fromList
+                        [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+                    meta = emptyMetadata
+              pure (ctx, [preDisc])
+          pure (ea, facDisc :: preDiscs)
+
+      let discs = csDisc :: emDisc :: mgrDisc :: (ledgerDiscs ++ mockDiscs)
+          submitOpts0 = foldl (\opts d -> opts <> disclose d) (actAs input.user) discs
+      pure (mgrCid0, mgr0, emCid, em, csCid, ledgerCidOpt, mockExtraArgs, submitOpts0)
+
+    Some seam -> do
+      let mgrCid  = fromSomeNote "playground: remote seam missing mgrCid" seam.mgrCid
+          mgr     = fromSomeNote "playground: remote seam missing mgr" seam.mgr
+          emCid   = fromSomeNote "playground: remote seam missing emCid" seam.emCid
+          em      = fromSomeNote "playground: remote seam missing em" seam.em
+          csCid   = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+          ledgerCidOpt = seam.ledgerCid
+      -- No existing contract of @user@'s own to queryDisclosure a seed FROM on this
+      -- participant -- create+fetch a throwaway one (Playground.Disclose.mkSeedDisclosure).
+      seed <- mkSeedDisclosure input.user
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+          submitOpts0 = foldl (\opts d -> opts <> disclose d) (actAs input.user) toDisc
+          -- The preapproval cid itself needs no query -- prepareTransferOut already resolved
+          -- it (as gg, on gg's own participant); this just builds the same ExtraArgs.context
+          -- shape 'Playground.MockRegistry.MockPreapprovedTransferFactory' expects.
+          mockExtraArgs = case mgr.tokenConfig of
+            BurnMint -> emptyExtraArgs
+            LockUnlock ->
+              let preCid = fromSomeNote "playground: remote seam missing mockPreapprovalCid" seam.mockPreapprovalCid
+              in ExtraArgs with
+                   context = ChoiceContext with
+                     values = TextMap.fromList
+                       [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+                   meta = emptyMetadata
+      pure (mgrCid, mgr, emCid, em, csCid, ledgerCidOpt, mockExtraArgs, submitOpts0)
+
+  -- Amulet: the registry recreates its factory contract occasionally; compare the
+  -- CLI-resolved cid against the committed one and rotate it (admin-submitted) before the
+  -- transfer if it moved (plan §4.4's upgrade path). Never routes through a RemoteSeam in
+  -- practice (the sender is always a validator wallet user on the default participant, plan
+  -- §3), so it resolves everything itself regardless of input.remote.
+  (mgrCid', mgr', extraArgs, holdingCids, submitOpts) <- case parseTokenKind input.tokenKind of
+    Amulet -> do
+      let seam = fromSomeNote "playground: amulet transferOut requires a resolved 'amulet' seam" input.amulet
+          resolvedFactory = TransferFactoryCid (coerceContractId seam.factoryCid)
+      mgrCid'' <-
+        if resolvedFactory == mgr.factory
+          then pure mgrCid
+          else submit input.admin do exerciseCmd mgrCid SetFactory with newFactory = resolvedFactory
+      Some mgr'' <- queryContractId input.operator mgrCid''
+      csDiscForAmulet <- fromSome <$> queryDisclosure input.operator csCid
+      let dSeam = map (toDisclosure csDiscForAmulet) seam.disclosed
+          ea = ExtraArgs with context = seam.choiceContext, meta = emptyMetadata
+      -- The real registry's 'TransferFactory_Transfer' requires at least one input
+      -- holding (unlike the mock, which creates the receiver's holding out of nothing);
+      -- the CLI intentionally leaves 'input.inputHoldingCids' empty for "amulet" (see
+      -- transfer.go), so this in-script enumeration of the sender's own unlocked Amulet
+      -- (Playground.Amulet.amuletHoldings) is what actually supplies it.
+      hcids <- amuletHoldings input.user mgr''.instrumentId.admin
+      hcids' <- if null hcids
+        then abort "playground: amulet transferOut found no unlocked Amulet for the sender -- tap first"
+        else pure hcids
+      pure (mgrCid'', mgr'', ea, hcids', foldl (\opts d -> opts <> disclose d) submitOpts0 dSeam)
+    Mock -> do
+      when (isSome input.amulet) $
+        abort "playground: the amulet seam must be None for a non-amulet deployment"
+      pure (mgrCid, mgr, mockExtraArgs, input.inputHoldingCids, submitOpts0)
+
+  -- Recompute the exact published payload from the emitter's PRE-exercise sequence -- see
+  -- the module header; this is what `guardian sign-vaa` needs.
   let peer = fromSomeNote ("playground: no peer for chain " <> show input.recipientChain)
-               (Map.lookup input.recipientChain mgr.peers)
-      trimmed = trimAmount input.rawAmount mgr.tokenDecimals
+               (Map.lookup input.recipientChain mgr'.peers)
+      trimmed = trimAmount input.rawAmount mgr'.tokenDecimals
       ntt = NativeTokenTransfer with
         decimals = trimmed.decimals
         amount = trimmed.amount
@@ -224,71 +341,41 @@ transferOut input = do
         recipientChain = input.recipientChain
         additionalPayload = ""
       mm = NttManagerMessage with
-        id = leftPadTo 32 (intToBytesN mgr.outboundSequence 8)
-        sender = mgr.managerAddress
+        id = leftPadTo 32 (intToBytesN em.sequence 8)
+        sender = mgr'.managerAddress
         payload = encodeNativeTokenTransfer ntt
       wm = WormholeTransceiverMessage with
-        sourceManager = mgr.managerAddress
+        sourceManager = mgr'.managerAddress
         recipientManager = peer.managerAddress
         managerPayload = encodeNttManagerMessage mm
         transceiverPayload = ""
-      recomputedPayload = encodeWormholeTransceiverMessage wm
 
-  dMgr <- fromSome <$> queryDisclosure input.admin mgrCid
-  dEmitter <- fromSome <$> queryDisclosure input.admin emCid
-  (_, registryCidDefault, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
-  dCs <- fromSome <$> queryDisclosure input.operator csCid
-
-  -- Cip56Custody drives the real Amulet registry: the factory cid/choice-context/disclosures
-  -- arrive fresh per call in input.amulet (resolveTokenSeam deliberately left registryCid =
-  -- None for this kind -- there is no mock factory to fall back to). Every other kind is
-  -- byte-identical to before this feature landed.
-  (registryCid, extraArgs, inputHoldingCids, dSeam) <- case parseTokenKind input.tokenKind of
-    Cip56Custody -> do
-      let seam = fromSomeNote "playground: cip56-custody transferOut needs a resolved input.amulet seam" input.amulet
-      dTok <- case dTokens of
-        [d] -> pure d
-        _   -> abort "playground: cip56-custody token disclosure resolution invariant violated"
-      [(_, tok)] <- query @Cip56CustodyToken input.admin
-      resolvedHoldingCids <-
-        if input.inputHoldingCids == []
-          then amuletHoldings input.user tok.instrumentId.admin
-          else pure input.inputHoldingCids
-      let extraArgs = ExtraArgs with context = seam.choiceContext, meta = emptyMetadata
-          dDisclosed = map (toDisclosure dTok) seam.disclosed
-      pure (Some (coerceContractId seam.factoryCid), extraArgs, resolvedHoldingCids, dTok :: dDisclosed)
-    _ -> do
-      when (isSome input.amulet) $
-        abort "playground: the amulet seam must be None for a non-cip56-custody deployment"
-      pure (registryCidDefault, emptyExtraArgs, input.inputHoldingCids, dTokens)
-
-  let baseOpts = actAs input.user <> disclose dMgr <> disclose dEmitter <> disclose dCs
-  _ <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dSeam) do
-    exerciseCmd mgrCid Transfer with
+  _ <- submit submitOpts do
+    exerciseCmd mgrCid' Transfer with
       user = input.user
       transceiverEmitterCid = emCid
       coreStateCid = csCid
+      ledgerCid = ledgerCidOpt
       recipientChain = input.recipientChain
-      recipientAddress = normalizeHex input.recipientAddress
-      sourceToken = normalizeHex input.sourceToken
+      recipientAddress = input.recipientAddress
+      sourceToken = input.sourceToken
       rawAmount = input.rawAmount
       nonce = input.nonce
       consistencyLevel = input.consistencyLevel
-      inputHoldingCids
+      inputHoldingCids = holdingCids
       feeAllocation = None  -- playground MVP assumes fee 0; see Playground.Init's note
-      registryCid
       extraArgs
 
   pure TransferOutOutput with
-    outboundSequence = mgr.outboundSequence
+    outboundSequence = em.sequence
     emitterChain = 72
     emitterAddress = em.emitterAddress
     nonce = input.nonce
     consistencyLevel = input.consistencyLevel
-    payload = recomputedPayload
+    payload = encodeWormholeTransceiverMessage wm
 
 ----------------------------------------------------------------------
--- registerEmitter
+-- registerEmitter (standalone, not tied to any NTT deployment)
 ----------------------------------------------------------------------
 
 data RegisterEmitterInput = RegisterEmitterInput with
@@ -303,8 +390,8 @@ data RegisterEmitterOutput = RegisterEmitterOutput with
 
 -- | Register a standalone core-bridge 'Emitter' for @owner@, not tied to any NTT
 -- deployment -- the same requester-submitted 'Test.TestCore:registerEmitter' path
--- 'Playground.Deploy:deployNtt' uses for transceivers (zero-fee registry, so no CoreState
--- reference needed). The returned identity pair is what the CLI persists; the cid is not.
+-- 'Wormhole.Ntt.Governance.RegisterManager' uses internally for a deployment's own
+-- transceiver. The returned identity pair is what the CLI persists; the cid is not.
 registerEmitter : RegisterEmitterInput -> Script RegisterEmitterOutput
 registerEmitter input = do
   emCid <- TestCore.registerEmitter input.operator input.owner
@@ -324,6 +411,10 @@ data PublishMessageInput = PublishMessageInput with
     payload          : Text
     nonce            : Int
     consistencyLevel : Int
+    -- 'None' on the same-participant fast path; 'Some' when the CLI ran
+    -- 'Playground.Prepare:preparePublish' on the operator's own participant first (phase 5)
+    -- because the emitter's owner routes to a different participant.
+    remote           : Optional RemoteSeam
   deriving (Eq, Show)
 
 data PublishMessageOutput = PublishMessageOutput with
@@ -343,10 +434,20 @@ data PublishMessageOutput = PublishMessageOutput with
 -- playground's fee-0 assumption (same as 'transferOut').
 publishMessage : PublishMessageInput -> Script PublishMessageOutput
 publishMessage input = do
-  (emCid, em) <- resolveEmitter input.operator input.emitterId
-  csCid <- resolveCoreState input.operator
-  dCs <- fromSome <$> queryDisclosure input.operator csCid
-  msg <- submit (actAs input.owner <> disclose dCs) do
+  (emCid, em, csCid, submitOpts) <- case input.remote of
+    None -> do
+      (emCid, em) <- resolveEmitter input.operator input.emitterId
+      csCid <- resolveCoreState input.operator
+      dCs <- fromSome <$> queryDisclosure input.operator csCid
+      pure (emCid, em, csCid, actAs input.owner <> disclose dCs)
+    Some seam -> do
+      let emCid = fromSomeNote "playground: remote seam missing emCid" seam.emCid
+          em    = fromSomeNote "playground: remote seam missing em" seam.em
+          csCid = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+      seed <- mkSeedDisclosure input.owner
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+      pure (emCid, em, csCid, foldl (\opts d -> opts <> disclose d) (actAs input.owner) toDisc)
+  msg <- submit submitOpts do
     exerciseCmd emCid PublishMessage with
       nonce = input.nonce
       payload = normalizeHex input.payload
@@ -395,12 +496,16 @@ applyGovernance input = do
 data ReceiveVaaInput = ReceiveVaaInput with
     operator  : Party
     managerId : Int
-    admin     : Party  -- the deployment's replay-trie consumer (Playground.Deploy:deployNtt)
-    tokenKind : Text   -- selects the token disclosure (see resolveTokenDisclosure)
+    admin     : Party  -- the deployment's admin (lock/unlock custodian; unused for burn/mint)
+    tokenKind : Text   -- "mock" | "amulet" ("amulet" is rejected outright, receive out of scope)
     executor  : Party
     recipient : Party
     vaaBytes  : Text
     pubKeys   : [(Int, Text)]
+    -- 'None' on the same-participant fast path; 'Some' when the CLI ran
+    -- 'Playground.Prepare:prepareReceive' on the operator's own participant first (phase 5) --
+    -- only relevant for an explicit '--executor' that routes off the default participant.
+    remote    : Optional RemoteSeam
   deriving (Eq, Show)
 
 data ReceiveVaaOutput = ReceiveVaaOutput with
@@ -409,97 +514,241 @@ data ReceiveVaaOutput = ReceiveVaaOutput with
     decimals       : Int
   deriving (Eq, Show)
 
+-- | Relay a VAA through 'Wormhole.Ntt.Manager.Mint' (burn/mint) or 'Release' (lock/unlock),
+-- executor-only both ways (see the module header). "amulet" aborts outright -- receiving
+-- against real Amulet is out of scope for the playground (unchanged posture).
 receiveVaa : ReceiveVaaInput -> Script ReceiveVaaOutput
-receiveVaa input = do
-  -- Receiving is out of scope for the real-Amulet flow: resolveTokenSeam's Cip56Custody case
-  -- deliberately returns registryCid = None (there is no mock factory to fall back to), so
-  -- aborting here explains why clearly instead of surfacing a generic "registry transfer
-  -- factory cid required" error from deep inside Cip56CustodyToken.mintOrUnlockImpl.
-  when (parseTokenKind input.tokenKind == Cip56Custody) $
-    abort "playground: cip56-custody receive/unlock not supported by the playground"
-  (mgrCid, _mgr) <- resolveManager input.operator input.managerId
-  csCid <- resolveCoreState input.operator
-  let digest = (parseVAA input.vaaBytes).hash
-  (nodeCid, nodeDisc) <- coveringDisclosure input.operator input.admin digest
-  dMgr <- fromSome <$> queryDisclosure input.operator mgrCid
-  dCs <- fromSome <$> queryDisclosure input.operator csCid
-  -- The nested MintOrUnlock reaches the token hook AND its admin-signed registry factory;
-  -- disclose both (as transferOut does for the outbound leg) so a non-admin executor can
-  -- resolve them. Receive is executor-only: the recipient is passive. For an owner-signed
-  -- kind its authority arrives through a standing DepositPreapproval, resolved and disclosed
-  -- here; if the recipient has not opted in, pass None and let the on-ledger mint gate abort.
-  let kind = parseTokenKind input.tokenKind
-  (_, registryCid, dTokens) <- resolveTokenSeam input.admin kind
-  (preCid, dPre) <- resolvePreapproval input.admin kind input.recipient
+receiveVaa input =
+  case parseTokenKind input.tokenKind of
+    Amulet -> abort "playground: amulet receive/unlock not supported by the playground"
+    Mock -> do
+      -- Resolve the manager/core-state/replay-node cids + records. 'None' queries fresh,
+      -- exactly as before phase 5, reading everything as operator/gg (the fast path that
+      -- keeps sandbox/same-participant flows unchanged); 'Some' takes a pre-fetched RemoteSeam
+      -- ('Playground.Prepare:prepareReceive', run as gg on gg's OWN participant -- see that
+      -- module's header) instead -- relevant only when an explicit '--executor' routes this
+      -- submit off the default participant.
+      (mgrCid, mgr, csCid, nodeCid, submitOpts0) <- case input.remote of
+        None -> do
+          (mgrCid, mgr) <- resolveManager input.operator input.managerId
+          csCid <- resolveCoreState input.operator
+          csDisc <- fromSome <$> queryDisclosure input.operator csCid
+          mgrDisc <- fromSome <$> queryDisclosure input.operator mgrCid
+          let gg = mgr.guardianGovernance
+              digest = (parseVAA input.vaaBytes).hash
+          (nodeCid, nodeDisc) <- coveringDisclosure input.operator gg mgr.namespace digest
+          let submitOpts0 = actAs input.executor <> disclose csDisc <> disclose mgrDisc <> disclose nodeDisc
+          pure (mgrCid, mgr, csCid, nodeCid, submitOpts0)
+        Some seam -> do
+          let mgrCid  = fromSomeNote "playground: remote seam missing mgrCid" seam.mgrCid
+              mgr     = fromSomeNote "playground: remote seam missing mgr" seam.mgr
+              csCid   = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+              nodeCid = fromSomeNote "playground: remote seam missing replayNodeCid" seam.replayNodeCid
+          seed <- mkSeedDisclosure input.executor
+          let toDisc = map (toDisclosureByName seed) seam.disclosed
+              submitOpts0 = foldl (\opts d -> opts <> disclose d) (actAs input.executor) toDisc
+          pure (mgrCid, mgr, csCid, nodeCid, submitOpts0)
 
-  let baseOpts = actAs input.executor
-                   <> disclose dMgr <> disclose dCs <> disclose nodeDisc
-  ntt <- submit (foldl (\opts d -> opts <> disclose d) baseOpts (dTokens <> dPre)) do
-    exerciseCmd mgrCid Receive with
-      executor = input.executor
-      coreStateCid = csCid
-      replayNodeCid = nodeCid
-      vaaBytes = input.vaaBytes
-      pubKeys = input.pubKeys
-      recipient = input.recipient
-      inputHoldingCids = []
-      depositPreapprovalCid = preCid
-      registryCid
-      extraArgs = emptyExtraArgs
+      case mgr.tokenConfig of
+        BurnMint -> do
+          (preCid, submitOpts) <- case input.remote of
+            None -> do
+              let gg = mgr.guardianGovernance
+              pres <- query @DepositPreapproval gg
+              preCid <- case
+                [ cid | (cid, p) <- pres, p.owner == input.recipient, p.instrumentId == mgr.instrumentId ] of
+                [cid] -> pure cid
+                [] -> abort "playground: recipient has no DepositPreapproval -- run `preapprove` first"
+                _ -> abort "playground: more than one DepositPreapproval for the recipient"
+              -- The recipient's own DepositPreapproval: 'Mint' 'fetch'es it, so the
+              -- executor-only submission needs it disclosed (gg is its observer) -- same
+              -- pattern as the LockUnlock branch below's preapproval disclosure.
+              preDisc <- fromSome <$> queryDisclosure gg preCid
+              -- The committed burn/mint factory: 'Deposit' (nested inside 'Mint') exercises
+              -- it directly, so it needs disclosing too -- same pattern as transferOut's Mock
+              -- branch and the LockUnlock branch below's facDisc.
+              facDisc <- case mgr.factory of
+                BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+                TransferFactoryCid _ -> abort "playground: burn/mint deployment has a lock/unlock factory -- inconsistent state"
+              pure (preCid, submitOpts0 <> disclose preDisc <> disclose facDisc)
+            Some seam ->
+              let preCid = fromSomeNote
+                    "playground: recipient has no DepositPreapproval -- run `preapprove` first"
+                    seam.preapprovalCid
+              in pure (preCid, submitOpts0)
 
-  pure ReceiveVaaOutput with
-    recipientChain = ntt.recipientChain
-    amount = ntt.amount
-    decimals = ntt.decimals
+          ntt <- submit submitOpts do
+            exerciseCmd mgrCid Mint with
+              executor = input.executor
+              coreStateCid = csCid
+              replayNodeCid = nodeCid
+              vaaBytes = input.vaaBytes
+              pubKeys = input.pubKeys
+              recipient = input.recipient
+              depositPreapprovalCid = preCid
+              extraArgs = emptyExtraArgs
+          pure ReceiveVaaOutput with
+            recipientChain = ntt.recipientChain
+            amount = ntt.amount
+            decimals = ntt.decimals
+
+        LockUnlock -> do
+          (ledgerCid, extraArgs, submitOpts) <- case input.remote of
+            None -> do
+              let gg = mgr.guardianGovernance
+              (ledgerCid, ledger) <- resolveLedger input.operator mgr.managerAddress
+              ledgerDisc <- fromSome <$> queryDisclosure input.operator ledgerCid
+              potDiscs <- case ledger.custodyHoldingCid of
+                None -> pure []
+                Some potCid -> do
+                  d <- fromSome <$> queryDisclosure gg (coerceContractId potCid : ContractId Cip56MockHolding)
+                  pure [d]
+              facDisc <- case mgr.factory of
+                BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+                TransferFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
+              pres <- query @MockTransferPreapproval gg
+              preCid <- case
+                [ cid | (cid, p) <- pres, p.owner == input.recipient, p.instrument == mgr.instrumentId ] of
+                [cid] -> pure cid
+                [] -> abort "playground: recipient has no standing transfer pre-approval -- run `preapprove` first"
+                _ -> abort "playground: more than one MockTransferPreapproval for the recipient"
+              preDisc <- fromSome <$> queryDisclosure gg preCid
+
+              let extraArgs = ExtraArgs with
+                    context = ChoiceContext with
+                      values = TextMap.fromList
+                        [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+                    meta = emptyMetadata
+                  discs = [ledgerDisc, facDisc, preDisc] ++ potDiscs
+                  submitOpts = foldl (\opts d -> opts <> disclose d) submitOpts0 discs
+              pure (ledgerCid, extraArgs, submitOpts)
+            Some seam ->
+              let ledgerCid = fromSomeNote "playground: remote seam missing ledgerCid" seam.ledgerCid
+                  preCid = fromSomeNote
+                    "playground: recipient has no standing transfer pre-approval -- run `preapprove` first"
+                    seam.mockPreapprovalCid
+                  extraArgs = ExtraArgs with
+                    context = ChoiceContext with
+                      values = TextMap.fromList
+                        [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+                    meta = emptyMetadata
+              in pure (ledgerCid, extraArgs, submitOpts0)
+
+          (_, ntt) <- submit submitOpts do
+            exerciseCmd mgrCid Release with
+              executor = input.executor
+              coreStateCid = csCid
+              replayNodeCid = nodeCid
+              vaaBytes = input.vaaBytes
+              pubKeys = input.pubKeys
+              recipient = input.recipient
+              ledgerCid
+              inputHoldingCids = []
+              extraArgs
+          pure ReceiveVaaOutput with
+            recipientChain = ntt.recipientChain
+            amount = ntt.amount
+            decimals = ntt.decimals
 
 ----------------------------------------------------------------------
--- preapproveDeposit / revokeDeposit
+-- preapprove / revoke
 ----------------------------------------------------------------------
 
-data PreapproveDepositInput = PreapproveDepositInput with
-    admin     : Party  -- the deployment's token admin (co-signatory of the pre-approval)
-    tokenKind : Text   -- selects the token disclosure (see resolveTokenSeam)
-    user      : Party  -- the recipient opting in
+data PreapproveInput = PreapproveInput with
+    admin              : Party  -- the deployment's admin (resolves its committed factory context)
+    guardianGovernance : Party  -- the registry admin (gg): observer/co-signatory of the created pre-approval
+    tokenKind          : Text   -- "mock" | "amulet"
+    mode               : Text   -- "burn-mint" | "lock-unlock" -- selects the template for "mock"
+    user               : Party  -- the recipient opting in
   deriving (Eq, Show)
 
-data PreapproveDepositOutput = PreapproveDepositOutput with
-    preapproved : Bool   -- False when the kind needs no pre-approval (mock no-op)
+data PreapproveOutput = PreapproveOutput with
+    -- False when the kind needs no local pre-approval concept ("amulet": real Amulet's own
+    -- TransferPreapproval is out of this script's scope).
+    preapproved : Bool
   deriving (Eq, Show)
 
--- | @user@ opts in to receive owner-signed deposits: exercises 'PreApproveDeposit'
--- on the deployment's token hook (disclosed to @user@), creating a standing,
--- dual-signed 'DepositPreapproval'. Returns @preapproved = False@ when the choice
--- returns 'None' (the admin-signed mock, which needs no consent). No cid is
--- persisted -- the pre-approval is resolved fresh by 'resolvePreapproval' at
--- receive time. The custody kind's on-ledger 'preApproveImpl' abort surfaces as the
--- command error.
-preapproveDeposit : PreapproveDepositInput -> Script PreapproveDepositOutput
-preapproveDeposit input = do
-  (tokenCid, _registryCid, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
-  let baseOpts = actAs input.user
-  mCid <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
-    exerciseCmd tokenCid PreApproveDeposit with user = input.user
-  pure PreapproveDepositOutput with preapproved = isSome mCid
+-- | @user@ opts in to receive inbound deliveries: for "mock" burn-mint, a self-signed
+-- 'Wormhole.Ntt.Deposit.DepositPreapproval' create; for "mock" lock-unlock, a self-signed
+-- 'Playground.MockRegistry.MockTransferPreapproval' create. No cid is persisted -- the
+-- pre-approval is resolved fresh at receive/fund time. Idempotent: 'transfer' (Go CLI) calls
+-- this to ENSURE a standing pre-approval exists before every mock-kind send, so a second call
+-- for the same (user, instrument) must be a no-op rather than a duplicate create -- otherwise
+-- 'fundUser'/'receiveVaa's single-contract lookups would start aborting with "more than one
+-- DepositPreapproval/MockTransferPreapproval" the moment a user transfers or is preapproved
+-- twice.
+--
+-- Needs no 'Playground.Disclose.RemoteSeam': every argument here is a plain Party value (no
+-- contract fetching), and the only queries/creates are of @user@'s OWN prospective pre-approval,
+-- submitted as @user@ itself -- so this always runs correctly on @user@'s own participant with
+-- no cross-participant read at all (contrast 'transferOut'/'receiveVaa', which must resolve
+-- gg-owned committed-factory/preapproval contracts on ANOTHER participant to build the
+-- @extraArgs@ a nested exercise needs).
+preapprove : PreapproveInput -> Script PreapproveOutput
+preapprove input =
+  case parseTokenKind input.tokenKind of
+    -- Real Amulet's own TransferPreapproval is out of this script's scope.
+    Amulet -> pure PreapproveOutput with preapproved = False
+    Mock -> do
+      let gg = input.guardianGovernance
+          -- Fixed nonce 0 -- see fundUser's note; this playground phase supports one
+          -- bridged instrument per admin.
+          instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor input.admin 0
+      case parseTokenMode input.mode of
+        BurnMint -> do
+          pres <- query @DepositPreapproval input.user
+          case [ () | (_, p) <- pres, p.instrumentId == instrumentId ] of
+            [] -> do
+              _ <- submit input.user do
+                createCmd DepositPreapproval with owner = input.user, instrumentId
+              pure ()
+            _ -> pure () -- already preapproved for this instrument -- no-op
+        LockUnlock -> do
+          pres <- query @MockTransferPreapproval input.user
+          case [ () | (_, p) <- pres, p.instrument == instrumentId ] of
+            [] -> do
+              _ <- submit input.user do
+                createCmd MockTransferPreapproval with
+                  owner = input.user
+                  registryAdmin = gg
+                  instrument = instrumentId
+              pure ()
+            _ -> pure () -- already preapproved for this instrument -- no-op
+      pure PreapproveOutput with preapproved = True
 
-data RevokeDepositInput = RevokeDepositInput with
-    admin : Party  -- the pre-approval's admin co-signatory (resolves it)
-    user  : Party  -- the owner tearing down its consent
+data RevokeInput = RevokeInput with
+    guardianGovernance : Party  -- the pre-approval's registry-admin co-signatory/observer (gg), resolves it
+    tokenKind          : Text   -- "mock" | "amulet"
+    mode               : Text   -- "burn-mint" | "lock-unlock"
+    user               : Party  -- the owner tearing down its consent
   deriving (Eq, Show)
 
-data RevokeDepositOutput = RevokeDepositOutput with
+data RevokeOutput = RevokeOutput with
     revoked : Bool
   deriving (Eq, Show)
 
--- | @user@ (owner) tears down its standing 'Cip56DepositPreapproval' via the
--- owner-only 'Revoke'. Resolved by query as @admin@ (a signatory), filtered by
--- owner; aborts cleanly if none exists.
-revokeDeposit : RevokeDepositInput -> Script RevokeDepositOutput
-revokeDeposit input = do
-  pres <- query @Cip56DepositPreapproval input.admin
-  case [ cid | (cid, p) <- pres, p.owner == input.user ] of
-    cid :: _ -> do
-      dPre <- fromSome <$> queryDisclosure input.admin cid
-      _ <- submit (actAs input.user <> disclose dPre) do
-        exerciseCmd (toInterfaceContractId @DepositPreapproval cid) Revoke
-      pure RevokeDepositOutput with revoked = True
-    [] -> abort "playground: no deposit pre-approval to revoke for this user"
+-- | @user@ (owner) tears down its standing pre-approval (either template, selected the same
+-- way as 'preapprove') via the owner-only @Revoke@ choice. Aborts cleanly if none exists.
+revoke : RevokeInput -> Script RevokeOutput
+revoke input =
+  case parseTokenKind input.tokenKind of
+    Amulet -> pure RevokeOutput with revoked = False
+    Mock -> do
+      case parseTokenMode input.mode of
+        BurnMint -> do
+          pres <- query @DepositPreapproval input.user
+          case pres of
+            [(cid, _)] -> do
+              _ <- submit input.user do exerciseCmd cid Deposit.Revoke
+              pure ()
+            [] -> abort "playground: no DepositPreapproval to revoke"
+            _ -> abort "playground: more than one DepositPreapproval visible to user"
+        LockUnlock -> do
+          pres <- query @MockTransferPreapproval input.user
+          case pres of
+            [(cid, _)] -> do
+              _ <- submit input.user do exerciseCmd cid MockRegistry.Revoke
+              pure ()
+            [] -> abort "playground: no MockTransferPreapproval to revoke"
+            _ -> abort "playground: more than one MockTransferPreapproval visible to user"
+      pure RevokeOutput with revoked = True

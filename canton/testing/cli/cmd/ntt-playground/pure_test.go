@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/amulet"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/disclosure"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/observer"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
@@ -227,6 +228,61 @@ func TestKnownHints_EmptyState(t *testing.T) {
 // ----------------------------------------------------------------------
 // toObservedOutput
 // ----------------------------------------------------------------------
+
+// ----------------------------------------------------------------------
+// resolveParticipantRole: hint -> participant-role precedence
+// (.claude/tasks/e2e-separate-participants.md §3: state.UserParticipants > config
+// partyHosting > config "*" wildcard > "" (caller defers to profile.Endpoint's own default))
+// ----------------------------------------------------------------------
+
+func TestResolveParticipantRole_StateWinsOverConfig(t *testing.T) {
+	s := state.New()
+	s.UserParticipants["Alice"] = "bob" // deliberately "wrong" vs cfg, to prove state wins
+	cfg := disclosure.Config{PartyHosting: map[string]string{"Alice": "app-user", "*": "app-provider"}}
+
+	got := resolveParticipantRole("Alice", cfg, s)
+	if got != "bob" {
+		t.Fatalf("expected the state-persisted role to win, got %q", got)
+	}
+}
+
+func TestResolveParticipantRole_ConfigWinsOverWildcard(t *testing.T) {
+	s := state.New()
+	cfg := disclosure.Config{PartyHosting: map[string]string{"Bob": "bob", "*": "app-provider"}}
+
+	got := resolveParticipantRole("Bob", cfg, s)
+	if got != "bob" {
+		t.Fatalf("expected the config's specific mapping to win over the wildcard, got %q", got)
+	}
+}
+
+func TestResolveParticipantRole_WildcardFallback(t *testing.T) {
+	s := state.New()
+	cfg := disclosure.Config{PartyHosting: disclosure.DefaultPartyHosting()}
+
+	got := resolveParticipantRole("SomeoneNotListed", cfg, s)
+	if got != "app-provider" {
+		t.Fatalf("expected the config's \"*\" wildcard fallback, got %q", got)
+	}
+}
+
+func TestResolveParticipantRole_NoMatchReturnsEmpty(t *testing.T) {
+	s := state.New()
+	cfg := disclosure.Config{} // no PartyHosting at all -- not even a "*" entry
+
+	got := resolveParticipantRole("Anyone", cfg, s)
+	if got != "" {
+		t.Fatalf("expected an empty role when nothing resolves (deferring to profile.Endpoint's own default), got %q", got)
+	}
+}
+
+func TestResolveParticipantRole_NilStateSkipsToConfig(t *testing.T) {
+	cfg := disclosure.Config{PartyHosting: map[string]string{"Bob": "bob"}}
+	got := resolveParticipantRole("Bob", cfg, nil)
+	if got != "bob" {
+		t.Fatalf("expected a nil state to fall through to the config mapping, got %q", got)
+	}
+}
 
 func TestToObservedOutput(t *testing.T) {
 	o := observer.Observed{

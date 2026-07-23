@@ -135,7 +135,8 @@ exit 1
 		WorkDir:       t.TempDir(),
 		RetryAttempts: 1,
 		RetryInterval: time.Millisecond,
-		Profile:       profile.Profile{Name: profile.LocalNet, LedgerHost: "localhost", LedgerPort: 6865},
+		Profile:       profile.Profile{Name: profile.LocalNet},
+		Endpoint:      profile.Endpoint{LedgerHost: "localhost", LedgerPort: 6865},
 	}
 	err := r.Run(context.Background(), "Playground.Ops:setPeer", map[string]any{}, nil)
 	if err == nil {
@@ -165,7 +166,8 @@ exit 1
 		WorkDir:       t.TempDir(),
 		RetryAttempts: 0,
 		RetryInterval: time.Millisecond,
-		Profile:       profile.Profile{Name: profile.Sandbox, LedgerHost: "localhost", LedgerPort: 6865},
+		Profile:       profile.Profile{Name: profile.Sandbox},
+		Endpoint:      profile.Endpoint{LedgerHost: "localhost", LedgerPort: 6865},
 		Logf:          func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) },
 	}
 	err := r.Run(context.Background(), "Playground.Ops:setPeer", map[string]any{}, nil)
@@ -227,7 +229,7 @@ func TestRunner_RetryDefaults(t *testing.T) {
 // ----------------------------------------------------------------------
 
 func TestNewRunner_ExplicitDpmPath(t *testing.T) {
-	r, err := NewRunner("/explicit/dpm", "/some.dar", profile.Profile{}, "", t.TempDir())
+	r, err := NewRunner("/explicit/dpm", "/some.dar", profile.Profile{}, profile.Endpoint{}, "", t.TempDir())
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -241,7 +243,7 @@ func TestNewRunner_ResolvesDpmFromPATH(t *testing.T) {
 	writeExecutable(t, dir, "dpm")
 	t.Setenv("PATH", dir)
 
-	r, err := NewRunner("", "/some.dar", profile.Profile{}, "", t.TempDir())
+	r, err := NewRunner("", "/some.dar", profile.Profile{}, profile.Endpoint{}, "", t.TempDir())
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -255,7 +257,7 @@ func TestNewRunner_DpmNotFound(t *testing.T) {
 	t.Setenv("PATH", emptyPathDir)
 	t.Setenv("HOME", t.TempDir())
 
-	_, err := NewRunner("", "/some.dar", profile.Profile{}, "", t.TempDir())
+	_, err := NewRunner("", "/some.dar", profile.Profile{}, profile.Endpoint{}, "", t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "dpm not found") {
 		t.Fatalf("expected a dpm-not-found error, got %v", err)
 	}
@@ -318,7 +320,7 @@ func TestRun_Success(t *testing.T) {
 	dpm := fakeDpmScript(t, `echo '{"managerId": 42}' > "$out"
 exit 0
 `)
-	r := &Runner{DpmPath: dpm, DarPath: "unused.dar", WorkDir: t.TempDir(), Profile: profile.Profile{LedgerHost: "localhost", LedgerPort: 6865}}
+	r := &Runner{DpmPath: dpm, DarPath: "unused.dar", WorkDir: t.TempDir(), Endpoint: profile.Endpoint{LedgerHost: "localhost", LedgerPort: 6865}}
 
 	var out struct {
 		ManagerID int `json:"managerId"`
@@ -453,11 +455,13 @@ echo "$@" > "` + argsFile + `"
 		AccessTokenFile: tokenFile,
 		Profile: profile.Profile{
 			Name:         profile.LocalNet,
-			LedgerHost:   "localhost",
-			LedgerPort:   3901,
 			RequiresAuth: true,
 			UploadDAR:    true,
-			UserID:       "ledger-api-user",
+		},
+		Endpoint: profile.Endpoint{
+			LedgerHost: "localhost",
+			LedgerPort: 3901,
+			UserID:     "ledger-api-user",
 		},
 	}
 	var out map[string]any
@@ -494,11 +498,11 @@ exit 0
 `)
 	var lines []string
 	r := &Runner{
-		DpmPath: dpm,
-		DarPath: "unused.dar",
-		WorkDir: t.TempDir(),
-		Profile: profile.Profile{LedgerHost: "localhost", LedgerPort: 6865, UserID: "u"},
-		Logf:    func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) },
+		DpmPath:  dpm,
+		DarPath:  "unused.dar",
+		WorkDir:  t.TempDir(),
+		Endpoint: profile.Endpoint{LedgerHost: "localhost", LedgerPort: 6865, UserID: "u"},
+		Logf:     func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) },
 	}
 	var out map[string]any
 	if err := r.Run(context.Background(), "Playground.Ops:setPeer", map[string]any{}, &out); err != nil {

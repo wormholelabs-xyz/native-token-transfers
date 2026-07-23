@@ -11,18 +11,34 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
 
-// initInput/initOutput mirror Playground.Init.daml's InitInput/InitOutput JSON shapes.
-type initInput struct {
+// proposeGenesisInput/proposeGenesisOutput mirror Playground.Init.daml's
+// ProposeGenesisInput/ProposeGenesisOutput JSON shapes -- the operator-only half of genesis
+// (see the module header for why genesis is a propose/accept pair, not a single co-signed
+// create, post participant-split).
+type proposeGenesisInput struct {
 	Operator           string   `json:"operator"`
 	GuardianGovernance string   `json:"guardianGovernance"`
 	GuardianObserver   string   `json:"guardianObserver"`
 	GuardianAddresses  []string `json:"guardianAddresses"`
 }
 
-type initOutput struct {
+type proposeGenesisOutput struct {
 	Operator           string `json:"operator"`
 	GuardianGovernance string `json:"guardianGovernance"`
 	GuardianObserver   string `json:"guardianObserver"`
+	ProposalCid        string `json:"proposalCid"`
+}
+
+// acceptGenesisInput/acceptGenesisOutput mirror Playground.Init.daml's
+// AcceptGenesisInput/AcceptGenesisOutput JSON shapes -- guardianGovernance's half of genesis,
+// the only step that actually creates Wormhole.Core.State:CoreState.
+type acceptGenesisInput struct {
+	GuardianGovernance string `json:"guardianGovernance"`
+	ProposalCid        string `json:"proposalCid"`
+}
+
+type acceptGenesisOutput struct {
+	CoreStateCid string `json:"coreStateCid"`
 }
 
 func newInitCmd(a *app) *cobra.Command {
@@ -50,14 +66,11 @@ func newInitCmd(a *app) *cobra.Command {
 			// Address only -- the private key never appears in any log, verbose or not.
 			a.vlogf(cmd, "guardian: 1/1 set, address=%s", addrHex)
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-
 			// Parties are allocated (and actAs rights granted, on auth-enabled profiles)
-			// BEFORE initPlayground submits as them -- see grantActAs.
+			// BEFORE the genesis scripts submit as them -- see grantActAs. resolveParty
+			// routes each hint to its own participant (plan §3) and records the resolved
+			// role in s.UserParticipants, which is what the two genesis submits below use
+			// to pick the right participant for each half.
 			s := state.New()
 			s.Profile = string(a.profile)
 			operator, err := resolveParty(cmd, a, s, "Operator")
@@ -73,19 +86,48 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			a.vlogf(cmd, "init: creating genesis contracts as operator+guardianGovernance: CoreState (guardian set idx 0), EmitterRegistry, ReplayRootRegistry, NttManagerRegistry")
-			var out initOutput
-			if err := runner.Run(ctx, "Playground.Init:initPlayground", initInput{
+			// Genesis is a propose/accept pair (plan §5.1): no single participant hosts both
+			// operator and guardianGovernance post-split, so no single `dpm script`
+			// invocation can submit as both. proposeGenesis runs on operator's own
+			// participant (operator-only authority); acceptGenesis runs on
+			// guardianGovernance's own participant and is the step that actually creates
+			// CoreState AND the NTT root NttGovernance -- one ceremony, gg signs once for
+			// both roots (see Playground.Genesis's header).
+			operatorRunner, operatorCleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants["Operator"])
+			if err != nil {
+				return err
+			}
+			defer operatorCleanup()
+
+			a.vlogf(cmd, "init: proposing genesis as operator: CoreStateBootstrapProposal (guardian set idx 0), EmitterRegistry, ReplayRootRegistry")
+			var proposeOut proposeGenesisOutput
+			if err := operatorRunner.Run(ctx, "Playground.Init:proposeGenesis", proposeGenesisInput{
 				Operator:           operator,
 				GuardianGovernance: guardianGovernance,
 				GuardianObserver:   guardianObserver,
 				GuardianAddresses:  []string{addrHex},
-			}, &out); err != nil {
+			}, &proposeOut); err != nil {
 				return err
 			}
-			s.Operator = out.Operator
-			s.GuardianGovernance = out.GuardianGovernance
-			s.GuardianObserver = out.GuardianObserver
+
+			ggRunner, ggCleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants["GuardianGovernance"])
+			if err != nil {
+				return err
+			}
+			defer ggCleanup()
+
+			a.vlogf(cmd, "init: accepting genesis as guardianGovernance: creating CoreState + NttGovernance")
+			var acceptOut acceptGenesisOutput
+			if err := ggRunner.Run(ctx, "Playground.Init:acceptGenesis", acceptGenesisInput{
+				GuardianGovernance: guardianGovernance,
+				ProposalCid:        proposeOut.ProposalCid,
+			}, &acceptOut); err != nil {
+				return err
+			}
+
+			s.Operator = proposeOut.Operator
+			s.GuardianGovernance = proposeOut.GuardianGovernance
+			s.GuardianObserver = proposeOut.GuardianObserver
 			s.Guardian = state.Guardian{PrivateKeyHex: key.HexPrivate(), Address: addrHex}
 
 			if fee > 0 {
@@ -96,8 +138,8 @@ func newInitCmd(a *app) *cobra.Command {
 					return err
 				}
 				var applyOut applyGovernanceOutput
-				if err := runner.Run(ctx, "Playground.Ops:applyGovernance", applyGovernanceInput{
-					Operator: out.Operator,
+				if err := operatorRunner.Run(ctx, "Playground.Ops:applyGovernance", applyGovernanceInput{
+					Operator: proposeOut.Operator,
 					VaaBytes: hex.EncodeToString(vaa),
 					PubKeys:  []ledger.PubKeyHint{{Index: 0, Key: hex.EncodeToString(key.PubKeyUncompressed())}},
 				}, &applyOut); err != nil {
@@ -110,7 +152,7 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "init: operator=%s guardianGovernance=%s guardian=%s\n",
-				out.Operator, out.GuardianGovernance, addrHex)
+				proposeOut.Operator, proposeOut.GuardianGovernance, addrHex)
 			return nil
 		},
 	}

@@ -51,7 +51,10 @@ func newEmitterRegisterCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// A standalone emitter's owner drives its own PublishMessage exercises, so
+			// register it on the owner's own participant (plan §3: "publish/emitter register
+			// -- owner's participant").
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants[ownerHint])
 			if err != nil {
 				return err
 			}
