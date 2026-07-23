@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-
-	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
 
 // decimalLiteral round-trips a Daml `Decimal` value through JSON as a bare number literal
@@ -200,12 +198,13 @@ func newContractsListCmd(a *app) *cobra.Command {
 
 // balancesInput/balancesOutput mirror Playground.Query.daml's BalancesInput/BalancesOutput.
 type balancesInput struct {
-	Reader string `json:"reader"`
-	Owner  string `json:"owner"`
+	Reader          string `json:"reader"`
+	Owner           string `json:"owner"`
+	InstrumentAdmin string `json:"instrumentAdmin"`
+	InstrumentID    string `json:"instrumentId"`
 }
 
 type balancesOutput struct {
-	MockHoldingTotal  int            `json:"mockHoldingTotal"`
 	Cip56HoldingTotal decimalLiteral `json:"cip56HoldingTotal"`
 }
 
@@ -218,19 +217,6 @@ type amuletBalanceInput struct {
 
 type amuletBalanceOutput struct {
 	AmuletHoldingTotal decimalLiteral `json:"amuletHoldingTotal"`
-}
-
-// resolvePartyOrCustody resolves partyHint the normal way (allocate-or-cache under state.Users),
-// EXCEPT for a deployment's own custody hint ("<deployment>-custody"): that party was never
-// allocated by allocatePlaygroundParty -- it is a validator wallet user's already-existing
-// primary party (internal/amulet.OnboardWalletUser, persisted as d.CustodyParty at deploy time)
-// -- so it resolves directly from state rather than through a fresh allocation.
-func resolvePartyOrCustody(cmd *cobra.Command, a *app, s *state.State, d state.Deployment, deployment, partyHint string) (string, error) {
-	if d.CustodyParty != "" && partyHint == deployment+"-custody" {
-		a.vlogf(cmd, "party %q: resolved as deployment %q's custody party → %s", partyHint, deployment, d.CustodyParty)
-		return d.CustodyParty, nil
-	}
-	return resolveParty(cmd, a, s, partyHint)
 }
 
 func newBalanceCmd(a *app) *cobra.Command {
@@ -249,7 +235,7 @@ func newBalanceCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("balance: unknown deployment %q", deployment)
 			}
-			party, err := resolvePartyOrCustody(cmd, a, s, d, deployment, partyHint)
+			party, err := resolveParty(cmd, a, s, partyHint)
 			if err != nil {
 				return err
 			}
@@ -260,7 +246,7 @@ func newBalanceCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
-			if d.TokenKind == "cip56-custody" {
+			if d.TokenKind == "amulet" {
 				var out amuletBalanceOutput
 				if err := runner.Run(ctx, "Playground.Query:amuletBalance", amuletBalanceInput{
 					Owner:           party,
@@ -274,16 +260,18 @@ func newBalanceCmd(a *app) *cobra.Command {
 
 			var out balancesOutput
 			if err := runner.Run(ctx, "Playground.Query:balances", balancesInput{
-				Reader: d.Admin,
-				Owner:  party,
+				Reader:          s.GuardianGovernance,
+				Owner:           party,
+				InstrumentAdmin: d.InstrumentAdmin,
+				InstrumentID:    d.InstrumentID,
 			}, &out); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "party=%s mockHoldingTotal=%d cip56HoldingTotal=%s\n", party, out.MockHoldingTotal, out.Cip56HoldingTotal)
+			fmt.Fprintf(cmd.OutOrStdout(), "party=%s cip56HoldingTotal=%s\n", party, out.Cip56HoldingTotal)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&partyHint, "party", "", "party hint to check (a deployment's own \"<name>-custody\" hint resolves without allocating a new party)")
+	cmd.Flags().StringVar(&partyHint, "party", "", "party hint to check")
 	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name (determines whose holdings are visible)")
 	_ = cmd.MarkFlagRequired("party")
 	_ = cmd.MarkFlagRequired("deployment")

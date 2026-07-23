@@ -1,8 +1,8 @@
 {
-  "name": "cip56cumock",
+  "name": "amulet",
   "mode": "lock-unlock",
-  "tokenKind": "cip56-custody-mock",
-  "decimals": 8,
+  "tokenKind": "amulet",
+  "decimals": 10,
   "peers": [
     {
       "chain": 2,

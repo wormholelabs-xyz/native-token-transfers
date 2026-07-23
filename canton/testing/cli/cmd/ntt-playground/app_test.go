@@ -323,39 +323,3 @@ func TestGrantActAs_NoAuthProfileIsNoOp(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------
-// resolvePartyOrCustody: the custody-hint short-circuit (no ledger round-trip)
-// ----------------------------------------------------------------------
-
-func TestResolvePartyOrCustody_CustodyHintShortCircuits(t *testing.T) {
-	a := &app{}
-	root := newRootCmd()
-	root.SetContext(context.Background())
-	s := state.New()
-	d := state.Deployment{CustodyParty: "custody::abc"}
-
-	party, err := resolvePartyOrCustody(root, a, s, d, "ntt1", "ntt1-custody")
-	if err != nil {
-		t.Fatalf("resolvePartyOrCustody: %v", err)
-	}
-	if party != "custody::abc" {
-		t.Fatalf("expected the deployment's custody party, got %q", party)
-	}
-}
-
-func TestResolvePartyOrCustody_NonCustodyHintFallsBackToResolveParty(t *testing.T) {
-	a := &app{}
-	root := newRootCmd()
-	root.SetContext(context.Background())
-	s := state.New()
-	s.Users["Bob"] = "bob::abc" // cached, so no ledger round-trip is needed
-	d := state.Deployment{CustodyParty: "custody::abc"}
-
-	party, err := resolvePartyOrCustody(root, a, s, d, "ntt1", "Bob")
-	if err != nil {
-		t.Fatalf("resolvePartyOrCustody: %v", err)
-	}
-	if party != "bob::abc" {
-		t.Fatalf("expected the cached non-custody party, got %q", party)
-	}
-}

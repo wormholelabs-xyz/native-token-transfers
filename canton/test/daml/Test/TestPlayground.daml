@@ -1,0 +1,274 @@
+-- | Daml Script tests for the playground harness itself (canton/test/daml/Playground/*).
+-- Phase 2 replaced every stubbed entrypoint these scripts exercise
+-- (Playground.MockRegistry/Deploy/Ops) with its real implementation; all scripts below now
+-- pin real behavior, not a stub's abort.
+--
+-- 'testMockRegistryPreapprovedDelivery'/'testMockRegistryRequiresPreapproval' pin the
+-- compromise-free receive design on its own (no VAA, no NttManager) -- see
+-- 'Playground.MockRegistry'. The rest exercise the playground's own Deploy/Ops entrypoints
+-- against a real 'Wormhole.Ntt.Governance.NttGovernance' root (bootstrapped the same way
+-- 'Test.TestNtt.nttSetup' does, mirroring 'Playground.Init.initPlayground').
+module Test.TestPlayground where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import DA.Time (hours, addRelTime)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Splice.Api.Token.MetadataV1
+  ( AnyValue (..), ChoiceContext (..), ExtraArgs (..), emptyChoiceContext, emptyMetadata )
+import Splice.Api.Token.TransferInstructionV1
+  ( TransferFactory, TransferFactory_Transfer (..), Transfer (..)
+  , TransferInstructionResult_Output (..) )
+import Wormhole.Core.Bytes (leftPadTo, normalizeHex)
+import Wormhole.Ntt.Amount (trimAmount)
+import Wormhole.Ntt.Manager (NttTokenConfig (..), nttInstrumentIdFor)
+import Wormhole.Ntt.Payload
+  ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer )
+
+import Test.TestNtt (mkHolding, expectAbort, sendScaffold, nttSetup, Cip56MockHolding)
+
+import Playground.Deploy
+import Playground.MockRegistry
+import Playground.Ops
+import Playground.Types
+
+----------------------------------------------------------------------
+-- Playground.MockRegistry: the compromise-free receive design, in isolation
+----------------------------------------------------------------------
+
+-- | An executor-only submission (top-level 'actAs' only the SENDER, controller of
+-- 'TransferFactory_Transfer' -- the receiver never acts) delivers to a non-signing receiver
+-- when a matching 'MockTransferPreapproval' cid is present in 'ExtraArgs.context'.
+testMockRegistryPreapprovedDelivery : Script ()
+testMockRegistryPreapprovedDelivery = do
+  gg <- allocateParty "MockRegDeliverGG"
+  sender <- allocateParty "MockRegDeliverSender"
+  receiver <- allocateParty "MockRegDeliverReceiver"
+  let instrument = InstrumentId with admin = gg, id = "MOCKREG-DELIVER"
+
+  facTplCid <- submit gg do createCmd MockPreapprovedTransferFactory with admin = gg
+  let facCid = toInterfaceContractId @TransferFactory facTplCid
+  facDisc <- fromSome <$> queryDisclosure gg facTplCid
+
+  preCid <- submit receiver do
+    createCmd MockTransferPreapproval with owner = receiver, registryAdmin = gg, instrument
+  preDisc <- fromSome <$> queryDisclosure gg preCid
+
+  senderHoldingCid <- mkHolding gg sender instrument 5.0
+
+  now <- getTime
+  let extraArgs = ExtraArgs with
+        context = ChoiceContext with
+          values = TextMap.fromList
+            [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+        meta = emptyMetadata
+
+  result <- submit (actAs sender <> disclose facDisc <> disclose preDisc) do
+    exerciseCmd facCid TransferFactory_Transfer with
+      expectedAdmin = gg
+      transfer = Transfer with
+        sender
+        receiver
+        amount = 5.0
+        instrumentId = instrument
+        requestedAt = now
+        executeBefore = addRelTime now (hours 24)
+        inputHoldingCids = [senderHoldingCid]
+        meta = emptyMetadata
+      extraArgs
+
+  case result.output of
+    TransferInstructionResult_Completed receiverHoldingCids ->
+      assertMsg "expected exactly one receiver holding from the preapproved delivery"
+        (length receiverHoldingCids == 1)
+    _ -> abort "expected TransferInstructionResult_Completed (executor-only preapproved delivery)"
+
+-- | Delivery to a non-signing receiver with NO matching pre-approval in context aborts
+-- clearly (permissionless relay must not silently drop value, and the "requires prior
+-- opt-in" error must be legible).
+testMockRegistryRequiresPreapproval : Script ()
+testMockRegistryRequiresPreapproval = do
+  gg <- allocateParty "MockRegNoPreGG"
+  sender <- allocateParty "MockRegNoPreSender"
+  receiver <- allocateParty "MockRegNoPreReceiver"
+  let instrument = InstrumentId with admin = gg, id = "MOCKREG-NOPRE"
+
+  facTplCid <- submit gg do createCmd MockPreapprovedTransferFactory with admin = gg
+  let facCid = toInterfaceContractId @TransferFactory facTplCid
+  facDisc <- fromSome <$> queryDisclosure gg facTplCid
+
+  now <- getTime
+  res <- trySubmit (actAs sender <> disclose facDisc) do
+    exerciseCmd facCid TransferFactory_Transfer with
+      expectedAdmin = gg
+      transfer = Transfer with
+        sender
+        receiver
+        amount = 5.0
+        instrumentId = instrument
+        requestedAt = now
+        executeBefore = addRelTime now (hours 24)
+        inputHoldingCids = []
+        meta = emptyMetadata
+      extraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+  expectAbort "no standing transfer pre-approval" res
+
+----------------------------------------------------------------------
+-- Playground.Deploy: the gg-submitted deployRegistry -> admin-submitted deployNtt sequence
+----------------------------------------------------------------------
+
+-- | A "mock" burn-mint deployment: 'deployRegistry' (gg) creates the burn/mint mock
+-- factory, then 'deployNtt' (admin) resolves it and drives one
+-- 'Wormhole.Ntt.Governance.RegisterManager' call -- one manager + gg-owned emitter, burn/mint
+-- instrument bound to the registering admin, no ledger (burn/mint has none).
+testPlaygroundDeployMockBurnMint : Script ()
+testPlaygroundDeployMockBurnMint = do
+  (operator, gg, _csId) <- nttSetup
+  admin <- allocateParty "PlaygroundDeployBMAdmin"
+
+  _regOut <- deployRegistry DeployRegistryInput with
+    guardianGovernance = gg
+    admin
+    mode = "burn-mint"
+    tokenKind = "mock"
+    instrumentNonce = 0
+
+  deployOut <- deployNtt DeployInput with
+    operator
+    guardianGovernance = gg
+    admin
+    mode = "burn-mint"
+    tokenKind = "mock"
+    tokenDecimals = 8
+    instrumentNonce = 0
+    instrumentAdmin = None
+    amuletFactoryCid = None
+
+  (_, mgr) <- resolveManager operator deployOut.managerId
+  mgr.tokenConfig === BurnMint
+  mgr.instrumentId === InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
+
+-- | A "mock" lock-unlock deployment: 'deployRegistry' additionally creates a
+-- 'Playground.MockRegistry.MockPreapprovedTransferFactory' (the lock/unlock committed
+-- factory) plus the burn/mint funding faucet; 'deployNtt' yields a zero-balance
+-- 'Wormhole.Ntt.Ledger.LockedLedger' and (per plan §4.2) the admin's own standing
+-- 'Playground.MockRegistry.MockTransferPreapproval' (admin is the lock's custodian/receiver).
+testPlaygroundDeployMockLockUnlock : Script ()
+testPlaygroundDeployMockLockUnlock = do
+  (operator, gg, _csId) <- nttSetup
+  admin <- allocateParty "PlaygroundDeployLUAdmin"
+
+  _regOut <- deployRegistry DeployRegistryInput with
+    guardianGovernance = gg
+    admin
+    mode = "lock-unlock"
+    tokenKind = "mock"
+    instrumentNonce = 0
+
+  deployOut <- deployNtt DeployInput with
+    operator
+    guardianGovernance = gg
+    admin
+    mode = "lock-unlock"
+    tokenKind = "mock"
+    tokenDecimals = 8
+    instrumentNonce = 0
+    instrumentAdmin = None
+    amuletFactoryCid = None
+
+  (_, mgr) <- resolveManager operator deployOut.managerId
+  mgr.tokenConfig === LockUnlock
+  (_, ledger) <- resolveLedger operator mgr.managerAddress
+  ledger.balance === 0.0
+
+  -- The admin's own standing preapproval exists (plan §4.2: "lock by any user works with
+  -- admin-owned custody, no promotion needed").
+  pres <- query @MockTransferPreapproval gg
+  case [ () | (_, p) <- pres, p.owner == admin, p.instrument == mgr.instrumentId ] of
+    [_] -> pure ()
+    _ -> abort "expected exactly one MockTransferPreapproval for the admin"
+
+----------------------------------------------------------------------
+-- Playground.Ops: fundUser / transferOut against a REAL deployment
+-- (built via Test.TestNtt.deploy/sendScaffold, not the still-stubbed Playground.Deploy, so
+-- these two tests isolate Ops.daml's own stubs from Deploy.daml's).
+----------------------------------------------------------------------
+
+-- | 'fundUser' mints exactly @amount@ to the owner via the preapproval-based faucet Deposit,
+-- once the recipient has opted in with 'preapprove' (its own documented precondition -- the
+-- 'Deposit' choice lives on the recipient's own standing 'DepositPreapproval', so there is
+-- no way to fund a user who hasn't created one; the CLI ensures this before calling
+-- 'fundUser', which this test mirrors).
+testPlaygroundFundUserDeposits : Script ()
+testPlaygroundFundUserDeposits = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundFundAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  recipient <- allocateParty "PlaygroundFundRecipient"
+
+  _ <- preapprove PreapproveInput with
+    admin
+    guardianGovernance = gg
+    tokenKind = "mock"
+    mode = "burn-mint"
+    user = recipient
+
+  out <- fundUser FundUserInput with
+    guardianGovernance = gg
+    admin
+    owner = recipient
+    amount = 0.5
+
+  Some v <- queryContractId recipient (fromInterfaceContractId @Cip56MockHolding out.holdingCid)
+  v.amount === 0.5
+  v.owner === recipient
+
+-- | The recomputed outbound payload matches what 'Wormhole.Ntt.Manager.Transfer' actually
+-- publishes, and the recomputed sequence matches the pre-exercise 'Emitter.sequence' --
+-- 'transferOut''s whole reason for existing (there is no event stream to read the
+-- 'WormholeMessage' choice result back from). The pre-exercise read must happen BEFORE
+-- 'transferOut' runs: 'Transfer' consumes and recreates the transceiver 'Emitter' (the
+-- sequence-bearing cid churns on every publish, per Playground.Types's header note), so
+-- 'd.emitterCid' is stale afterwards.
+testPlaygroundTransferRecomputeMatches : Script ()
+testPlaygroundTransferRecomputeMatches = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundRecomputeAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  holdingCid <- mkHolding gg admin d.instrumentId 1.0
+  Some mgr <- queryContractId operator d.mgrCid
+  Some emBefore <- queryContractId operator d.emitterCid
+
+  out <- transferOut TransferOutInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    tokenKind = "mock"
+    user = admin
+    recipientChain = 2
+    recipientAddress = leftPadTo 32 "ee"
+    sourceToken = leftPadTo 32 "dd"
+    rawAmount = 1000000
+    nonce = 0
+    consistencyLevel = 0
+    inputHoldingCids = [holdingCid]
+    amulet = None
+
+  out.outboundSequence === emBefore.sequence
+
+  -- The recomputed payload decodes back to exactly what was requested -- a real check that
+  -- transferOut's independent recompute (it never reads Transfer's own return value; see the
+  -- module header) is bit-exact against the wire encoders 'Transfer' itself uses internally.
+  let wm = decodeWormholeTransceiverMessage out.payload
+      mm = decodeNttManagerMessage wm.managerPayload
+      ntt = decodeNativeTokenTransfer mm.payload
+      trimmed = trimAmount 1000000 mgr.tokenDecimals
+  wm.recipientManager === leftPadTo 32 "bb"
+  ntt.recipientChain === 2
+  ntt.recipientAddress === normalizeHex (leftPadTo 32 "ee")
+  ntt.sourceToken === normalizeHex (leftPadTo 32 "dd")
+  ntt.decimals === trimmed.decimals
+  ntt.amount === trimmed.amount

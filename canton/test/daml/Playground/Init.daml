@@ -14,7 +14,7 @@ module Playground.Init where
 import Daml.Script
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
-import Wormhole.Ntt.Manager (NttManagerRegistry (..))
+import Wormhole.Ntt.Governance (NttGovernance (..))
 
 -- | @guardianAddresses@ are 20-byte hex guardian addresses (Wormhole.Core.Bytes:Bytes20);
 -- typically exactly one, e.g. the address of a CLI-generated key
@@ -54,6 +54,10 @@ initPlayground input = do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance guardianObserver 0)
   _ <- submit operator do
     createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
-  _ <- submit operator do
-    createCmd NttManagerRegistry with operator, nextId = 0
+  -- The NTT bootstrap root: a single co-signed ceremony (operator + gg), mirroring the
+  -- CoreState co-create above. This is the only time gg actively signs for NTT -- every
+  -- later 'Wormhole.Ntt.Governance.RegisterManager' call inherits its signature from this
+  -- contract (see that module's header).
+  _ <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd NttGovernance with operator, guardianGovernance, nextId = 0
   pure InitOutput with operator, guardianGovernance, guardianObserver

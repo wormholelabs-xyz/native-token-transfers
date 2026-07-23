@@ -30,11 +30,21 @@ type app struct {
 	// helpers constructed without a *cobra.Command in scope (the script runner and network
 	// managers' Logf closures) narrate to the same stream vlogf writes to.
 	stderr io.Writer
+
+	// runnerOverride, when set, is used by newScriptRunner instead of constructing a real
+	// ledger.Runner -- test-only (see cmd_wiring_test.go's fakeRunner), never set by any
+	// cobra flag or production code path.
+	runnerOverride scriptRunner
 }
 
 func newRootCmd() *cobra.Command {
-	a := &app{}
+	return newRootCmdForApp(&app{})
+}
 
+// newRootCmdForApp builds the root command around a caller-supplied *app -- split out from
+// newRootCmd so wiring tests (cmd_wiring_test.go) can pre-set a's test-only fields (namely
+// runnerOverride) before Execute() runs, without touching any cobra flag.
+func newRootCmdForApp(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "ntt-playground",
 		Short:         "Playground CLI for the Canton NTT contracts (devnet only)",

@@ -11,10 +11,23 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 )
 
+// scriptRunner is the subset of *ledger.Runner every RunE/helper in this package actually
+// calls -- narrow on purpose so wiring tests (cmd_wiring_test.go) can substitute a fake that
+// records the sequence/routing of `dpm script` calls (which script names get invoked, in
+// what order, with what input) without touching a real dpm/ledger. *ledger.Runner satisfies
+// this interface structurally; no change to internal/ledger is needed.
+type scriptRunner interface {
+	Run(ctx context.Context, scriptName string, input, output any) error
+}
+
 // newScriptRunner builds a ledger.Runner for the current profile, minting a LocalNet access
 // token file when required. The returned cleanup func removes the per-invocation script I/O
-// directory.
-func (a *app) newScriptRunner(ctx context.Context) (*ledger.Runner, func(), error) {
+// directory. If a.runnerOverride is set (tests only), it is used instead of constructing a
+// real runner -- see cmd_wiring_test.go's fakeRunner.
+func (a *app) newScriptRunner(ctx context.Context) (scriptRunner, func(), error) {
+	if a.runnerOverride != nil {
+		return a.runnerOverride, func() {}, nil
+	}
 	prof, err := a.resolvedProfile()
 	if err != nil {
 		return nil, nil, err

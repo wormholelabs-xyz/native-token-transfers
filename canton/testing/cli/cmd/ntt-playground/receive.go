@@ -31,7 +31,7 @@ func newReceiveCmd(a *app) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "receive",
-		Short: "Relay a guardian-signed inbound VAA through NttManager.Receive",
+		Short: "Relay a guardian-signed inbound VAA through NttManager.Mint/Release (recipient must have run `preapprove` first, both modes)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			s, err := a.loadState()
@@ -42,8 +42,8 @@ func newReceiveCmd(a *app) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("receive: unknown deployment %q", deployment)
 			}
-			if d.TokenKind == "cip56-custody" {
-				return fmt.Errorf("receive: receiving network out of scope for real Amulet (cip56-custody)")
+			if d.TokenKind == "amulet" {
+				return fmt.Errorf("receive: receiving is out of scope for real Amulet (amulet)")
 			}
 			recipientParty, err := resolveParty(cmd, a, s, recipientHint)
 			if err != nil {

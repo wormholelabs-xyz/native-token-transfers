@@ -32,18 +32,35 @@ type Deployment struct {
 	TransceiverAddress string       `json:"transceiverAddress"`
 	Admin              string       `json:"admin"` // full party id
 	Mode               string       `json:"mode"`  // "burn-mint" | "lock-unlock"
-	TokenKind          string       `json:"tokenKind"`
+	TokenKind          string       `json:"tokenKind"` // "mock" | "amulet"
 	TokenDecimals      int          `json:"tokenDecimals"`
 	Peers              map[int]Peer `json:"peers"` // keyed by chain id
 
-	// CustodyParty/CustodyUser/InstrumentAdmin are set only for "cip56-custody" deployments
-	// (real Canton Coin/Amulet): CustodyParty is the wallet user's primary party holding
-	// locked funds between send/receive, CustodyUser is that wallet user's id (for re-tapping/
-	// re-onboarding), and InstrumentAdmin is the real DSO party (InstrumentId.admin for
-	// "Amulet"). Empty for every other token kind.
-	CustodyParty    string `json:"custodyParty,omitempty"`
-	CustodyUser     string `json:"custodyUser,omitempty"`
+	// InstrumentAdmin/InstrumentID are the deployment's bridged CIP-56 instrument identity
+	// (Splice.Api.Token.HoldingV1.InstrumentId): InstrumentAdmin is gg for "mock", the real
+	// DSO party for "amulet"; InstrumentID is the instrument's text id (the
+	// Wormhole.Ntt.Manager.nttInstrumentIdFor-bound hash for burn/mint "mock", the shared
+	// "NTT" text for lock/unlock "mock", "Amulet" for "amulet"). There is no separate
+	// custody party any more: lock/unlock custody is admin-owned (see
+	// Wormhole.Ntt.Manager's header) -- Admin above doubles as the custody party.
 	InstrumentAdmin string `json:"instrumentAdmin,omitempty"`
+	InstrumentID    string `json:"instrumentId,omitempty"`
+}
+
+// legacyStateMarkers are JSON keys that only ever appeared in a pre-CIP-56-rework state
+// file (the old 4-value tokenKind scheme's custody-party fields). Their presence means the
+// file predates this rework and must be rejected with a migration hint rather than silently
+// (and incorrectly) loaded -- CustodyParty/CustodyUser no longer exist on Deployment, so a
+// naive json.Unmarshal would just silently drop them, masking a stale-state bug as an
+// empty-field one.
+var legacyDeploymentMarkers = []string{"custodyParty", "custodyUser"}
+
+// legacyTokenKinds are the pre-CIP-56-rework 4-value tokenKind strings, no longer valid.
+var legacyTokenKinds = map[string]bool{
+	"mock-admin-signed":    true,
+	"cip56-burn-mint-mock": true,
+	"cip56-custody-mock":   true,
+	"cip56-custody":        true,
 }
 
 // Emitter is one standalone core-bridge emitter's stable identity (`emitter register`):
@@ -107,6 +124,9 @@ func Load(path string) (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("state: read %s: %w", path, err)
 	}
+	if err := rejectLegacyFormat(raw); err != nil {
+		return nil, err
+	}
 	var s State
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("state: parse %s: %w", path, err)
@@ -124,6 +144,42 @@ func Load(path string) (*State, error) {
 		s.Users = map[string]string{}
 	}
 	return &s, nil
+}
+
+// rejectLegacyFormat scans raw for the pre-CIP-56-rework state shape -- the old 4-value
+// tokenKind scheme's custody-party fields, or one of its tokenKind strings -- and returns a
+// clear migration-hinting error if found. Without this check, the current Deployment struct
+// would silently drop custodyParty/custodyUser (unknown fields to json.Unmarshal) and accept
+// a now-meaningless tokenKind, turning a stale state file into confusing downstream failures
+// instead of a loud, actionable one at load time. Malformed JSON is left to the caller's real
+// json.Unmarshal, which reports a clearer parse error.
+func rejectLegacyFormat(raw []byte) error {
+	var probe struct {
+		Deployments map[string]map[string]json.RawMessage `json:"deployments"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil
+	}
+	for name, d := range probe.Deployments {
+		for _, marker := range legacyDeploymentMarkers {
+			if _, ok := d[marker]; ok {
+				return fmt.Errorf(
+					"state: deployment %q looks like a pre-CIP-56-rework state file (found %q) -- "+
+						"this format is no longer supported; re-run `init`/`deploy` against the current CLI",
+					name, marker)
+			}
+		}
+		if rawKind, ok := d["tokenKind"]; ok {
+			var kind string
+			if err := json.Unmarshal(rawKind, &kind); err == nil && legacyTokenKinds[kind] {
+				return fmt.Errorf(
+					"state: deployment %q has tokenKind %q, removed in the CIP-56 rework -- "+
+						"this state file predates the current CLI; re-run `init`/`deploy` (valid kinds: \"mock\", \"amulet\")",
+					name, kind)
+			}
+		}
+	}
+	return nil
 }
 
 // Save writes the state file at path, pretty-printed for easy inspection/diffing.

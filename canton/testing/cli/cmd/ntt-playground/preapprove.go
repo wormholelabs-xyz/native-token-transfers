@@ -6,26 +6,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// preapproveDepositInput/preapproveDepositOutput mirror Playground.Ops.daml's
-// PreapproveDepositInput/PreapproveDepositOutput.
-type preapproveDepositInput struct {
-	Admin     string `json:"admin"`
-	TokenKind string `json:"tokenKind"`
-	User      string `json:"user"`
+// preapproveInput/preapproveOutput mirror Playground.Ops.daml's PreapproveInput/PreapproveOutput.
+type preapproveInput struct {
+	Admin              string `json:"admin"`
+	GuardianGovernance string `json:"guardianGovernance"`
+	TokenKind          string `json:"tokenKind"` // "mock" | "amulet"
+	Mode               string `json:"mode"`      // "burn-mint" | "lock-unlock"
+	User               string `json:"user"`
 }
 
-type preapproveDepositOutput struct {
+type preapproveOutput struct {
 	Preapproved bool `json:"preapproved"`
 }
 
-// revokeDepositInput/revokeDepositOutput mirror Playground.Ops.daml's
-// RevokeDepositInput/RevokeDepositOutput.
-type revokeDepositInput struct {
-	Admin string `json:"admin"`
-	User  string `json:"user"`
+// revokeInput/revokeOutput mirror Playground.Ops.daml's RevokeInput/RevokeOutput.
+type revokeInput struct {
+	GuardianGovernance string `json:"guardianGovernance"`
+	TokenKind          string `json:"tokenKind"`
+	Mode               string `json:"mode"`
+	User               string `json:"user"`
 }
 
-type revokeDepositOutput struct {
+type revokeOutput struct {
 	Revoked bool `json:"revoked"`
 }
 
@@ -61,12 +63,14 @@ func newPreapproveCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
-			a.vlogf(cmd, "preapprove: user %q → %s opting in on deployment %q (tokenKind=%s)", userHint, userParty, deployment, d.TokenKind)
-			var out preapproveDepositOutput
-			if err := runner.Run(ctx, "Playground.Ops:preapproveDeposit", preapproveDepositInput{
-				Admin:     d.Admin,
-				TokenKind: d.TokenKind,
-				User:      userParty,
+			a.vlogf(cmd, "preapprove: user %q → %s opting in on deployment %q (tokenKind=%s mode=%s)", userHint, userParty, deployment, d.TokenKind, d.Mode)
+			var out preapproveOutput
+			if err := runner.Run(ctx, "Playground.Ops:preapprove", preapproveInput{
+				Admin:              d.Admin,
+				GuardianGovernance: s.GuardianGovernance,
+				TokenKind:          d.TokenKind,
+				Mode:               d.Mode,
+				User:               userParty,
 			}, &out); err != nil {
 				return err
 			}
@@ -116,10 +120,12 @@ func newPreapproveRevokeCmd(a *app) *cobra.Command {
 			defer cleanup()
 
 			a.vlogf(cmd, "preapprove revoke: user %q → %s tearing down its standing consent on deployment %q", userHint, userParty, deployment)
-			var out revokeDepositOutput
-			if err := runner.Run(ctx, "Playground.Ops:revokeDeposit", revokeDepositInput{
-				Admin: d.Admin,
-				User:  userParty,
+			var out revokeOutput
+			if err := runner.Run(ctx, "Playground.Ops:revoke", revokeInput{
+				GuardianGovernance: s.GuardianGovernance,
+				TokenKind:          d.TokenKind,
+				Mode:               d.Mode,
+				User:               userParty,
 			}, &out); err != nil {
 				return err
 			}

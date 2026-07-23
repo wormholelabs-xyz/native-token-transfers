@@ -19,7 +19,7 @@ import (
 type deployConfig struct {
 	Name      string       `json:"name"`
 	Mode      string       `json:"mode"`      // "burn-mint" | "lock-unlock"
-	TokenKind string       `json:"tokenKind"` // "mock-admin-signed" | "cip56-burn-mint-mock" | "cip56-custody-mock" | "cip56-custody"
+	TokenKind string       `json:"tokenKind"` // "mock" | "amulet"
 	Decimals  int          `json:"decimals"`
 	AdminHint string       `json:"adminHint,omitempty"` // display-name hint for the fresh admin party; defaults to name+"-admin"
 	Peers     []peerConfig `json:"peers,omitempty"`
@@ -31,6 +31,62 @@ type peerConfig struct {
 	Transceiver string `json:"transceiver"`
 }
 
+// validTokenKinds are the only Playground.Types.daml TokenKind strings the CLI accepts
+// (Mock | Amulet). Collapsed from the pre-CIP-56-rework 4-value scheme now that
+// Playground.MockToken (the admin-signed double needing no recipient consent) is gone --
+// see Playground.Types.daml's TokenKind doc comment.
+var validTokenKinds = map[string]bool{"mock": true, "amulet": true}
+
+// legacyTokenKindHints maps each pre-CIP-56-rework tokenKind string to the current kind that
+// replaces it, so a stale config file's error names the fix instead of just "unknown".
+var legacyTokenKindHints = map[string]string{
+	"mock-admin-signed":    "mock",
+	"cip56-burn-mint-mock": "mock",
+	"cip56-custody-mock":   "mock",
+	"cip56-custody":        "amulet",
+}
+
+// parseTokenKind validates a deploy config's tokenKind against the current 2-value model
+// (Playground.Types.daml's TokenKind = Mock | Amulet). Pure Go logic -- no Daml dependency --
+// so a stale config fails fast with a clear migration hint at the CLI layer instead of
+// surfacing a less legible abort from deep inside the Daml script.
+func parseTokenKind(raw string) (string, error) {
+	if validTokenKinds[raw] {
+		return raw, nil
+	}
+	if hint, ok := legacyTokenKindHints[raw]; ok {
+		return "", fmt.Errorf("deploy: tokenKind %q was removed in the CIP-56 rework -- use %q instead", raw, hint)
+	}
+	return "", fmt.Errorf("deploy: unknown tokenKind %q (want \"mock\" or \"amulet\")", raw)
+}
+
+// validateDeployConfig checks a deploy config's cross-field invariants that need no ledger
+// round-trip. Currently: "amulet" deployments are lock-unlock only (Splice's Amulet registry
+// has no BurnMintFactory to bridge burn/mint against). Assumes cfg.TokenKind has already been
+// normalized by parseTokenKind.
+func validateDeployConfig(cfg deployConfig) error {
+	if cfg.TokenKind == "amulet" && cfg.Mode != "lock-unlock" {
+		return fmt.Errorf("deploy: tokenKind \"amulet\" only supports mode=lock-unlock (Amulet has no BurnMintFactory)")
+	}
+	return nil
+}
+
+// deployRegistryInput/deployRegistryOutput mirror Playground.Deploy.daml's
+// DeployRegistryInput/DeployRegistryOutput -- the gg-submitted step that stands up this
+// deployment's mock registry factory contract(s) before deployNtt (admin-submitted) resolves
+// them.
+type deployRegistryInput struct {
+	GuardianGovernance string `json:"guardianGovernance"`
+	Admin              string `json:"admin"`
+	Mode               string `json:"mode"`
+	TokenKind          string `json:"tokenKind"`
+	InstrumentNonce    int    `json:"instrumentNonce"`
+}
+
+type deployRegistryOutput struct {
+	Registered bool `json:"registered"`
+}
+
 // deployInput/deployOutput mirror Playground.Deploy.daml's DeployInput/DeployOutput.
 type deployInput struct {
 	Operator           string  `json:"operator"`
@@ -39,22 +95,33 @@ type deployInput struct {
 	Mode               string  `json:"mode"`
 	TokenKind          string  `json:"tokenKind"`
 	TokenDecimals      int     `json:"tokenDecimals"`
-	Custody            *string `json:"custody"`         // "cip56-custody" only; null otherwise
-	InstrumentAdmin    *string `json:"instrumentAdmin"` // "cip56-custody" only; null otherwise
+	InstrumentNonce    int     `json:"instrumentNonce"`
+	InstrumentAdmin    *string `json:"instrumentAdmin"`  // "amulet" only (the real DSO party); null otherwise
+	AmuletFactoryCid   *string `json:"amuletFactoryCid"` // "amulet" only (setupAmuletAdmin's resolved transfer-factory cid); null otherwise
 }
 
-// amuletTapUSD is the USD amount added to the validator's own wallet before requesting the
-// custody party's TransferPreapproval. The validator pays the fee to create that preapproval,
-// so its wallet must hold a balance first. TransferPreapproval is Splice's standing
-// authorization that lets a party receive Amulet transfers. The amount is deliberately larger
-// than needed because the devnet Amulet price is not fixed.
+// amuletTapUSD is the belt-and-braces amount tapped to the validator's own wallet
+// (app-provider) before requesting the admin's TransferPreapproval, since the validator pays
+// the preapproval's creation fee (mirrors the pre-rework setupCip56Custody this replaces).
+// Price-independent cushion.
 const amuletTapUSD = "1000"
+
+// amuletFactoryProbeAmount is the nominal amount setupAmuletAdmin uses to resolve the
+// registry's current transfer-factory cid (internal/amulet.GetTransferFactory) via a
+// self-transfer probe (sender == receiver == the newly onboarded admin). The value is
+// irrelevant -- this call never submits anything on-ledger, it only resolves the registry's
+// currently-committed factory contract id and requires a "direct" transferKind, which needs
+// the receiver (here, the admin itself) to already have a standing TransferPreapproval --
+// true by this point, since it was just created above.
+const amuletFactoryProbeAmount = "1"
 
 type deployOutput struct {
 	ManagerID          int    `json:"managerId"`
 	ManagerAddress     string `json:"managerAddress"`
 	TransceiverAddress string `json:"transceiverAddress"`
 	Admin              string `json:"admin"`
+	InstrumentAdmin    string `json:"instrumentAdmin"`
+	InstrumentID       string `json:"instrumentId"`
 }
 
 func newDeployCmd(a *app) *cobra.Command {
@@ -74,6 +141,15 @@ func newDeployCmd(a *app) *cobra.Command {
 			var cfg deployConfig
 			if err := json.Unmarshal(raw, &cfg); err != nil {
 				return fmt.Errorf("deploy: parse config %s: %w", configPath, err)
+			}
+
+			tokenKind, err := parseTokenKind(cfg.TokenKind)
+			if err != nil {
+				return err
+			}
+			cfg.TokenKind = tokenKind
+			if err := validateDeployConfig(cfg); err != nil {
+				return err
 			}
 
 			deploymentName := name
@@ -100,28 +176,34 @@ func newDeployCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			// cip56-custody uses real Canton Coin (Amulet) instead of a local mock registry.
-			// It needs a profile with a real DSO (the Amulet operator party), only supports
-			// lock-unlock (Amulet has no burn-mint factory), and requires the custody party to
-			// already be an onboarded validator wallet user with a standing TransferPreapproval
-			// before the deploy script runs. The deploy script only creates the token hook
-			// against an already-resolved custody and DSO party pair; setupCip56Custody below
-			// resolves those inputs off-ledger.
-			var custodyPartyPtr, instrumentAdminPtr *string
-			var custodyUser string
-			if cfg.TokenKind == "cip56-custody" {
+			// "amulet" uses real Canton Coin instead of a local mock registry: it needs a
+			// profile with a real DSO (the Amulet operator party), and the deployment's admin
+			// becomes a validator-onboarded wallet user (replacing the old custody-party
+			// split -- admin owns lock/unlock custody automatically now, see
+			// Wormhole.Ntt.Manager's header). setupAmuletAdmin onboards the admin itself under
+			// adminHint (proven machinery from the pre-rework setupCip56Custody, retargeted)
+			// and caches the resulting party into state BEFORE resolveParty runs below, so
+			// resolveParty's cache hit returns the SAME onboarded wallet party instead of
+			// allocating an unrelated bare script party under the same hint.
+			var instrumentAdminPtr *string
+			var amuletFactoryCidPtr *string
+			if cfg.TokenKind == "amulet" {
 				if !prof.AmuletAvailable {
-					return fmt.Errorf("deploy: cip56-custody requires a profile with real Amulet (localnet)")
+					return fmt.Errorf("deploy: amulet requires a profile with real Amulet (localnet)")
 				}
-				if cfg.Mode != "lock-unlock" {
-					return fmt.Errorf("deploy: cip56-custody only supports mode=lock-unlock (Amulet has no BurnMintFactory)")
-				}
-				custodyParty, custodyUserID, dsoParty, err := setupCip56Custody(ctx, cmd, a, deploymentName, prof)
+				adminParty, dsoParty, factoryCid, err := setupAmuletAdmin(ctx, cmd, a, adminHint, prof)
 				if err != nil {
-					return fmt.Errorf("deploy: cip56-custody setup: %w", err)
+					return fmt.Errorf("deploy: amulet setup: %w", err)
 				}
-				custodyPartyPtr, instrumentAdminPtr = &custodyParty, &dsoParty
-				custodyUser = custodyUserID
+				instrumentAdminPtr = &dsoParty
+				amuletFactoryCidPtr = &factoryCid
+				if s.Users == nil {
+					s.Users = map[string]string{}
+				}
+				s.Users[adminHint] = adminParty
+				if err := a.saveState(s); err != nil {
+					return err
+				}
 			}
 
 			runner, cleanup, err := a.newScriptRunner(ctx)
@@ -131,14 +213,28 @@ func newDeployCmd(a *app) *cobra.Command {
 			defer cleanup()
 
 			// The admin party is allocated (and granted actAs on auth-enabled profiles)
-			// before deployNtt submits as it -- see grantActAs.
+			// before deployRegistry/deployNtt submit as it -- see grantActAs. For "amulet" it
+			// was already onboarded and cached above by setupAmuletAdmin; this just reads it
+			// back (cache hit -- no fresh allocation, no re-grant).
 			admin, err := resolveParty(cmd, a, s, adminHint)
 			if err != nil {
 				return err
 			}
 
-			a.vlogf(cmd, "deploy %q: deployNtt = register transceiver Emitter → create %s token → RegisterManager → claim replay-trie root (consumer=admin)",
-				deploymentName, cfg.TokenKind)
+			a.vlogf(cmd, "deploy %q: deployRegistry (gg) = stand up the mock registry factory for mode=%s tokenKind=%s",
+				deploymentName, cfg.Mode, cfg.TokenKind)
+			var regOut deployRegistryOutput
+			if err := runner.Run(ctx, "Playground.Deploy:deployRegistry", deployRegistryInput{
+				GuardianGovernance: s.GuardianGovernance,
+				Admin:              admin,
+				Mode:               cfg.Mode,
+				TokenKind:          cfg.TokenKind,
+				InstrumentNonce:    0,
+			}, &regOut); err != nil {
+				return fmt.Errorf("deploy: deployRegistry: %w", err)
+			}
+
+			a.vlogf(cmd, "deploy %q: deployNtt (admin) = resolve registries/factory → RegisterManager", deploymentName)
 			var out deployOutput
 			if err := runner.Run(ctx, "Playground.Deploy:deployNtt", deployInput{
 				Operator:           s.Operator,
@@ -147,8 +243,9 @@ func newDeployCmd(a *app) *cobra.Command {
 				Mode:               cfg.Mode,
 				TokenKind:          cfg.TokenKind,
 				TokenDecimals:      cfg.Decimals,
-				Custody:            custodyPartyPtr,
+				InstrumentNonce:    0,
 				InstrumentAdmin:    instrumentAdminPtr,
+				AmuletFactoryCid:   amuletFactoryCidPtr,
 			}, &out); err != nil {
 				return err
 			}
@@ -163,11 +260,8 @@ func newDeployCmd(a *app) *cobra.Command {
 				TokenKind:          cfg.TokenKind,
 				TokenDecimals:      cfg.Decimals,
 				Peers:              map[int]state.Peer{},
-			}
-			if custodyPartyPtr != nil {
-				d.CustodyParty = *custodyPartyPtr
-				d.CustodyUser = custodyUser
-				d.InstrumentAdmin = *instrumentAdminPtr
+				InstrumentAdmin:    out.InstrumentAdmin,
+				InstrumentID:       out.InstrumentID,
 			}
 
 			for _, p := range cfg.Peers {
@@ -194,13 +288,20 @@ func newDeployCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// setupCip56Custody resolves everything the deploy script's cip56-custody path needs before
-// it runs: the real DSO party, the custody wallet user's onboarded party (with actAs granted
-// to the script user), and a standing TransferPreapproval for it. The validator pays the fee
-// to create the preapproval, so its own wallet is funded first. None of these steps submit a
-// ledger command: they are all off-ledger HTTP calls to the validator plus one localnet
-// lookup that resolve inputs for the deploy script.
-func setupCip56Custody(ctx context.Context, cmd *cobra.Command, a *app, deploymentName string, prof profile.Profile) (custodyParty, custodyUser, dsoParty string, err error) {
+// setupAmuletAdmin onboards an "amulet" deployment's admin as a validator wallet user (plan
+// §4.3's spike, now live-verified against a real LocalNet validator -- an onboarded wallet
+// party composes cleanly with Daml-script actAs AND with serving as an NttManager
+// co-signatory at RegisterManager-creation time; see the plan's Phase 4 checkpoint for the
+// narrow probe that proved this before deployNtt was built on top of it). Mirrors the
+// pre-rework setupCip56Custody one-for-one, retargeted from a separate custody party to the
+// admin itself (Wormhole.Ntt.Manager's custody is admin-owned by construction now, so the
+// admin takes the old custody party's exact seat): OnboardWalletUser(adminHint) + grantActAs
+// + the validator's own wallet Tap (pays the preapproval's creation fee) +
+// CreateTransferPreapproval for the admin. Additionally resolves the registry's current
+// transfer-factory cid (plan §4.4) via a self-transfer probe now that the admin's own
+// preapproval exists, so deployNtt's RegisterManager call can commit a real factory instead
+// of aborting.
+func setupAmuletAdmin(ctx context.Context, cmd *cobra.Command, a *app, adminHint string, prof profile.Profile) (adminParty, dsoParty, factoryCid string, err error) {
 	m, err := a.localNetManager()
 	if err != nil {
 		return "", "", "", err
@@ -209,29 +310,48 @@ func setupCip56Custody(ctx context.Context, cmd *cobra.Command, a *app, deployme
 	if err != nil {
 		return "", "", "", fmt.Errorf("resolve DSO party: %w", err)
 	}
-	a.vlogf(cmd, "cip56-custody: DSO party → %s", dsoParty)
+	a.vlogf(cmd, "amulet: DSO party → %s", dsoParty)
 
 	client := &amulet.Client{ValidatorBaseURL: prof.ValidatorBaseURL, Logf: a.verboseLogf()}
 
-	custodyUser = deploymentName + "-custody"
-	a.vlogf(cmd, "cip56-custody: onboarding wallet user %q", custodyUser)
-	custodyParty, err = client.OnboardWalletUser(ctx, custodyUser)
+	a.vlogf(cmd, "amulet: onboarding admin wallet user %q", adminHint)
+	adminParty, err = client.OnboardWalletUser(ctx, adminHint)
 	if err != nil {
-		return "", "", "", fmt.Errorf("onboard custody wallet user %q: %w", custodyUser, err)
+		return "", "", "", fmt.Errorf("onboard admin wallet user %q: %w", adminHint, err)
 	}
-	if err := grantActAs(cmd, a, custodyParty); err != nil {
-		return "", "", "", fmt.Errorf("grant actAs on custody party %s: %w", custodyParty, err)
+	if err := grantActAs(cmd, a, adminParty); err != nil {
+		return "", "", "", fmt.Errorf("grant actAs on admin party %s: %w", adminParty, err)
 	}
 
-	a.vlogf(cmd, "cip56-custody: tapping the validator's own wallet (%s) before requesting the preapproval (it pays the creation fee)", network.LocalNetWalletUser)
+	a.vlogf(cmd, "amulet: tapping the validator's own wallet (%s) before requesting the admin's preapproval (it pays the creation fee)", network.LocalNetWalletUser)
 	if _, err := client.Tap(ctx, network.LocalNetWalletUser, amuletTapUSD); err != nil {
 		return "", "", "", fmt.Errorf("tap validator wallet %s: %w", network.LocalNetWalletUser, err)
 	}
 
-	a.vlogf(cmd, "cip56-custody: creating TransferPreapproval for %s (%s)", custodyUser, custodyParty)
-	if _, err := client.CreateTransferPreapproval(ctx, custodyUser); err != nil {
-		return "", "", "", fmt.Errorf("create TransferPreapproval for %s: %w", custodyUser, err)
+	a.vlogf(cmd, "amulet: creating TransferPreapproval for admin %q (%s)", adminHint, adminParty)
+	if _, err := client.CreateTransferPreapproval(ctx, adminHint); err != nil {
+		return "", "", "", fmt.Errorf("create TransferPreapproval for admin %s: %w", adminParty, err)
 	}
 
-	return custodyParty, custodyUser, dsoParty, nil
+	// The admin now has its own standing preapproval, so a probe transfer TO the admin
+	// resolves transferKind="direct" and yields the registry's current transfer-factory cid
+	// -- this deployment's committed factory (RegisterManager just stores it; it never
+	// fetches/exercises it, so no disclosure is needed at deploy time). sender == receiver
+	// (a "self" transfer) resolves a different transferKind and does not exercise the
+	// receiver-preapproval path real transfers use, so the probe's sender is the DSO party
+	// instead -- any valid party works here (the call never submits anything, it only
+	// resolves the registry's currently-committed factory + choice context for a
+	// hypothetical transfer of this shape).
+	a.vlogf(cmd, "amulet: resolving current transfer-factory cid (probe transfer to admin)")
+	factory, err := client.GetTransferFactory(ctx, adminHint, amulet.TransferArgs{
+		DSO:      dsoParty,
+		Sender:   dsoParty,
+		Receiver: adminParty,
+		Amount:   amuletFactoryProbeAmount,
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("resolve transfer-factory: %w", err)
+	}
+
+	return adminParty, dsoParty, factory.FactoryID, nil
 }

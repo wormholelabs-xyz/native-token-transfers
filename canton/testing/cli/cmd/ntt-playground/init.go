@@ -73,7 +73,7 @@ func newInitCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			a.vlogf(cmd, "init: creating genesis contracts as operator+guardianGovernance: CoreState (guardian set idx 0), EmitterRegistry, ReplayRootRegistry, NttManagerRegistry")
+			a.vlogf(cmd, "init: creating genesis contracts as operator+guardianGovernance: CoreState (guardian set idx 0), EmitterRegistry, ReplayRootRegistry, NttGovernance")
 			var out initOutput
 			if err := runner.Run(ctx, "Playground.Init:initPlayground", initInput{
 				Operator:           operator,

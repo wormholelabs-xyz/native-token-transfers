@@ -115,6 +115,90 @@ func TestLoad_PopulatedFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoad_RoundTripsInstrumentFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instrument.json")
+	raw := `{
+		"deployments": {
+			"ntt1": {
+				"name": "ntt1",
+				"mode": "lock-unlock",
+				"tokenKind": "mock",
+				"instrumentAdmin": "gg::abc",
+				"instrumentId": "wormhole-ntt:deadbeef"
+			}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	d, ok := s.Deployment("ntt1")
+	if !ok || d.InstrumentAdmin != "gg::abc" || d.InstrumentID != "wormhole-ntt:deadbeef" {
+		t.Fatalf("instrument field round-trip mismatch: ok=%v %+v", ok, d)
+	}
+}
+
+func TestLoad_RejectsLegacyCustodyPartyField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-custody.json")
+	raw := `{
+		"deployments": {
+			"cc-custody": {
+				"name": "cc-custody",
+				"tokenKind": "cip56-custody",
+				"custodyParty": "custody::abc",
+				"custodyUser": "cc-custody-custody"
+			}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected a rejection error for a legacy custodyParty-bearing state file")
+	}
+	if !strings.Contains(err.Error(), "custodyParty") || !strings.Contains(err.Error(), "pre-CIP-56-rework") {
+		t.Fatalf("expected a migration-hinting error naming custodyParty, got: %v", err)
+	}
+}
+
+func TestLoad_RejectsLegacyTokenKind(t *testing.T) {
+	for _, kind := range []string{"mock-admin-signed", "cip56-burn-mint-mock", "cip56-custody-mock", "cip56-custody"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "legacy-kind.json")
+			raw := `{"deployments": {"ntt1": {"name": "ntt1", "tokenKind": "` + kind + `"}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatalf("seed file: %v", err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected a rejection error for legacy tokenKind %q", kind)
+			}
+			if !strings.Contains(err.Error(), kind) || !strings.Contains(err.Error(), "mock") {
+				t.Fatalf("expected a migration-hinting error naming %q and the new kinds, got: %v", kind, err)
+			}
+		})
+	}
+}
+
+func TestLoad_AcceptsCurrentTokenKinds(t *testing.T) {
+	for _, kind := range []string{"mock", "amulet"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "current-kind.json")
+			raw := `{"deployments": {"ntt1": {"name": "ntt1", "tokenKind": "` + kind + `"}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatalf("seed file: %v", err)
+			}
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load should accept current tokenKind %q, got: %v", kind, err)
+			}
+		})
+	}
+}
+
 // ----------------------------------------------------------------------
 // Save
 // ----------------------------------------------------------------------

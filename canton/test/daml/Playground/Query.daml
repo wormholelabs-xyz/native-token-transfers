@@ -1,5 +1,5 @@
 -- | Read-only introspection: bridge-wide status (guardian set, fee, every deployment and its
--- peers), token balances for the mock registries, and the on-ledger recipient-address
+-- peers), token balances for the mock registry, and the on-ledger recipient-address
 -- cross-check for internal/wire.RecipientAddressFor in the Go CLI.
 module Playground.Query where
 
@@ -9,10 +9,9 @@ import DA.Optional (fromSome)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State (Emitter, ParseAndVerifyVAA (..))
-import Wormhole.Ntt.Manager (recipientAddressFor)
+import Wormhole.Ntt.Manager (NttManager, recipientAddressFor)
 import Test.TestNtt (Cip56MockHolding)
 
-import Playground.MockToken (MockHolding)
 import Playground.Types
 
 ----------------------------------------------------------------------
@@ -68,6 +67,16 @@ data ListContractsOutput = ListContractsOutput with
     replayNodes      : Int
   deriving (Eq, Show)
 
+-- | The manager's outbound sequence is no longer its own field: the message id is the
+-- transceiver 'Emitter''s own sequence counter (see 'Wormhole.Ntt.Manager.Transfer'), so it
+-- is joined in here by @transceiverEmitterId@. '0' if the emitter can't be resolved (should
+-- not happen for a registered manager; defensive only).
+emitterSequenceFor : [(ContractId Emitter, Emitter)] -> NttManager -> Int
+emitterSequenceFor ems mgr =
+  case [ e.sequence | (_, e) <- ems, e.emitterId == mgr.transceiverEmitterId ] of
+    [s] -> s
+    _   -> 0
+
 -- | One flat snapshot of every live playground contract. Read as @operator@, who is a
 -- signatory on all of them (CoreState/Emitter/NttManager/ReplayNode) -- no disclosure
 -- gymnastics needed. ReplayNodes are only counted, not itemized: their prefix/consumed-set
@@ -89,8 +98,8 @@ listContracts input = do
       [ ManagerInfo with
           managerId = m.managerId
           managerAddress = m.managerAddress
-          mode = showTokenMode m.mode
-          outboundSequence = m.outboundSequence
+          mode = showTokenMode m.tokenConfig
+          outboundSequence = emitterSequenceFor ems m
       | (_, m) <- mgrs ]
     replayNodes = length nodes
 
@@ -136,9 +145,9 @@ queryStatus input = do
       managerAddress = m.managerAddress
       transceiverAddress
       admin = m.admin
-      mode = showTokenMode m.mode
+      mode = showTokenMode m.tokenConfig
       tokenDecimals = m.tokenDecimals
-      outboundSequence = m.outboundSequence
+      outboundSequence = emitterSequenceFor ems m
       peers = peersList m
   pure StatusOutput with
     guardianSetIndex = cs.guardianSetIndex
@@ -151,25 +160,27 @@ queryStatus input = do
 ----------------------------------------------------------------------
 
 data BalancesInput = BalancesInput with
-    reader : Party  -- typically the deployment's admin (MockHolding/Cip56MockHolding signer)
-    owner  : Party
+    -- gg: a 'Test.TestNtt.Cip56MockHolding' signatory, resolves them by ACS query.
+    reader          : Party
+    owner           : Party
+    instrumentAdmin : Party
+    instrumentId    : Text
   deriving (Eq, Show)
 
 data BalancesOutput = BalancesOutput with
-    mockHoldingTotal  : Int      -- Test.TestNtt:MockHolding (bridged-token integer units)
     cip56HoldingTotal : Decimal  -- Test.TestNtt:Cip56MockHolding (CIP-56 decimal units)
   deriving (Eq, Show)
 
 balances : BalancesInput -> Script BalancesOutput
 balances input = do
-  mockHoldings <- query @MockHolding input.reader
-  cip56Holdings <- query @Cip56MockHolding input.reader
+  let instrument = InstrumentId with admin = input.instrumentAdmin, id = input.instrumentId
+  holdings <- query @Cip56MockHolding input.reader
   pure BalancesOutput with
-    mockHoldingTotal = sum [ h.amount | (_, h) <- mockHoldings, h.owner == input.owner ]
-    cip56HoldingTotal = sum [ h.amount | (_, h) <- cip56Holdings, h.owner == input.owner ]
+    cip56HoldingTotal =
+      sum [ h.amount | (_, h) <- holdings, h.owner == input.owner, h.instrument == instrument ]
 
 ----------------------------------------------------------------------
--- amuletBalance (real Canton Coin holdings, cip56-custody kind only)
+-- amuletBalance (real Canton Coin holdings, "amulet" kind only)
 ----------------------------------------------------------------------
 
 data AmuletBalanceInput = AmuletBalanceInput with

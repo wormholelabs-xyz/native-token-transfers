@@ -45,7 +45,7 @@ type Profile struct {
 	UserID string
 
 	// JSONAPIBaseURL is the JSON Ledger API v2 base (user-rights grants, DAR upload, and --
-	// for cip56-custody -- the observer's update stream). Empty for the sandbox, which has no
+	// for "amulet" -- the observer's update stream). Empty for the sandbox, which has no
 	// auth and needs neither.
 	JSONAPIBaseURL string
 

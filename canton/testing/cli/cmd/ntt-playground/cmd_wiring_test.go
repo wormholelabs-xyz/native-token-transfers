@@ -316,7 +316,7 @@ func TestCmd_PreapproveRevoke_UnknownDeployment(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
-// receive: unknown deployment / cip56-custody out of scope / missing pubkey
+// receive: unknown deployment / amulet out of scope / missing pubkey
 // ----------------------------------------------------------------------
 
 func TestCmd_Receive_UnknownDeployment(t *testing.T) {
@@ -329,15 +329,18 @@ func TestCmd_Receive_UnknownDeployment(t *testing.T) {
 	}
 }
 
-func TestCmd_Receive_Cip56CustodyOutOfScope(t *testing.T) {
+// TestCmd_Receive_AmuletOutOfScope pins plan §6's receive.go rejection: "amulet" is rejected
+// outright, before any script runs (real receive against Amulet is out of scope for the
+// playground, unchanged posture from the pre-rework "cip56-custody" kind).
+func TestCmd_Receive_AmuletOutOfScope(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
 	s := state.New()
-	s.Deployments["ntt1"] = state.Deployment{TokenKind: "cip56-custody"}
+	s.Deployments["ntt1"] = state.Deployment{TokenKind: "amulet"}
 	seedStateFile(t, stateFile, s)
 	_, _, err := runPlayground(t, append(baseFlags(stateFile),
 		"receive", "--deployment", "ntt1", "--vaa", "aa", "--recipient", "Alice", "--pubkey", "bb")...)
 	if err == nil || !contains(err.Error(), "out of scope for real Amulet") {
-		t.Fatalf("expected a cip56-custody-out-of-scope error, got %v", err)
+		t.Fatalf("expected an amulet-out-of-scope error, got %v", err)
 	}
 }
 
@@ -402,4 +405,151 @@ func TestCmd_PartyList_MissingState(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+// ----------------------------------------------------------------------
+// Wiring tests (fakeRunner): call SEQUENCE and routing, not real Daml behavior.
+//
+// Playground.Deploy/Ops's script bodies are real (Phase 2 landed them), but these tests
+// still swap in a fakeRunner double (fake_runner_test.go) rather than a real dpm/ledger
+// round-trip: they assert on the CLI's own plumbing -- which script names get invoked, in
+// what order, with what routing -- fast and without a live sandbox. Real end-to-end Daml
+// behavior (the actual RegisterManager/Transfer/Release/Mint semantics) is the e2e suite's
+// job (canton/testing/cli/e2e), not this package's.
+// ----------------------------------------------------------------------
+
+// TestCmd_Deploy_CallsDeployRegistryAsGgThenDeployNttAsAdmin pins plan §5/§9 Phase 2's
+// intended deploy sequence: `deploy` must call Playground.Deploy:deployRegistry (routed with
+// the state file's guardianGovernance) BEFORE Playground.Deploy:deployNtt (routed with the
+// resolved deployment admin) -- gg stands up the mock registry factory, then admin resolves
+// it and registers the manager.
+func TestCmd_Deploy_CallsDeployRegistryAsGgThenDeployNttAsAdmin(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	seedStateFile(t, stateFile, s)
+
+	cfgPath := filepath.Join(t.TempDir(), "deploy.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"name":"wiringdeploy","mode":"burn-mint","tokenKind":"mock","decimals":8}`), 0o600); err != nil {
+		t.Fatalf("write deploy config: %v", err)
+	}
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:allocatePlaygroundParty"] = map[string]any{"party": "wiringdeploy-admin::abc"}
+	r.outputs["Playground.Deploy:deployRegistry"] = map[string]any{"registered": true}
+	r.outputs["Playground.Deploy:deployNtt"] = map[string]any{
+		"managerId": 0, "managerAddress": "aa", "transceiverAddress": "bb",
+		"admin": "wiringdeploy-admin::abc", "instrumentAdmin": "gg::abc", "instrumentId": "wormhole-ntt:xyz",
+	}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile), "deploy", "--config", cfgPath)...)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	names := r.scriptNames()
+	regIdx, nttIdx := -1, -1
+	for i, n := range names {
+		switch n {
+		case "Playground.Deploy:deployRegistry":
+			regIdx = i
+		case "Playground.Deploy:deployNtt":
+			nttIdx = i
+		}
+	}
+	if regIdx == -1 || nttIdx == -1 {
+		t.Fatalf("expected both deployRegistry and deployNtt to be called, got %v", names)
+	}
+	if regIdx >= nttIdx {
+		t.Fatalf("expected deployRegistry BEFORE deployNtt, got call sequence %v", names)
+	}
+
+	regInput, ok := r.calls[regIdx].Input.(deployRegistryInput)
+	if !ok {
+		t.Fatalf("deployRegistry input type mismatch: %T", r.calls[regIdx].Input)
+	}
+	if regInput.GuardianGovernance != "gg::abc" {
+		t.Fatalf("deployRegistry should be gg-routed, got %+v", regInput)
+	}
+
+	nttInput, ok := r.calls[nttIdx].Input.(deployInput)
+	if !ok {
+		t.Fatalf("deployNtt input type mismatch: %T", r.calls[nttIdx].Input)
+	}
+	if nttInput.Admin != "wiringdeploy-admin::abc" {
+		t.Fatalf("deployNtt should be admin-routed, got %+v", nttInput)
+	}
+}
+
+// TestCmd_Transfer_MockKindRunsPreapproveFundThenTransferOut pins plan §6's transfer.go
+// redesign: every "mock" transfer runs an ensure-preapproval + fund + transfer sequence
+// (Playground.Ops:preapprove, then Playground.Ops:fundUser, then Playground.Ops:transferOut,
+// in that order), with fundUser's minted holding cid feeding transferOut's inputHoldingCids.
+func TestCmd_Transfer_MockKindRunsPreapproveFundThenTransferOut(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.Deployments["ntt1"] = state.Deployment{
+		Name: "ntt1", ManagerID: 0, Admin: "ntt1-admin::abc",
+		Mode: "burn-mint", TokenKind: "mock", TokenDecimals: 8,
+		Peers: map[int]state.Peer{2: {ManagerAddress: strings.Repeat("00", 31) + "bb", TransceiverAddress: strings.Repeat("00", 31) + "cc"}},
+	}
+	s.Users["Alice"] = "alice::abc" // cached, so resolveParty needs no ledger round-trip
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:preapprove"] = map[string]any{"preapproved": true}
+	r.outputs["Playground.Ops:fundUser"] = map[string]any{"holdingCid": "holding-cid-1"}
+	r.outputs["Playground.Ops:transferOut"] = map[string]any{
+		"outboundSequence": 0, "emitterChain": 72, "emitterAddress": strings.Repeat("00", 31) + "dd",
+		"nonce": 0, "consistencyLevel": 0, "payload": "9945ff10",
+	}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"transfer", "--deployment", "ntt1", "--user", "Alice", "--chain", "2",
+		"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "100")...)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+
+	names := r.scriptNames()
+	want := []string{"Playground.Ops:preapprove", "Playground.Ops:fundUser", "Playground.Ops:transferOut"}
+	if len(names) != len(want) {
+		t.Fatalf("expected exactly %v, got %v", want, names)
+	}
+	for i, n := range want {
+		if names[i] != n {
+			t.Fatalf("expected call %d to be %q, got %q (full sequence %v)", i, n, names[i], names)
+		}
+	}
+
+	transferInput, ok := r.calls[2].Input.(transferOutInput)
+	if !ok {
+		t.Fatalf("transferOut input type mismatch: %T", r.calls[2].Input)
+	}
+	if len(transferInput.InputHoldingCids) != 1 || transferInput.InputHoldingCids[0] != "holding-cid-1" {
+		t.Fatalf("expected transferOut to use fundUser's minted holding cid, got %+v", transferInput.InputHoldingCids)
+	}
+}
+
+// TestCmd_Receive_AmuletRejectedBeforeAnyScriptRuns re-pins TestCmd_Receive_AmuletOutOfScope
+// at the wiring level: "amulet" must be rejected client-side, before any dpm script runs at
+// all (not just before receiveVaa specifically).
+func TestCmd_Receive_AmuletRejectedBeforeAnyScriptRuns(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Deployments["ntt1"] = state.Deployment{TokenKind: "amulet"}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"receive", "--deployment", "ntt1", "--vaa", "aa", "--recipient", "Alice", "--pubkey", "bb")...)
+	if err == nil || !contains(err.Error(), "out of scope for real Amulet") {
+		t.Fatalf("expected an amulet-out-of-scope error, got %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("expected no script calls at all for a rejected amulet receive, got %v", r.scriptNames())
+	}
 }
