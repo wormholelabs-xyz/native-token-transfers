@@ -731,6 +731,50 @@ testTransferTrimsToPeerDecimals = do
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.001
 
+-- | Pausing halts outbound sends and lifting the pause restores them; config
+-- (here, SetPaused itself) keeps working while paused.
+testPauseHaltsSend : Script ()
+testPauseHaltsSend = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "PauseAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  holding <- mkHolding gg alice d.instrumentId 0.01
+
+  pausedMgr <- submit alice do exerciseCmd d.mgrCid SetPaused with newPaused = True
+  let dP = d with mgrCid = pausedMgr
+  res <- trySubmitWithDiscs alice discs do sendTransfer alice dP csId [holding]
+  expectAbort "deployment is paused" res
+
+  liveMgr <- submit alice do exerciseCmd dP.mgrCid SetPaused with newPaused = False
+  let dL = dP with mgrCid = liveMgr
+  _ <- submitWithDiscs alice discs do sendTransfer alice dL csId [holding]
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.01
+
+-- | Pausing also halts inbound release: the pause check runs before any VAA
+-- verification, so a paused deployment rejects an otherwise-valid relay.
+testPauseHaltsRelease : Script ()
+testPauseHaltsRelease = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PauseRelAdmin"
+  recipient <- allocateParty "PauseRelRecipient"
+  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  pausedMgr <- submit admin do exerciseCmd mgrCid SetPaused with newPaused = True
+  (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
+
+  res <- trySubmit (actAs operator) do
+    exerciseCmd pausedMgr Release with
+      executor = operator
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      vaaBytes = nttTransferVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      recipient
+      ledgerCid = fromSome ledgerCid
+      inputHoldingCids = []
+      extraArgs = emptyExtraArgs
+  expectAbort "deployment is paused" res
+
 -- | Anyone can merge custody fragments back into one pot and repoint the
 -- ledger's hint: the repair path for stale hints and explicit-input releases.
 testConsolidateCustody : Script ()
@@ -1486,6 +1530,7 @@ setupFixedManagerOn operator gg admin config chainId = do
       tokenDecimals = 8
       peers = Map.empty
       factory
+      paused = False
   mgrCid <- submit admin do
     exerciseCmd mgrCid SetPeer with
       chainId = 2

@@ -328,6 +328,7 @@ template NttManager
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
+    paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
   where
     -- See the module header for what each signature contributes. All four are
     -- inherited from the NttGovernance root at registration (namespace and
@@ -353,6 +354,19 @@ template NttManager
         assertMsg "ntt: peer transceiver address must be non-zero"
           (not (isZeroAddress peer.transceiverAddress))
         create this with peers = Map.insert chainId (normalizePeer peer) peers
+
+    -- | Emergency halt. While @paused@, 'Transfer', 'Release', and 'Mint' all
+    -- abort; config choices ('SetPeer', 'SetFactory', 'TransferAdmin') keep
+    -- working, matching the reference, where pause blocks value movement but not
+    -- administration. Controlled by @admin@, so on a gg-adminned deployment
+    -- pausing is a governance action. (The reference additionally allows a
+    -- separate pauser role to pause but only the owner to unpause; a dedicated
+    -- pauser party could be added here the same way.)
+    choice SetPaused : ContractId NttManager
+      with
+        newPaused : Bool
+      controller admin
+      do create this with paused = newPaused
 
     -- | Repoint the committed registry factory. Needed only when the registry
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
@@ -462,6 +476,7 @@ template NttManager
         extraArgs             : ExtraArgs
       controller user
       do
+        assertMsg "ntt: deployment is paused" (not paused)
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
                      (Map.lookup recipientChain peers)
             trimmed = trimAmountTo rawAmount tokenDecimals peer.decimals
@@ -585,6 +600,7 @@ template NttManager
         extraArgs        : ExtraArgs
       controller executor
       do
+        assertMsg "ntt: deployment is paused" (not paused)
         assertMsg "ntt: release is only for lock/unlock deployments"
           (tokenConfig == LockUnlock)
         ledger <- resolveLedger this ledgerCid
@@ -687,6 +703,7 @@ template NttManager
         extraArgs             : ExtraArgs
       controller executor
       do
+        assertMsg "ntt: deployment is paused" (not paused)
         assertMsg "ntt: mint is only for burn/mint deployments"
           (tokenConfig == BurnMint)
         ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid

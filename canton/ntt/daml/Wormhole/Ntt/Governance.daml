@@ -100,6 +100,7 @@ template NttGovernance
           tokenDecimals
           peers = Map.empty
           factory
+          paused = False
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with
             operator
