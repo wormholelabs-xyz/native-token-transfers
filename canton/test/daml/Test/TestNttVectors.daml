@@ -1,0 +1,233 @@
+-- | Cross-runtime wire-compatibility vectors for the NTT codec, ported from
+-- the reference implementations so the Canton encoder/decoder can be checked
+-- byte-for-byte against the bytes EVM, Solana, and the TS SDK agree on.
+--
+-- The message vectors are the shared fixtures in @evm/test/payloads/@ (also
+-- consumed by the Solana Rust tests via @include_str!@ and by the TS SDK
+-- tests). The TrimmedAmount numeric vectors are the unit-test values from
+-- @solana/modules/ntt-messages/src/trimmed_amount.rs@ and the identical Sui
+-- suite. Where Canton's behavior diverges from the reference the divergence is
+-- called out inline and the test pins Canton's ACTUAL behavior.
+module Test.TestNttVectors where
+
+import Daml.Script
+import DA.Assert ((===))
+
+import Wormhole.Core.Bytes
+import Wormhole.Ntt.Amount
+import Wormhole.Ntt.Payload
+
+----------------------------------------------------------------------
+-- The canonical shared TransceiverMessage vector
+-- (evm/test/payloads/transceiver_message_1.txt, 217 bytes).
+--
+-- The EVM test comment calls this out as "a useful test case for
+-- implementations on other runtimes". If the Canton encoder produces these
+-- exact bytes and the decoder round-trips them, the Canton wire format is
+-- byte-identical to the reference for this message.
+----------------------------------------------------------------------
+
+-- The 32-byte fields carry their data left-aligned (right-padded with zeros),
+-- exactly as the Solidity `bytes32` literals in the fixture do.
+vecSourceManager : Bytes32
+vecSourceManager = "042942fafabe0000000000000000000000000000000000000000000000000000"
+
+vecRecipientManager : Bytes32
+vecRecipientManager = "042942fababe0000000000000000000000000000000000000000000000000000"
+
+vecId : Bytes32
+vecId = "128434bafe23430000000000000000000000000000000000ce00aa0000000000"
+
+vecSender : Bytes32
+vecSender = "4667921341234300000000000000000000000000000000000000000000000000"
+
+vecSourceToken : Bytes32
+vecSourceToken = "beefface00000000000000000000000000000000000000000000000000000000"
+
+vecRecipient : Bytes32
+vecRecipient = "feebcafe00000000000000000000000000000000000000000000000000000000"
+
+-- The inner NativeTokenTransfer shared by every message vector below:
+-- amount 1234567 at 7 decimals, toChain 2 (Ethereum), no additional payload.
+vecNtt : NativeTokenTransfer
+vecNtt = NativeTokenTransfer with
+    decimals = 7
+    amount = 1234567
+    sourceToken = vecSourceToken
+    recipientAddress = vecRecipient
+    recipientChain = 2
+    additionalPayload = ""
+
+vecMm : NttManagerMessage
+vecMm = NttManagerMessage with
+    id = vecId
+    sender = vecSender
+    payload = encodeNativeTokenTransfer vecNtt
+
+vecWm : WormholeTransceiverMessage
+vecWm = WormholeTransceiverMessage with
+    sourceManager = vecSourceManager
+    recipientManager = vecRecipientManager
+    managerPayload = encodeNttManagerMessage vecMm
+    transceiverPayload = ""
+
+transceiverMessage1 : Bytes
+transceiverMessage1 = "9945ff10042942fafabe0000000000000000000000000000000000000000000000000000042942fababe00000000000000000000000000000000000000000000000000000091128434bafe23430000000000000000000000000000000000ce00aa00000000004667921341234300000000000000000000000000000000000000000000000000004f994e545407000000000012d687beefface00000000000000000000000000000000000000000000000000000000feebcafe0000000000000000000000000000000000000000000000000000000000020000"
+
+-- | Byte-exact encode and decode round-trip against the shared 217-byte
+-- vector. This is the load-bearing compatibility check: it proves a Canton
+-- send produces bytes an EVM/Solana peer parses identically, and that Canton
+-- parses what they produce.
+testVectorTransceiverMessage1 : Script ()
+testVectorTransceiverMessage1 = do
+  -- Encode matches the reference bytes exactly.
+  encodeWormholeTransceiverMessage vecWm === transceiverMessage1
+  -- Decode of the reference bytes recovers the structure, all the way down to
+  -- the NativeTokenTransfer.
+  let wm = decodeWormholeTransceiverMessage transceiverMessage1
+  wm.sourceManager === vecSourceManager
+  wm.recipientManager === vecRecipientManager
+  wm.transceiverPayload === ""
+  let mm = decodeNttManagerMessage wm.managerPayload
+  mm.id === vecId
+  mm.sender === vecSender
+  decodeNativeTokenTransfer mm.payload === vecNtt
+
+----------------------------------------------------------------------
+-- The 32-byte-additionalPayload vector
+-- (transceiver_message_with_32byte_payload.txt, 251 bytes).
+----------------------------------------------------------------------
+
+vecNtt32 : NativeTokenTransfer
+vecNtt32 = vecNtt with
+    additionalPayload = "deadbeef000000000000000000000000000000000000000000000000deadbeef"
+
+vecWm32 : WormholeTransceiverMessage
+vecWm32 = vecWm with
+    managerPayload = encodeNttManagerMessage (vecMm with payload = encodeNativeTokenTransfer vecNtt32)
+
+transceiverMessage32 : Bytes
+transceiverMessage32 = "9945ff10042942fafabe0000000000000000000000000000000000000000000000000000042942fababe000000000000000000000000000000000000000000000000000000b3128434bafe23430000000000000000000000000000000000ce00aa000000000046679213412343000000000000000000000000000000000000000000000000000071994e545407000000000012d687beefface00000000000000000000000000000000000000000000000000000000feebcafe0000000000000000000000000000000000000000000000000000000000020020deadbeef000000000000000000000000000000000000000000000000deadbeef0000"
+
+-- | The optional additionalPayload extension (uint16 length + bytes) encodes
+-- and decodes byte-exactly against the reference.
+testVectorAdditionalPayload : Script ()
+testVectorAdditionalPayload = do
+  encodeWormholeTransceiverMessage vecWm32 === transceiverMessage32
+  let wm = decodeWormholeTransceiverMessage transceiverMessage32
+      mm = decodeNttManagerMessage wm.managerPayload
+      ntt = decodeNativeTokenTransfer mm.payload
+  ntt === vecNtt32
+  ntt.additionalPayload === "deadbeef000000000000000000000000000000000000000000000000deadbeef"
+
+----------------------------------------------------------------------
+-- The non-canonical empty-payload vector
+-- (transceiver_message_with_empty_payload.txt, 219 bytes).
+--
+-- This is a NativeTokenTransfer that carries an explicit additionalPayload
+-- length of 0x0000 rather than omitting the field. The reference calls it a
+-- message that "can't be generated but does technically adhere to the spec":
+-- parsers must accept it and recover an empty additional payload, but encoders
+-- never emit it. Canton behaves the same way, which is what keeps it
+-- wire-compatible: two distinct byte strings decode to the same message.
+----------------------------------------------------------------------
+
+emptyPayloadInnerNtt : Bytes
+emptyPayloadInnerNtt = "994e545407000000000012d687beefface00000000000000000000000000000000000000000000000000000000feebcafe0000000000000000000000000000000000000000000000000000000000020000"
+
+-- | The non-canonical form decodes to the same NativeTokenTransfer as the
+-- canonical form, but re-encoding yields the canonical (shorter) bytes, never
+-- the non-canonical input. Matches the EVM/SDK behavior exactly.
+testVectorNonCanonicalEmptyPayload : Script ()
+testVectorNonCanonicalEmptyPayload = do
+  let decoded = decodeNativeTokenTransfer emptyPayloadInnerNtt
+  decoded === vecNtt
+  decoded.additionalPayload === ""
+  -- The trailing 0x0000 length is dropped on re-encode: the canonical bytes
+  -- are shorter than the accepted non-canonical input.
+  assert (encodeNativeTokenTransfer decoded /= emptyPayloadInnerNtt)
+  byteLength emptyPayloadInnerNtt === 81
+  byteLength (encodeNativeTokenTransfer decoded) === 79
+
+----------------------------------------------------------------------
+-- TrimmedAmount numeric vectors, ported from
+-- solana/modules/ntt-messages/src/trimmed_amount.rs and the identical Sui
+-- suite. The reference `trim` takes (amount, fromDecimals, toDecimals) and
+-- trims to min(8, fromDecimals, toDecimals). Canton's `trimAmount` takes only
+-- (amount, fromDecimals) and trims to min(8, fromDecimals): it has no
+-- destination-decimals input because a Canton deployment stores no per-peer
+-- decimals. These tests pin where the two agree and where they diverge.
+----------------------------------------------------------------------
+
+-- | Cases where min(8, from, to) == min(8, from): Canton matches the reference.
+testTrimVectorsMatching : Script ()
+testTrimVectorsMatching = do
+  -- reference trim(1e17, from=18, to=13) -> {amount 1e7, decimals 8};
+  -- min(8,18,13) == min(8,18) == 8, so Canton agrees.
+  let t1 = trimAmount 100000000000000000 18
+  t1 === TrimmedAmount with decimals = 8, amount = 10000000
+
+  -- reference trim(1e17, from=7, to=11) -> unchanged at decimals 7 (NOOP);
+  -- min(8,7,11) == min(8,7) == 7.
+  let t2 = trimAmount 100000000000000000 7
+  t2 === TrimmedAmount with decimals = 7, amount = 100000000000000000
+
+  -- reference trim(5e18,18,8).untrim(18) == 5e18 (EVM testTrimmingRoundTrip,
+  -- scaled down from 50e18: the reference uses a uint256/u64 amount, but 50e18
+  -- exceeds Daml's signed 64-bit Int max (~9.2e18) and cannot be written here
+  -- at all -- see testAmountUint64Bound for that divergence).
+  let t3 = trimAmount 5000000000000000000 18
+  untrimAmount t3 18 === 5000000000000000000
+
+  -- reference {amount 1, decimals 6}.untrim(13) == 1e7.
+  untrimAmount (TrimmedAmount with decimals = 6, amount = 1) 13 === 10000000
+
+  -- reference trim(100555555555555555,18,9).untrim(18) == 100555550000000000;
+  -- min(8,18,9) == 8, matches Canton.
+  let t5 = trimAmount 100555555555555555 18
+  untrimAmount t5 18 === 100555550000000000
+
+-- | Cases where the destination decimals are below min(8, fromDecimals). The
+-- reference trims further (to the destination decimals) and the EVM manager
+-- rejects any leftover dust at send time (TransferAmountHasDust). Canton
+-- cannot: it does not know the peer's decimals, so it trims only to
+-- min(8, fromDecimals) and sends more precision than a low-decimal peer can
+-- represent. The peer then truncates on receive, so value is lost relative to
+-- what the sender committed. These asserts pin Canton's actual (divergent)
+-- output.
+testTrimVectorsPeerDecimalDivergence : Script ()
+testTrimVectorsPeerDecimalDivergence = do
+  -- reference trim(158434, from=6, to=3) == {amount 158, decimals 3}.
+  -- Canton trims only by fromDecimals=6:
+  trimAmount 158434 6 === TrimmedAmount with decimals = 6, amount = 158434
+  -- (reference would be decimals = 3, amount = 158)
+
+  -- reference trim(100555555555555555, from=18, to=1).untrim(18)
+  --   == 100000000000000000 (trimmed to 1 decimal).
+  -- Canton trims to 8 decimals and preserves far more precision:
+  let t = trimAmount 100555555555555555 18
+  untrimAmount t 18 === 100555550000000000
+  -- (reference, trimming to min(8,18,1)=1, would yield 100000000000000000)
+
+  -- Demonstration of end-to-end value loss to a 3-decimal peer:
+  -- sender at 6 decimals sends 158434 units (= 0.158434). Canton puts
+  -- {amount 158434, decimals 6} on the wire; a 3-decimal peer untrims to
+  -- 158434 / 10^3 = 158 units (= 0.158), silently dropping 0.000434.
+  let onWire = trimAmount 158434 6
+  untrimAmount onWire 3 === 158
+
+-- | The wire amount field is a uint64 (0 .. 2^64-1). Daml's Int is signed
+-- 64-bit, so its max is 2^63-1 (about 9.2e18). Amounts in [2^63, 2^64) are
+-- legal on the wire and producible by an EVM/Solana peer, but cannot be
+-- represented on Canton: the value 9223372036854775807 is the largest Int, and
+-- decoding a larger wire amount overflows and aborts the transaction. This is
+-- fail-closed (such an inbound transfer is undeliverable, never mis-paid) but
+-- is a wire-compatibility asymmetry, so a peer must not send amounts at that
+-- scale to a Canton deployment.
+testAmountUint64Bound : Script ()
+testAmountUint64Bound = do
+  -- The largest amount Canton can carry; one more would not typecheck as an
+  -- Int literal and larger values decoded off the wire overflow at runtime.
+  let maxInt = 9223372036854775807
+  (trimAmount maxInt 0).amount === maxInt
+  pure ()
