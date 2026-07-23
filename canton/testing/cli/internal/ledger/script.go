@@ -36,11 +36,24 @@ func FindDpm() (string, error) {
 	return "", fmt.Errorf("ledger: dpm not found (PATH or ~/.dpm/bin)")
 }
 
-// Runner invokes `dpm script` for one DAR against one profile.
+// Runner invokes `dpm script` for one DAR against one participant endpoint.
 type Runner struct {
 	DpmPath string
 	DarPath string
+
+	// Profile carries the profile-wide settings that don't vary per participant:
+	// RequiresAuth, UploadDAR, Name (used only for narration/error messages). Host/port/
+	// user-id come from Endpoint below, not from this profile's own top-level fields --
+	// see the plan's §3 ("thread an Endpoint, not the whole Profile, through to wherever
+	// host/port/user-id are consumed").
 	Profile profile.Profile
+
+	// Endpoint is the specific participant this Runner submits `dpm script` calls against
+	// -- resolved via Profile.Endpoint(role) by the caller (cmd/ntt-playground/runner.go's
+	// newScriptRunnerFor). Every LocalNet participant shares the same RequiresAuth/UploadDAR/
+	// Name from Profile above; only LedgerHost/LedgerPort/UserID (and, for callers outside
+	// this package, JSONAPIBaseURL/ValidatorBaseURL) vary per participant.
+	Endpoint profile.Endpoint
 
 	// AccessTokenFile is a path to a file containing a bearer JWT, used when
 	// Profile.RequiresAuth is true (LocalNet). Ignored for the sandbox.
@@ -141,13 +154,15 @@ func (r *Runner) scriptFailureErr(scriptName string, runErr error, out []byte) e
 		return fmt.Errorf(
 			"ledger: cannot reach the %s ledger at %s:%d -- is it running? "+
 				"start it with 'just localnet-cli' (or 'ntt-playground --profile %s network up'), or check --profile",
-			r.Profile.Name, r.Profile.LedgerHost, r.Profile.LedgerPort, r.Profile.Name)
+			r.Profile.Name, r.Endpoint.LedgerHost, r.Endpoint.LedgerPort, r.Profile.Name)
 	}
 	return fmt.Errorf("ledger: dpm script %s failed: %w\n%s", scriptName, runErr, out)
 }
 
-// NewRunner constructs a Runner, resolving dpm from PATH/~/.dpm/bin if dpmPath is empty.
-func NewRunner(dpmPath, darPath string, p profile.Profile, accessTokenFile, workDir string) (*Runner, error) {
+// NewRunner constructs a Runner, resolving dpm from PATH/~/.dpm/bin if dpmPath is empty. ep
+// is the specific participant endpoint this Runner submits against (see Runner.Endpoint) --
+// callers resolve it via p.Endpoint(role) before calling NewRunner.
+func NewRunner(dpmPath, darPath string, p profile.Profile, ep profile.Endpoint, accessTokenFile, workDir string) (*Runner, error) {
 	if dpmPath == "" {
 		var err error
 		dpmPath, err = FindDpm()
@@ -159,6 +174,7 @@ func NewRunner(dpmPath, darPath string, p profile.Profile, accessTokenFile, work
 		DpmPath:         dpmPath,
 		DarPath:         darPath,
 		Profile:         p,
+		Endpoint:        ep,
 		AccessTokenFile: accessTokenFile,
 		WorkDir:         workDir,
 	}, nil
@@ -185,8 +201,8 @@ func (r *Runner) Run(ctx context.Context, scriptName string, input, output any) 
 		"script",
 		"--dar", r.DarPath,
 		"--script-name", scriptName,
-		"--ledger-host", r.Profile.LedgerHost,
-		"--ledger-port", strconv.Itoa(r.Profile.LedgerPort),
+		"--ledger-host", r.Endpoint.LedgerHost,
+		"--ledger-port", strconv.Itoa(r.Endpoint.LedgerPort),
 		"--input-file", inputPath,
 		"--output-file", outputPath,
 	}
@@ -199,8 +215,8 @@ func (r *Runner) Run(ctx context.Context, scriptName string, input, output any) 
 		}
 		args = append(args, "--access-token-file", r.AccessTokenFile)
 	}
-	if r.Profile.UserID != "" {
-		args = append(args, "--user-id", r.Profile.UserID)
+	if r.Endpoint.UserID != "" {
+		args = append(args, "--user-id", r.Endpoint.UserID)
 	}
 
 	if r.Logf != nil {
@@ -208,11 +224,11 @@ func (r *Runner) Run(ctx context.Context, scriptName string, input, output any) 
 		if r.Profile.RequiresAuth {
 			auth = "bearer"
 		}
-		if r.Profile.UserID != "" {
-			user = r.Profile.UserID
+		if r.Endpoint.UserID != "" {
+			user = r.Endpoint.UserID
 		}
 		r.logf("script %s → dpm script @ %s:%d (upload-dar=%t auth=%s user=%s)",
-			scriptName, r.Profile.LedgerHost, r.Profile.LedgerPort, r.Profile.UploadDAR, auth, user)
+			scriptName, r.Endpoint.LedgerHost, r.Endpoint.LedgerPort, r.Profile.UploadDAR, auth, user)
 		// Inputs are parties/addresses/VAA hex -- never the guardian private key, which is
 		// signed off-ledger and never crosses this boundary.
 		r.logf("script %s input: %s", scriptName, inputRaw)

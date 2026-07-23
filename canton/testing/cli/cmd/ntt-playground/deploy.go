@@ -219,7 +219,7 @@ func setupCip56Custody(ctx context.Context, cmd *cobra.Command, a *app, deployme
 	if err != nil {
 		return "", "", "", fmt.Errorf("onboard custody wallet user %q: %w", custodyUser, err)
 	}
-	if err := grantActAs(cmd, a, custodyParty); err != nil {
+	if err := grantActAs(cmd, a, "", custodyParty); err != nil {
 		return "", "", "", fmt.Errorf("grant actAs on custody party %s: %w", custodyParty, err)
 	}
 

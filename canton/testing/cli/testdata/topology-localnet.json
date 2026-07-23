@@ -1,0 +1,8 @@
+{
+  "disclose": [
+    { "template": "Wormhole.Ntt.Manager:NttManager", "fetchAs": "Operator" },
+    { "template": "Wormhole.Core.State:CoreState", "fetchAs": "Operator" },
+    { "template": "Wormhole.Core.State:Emitter", "fetchAs": "admin" },
+    { "template": "Playground.MockToken:MockToken", "fetchAs": "admin" }
+  ]
+}

@@ -65,7 +65,14 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if prof.JSONAPIBaseURL == "" {
+			// The guardian observation genuinely happens on the guardians' own node: GO is an
+			// observer of Emitter/CoreState, so its OWN participant is what receives those
+			// projections and must serve the stream (plan §3's "observe stream" routing).
+			ep, err := prof.Endpoint("guardian-observer")
+			if err != nil {
+				return err
+			}
+			if ep.JSONAPIBaseURL == "" {
 				return fmt.Errorf("observe stream: requires the localnet profile")
 			}
 			s, err := a.loadState()
@@ -93,7 +100,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 			// This is the CLI's one non-`dpm script` ledger surface, and it is strictly
 			// read-only: no command on this path submits anything.
 			a.vlogf(cmd, "observe stream: ensuring reader user %q exists with ONLY CanReadAs(%s)", guardianWatcherUser, s.GuardianObserver)
-			if err := network.CreateLedgerUser(ctx, prof.JSONAPIBaseURL, adminToken, guardianWatcherUser, []string{s.GuardianObserver}, nil); err != nil {
+			if err := network.CreateLedgerUser(ctx, ep.JSONAPIBaseURL, adminToken, guardianWatcherUser, []string{s.GuardianObserver}, nil); err != nil {
 				return fmt.Errorf("observe stream: create reader user: %w", err)
 			}
 			watcherToken, err := network.MintUnsafeToken(guardianWatcherUser, timeout+time.Hour)
@@ -102,7 +109,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 			}
 
 			if printOffset {
-				ledgerEnd, err := observer.LedgerEnd(ctx, prof.JSONAPIBaseURL, watcherToken)
+				ledgerEnd, err := observer.LedgerEnd(ctx, ep.JSONAPIBaseURL, watcherToken)
 				if err != nil {
 					return fmt.Errorf("observe stream --print-offset: %w", err)
 				}
@@ -112,7 +119,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 
 			begin := fromOffset
 			if !cmd.Flags().Changed("from-offset") {
-				begin, err = observer.LedgerEnd(ctx, prof.JSONAPIBaseURL, watcherToken)
+				begin, err = observer.LedgerEnd(ctx, ep.JSONAPIBaseURL, watcherToken)
 				if err != nil {
 					return fmt.Errorf("observe stream: resolve default --from-offset: %w", err)
 				}
@@ -124,7 +131,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 
 			var results []observedOutput
 			streamErr := observer.Stream(streamCtx, observer.Config{
-				JSONAPIBaseURL: prof.JSONAPIBaseURL,
+				JSONAPIBaseURL: ep.JSONAPIBaseURL,
 				Token:          watcherToken,
 				ObserverParty:  s.GuardianObserver,
 				BeginExclusive: begin,

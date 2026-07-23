@@ -77,6 +77,24 @@ func newNetworkUpCmd(a *app) *cobra.Command {
 				if err := m.Up(ctx, 10*time.Minute); err != nil {
 					return err
 				}
+				// Vet the DAR on every participant, not just app-provider's -- informee/
+				// confirming participants (e.g. guardian-observer, receiving CoreState/
+				// Emitter only as an observer projection) need the package vetted locally
+				// even if no script ever submits there. Best-effort: if the DAR hasn't been
+				// built yet (`dpm build` not run), skip with a narration rather than
+				// failing `network up` outright -- unchanged from today's behavior, where
+				// `network up` uploads nothing and each script call's own --upload-dar true
+				// covers its one participant.
+				if dar, err := a.darPath(); err == nil {
+					if _, statErr := os.Stat(dar); statErr == nil {
+						a.vlogf(cmd, "network up: uploading DAR to every participant's JSON API (%s)", dar)
+						if err := m.UploadDARToAllParticipants(ctx, dar); err != nil {
+							return fmt.Errorf("network up: %w", err)
+						}
+					} else {
+						a.vlogf(cmd, "network up: DAR not built yet (%s), skipping all-participant upload", dar)
+					}
+				}
 				fmt.Fprintln(cmd.OutOrStdout(), "localnet: ready")
 				return nil
 			default:

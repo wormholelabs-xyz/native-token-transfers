@@ -1,0 +1,45 @@
+-- | Genesis propose/accept (phase 4 of the participant-split redesign, plan §5.1 at
+-- .claude/tasks/e2e-separate-participants.md). 'Playground.Init:initPlayground' used to create
+-- 'Wormhole.Core.State:CoreState' with a single `submit (actAs operator <> actAs
+-- guardianGovernance)` -- a co-signed create that needs one script user with actAs rights on
+-- BOTH parties. That only worked because operator and guardianGovernance were hosted on the
+-- same (only) participant. Now that guardianGovernance has its own participant (the topology
+-- split, plan's §2), no single `dpm script` invocation can submit as both -- genesis is a
+-- propose (on operator's participant) / accept (on guardianGovernance's participant) pair
+-- instead. 'Playground.Init' is split accordingly into `proposeGenesis`/`acceptGenesis`.
+module Playground.Genesis where
+
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+import Wormhole.Core.Bytes (Bytes20, Bytes32)
+import Wormhole.Core.State (CoreState)
+import Wormhole.Core.Setup (mkInitialCoreState)
+
+-- | The operator's genesis offer: every argument 'Wormhole.Core.Setup:mkInitialCoreState'
+-- needs, held on a contract only the operator signs -- guardianGovernance sees it as an
+-- ordinary stakeholder (no explicit disclosure needed, unlike the cross-participant
+-- disclosure mechanism in Playground.Disclose) and accepts from its OWN participant.
+template CoreStateBootstrapProposal
+  with
+    operator           : Party
+    guardianGovernance : Party
+    governanceChainId  : Int
+    governanceContract : Bytes32
+    initialGuardians   : [Bytes20]
+    guardianObserver   : Party
+    feeInstrument      : InstrumentId
+    feeRecipient       : Party
+  where
+    signatory operator
+    observer guardianGovernance
+
+    -- Creating 'CoreState' from inside this choice's body carries BOTH this proposal's
+    -- signatory (operator, via the proposal contract being consumed) AND the exercising
+    -- controller's (guardianGovernance) authority, satisfying CoreState's `signatory
+    -- operator, guardianGovernance` invariant without any single script needing actAs rights
+    -- on both parties at once -- exactly the propose/accept split genesis needs post-split.
+    choice AcceptGenesis : ContractId CoreState
+      controller guardianGovernance
+      do
+        create (mkInitialCoreState operator guardianGovernance governanceChainId
+                  governanceContract initialGuardians guardianObserver feeInstrument
+                  feeRecipient)

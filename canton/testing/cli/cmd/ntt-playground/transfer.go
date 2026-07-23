@@ -39,6 +39,11 @@ type transferOutInput struct {
 	ConsistencyLevel int             `json:"consistencyLevel"`
 	InputHoldingCids []string        `json:"inputHoldingCids"`
 	Amulet           *amuletSeamJSON `json:"amulet"` // "cip56-custody" only; null otherwise
+	// Remote carries a pre-fetched Playground.Prepare:prepareTransferOut RemoteSeam, as raw
+	// JSON -- nil marshals to `null` (Daml's None), the unchanged same-participant fast path.
+	// See cmd/ntt-playground/remote.go: the CLI never parses or constructs this value, only
+	// relays it between two `dpm script` calls.
+	Remote json.RawMessage `json:"remote"`
 }
 
 // amuletSeamJSON/disclosedContractInJSON mirror Playground.Amulet.daml's
@@ -139,7 +144,7 @@ func newTransferCmd(a *app) *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("transfer: onboard sender wallet user %q: %w", userHint, err)
 					}
-					if err := grantActAs(cmd, a, party); err != nil {
+					if err := grantActAs(cmd, a, "", party); err != nil {
 						return fmt.Errorf("transfer: grant actAs on sender party %s: %w", party, err)
 					}
 					s.Users[userHint] = party
@@ -162,25 +167,28 @@ func newTransferCmd(a *app) *cobra.Command {
 			}
 			a.vlogf(cmd, "transfer: user %q → %s, deployment %q (managerId=%d)", userHint, userParty, deployment, d.ManagerID)
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-
 			// Daml's `[ContractId Holding]` needs a JSON array, never `null` -- must start
 			// non-nil (a nil Go slice marshals to `null`).
 			holdingCids := []string{}
 			if d.TokenKind != "mock-admin-signed" && d.TokenKind != "cip56-custody" {
+				// Funding stays on the admin's (default/app-provider) participant, regardless
+				// of which participant the user is routed to -- see the plan's §3: only the
+				// final transferOut submit below moves to the user's own participant.
+				fundRunner, fundCleanup, err := a.newScriptRunner(ctx)
+				if err != nil {
+					return err
+				}
 				decimals := wire.TrimDecimals(d.TokenDecimals)
 				a.vlogf(cmd, "transfer: funding sender with %s via Playground.Ops:fundUser (holding cid feeds transferOut)", formatDecimal(amount, decimals))
 				var fundOut fundUserOutput
-				if err := runner.Run(ctx, "Playground.Ops:fundUser", fundUserInput{
+				fundErr := fundRunner.Run(ctx, "Playground.Ops:fundUser", fundUserInput{
 					Admin:  d.Admin,
 					Owner:  userParty,
 					Amount: decimalLiteral(formatDecimal(amount, decimals)),
-				}, &fundOut); err != nil {
-					return fmt.Errorf("transfer: funding user for a Cip56 deployment: %w", err)
+				}, &fundOut)
+				fundCleanup()
+				if fundErr != nil {
+					return fmt.Errorf("transfer: funding user for a Cip56 deployment: %w", fundErr)
 				}
 				holdingCids = []string{fundOut.HoldingCid}
 			}
@@ -209,8 +217,35 @@ func newTransferCmd(a *app) *cobra.Command {
 				}
 			}
 
+			// transferOut submits AS the user, so it routes to the user's home participant
+			// (plan §3) -- s.UserParticipants[userHint] was just populated (if not already
+			// set) by resolveParty above; a cip56-custody sender never goes through
+			// resolveParty (it's a validator wallet user, see the branch above), so its
+			// UserParticipants entry is unset and this correctly falls back to the default
+			// (app-provider), matching "cip56-custody wallet senders remain app-provider
+			// wallet users -- unchanged".
+			actorRole := s.UserParticipants[userHint]
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, "Playground.Prepare:prepareTransferOut", func(templates []string) any {
+				return prepareTransferOutInput{
+					Operator:          s.Operator,
+					ManagerID:         d.ManagerID,
+					Admin:             d.Admin,
+					TokenKind:         d.TokenKind,
+					DiscloseTemplates: templates,
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("transfer: prepare remote disclosure: %w", err)
+			}
+
+			userRunner, userCleanup, err := a.newScriptRunnerFor(ctx, actorRole)
+			if err != nil {
+				return err
+			}
+			defer userCleanup()
+
 			var out transferOutOutput
-			if err := runner.Run(ctx, "Playground.Ops:transferOut", transferOutInput{
+			if err := userRunner.Run(ctx, "Playground.Ops:transferOut", transferOutInput{
 				Operator:         s.Operator,
 				ManagerID:        d.ManagerID,
 				Admin:            d.Admin,
@@ -224,6 +259,7 @@ func newTransferCmd(a *app) *cobra.Command {
 				ConsistencyLevel: consistencyLevel,
 				InputHoldingCids: holdingCids,
 				Amulet:           amuletSeam,
+				Remote:           remoteSeam,
 			}, &out); err != nil {
 				return err
 			}

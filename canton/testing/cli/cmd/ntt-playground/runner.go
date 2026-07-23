@@ -11,11 +11,25 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 )
 
-// newScriptRunner builds a ledger.Runner for the current profile, minting a LocalNet access
+// newScriptRunner builds a ledger.Runner against the profile's DEFAULT participant (e.g.
+// app-provider on LocalNet) -- the zero-arg wrapper the plan's §3 keeps around so read-only,
+// operator-side commands (status, contracts, observe, applyGovernance, deploy admins, ...)
+// stay unchanged. Equivalent to newScriptRunnerFor(ctx, "").
+func (a *app) newScriptRunner(ctx context.Context) (*ledger.Runner, func(), error) {
+	return a.newScriptRunnerFor(ctx, "")
+}
+
+// newScriptRunnerFor builds a ledger.Runner against the participant role resolves to via the
+// current profile's Endpoint(role) (see internal/profile.Profile.Endpoint) -- "" or an
+// unrecognized role falls back to the profile's default participant. Mints a LocalNet access
 // token file when required. The returned cleanup func removes the per-invocation script I/O
 // directory.
-func (a *app) newScriptRunner(ctx context.Context) (*ledger.Runner, func(), error) {
+func (a *app) newScriptRunnerFor(ctx context.Context, role string) (*ledger.Runner, func(), error) {
 	prof, err := a.resolvedProfile()
+	if err != nil {
+		return nil, nil, err
+	}
+	ep, err := prof.Endpoint(role)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -36,13 +50,13 @@ func (a *app) newScriptRunner(ctx context.Context) (*ledger.Runner, func(), erro
 	var tokenFile string
 	if prof.RequiresAuth {
 		tokenFile = filepath.Join(workDir, "token.jwt")
-		if err := network.WriteTokenFile(tokenFile, prof.UserID, time.Hour); err != nil {
+		if err := network.WriteTokenFile(tokenFile, ep.UserID, time.Hour); err != nil {
 			cleanup()
 			return nil, nil, err
 		}
 	}
 
-	r, err := ledger.NewRunner(a.dpmPath, dar, prof, tokenFile, workDir)
+	r, err := ledger.NewRunner(a.dpmPath, dar, prof, ep, tokenFile, workDir)
 	if err != nil {
 		cleanup()
 		return nil, nil, err

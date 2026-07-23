@@ -153,6 +153,259 @@ func TestEnsurePostgresOverride_StaleContentIsRewritten(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
+// participants override + conf files
+// ----------------------------------------------------------------------
+
+func TestComposeArgs_IncludesParticipantsOverride(t *testing.T) {
+	m := LocalNetManager{ComposeDir: "/tmp/compose-dir"}
+	args := m.composeArgs("up", "-d")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-f /tmp/compose-dir/" + postgresOverrideFile, "-f /tmp/compose-dir/" + participantsOverrideFile} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("composeArgs missing %q: %v", want, args)
+		}
+	}
+	// The participants override must come after the postgres override (both are additive
+	// -f files; order doesn't change merge semantics here, but pins the expected shape).
+	if strings.Index(joined, postgresOverrideFile) > strings.Index(joined, participantsOverrideFile) {
+		t.Fatalf("expected postgres override before participants override in %v", args)
+	}
+}
+
+func TestEnsureParticipantsOverride_WritesWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	m := LocalNetManager{ComposeDir: dir}
+	if err := m.ensureParticipantsOverride(); err != nil {
+		t.Fatalf("ensureParticipantsOverride: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, participantsOverrideFile))
+	if err != nil {
+		t.Fatalf("read override: %v", err)
+	}
+	if string(got) != string(participantsOverride) {
+		t.Fatalf("override contents mismatch")
+	}
+}
+
+func TestEnsureParticipantsOverride_UpToDateSkipsRewrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, participantsOverrideFile)
+	if err := os.WriteFile(path, participantsOverride, 0o644); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	before := info.ModTime()
+	time.Sleep(10 * time.Millisecond)
+
+	m := LocalNetManager{ComposeDir: dir}
+	if err := m.ensureParticipantsOverride(); err != nil {
+		t.Fatalf("ensureParticipantsOverride: %v", err)
+	}
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !info2.ModTime().Equal(before) {
+		t.Fatalf("file was rewritten even though contents already matched")
+	}
+}
+
+func TestEnsureParticipantsOverride_StaleContentIsRewritten(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, participantsOverrideFile)
+	if err := os.WriteFile(path, []byte("stale content"), 0o644); err != nil {
+		t.Fatalf("seed stale override: %v", err)
+	}
+	m := LocalNetManager{ComposeDir: dir}
+	if err := m.ensureParticipantsOverride(); err != nil {
+		t.Fatalf("ensureParticipantsOverride: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read override: %v", err)
+	}
+	if string(got) != string(participantsOverride) {
+		t.Fatalf("stale override was not refreshed")
+	}
+}
+
+// participantsOverride content assertions: pins the port table and mechanism the plan's §2
+// describes, so a future edit to the embedded YAML that silently drops a port or a mount
+// fails this test rather than only being caught live.
+func TestParticipantsOverride_Content(t *testing.T) {
+	content := string(participantsOverride)
+	for _, want := range []string{
+		// bob / guardian-governance / guardian-observer ledger, admin, JSON-API ports.
+		"5901:5901", "5902:5902", "5975:5975",
+		"6901:6901", "6902:6902", "6975:6975",
+		"7901:7901", "7902:7902", "7975:7975",
+		// validator API ports.
+		"5903:5903", "6903:6903", "7903:7903",
+		// the wrapper-include mechanism: original conf remounted, wrapper replaces app.conf.
+		"/app/app-orig.conf", "/app/app.conf", "/app/wormhole", "/app/health-check.sh",
+		// new postgres databases.
+		"participant-bob", "validator-bob",
+		"participant-guardian-governance", "validator-guardian-governance",
+		"participant-guardian-observer", "validator-guardian-observer",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("participantsOverride missing %q", want)
+		}
+	}
+}
+
+func TestEnsureParticipantConfs_WritesAll(t *testing.T) {
+	dir := t.TempDir()
+	m := LocalNetManager{ComposeDir: dir}
+	if err := m.ensureParticipantConfs(); err != nil {
+		t.Fatalf("ensureParticipantConfs: %v", err)
+	}
+	for _, rel := range []string{
+		"canton-app.conf",
+		"splice-app.conf",
+		"health-check-canton.sh",
+		"health-check-splice.sh",
+		filepath.Join("canton", "bob", "app.conf"),
+		filepath.Join("canton", "bob", "app-auth.conf"),
+		filepath.Join("canton", "guardian-governance", "app.conf"),
+		filepath.Join("canton", "guardian-governance", "app-auth.conf"),
+		filepath.Join("canton", "guardian-observer", "app.conf"),
+		filepath.Join("canton", "guardian-observer", "app-auth.conf"),
+		filepath.Join("splice", "bob", "app.conf"),
+		filepath.Join("splice", "bob", "app-auth.conf"),
+		filepath.Join("splice", "guardian-governance", "app.conf"),
+		filepath.Join("splice", "guardian-governance", "app-auth.conf"),
+		filepath.Join("splice", "guardian-observer", "app.conf"),
+		filepath.Join("splice", "guardian-observer", "app-auth.conf"),
+		filepath.Join("splice", "sv-onboarding-overlay.conf"),
+	} {
+		path := filepath.Join(dir, "wormhole-conf", rel)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+		if strings.HasSuffix(path, ".sh") && info.Mode()&0o111 == 0 {
+			t.Fatalf("expected %s to be executable, got mode %v", path, info.Mode())
+		}
+	}
+
+	// Content spot-checks: the wrapper files chain app-orig.conf first, then each
+	// participant's includes; the sv overlay names all three onboarding secrets.
+	wrapper, err := os.ReadFile(filepath.Join(dir, "wormhole-conf", "canton-app.conf"))
+	if err != nil {
+		t.Fatalf("read canton wrapper: %v", err)
+	}
+	if idx := strings.Index(string(wrapper), `include file("/app/app-orig.conf")`); idx < 0 {
+		t.Fatalf("canton wrapper does not include app-orig.conf: %s", wrapper)
+	} else if bobIdx := strings.Index(string(wrapper), "bob/app.conf"); bobIdx < idx {
+		t.Fatalf("canton wrapper includes bob before the original bundle conf: %s", wrapper)
+	}
+
+	overlay, err := os.ReadFile(filepath.Join(dir, "wormhole-conf", "splice", "sv-onboarding-overlay.conf"))
+	if err != nil {
+		t.Fatalf("read sv overlay: %v", err)
+	}
+	for _, secret := range []string{
+		"bob-validator-onboarding-secret",
+		"guardian-governance-validator-onboarding-secret",
+		"guardian-observer-validator-onboarding-secret",
+	} {
+		if !strings.Contains(string(overlay), secret) {
+			t.Fatalf("sv onboarding overlay missing %q: %s", secret, overlay)
+		}
+	}
+}
+
+func TestEnsureParticipantConfs_UpToDateSkipsRewrite(t *testing.T) {
+	dir := t.TempDir()
+	m := LocalNetManager{ComposeDir: dir}
+	if err := m.ensureParticipantConfs(); err != nil {
+		t.Fatalf("first ensureParticipantConfs: %v", err)
+	}
+	path := filepath.Join(dir, "wormhole-conf", "canton", "bob", "app.conf")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	before := info.ModTime()
+	time.Sleep(10 * time.Millisecond)
+
+	if err := m.ensureParticipantConfs(); err != nil {
+		t.Fatalf("second ensureParticipantConfs: %v", err)
+	}
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !info2.ModTime().Equal(before) {
+		t.Fatalf("file was rewritten even though contents already matched")
+	}
+}
+
+func TestEnsureParticipantConfs_StaleRewritten(t *testing.T) {
+	dir := t.TempDir()
+	m := LocalNetManager{ComposeDir: dir}
+	path := filepath.Join(dir, "wormhole-conf", "canton", "bob", "app.conf")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("seed stale conf: %v", err)
+	}
+	if err := m.ensureParticipantConfs(); err != nil {
+		t.Fatalf("ensureParticipantConfs: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.TrimSpace(string(got)) == "stale" {
+		t.Fatalf("stale conf was not refreshed")
+	}
+}
+
+func TestAllParticipantProbes_FiveParticipants(t *testing.T) {
+	m := LocalNetManager{}
+	probes := m.allParticipantProbes()
+	if len(probes) != 5 {
+		t.Fatalf("expected 5 participant probes, got %d: %+v", len(probes), probes)
+	}
+	wantRoles := map[string]bool{"app-provider": true, "app-user": true, "bob": true, "guardian-governance": true, "guardian-observer": true}
+	for _, p := range probes {
+		if !wantRoles[p.role] {
+			t.Fatalf("unexpected participant role %q", p.role)
+		}
+		delete(wantRoles, p.role)
+	}
+	if len(wantRoles) != 0 {
+		t.Fatalf("missing participant roles: %v", wantRoles)
+	}
+}
+
+func TestAllParticipantJSONAPIBaseURLs_FiveParticipants(t *testing.T) {
+	m := LocalNetManager{}
+	urls := m.allParticipantJSONAPIBaseURLs()
+	want := map[string]string{
+		"app-provider":        "http://localhost:3975",
+		"app-user":            "http://localhost:2975",
+		"bob":                 "http://localhost:5975",
+		"guardian-governance": "http://localhost:6975",
+		"guardian-observer":   "http://localhost:7975",
+	}
+	for role, url := range want {
+		if urls[role] != url {
+			t.Fatalf("participant %s: got %q, want %q", role, urls[role], url)
+		}
+	}
+	if len(urls) != len(want) {
+		t.Fatalf("got %d participants, want %d: %v", len(urls), len(want), urls)
+	}
+}
+
+// ----------------------------------------------------------------------
 // probeGET / probeTCP
 // ----------------------------------------------------------------------
 

@@ -9,12 +9,24 @@
 -- ('Wormhole.Core.State.SubmitGovernanceVAA'), applied via `guardian sign-governance set-fee`
 -- (which both signs the VAA with the playground's own guardian key and submits it) -- there is
 -- deliberately no side-channel to set an initial fee.
+--
+-- Genesis is a propose/accept pair (phase 4 of the participant-split redesign, plan §5.1 at
+-- .claude/tasks/e2e-separate-participants.md), not a single co-signed create: once
+-- guardianGovernance has its own participant, no single `dpm script` invocation can submit as
+-- both operator and guardianGovernance. 'proposeGenesis' runs on the operator's participant
+-- (operator-only authority: the 'Playground.Genesis:CoreStateBootstrapProposal' plus every
+-- operator-only registry -- EmitterRegistry, ReplayRootRegistry, NttManagerRegistry).
+-- 'acceptGenesis' runs on guardianGovernance's participant (guardianGovernance sees the
+-- proposal as an ordinary stakeholder and exercises 'AcceptGenesis', which is the only step
+-- that actually creates 'Wormhole.Core.State:CoreState').
 module Playground.Init where
 
 import Daml.Script
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.Setup (mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.State (CoreState)
 import Wormhole.Ntt.Manager (NttManagerRegistry (..))
+import Playground.Genesis (CoreStateBootstrapProposal (..), AcceptGenesis (..))
 
 -- | @guardianAddresses@ are 20-byte hex guardian addresses (Wormhole.Core.Bytes:Bytes20);
 -- typically exactly one, e.g. the address of a CLI-generated key
@@ -25,35 +37,66 @@ import Wormhole.Ntt.Manager (NttManagerRegistry (..))
 -- script user needs explicit actAs rights on a party before submitting as it, and the CLI
 -- grants those between allocation and this script's submits -- an in-script allocateParty
 -- would hit PERMISSION_DENIED at the first submit.
-data InitInput = InitInput with
+data ProposeGenesisInput = ProposeGenesisInput with
     operator           : Party
     guardianGovernance : Party
     guardianObserver   : Party
     guardianAddresses  : [Text]
   deriving (Eq, Show)
 
-data InitOutput = InitOutput with
+data ProposeGenesisOutput = ProposeGenesisOutput with
     operator           : Party
     guardianGovernance : Party
     guardianObserver   : Party
+    proposalCid        : ContractId CoreStateBootstrapProposal
   deriving (Eq, Show)
 
-initPlayground : InitInput -> Script InitOutput
-initPlayground input = do
+-- | Operator-only half of genesis: submits as operator alone (no guardianGovernance
+-- authority needed), creating the 'CoreStateBootstrapProposal' plus every operator-only
+-- registry the old single-shot 'initPlayground' also created. Runs on operator's own
+-- participant.
+proposeGenesis : ProposeGenesisInput -> Script ProposeGenesisOutput
+proposeGenesis input = do
   let operator = input.operator
       guardianGovernance = input.guardianGovernance
       guardianObserver = input.guardianObserver
   -- Fees are never validated at fee 0 (Wormhole.Core.Fees:chargeFee is a no-op then), so this
   -- placeholder instrument is never exercised unless a later governance VAA raises the fee.
   let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
-  _ <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
-                 defaultGovernanceContract input.guardianAddresses guardianObserver
-                 feeInstrument guardianGovernance)
+  proposalCid <- submit operator do
+    createCmd CoreStateBootstrapProposal with
+      operator
+      guardianGovernance
+      governanceChainId = solanaGovernanceChainId
+      governanceContract = defaultGovernanceContract
+      initialGuardians = input.guardianAddresses
+      guardianObserver
+      feeInstrument
+      feeRecipient = guardianGovernance
   _ <- submit operator do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance guardianObserver 0)
   _ <- submit operator do
     createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
   _ <- submit operator do
     createCmd NttManagerRegistry with operator, nextId = 0
-  pure InitOutput with operator, guardianGovernance, guardianObserver
+  pure ProposeGenesisOutput with operator, guardianGovernance, guardianObserver, proposalCid
+
+data AcceptGenesisInput = AcceptGenesisInput with
+    guardianGovernance : Party
+    proposalCid        : ContractId CoreStateBootstrapProposal
+  deriving (Eq, Show)
+
+data AcceptGenesisOutput = AcceptGenesisOutput with
+    coreStateCid : ContractId CoreState
+  deriving (Eq, Show)
+
+-- | GuardianGovernance-only half of genesis: submits as guardianGovernance alone, exercising
+-- 'AcceptGenesis' on the proposal created by 'proposeGenesis'. GuardianGovernance sees the
+-- proposal via ordinary stakeholder visibility (it is an observer on
+-- 'CoreStateBootstrapProposal') -- no explicit disclosure needed. Runs on guardianGovernance's
+-- own participant; this is the step that actually creates 'Wormhole.Core.State:CoreState'.
+acceptGenesis : AcceptGenesisInput -> Script AcceptGenesisOutput
+acceptGenesis input = do
+  coreStateCid <- submit input.guardianGovernance do
+    exerciseCmd input.proposalCid AcceptGenesis
+  pure AcceptGenesisOutput with coreStateCid

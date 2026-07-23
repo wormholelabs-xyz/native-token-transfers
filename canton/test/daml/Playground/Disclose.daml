@@ -1,0 +1,145 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+-- | The general (non-Amulet) explicit-disclosure seam: mapping a playground template's
+-- qualified name to the 'Disclosure' the CLI attaches when a submit's actor and the
+-- contract's home participant differ (see .claude/tasks/e2e-separate-participants.md §4).
+-- 'Playground.Amulet' remains the Amulet-specific seam (real Canton Coin registry contracts);
+-- this module owns 'DisclosedContractIn' (moved here, since it is the shared shape both seams
+-- use) and the playground-template half of the lookup table, plus 'RemoteSeam' -- the shared
+-- shape a `prepare*` script (Playground.Prepare) hands to a submit-side entrypoint
+-- (Playground.Ops) when the actor's participant differs from the data-owning parties'
+-- (operator's/admin's) participant.
+module Playground.Disclose where
+
+import Daml.Script hiding (AnyContractId)
+import DA.Text (isSuffixOf)
+import DA.Optional (fromSomeNote)
+import Splice.AmuletRules qualified as AmuletRules
+import Splice.Round qualified as Round
+import Splice.ExternalPartyAmuletRules qualified as ExternalPartyAmuletRules
+import Splice.ExternalPartyConfigState qualified as ExternalPartyConfigState
+import Splice.Api.Token.MetadataV1 (AnyContractId)
+
+import Wormhole.Core.State (CoreState, Emitter)
+import Wormhole.Core.Replay (ReplayNode)
+import Wormhole.Ntt.Manager (NttManager, NttManagerRegistry)
+import Wormhole.Ntt.Token (NttToken, DepositPreapproval)
+import Wormhole.Ntt.TokenCip56 (Cip56BurnMintToken, Cip56CustodyToken, Cip56DepositPreapproval)
+import Test.TestNtt (MockBurnMintFactory, MockTransferFactory)
+import Playground.MockToken (MockToken)
+
+-- | One registry-format disclosed contract, as Go's internal/amulet.DisclosedContract (or a
+-- 'Playground.Prepare' script's own output) sends it -- moved here verbatim from
+-- 'Playground.Amulet', which now imports it from this module (see that module's own doc
+-- comment). Symmetric by design: the exact same shape is also what a `prepare*` script EMITS
+-- (see 'Playground.Prepare.gated'/'toDisclosedContractIn') -- Go never needs to reshape a
+-- fetched disclosure before feeding it back into a submit-side entrypoint's 'RemoteSeam'.
+data DisclosedContractIn = DisclosedContractIn with
+    templateId : Text          -- "<packageId>:<Module>:<Entity>"
+    contractId : ContractId () -- the opaque contract-id string, Daml-JSON decoded
+    blob       : Text          -- createdEventBlob (hex)
+  deriving (Eq, Show)
+
+-- | A trivial contract whose only purpose is giving 'mkSeedDisclosure' something to fetch a
+-- genuine 'Disclosure' value FOR: 'Daml.Script' exports the 'Disclosure' type but hides its
+-- constructor (see 'toDisclosureByName' below and 'Playground.Amulet:toDisclosure', whose
+-- exact same record-update-a-seed pattern this mirrors), so every 'Disclosure' the playground
+-- builds has to start from one obtained via 'queryDisclosure'.
+template DisclosureSeed
+  with
+    owner : Party
+  where
+    signatory owner
+
+-- | Create and immediately fetch a disclosure for a throwaway 'DisclosureSeed' -- the
+-- starting point 'toDisclosureByName''s callers record-update with the real
+-- templateId/contractId/blob. Also how a submit-side entrypoint (Playground.Ops) running a
+-- REMOTE seam gets a seed disclosure on the ACTOR's own participant (e.g. Bob's): @owner@ is
+-- always the actor itself, already actAs-granted there by `resolveParty`, so this create/query
+-- pair succeeds locally without needing any cross-participant visibility of its own.
+mkSeedDisclosure : Party -> Script Disclosure
+mkSeedDisclosure owner = do
+  cid <- submit owner do createCmd DisclosureSeed with owner
+  fromSomeNote "mkSeedDisclosure: queryDisclosure returned None for a contract just created"
+    <$> queryDisclosure owner cid
+
+-- | Map a registry/prepare-script @templateId@'s "<Module>:<Entity>" suffix to the matching
+-- type's 'templateTypeRep', producing a 'Disclosure' for @d@ by record-updating @seed@ (see
+-- 'mkSeedDisclosure'). Aborts loudly on any unmapped templateId, exactly like
+-- 'Playground.Amulet:toDisclosure' -- a live caller naming a contract this table does not
+-- cover fails fast instead of silently dropping a disclosure the submit needs.
+--
+-- The Amulet-covered arms are duplicated from Playground.Amulet:toDisclosure rather than
+-- calling it, since Playground.Amulet imports DisclosedContractIn FROM this module --
+-- importing Playground.Amulet back here would be a module cycle. The playground-template arms
+-- below cover every template Playground.Prepare's four `prepare*` entrypoints can disclose
+-- (Playground/Prepare.daml's own `gated` helper only ever tags a disclosure with one of these
+-- exact names, so this table is complete by construction for the current entrypoints).
+toDisclosureByName : Disclosure -> DisclosedContractIn -> Disclosure
+toDisclosureByName seed d
+  | "Splice.AmuletRules:AmuletRules" `isSuffixOf` d.templateId =
+      mkDisclosure @AmuletRules.AmuletRules
+  | "Splice.AmuletRules:TransferPreapproval" `isSuffixOf` d.templateId =
+      mkDisclosure @AmuletRules.TransferPreapproval
+  | "Splice.Round:OpenMiningRound" `isSuffixOf` d.templateId =
+      mkDisclosure @Round.OpenMiningRound
+  | "Splice.ExternalPartyAmuletRules:ExternalPartyAmuletRules" `isSuffixOf` d.templateId =
+      mkDisclosure @ExternalPartyAmuletRules.ExternalPartyAmuletRules
+  | "Splice.ExternalPartyConfigState:ExternalPartyConfigState" `isSuffixOf` d.templateId =
+      mkDisclosure @ExternalPartyConfigState.ExternalPartyConfigState
+  | "Wormhole.Ntt.Manager:NttManager" `isSuffixOf` d.templateId =
+      mkDisclosure @NttManager
+  | "Wormhole.Ntt.Manager:NttManagerRegistry" `isSuffixOf` d.templateId =
+      mkDisclosure @NttManagerRegistry
+  | "Wormhole.Core.State:CoreState" `isSuffixOf` d.templateId =
+      mkDisclosure @CoreState
+  | "Wormhole.Core.State:Emitter" `isSuffixOf` d.templateId =
+      mkDisclosure @Emitter
+  | "Wormhole.Core.Replay:ReplayNode" `isSuffixOf` d.templateId =
+      mkDisclosure @ReplayNode
+  | "Playground.MockToken:MockToken" `isSuffixOf` d.templateId =
+      mkDisclosure @MockToken
+  | "Wormhole.Ntt.TokenCip56:Cip56BurnMintToken" `isSuffixOf` d.templateId =
+      mkDisclosure @Cip56BurnMintToken
+  | "Wormhole.Ntt.TokenCip56:Cip56CustodyToken" `isSuffixOf` d.templateId =
+      mkDisclosure @Cip56CustodyToken
+  | "Wormhole.Ntt.TokenCip56:Cip56DepositPreapproval" `isSuffixOf` d.templateId =
+      mkDisclosure @Cip56DepositPreapproval
+  | "Test.TestNtt:MockBurnMintFactory" `isSuffixOf` d.templateId =
+      mkDisclosure @MockBurnMintFactory
+  | "Test.TestNtt:MockTransferFactory" `isSuffixOf` d.templateId =
+      mkDisclosure @MockTransferFactory
+  | otherwise =
+      error ("playground: unmapped disclosed-contract templateId " <> d.templateId)
+  where
+    mkDisclosure : forall t. HasTemplateTypeRep t => Disclosure
+    mkDisclosure =
+      seed with
+        templateId = templateTypeRep @t
+        contractId = coerceContractId d.contractId
+        blob = d.blob
+
+-- | Everything a submit-side entrypoint needs when its actor's participant differs from the
+-- data it must resolve (the NttManager/Emitter/CoreState/ReplayNode/token-registry contracts,
+-- all owned by operator/admin on their own home participant) -- built once by one of
+-- 'Playground.Prepare''s four `prepare*` scripts and threaded through
+-- 'Playground.Ops.TransferOutInput'/'PreapproveDepositInput'/'ReceiveVaaInput'/
+-- 'PublishMessageInput''s new @remote@ field.
+--
+-- One shared shape (a superset of Optional fields) covers every entrypoint's needs, rather than
+-- one bespoke record per entrypoint -- deliberately, per the plan's §4 "generalized" note: this
+-- is what lets the Go CLI treat a RemoteSeam as an opaque JSON value it never has to construct
+-- or destructure field-by-field. It flows verbatim from a `prepare*` script's stdout straight
+-- into a submit script's stdin (Go reads it as a raw JSON blob -- see
+-- cmd/ntt-playground/remote.go), so adding a field here never requires a Go-side change.
+data RemoteSeam = RemoteSeam with
+    mgrCid         : Optional (ContractId NttManager)
+    mgr            : Optional NttManager
+    emCid          : Optional (ContractId Emitter)
+    em             : Optional Emitter
+    csCid          : Optional (ContractId CoreState)
+    tokenCid       : Optional (ContractId NttToken)
+    registryCid    : Optional AnyContractId
+    replayNodeCid  : Optional (ContractId ReplayNode)
+    preapprovalCid : Optional (ContractId DepositPreapproval)
+    disclosed      : [DisclosedContractIn]
+  deriving (Eq, Show)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,9 @@ type preapproveDepositInput struct {
 	Admin     string `json:"admin"`
 	TokenKind string `json:"tokenKind"`
 	User      string `json:"user"`
+	// Remote carries a pre-fetched Playground.Prepare:preparePreapprove RemoteSeam, as raw
+	// JSON -- see transferOutInput.Remote's doc comment (transfer.go).
+	Remote json.RawMessage `json:"remote"`
 }
 
 type preapproveDepositOutput struct {
@@ -55,7 +59,21 @@ func newPreapproveCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// preapprove is a recipient-authorized opt-in, so it routes to the user's own
+			// participant (plan §3).
+			actorRole := s.UserParticipants[userHint]
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, "Playground.Prepare:preparePreapprove", func(templates []string) any {
+				return preparePreapproveInput{
+					Admin:             d.Admin,
+					TokenKind:         d.TokenKind,
+					DiscloseTemplates: templates,
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("preapprove: prepare remote disclosure: %w", err)
+			}
+
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, actorRole)
 			if err != nil {
 				return err
 			}
@@ -67,6 +85,7 @@ func newPreapproveCmd(a *app) *cobra.Command {
 				Admin:     d.Admin,
 				TokenKind: d.TokenKind,
 				User:      userParty,
+				Remote:    remoteSeam,
 			}, &out); err != nil {
 				return err
 			}
@@ -109,7 +128,8 @@ func newPreapproveRevokeCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// revoke, like preapprove, routes to the user's own participant (plan §3).
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, s.UserParticipants[userHint])
 			if err != nil {
 				return err
 			}

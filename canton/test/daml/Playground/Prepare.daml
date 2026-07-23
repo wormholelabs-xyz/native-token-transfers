@@ -1,0 +1,198 @@
+-- | Read-only "prepare" scripts (phase 5 of the participant-split redesign, plan §4/§7 step 5
+-- at .claude/tasks/e2e-separate-participants.md): the resolver half of each of
+-- 'Playground.Ops''s cross-participant-capable entrypoints (transferOut/preapproveDeposit/
+-- receiveVaa/publishMessage), split out to run standalone AS the data-owning parties
+-- (operator/admin) on THEIR OWN home participant, producing a 'Playground.Disclose.RemoteSeam'
+-- the Go CLI hands back to the corresponding submit-side entrypoint running on the ACTOR's
+-- participant.
+--
+-- Every `prepare*` entrypoint here does exactly what its Playground.Ops counterpart's resolver
+-- half already does (same Playground.Types/Playground.Ops resolvers, called the same way) --
+-- this module changes WHO calls them and WHERE, never the resolution logic itself. The only
+-- new behavior is the disclosure gate ('gated'): a resolved contract's disclosure is included
+-- in the output only when its qualified template name is in the caller-supplied
+-- @discloseTemplates@ list (the CLI's --topology-config `disclose` entries) -- enforced HERE,
+-- on the fetch side, so nothing is ever over-disclosed by construction. mgrCid/mgr/emCid/em/
+-- csCid/registryCid/tokenCid/replayNodeCid/preapprovalCid are always populated when resolved
+-- (the actor-side pure computations -- e.g. transferOut's peer lookup -- need the real data
+-- regardless of what is disclosed); only the @disclosed@ list itself is gated.
+module Playground.Prepare where
+
+import Daml.Script hiding (AnyContractId)
+import DA.Optional (fromSome)
+import Wormhole.Core.VAA (parseVAA)
+import Test.TestReplay (coveringDisclosure)
+
+import Playground.Disclose (RemoteSeam (..), DisclosedContractIn (..))
+import Playground.Types
+import Playground.Ops (resolveTokenSeam, resolvePreapproval)
+
+----------------------------------------------------------------------
+-- shared helpers
+----------------------------------------------------------------------
+
+-- | Convert a genuine 'Disclosure' (from 'queryDisclosure') into the Go-facing wire shape,
+-- tagging it with the STATICALLY KNOWN qualified template name of the contract it was resolved
+-- for -- every call site below always knows this by construction (e.g. 'resolveManager' always
+-- resolves a 'Wormhole.Ntt.Manager:NttManager'), so there is no need to introspect
+-- 'Disclosure''s opaque 'TemplateTypeRep' at runtime.
+toDisclosedContractIn : Text -> Disclosure -> DisclosedContractIn
+toDisclosedContractIn templateId d = DisclosedContractIn with
+  templateId
+  contractId = d.contractId
+  blob = d.blob
+
+-- | Include @d@'s disclosure in the output only when @templateId@ is in @allowed@ (the
+-- caller's --topology-config `disclose` allow-list) -- the config-driven gate.
+gated : [Text] -> Text -> Disclosure -> [DisclosedContractIn]
+gated allowed templateId d
+  | templateId `elem` allowed = [toDisclosedContractIn templateId d]
+  | otherwise = []
+
+-- | The qualified template name(s) 'resolveTokenSeam' discloses for @kind@, in the same order
+-- as the '[Disclosure]' it returns -- mirrors 'Playground.Ops:resolveTokenSeam' exactly (one
+-- entry for the token hook itself, plus a second for its underlying mock factory where one
+-- exists).
+tokenDiscloseNames : TokenKind -> [Text]
+tokenDiscloseNames kind = case kind of
+  MockAdminSigned   -> ["Playground.MockToken:MockToken"]
+  Cip56BurnMintMock -> ["Wormhole.Ntt.TokenCip56:Cip56BurnMintToken", "Test.TestNtt:MockBurnMintFactory"]
+  Cip56CustodyMock  -> ["Wormhole.Ntt.TokenCip56:Cip56CustodyToken", "Test.TestNtt:MockTransferFactory"]
+  Cip56Custody      -> ["Wormhole.Ntt.TokenCip56:Cip56CustodyToken"]
+
+emptyRemoteSeam : RemoteSeam
+emptyRemoteSeam = RemoteSeam with
+  mgrCid = None; mgr = None; emCid = None; em = None; csCid = None
+  tokenCid = None; registryCid = None; replayNodeCid = None; preapprovalCid = None
+  disclosed = []
+
+----------------------------------------------------------------------
+-- prepareTransferOut (Playground.Ops:transferOut's resolver half)
+----------------------------------------------------------------------
+
+data PrepareTransferOutInput = PrepareTransferOutInput with
+    operator          : Party
+    managerId         : Int
+    admin             : Party
+    tokenKind         : Text
+    discloseTemplates : [Text]
+  deriving (Eq, Show)
+
+prepareTransferOut : PrepareTransferOutInput -> Script RemoteSeam
+prepareTransferOut input = do
+  (mgrCid, mgr) <- resolveManager input.operator input.managerId
+  (emCid, em) <- resolveEmitter input.admin mgr.transceiverEmitterId
+  csCid <- resolveCoreState input.operator
+  (_, registryCid, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
+
+  dMgr <- fromSome <$> queryDisclosure input.admin mgrCid
+  dEmitter <- fromSome <$> queryDisclosure input.admin emCid
+  dCs <- fromSome <$> queryDisclosure input.operator csCid
+
+  let allowed = input.discloseTemplates
+      tokenNames = tokenDiscloseNames (parseTokenKind input.tokenKind)
+      disclosed =
+        gated allowed "Wormhole.Ntt.Manager:NttManager" dMgr
+        <> gated allowed "Wormhole.Core.State:Emitter" dEmitter
+        <> gated allowed "Wormhole.Core.State:CoreState" dCs
+        <> concat (zipWith (gated allowed) tokenNames dTokens)
+
+  pure emptyRemoteSeam with
+    mgrCid = Some mgrCid
+    mgr = Some mgr
+    emCid = Some emCid
+    em = Some em
+    csCid = Some csCid
+    registryCid
+    disclosed
+
+----------------------------------------------------------------------
+-- preparePreapprove (Playground.Ops:preapproveDeposit's resolver half)
+----------------------------------------------------------------------
+
+data PreparePreapproveInput = PreparePreapproveInput with
+    admin             : Party
+    tokenKind         : Text
+    discloseTemplates : [Text]
+  deriving (Eq, Show)
+
+preparePreapprove : PreparePreapproveInput -> Script RemoteSeam
+preparePreapprove input = do
+  let kind = parseTokenKind input.tokenKind
+  (tokenCid, _registryCid, dTokens) <- resolveTokenSeam input.admin kind
+
+  let allowed = input.discloseTemplates
+      tokenNames = tokenDiscloseNames kind
+      disclosed = concat (zipWith (gated allowed) tokenNames dTokens)
+
+  pure emptyRemoteSeam with
+    tokenCid = Some tokenCid
+    disclosed
+
+----------------------------------------------------------------------
+-- prepareReceive (Playground.Ops:receiveVaa's resolver half)
+----------------------------------------------------------------------
+
+data PrepareReceiveInput = PrepareReceiveInput with
+    operator          : Party
+    managerId         : Int
+    admin             : Party
+    tokenKind         : Text
+    recipient         : Party
+    vaaBytes          : Text
+    discloseTemplates : [Text]
+  deriving (Eq, Show)
+
+prepareReceive : PrepareReceiveInput -> Script RemoteSeam
+prepareReceive input = do
+  let kind = parseTokenKind input.tokenKind
+  (mgrCid, _mgr) <- resolveManager input.operator input.managerId
+  csCid <- resolveCoreState input.operator
+  let digest = (parseVAA input.vaaBytes).hash
+  (nodeCid, nodeDisc) <- coveringDisclosure input.operator input.admin digest
+  dMgr <- fromSome <$> queryDisclosure input.operator mgrCid
+  dCs <- fromSome <$> queryDisclosure input.operator csCid
+  (_, registryCid, dTokens) <- resolveTokenSeam input.admin kind
+  (preCid, dPre) <- resolvePreapproval input.admin kind input.recipient
+
+  let allowed = input.discloseTemplates
+      tokenNames = tokenDiscloseNames kind
+      disclosed =
+        gated allowed "Wormhole.Ntt.Manager:NttManager" dMgr
+        <> gated allowed "Wormhole.Core.State:CoreState" dCs
+        <> gated allowed "Wormhole.Core.Replay:ReplayNode" nodeDisc
+        <> concat (zipWith (gated allowed) tokenNames dTokens)
+        <> concatMap (gated allowed "Wormhole.Ntt.TokenCip56:Cip56DepositPreapproval") dPre
+
+  pure emptyRemoteSeam with
+    mgrCid = Some mgrCid
+    csCid = Some csCid
+    registryCid
+    replayNodeCid = Some nodeCid
+    preapprovalCid = preCid
+    disclosed
+
+----------------------------------------------------------------------
+-- preparePublish (Playground.Ops:publishMessage's resolver half)
+----------------------------------------------------------------------
+
+data PreparePublishInput = PreparePublishInput with
+    operator          : Party
+    emitterId         : Int
+    discloseTemplates : [Text]
+  deriving (Eq, Show)
+
+preparePublish : PreparePublishInput -> Script RemoteSeam
+preparePublish input = do
+  (emCid, em) <- resolveEmitter input.operator input.emitterId
+  csCid <- resolveCoreState input.operator
+  dCs <- fromSome <$> queryDisclosure input.operator csCid
+
+  let allowed = input.discloseTemplates
+      disclosed = gated allowed "Wormhole.Core.State:CoreState" dCs
+
+  pure emptyRemoteSeam with
+    emCid = Some emCid
+    em = Some em
+    csCid = Some csCid
+    disclosed

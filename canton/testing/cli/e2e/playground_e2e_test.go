@@ -222,17 +222,22 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	var guardianKeyHex string
+	var initOut string
 	t.Run("init with a fresh 1/1 guardian", func(t *testing.T) {
 		priv, err := crypto.GenerateKey()
 		require.NoError(t, err)
 		guardianKeyHex = hex.EncodeToString(crypto.FromECDSA(priv))
 
-		out := h.mustRun(t, "init", "--guardian-key", guardianKeyHex)
+		initOut = h.mustRun(t, "init", "--guardian-key", guardianKeyHex)
+		out := initOut
 
-		// Stable verbose markers only (messages may evolve): a party allocation and the
-		// genesis script invocation must both have been narrated.
+		// Stable verbose markers only (messages may evolve): a party allocation and both
+		// genesis script invocations (propose on operator's participant, accept on
+		// guardianGovernance's participant -- phase 4's propose/accept split, plan §5.1)
+		// must have been narrated.
 		require.Contains(t, out, "[v] allocated party")
-		require.Contains(t, out, "[v] script Playground.Init:initPlayground")
+		require.Contains(t, out, "[v] script Playground.Init:proposeGenesis")
+		require.Contains(t, out, "[v] script Playground.Init:acceptGenesis")
 
 		s := h.loadState(t)
 		require.Equal(t, guardianKeyHex, s.Guardian.PrivateKeyHex)
@@ -349,7 +354,11 @@ func TestPlaygroundE2E(t *testing.T) {
 	})
 
 	t.Run("outbound transfer recomputes the message and signs it", func(t *testing.T) {
+		// Bob lives on his own participant (plan §2/§3); transferOut's prepare step needs the
+		// NttManager/CoreState/Emitter/MockToken disclosures from topology-localnet.json to
+		// fetch and attach the app-provider-owned contracts across participants (plan §7 step 6).
 		out := h.mustRun(t, "transfer", "--deployment", "burnmint",
+			"--topology-config", testdataPath("topology-localnet.json"),
 			"--user", "Bob", "--chain", "2",
 			"--recipient-address", "00000000000000000000000000000000000000000000000000000000000000ee",
 			"--amount", "500000", "--sign")
@@ -474,7 +483,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		// The mock (admin-signed) kind needs no pre-approval: `preapprove` there is a ledger-
 		// surfaced no-op (PreApproveDeposit returns None), proving the CLI reads kind policy
 		// from the ledger rather than gating client-side.
-		out = h.mustRun(t, "preapprove", "--deployment", "burnmint", "--user", "Alice")
+		// Alice lives on her own participant (app-user); the mock kind's no-op preapprove still
+		// needs to fetch burnmint's admin-owned MockToken to report kind policy, so this leg
+		// needs the same topology config's MockToken disclosure entry.
+		out = h.mustRun(t, "preapprove", "--deployment", "burnmint", "--user", "Alice",
+			"--topology-config", testdataPath("topology-localnet.json"))
 		require.Contains(t, out, "preapproved=false")
 		require.Contains(t, out, "no pre-approval required")
 
@@ -1095,6 +1108,142 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		out := h.mustRun(t, "network", "status")
 		require.Contains(t, out, "localnet: service=", "status should report the running compose services")
+	})
+
+	// ----------------------------------------------------------------------
+	// Phase-1 placeholders for the participant-split redesign
+	// (.claude/tasks/e2e-separate-participants.md). These call the CLI exactly as it exists
+	// TODAY -- no new flags, no new output -- and pin today's behavior with a TODO(phase N)
+	// comment describing what the assertion becomes once that phase lands. Do not fabricate
+	// CLI flags that don't exist yet (--topology-config, etc.); see the plan's §6(c)/§7.
+	// ----------------------------------------------------------------------
+
+	t.Run("parties live on separate participants", func(t *testing.T) {
+		// Multi-participant routing is a localnet-only concept -- the sandbox profile
+		// degenerates every role to its single "default" participant (plan §2), so
+		// `party list` there would show every hint under one participant name, which this
+		// assertion isn't shaped to check.
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+
+		// Genesis (`init`, earlier in this suite) now crosses participants for real
+		// (Playground/Init.daml's propose/accept split, phase 4's redesign, plan §5.1):
+		// proposeGenesis submits as operator alone on operator's participant, acceptGenesis
+		// submits as guardianGovernance alone on guardianGovernance's participant. Both
+		// resolveParty (party.go) persists s.Users[hint] and s.UserParticipants[hint] as
+		// soon as each party is allocated, and init.go assigns state.Operator/
+		// GuardianGovernance/GuardianObserver from proposeGenesis's own output -- so
+		// s.Users["Operator"]/["GuardianGovernance"]/["GuardianObserver"] are exactly the
+		// party ids this subtest relies on. Bob is (re-)allocated explicitly so this subtest
+		// doesn't depend on an earlier transfer/receive subtest having reached him first.
+		h.mustRun(t, "party", "allocate", "--hint", "Bob")
+		s := h.loadState(t)
+		require.NotEmpty(t, s.Users["Operator"], "the operator hint should have been allocated during init")
+		require.NotEmpty(t, s.Users["GuardianGovernance"])
+		require.NotEmpty(t, s.Users["GuardianObserver"])
+		require.NotEmpty(t, s.Users["Bob"])
+
+		out := h.mustRun(t, "party", "list")
+		lines := strings.Split(stripVerbose(out), "\n")
+
+		// requireRoutedTo asserts that every "participant=... party=<party> ... isLocal=..."
+		// line in `party list`'s output agrees with wantParticipant: isLocal=true on that
+		// participant, isLocal=false everywhere else the same party shows up (it is
+		// topology-visible domain-wide; only its HOME participant actually hosts it).
+		requireRoutedTo := func(party, wantParticipant string) {
+			matched := 0
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				var gotParty, gotParticipant, gotIsLocal string
+				for _, f := range fields {
+					switch {
+					case strings.HasPrefix(f, "party="):
+						gotParty = strings.TrimPrefix(f, "party=")
+					case strings.HasPrefix(f, "participant="):
+						gotParticipant = strings.TrimPrefix(f, "participant=")
+					case strings.HasPrefix(f, "isLocal="):
+						gotIsLocal = strings.TrimPrefix(f, "isLocal=")
+					}
+				}
+				if gotParty != party {
+					continue
+				}
+				matched++
+				if gotParticipant == wantParticipant {
+					require.Equal(t, "true", gotIsLocal, "party %s on its home participant=%s should be local: %q", party, wantParticipant, line)
+				} else {
+					require.Equal(t, "false", gotIsLocal, "party %s under a foreign participant=%s should not be local: %q", party, gotParticipant, line)
+				}
+			}
+			require.Positivef(t, matched, "expected party %s to appear in `party list` output at all:\n%s", party, out)
+		}
+
+		requireRoutedTo(s.Users["Operator"], "app-provider")
+		requireRoutedTo(s.Users["GuardianGovernance"], "guardian-governance")
+		requireRoutedTo(s.Users["GuardianObserver"], "guardian-observer")
+		requireRoutedTo(s.Users["Bob"], "bob")
+	})
+
+	t.Run("cross-participant transfer fails without disclosure config", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+		// Bob lives on the "bob" participant (default partyHosting), a different participant
+		// than the deployment's operator/admin (app-provider) -- an empty `disclose` list
+		// (testdata/topology-empty.json) means Playground.Prepare:prepareTransferOut still
+		// resolves real cids/records on app-provider, but discloses NONE of them, so the
+		// submit-side Playground.Ops:transferOut (running on Bob's own participant) fails
+		// on-ledger: the NttManager/CoreState/Emitter it must exercise/read are genuinely
+		// invisible there.
+		out, err := h.run(t, "--topology-config", testdataPath("topology-empty.json"),
+			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "1")
+		require.Error(t, err, "a cross-participant transfer with no configured disclosures must fail on-ledger")
+		require.Contains(t, out, "CONTRACT_NOT_FOUND")
+	})
+
+	t.Run("disclosure config recovers the transfer", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+		// The SAME command as above, but with testdata/topology-localnet.json (the plan's §4
+		// example config: NttManager, CoreState, Emitter, MockToken -- everything burnmint's
+		// transferOut needs) succeeds.
+		out := h.mustRun(t, "--topology-config", testdataPath("topology-localnet.json"),
+			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "1")
+		require.Contains(t, out, "emitterChain=72")
+
+		// Removing one entry (CoreState) from a copy of that config and re-running the SAME
+		// command must fail again, proving per-template granularity -- the mechanism isn't an
+		// all-or-nothing switch.
+		out, err := h.run(t, "--topology-config", testdataPath("topology-missing-corestate.json"),
+			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "1")
+		require.Error(t, err, "removing one required disclosure entry must make the SAME command fail again")
+		require.Contains(t, out, "CONTRACT_NOT_FOUND")
+	})
+
+	t.Run("genesis requires both guardian participants", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
+		}
+
+		// `init` is a one-time genesis operation -- init.go always starts from a brand new,
+		// empty state.New() (deliberately: genesis has no prior identities to resume from),
+		// so resolveParty always attempts a FRESH party allocation for the Operator/
+		// GuardianGovernance/GuardianObserver hints regardless of what an earlier CLI
+		// invocation already persisted. Calling `init` a second time against the SAME live
+		// ledger therefore fails ("Party already exists") -- it is not meant to be re-run
+		// mid-suite. Rather than re-invoke it, this asserts against the SAME output the
+		// earlier "init with a fresh 1/1 guardian" subtest already captured: `init` narrates
+		// BOTH the propose script run (on operator's participant) and the accept script run
+		// (on guardian-governance's participant) -- proving genesis now needs two
+		// independent participant authorizations rather than one single-participant
+		// co-signed submit.
+		require.Contains(t, initOut, "[v] script Playground.Init:proposeGenesis")
+		require.Contains(t, initOut, "[v] script Playground.Init:acceptGenesis")
 	})
 
 	t.Run("network down", func(t *testing.T) {

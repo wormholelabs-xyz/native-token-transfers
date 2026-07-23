@@ -36,6 +36,7 @@ import Test.TestNtt (mkHolding, MockBurnMintFactory, MockTransferFactory)
 import Test.TestReplay (coveringDisclosure)
 
 import Playground.Amulet (AmuletSeam, toDisclosure, amuletHoldings)
+import Playground.Disclose (RemoteSeam (..), toDisclosureByName, mkSeedDisclosure)
 import Playground.MockToken (MockToken)
 import Playground.Types
 
@@ -130,6 +131,11 @@ data TransferOutInput = TransferOutInput with
     -- and disclosures, resolved off-ledger by Go (internal/amulet.GetTransferFactory) for
     -- THIS call -- never cached across calls. 'None' for every other kind.
     amulet           : Optional AmuletSeam
+    -- 'None' when this submit runs on the same participant as the operator/admin (today's
+    -- unchanged fast path); 'Some' when the CLI ran 'Playground.Prepare:prepareTransferOut' on
+    -- the data-owning parties' own participant first (phase 5, plan §4) because @user@'s
+    -- participant differs from theirs.
+    remote           : Optional RemoteSeam
   deriving (Eq, Show)
 
 -- | Bit-exact recomputation of the published VAA payload -- what `guardian sign-vaa` needs.
@@ -209,9 +215,34 @@ resolvePreapproval admin kind recipient = case kind of
 
 transferOut : TransferOutInput -> Script TransferOutOutput
 transferOut input = do
-  (mgrCid, mgr) <- resolveManager input.operator input.managerId
-  (emCid, em) <- resolveEmitter input.admin mgr.transceiverEmitterId
-  csCid <- resolveCoreState input.operator
+  -- Resolve the manager/emitter/core-state cids + records, and gather the base disclosure set
+  -- the final submit needs. 'None' queries fresh, exactly as before phase 5 (the fast path that
+  -- keeps sandbox/same-participant flows unchanged); 'Some' takes a pre-fetched RemoteSeam
+  -- (Playground.Prepare:prepareTransferOut, run on the data owners' own participant) instead of
+  -- querying locally -- the actor's participant may not even be able to see operator/admin.
+  (mgrCid, mgr, emCid, em, csCid, registryCidDefault, dTokens, baseOpts) <- case input.remote of
+    None -> do
+      (mgrCid, mgr) <- resolveManager input.operator input.managerId
+      (emCid, em) <- resolveEmitter input.admin mgr.transceiverEmitterId
+      csCid <- resolveCoreState input.operator
+      dMgr <- fromSome <$> queryDisclosure input.admin mgrCid
+      dEmitter <- fromSome <$> queryDisclosure input.admin emCid
+      (_, registryCidDefault, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
+      dCs <- fromSome <$> queryDisclosure input.operator csCid
+      let baseOpts = actAs input.user <> disclose dMgr <> disclose dEmitter <> disclose dCs
+      pure (mgrCid, mgr, emCid, em, csCid, registryCidDefault, dTokens, baseOpts)
+    Some seam -> do
+      let mgrCid = fromSomeNote "playground: remote seam missing mgrCid" seam.mgrCid
+          mgr    = fromSomeNote "playground: remote seam missing mgr" seam.mgr
+          emCid  = fromSomeNote "playground: remote seam missing emCid" seam.emCid
+          em     = fromSomeNote "playground: remote seam missing em" seam.em
+          csCid  = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+      -- No existing contract of @user@'s own to queryDisclosure a seed FROM on this
+      -- participant -- create+fetch a throwaway one (Playground.Disclose.mkSeedDisclosure).
+      seed <- mkSeedDisclosure input.user
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+          baseOpts = foldl (\opts d -> opts <> disclose d) (actAs input.user) toDisc
+      pure (mgrCid, mgr, emCid, em, csCid, seam.registryCid, [], baseOpts)
 
   let peer = fromSomeNote ("playground: no peer for chain " <> show input.recipientChain)
                (Map.lookup input.recipientChain mgr.peers)
@@ -234,15 +265,12 @@ transferOut input = do
         transceiverPayload = ""
       recomputedPayload = encodeWormholeTransceiverMessage wm
 
-  dMgr <- fromSome <$> queryDisclosure input.admin mgrCid
-  dEmitter <- fromSome <$> queryDisclosure input.admin emCid
-  (_, registryCidDefault, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
-  dCs <- fromSome <$> queryDisclosure input.operator csCid
-
   -- Cip56Custody drives the real Amulet registry: the factory cid/choice-context/disclosures
   -- arrive fresh per call in input.amulet (resolveTokenSeam deliberately left registryCid =
   -- None for this kind -- there is no mock factory to fall back to). Every other kind is
-  -- byte-identical to before this feature landed.
+  -- byte-identical to before this feature landed. Cip56Custody senders never route through a
+  -- RemoteSeam in practice (they are always app-provider wallet users, plan §3), so dTokens is
+  -- only ever [] here in the (unreachable in practice) remote+Cip56Custody combination.
   (registryCid, extraArgs, inputHoldingCids, dSeam) <- case parseTokenKind input.tokenKind of
     Cip56Custody -> do
       let seam = fromSomeNote "playground: cip56-custody transferOut needs a resolved input.amulet seam" input.amulet
@@ -262,7 +290,6 @@ transferOut input = do
         abort "playground: the amulet seam must be None for a non-cip56-custody deployment"
       pure (registryCidDefault, emptyExtraArgs, input.inputHoldingCids, dTokens)
 
-  let baseOpts = actAs input.user <> disclose dMgr <> disclose dEmitter <> disclose dCs
   _ <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dSeam) do
     exerciseCmd mgrCid Transfer with
       user = input.user
@@ -324,6 +351,10 @@ data PublishMessageInput = PublishMessageInput with
     payload          : Text
     nonce            : Int
     consistencyLevel : Int
+    -- 'None' on the same-participant fast path; 'Some' when the CLI ran
+    -- 'Playground.Prepare:preparePublish' on the operator's own participant first (phase 5)
+    -- because the emitter's owner routes to a different participant.
+    remote           : Optional RemoteSeam
   deriving (Eq, Show)
 
 data PublishMessageOutput = PublishMessageOutput with
@@ -343,10 +374,20 @@ data PublishMessageOutput = PublishMessageOutput with
 -- playground's fee-0 assumption (same as 'transferOut').
 publishMessage : PublishMessageInput -> Script PublishMessageOutput
 publishMessage input = do
-  (emCid, em) <- resolveEmitter input.operator input.emitterId
-  csCid <- resolveCoreState input.operator
-  dCs <- fromSome <$> queryDisclosure input.operator csCid
-  msg <- submit (actAs input.owner <> disclose dCs) do
+  (emCid, em, csCid, submitOpts) <- case input.remote of
+    None -> do
+      (emCid, em) <- resolveEmitter input.operator input.emitterId
+      csCid <- resolveCoreState input.operator
+      dCs <- fromSome <$> queryDisclosure input.operator csCid
+      pure (emCid, em, csCid, actAs input.owner <> disclose dCs)
+    Some seam -> do
+      let emCid = fromSomeNote "playground: remote seam missing emCid" seam.emCid
+          em    = fromSomeNote "playground: remote seam missing em" seam.em
+          csCid = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+      seed <- mkSeedDisclosure input.owner
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+      pure (emCid, em, csCid, foldl (\opts d -> opts <> disclose d) (actAs input.owner) toDisc)
+  msg <- submit submitOpts do
     exerciseCmd emCid PublishMessage with
       nonce = input.nonce
       payload = normalizeHex input.payload
@@ -401,6 +442,10 @@ data ReceiveVaaInput = ReceiveVaaInput with
     recipient : Party
     vaaBytes  : Text
     pubKeys   : [(Int, Text)]
+    -- 'None' on the same-participant fast path; 'Some' when the CLI ran
+    -- 'Playground.Prepare:prepareReceive' on the operator's own participant first (phase 5) --
+    -- only relevant for an explicit '--executor' that routes off the default participant.
+    remote    : Optional RemoteSeam
   deriving (Eq, Show)
 
 data ReceiveVaaOutput = ReceiveVaaOutput with
@@ -417,24 +462,43 @@ receiveVaa input = do
   -- factory cid required" error from deep inside Cip56CustodyToken.mintOrUnlockImpl.
   when (parseTokenKind input.tokenKind == Cip56Custody) $
     abort "playground: cip56-custody receive/unlock not supported by the playground"
-  (mgrCid, _mgr) <- resolveManager input.operator input.managerId
-  csCid <- resolveCoreState input.operator
-  let digest = (parseVAA input.vaaBytes).hash
-  (nodeCid, nodeDisc) <- coveringDisclosure input.operator input.admin digest
-  dMgr <- fromSome <$> queryDisclosure input.operator mgrCid
-  dCs <- fromSome <$> queryDisclosure input.operator csCid
-  -- The nested MintOrUnlock reaches the token hook AND its admin-signed registry factory;
-  -- disclose both (as transferOut does for the outbound leg) so a non-admin executor can
-  -- resolve them. Receive is executor-only: the recipient is passive. For an owner-signed
-  -- kind its authority arrives through a standing DepositPreapproval, resolved and disclosed
-  -- here; if the recipient has not opted in, pass None and let the on-ledger mint gate abort.
   let kind = parseTokenKind input.tokenKind
-  (_, registryCid, dTokens) <- resolveTokenSeam input.admin kind
-  (preCid, dPre) <- resolvePreapproval input.admin kind input.recipient
 
-  let baseOpts = actAs input.executor
-                   <> disclose dMgr <> disclose dCs <> disclose nodeDisc
-  ntt <- submit (foldl (\opts d -> opts <> disclose d) baseOpts (dTokens <> dPre)) do
+  -- See transferOut's identical None/Some split: 'None' resolves everything fresh (unchanged
+  -- fast path); 'Some' takes a pre-fetched RemoteSeam (Playground.Prepare:prepareReceive, run
+  -- on the operator's/admin's own participant) instead -- relevant only when an explicit
+  -- '--executor' routes this submit off the default participant.
+  (mgrCid, csCid, nodeCid, registryCid, preCid, submitOpts) <- case input.remote of
+    None -> do
+      (mgrCid, _mgr) <- resolveManager input.operator input.managerId
+      csCid <- resolveCoreState input.operator
+      let digest = (parseVAA input.vaaBytes).hash
+      (nodeCid, nodeDisc) <- coveringDisclosure input.operator input.admin digest
+      dMgr <- fromSome <$> queryDisclosure input.operator mgrCid
+      dCs <- fromSome <$> queryDisclosure input.operator csCid
+      -- The nested MintOrUnlock reaches the token hook AND its admin-signed registry factory;
+      -- disclose both (as transferOut does for the outbound leg) so a non-admin executor can
+      -- resolve them. Receive is executor-only: the recipient is passive. For an owner-signed
+      -- kind its authority arrives through a standing DepositPreapproval, resolved and
+      -- disclosed here; if the recipient has not opted in, pass None and let the on-ledger
+      -- mint gate abort.
+      (_, registryCid, dTokens) <- resolveTokenSeam input.admin kind
+      (preCid, dPre) <- resolvePreapproval input.admin kind input.recipient
+      let baseOpts = actAs input.executor <> disclose dMgr <> disclose dCs <> disclose nodeDisc
+          submitOpts = foldl (\opts d -> opts <> disclose d) baseOpts (dTokens <> dPre)
+      pure (mgrCid, csCid, nodeCid, registryCid, preCid, submitOpts)
+    Some seam -> do
+      let mgrCid  = fromSomeNote "playground: remote seam missing mgrCid" seam.mgrCid
+          csCid   = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+          nodeCid = fromSomeNote "playground: remote seam missing replayNodeCid" seam.replayNodeCid
+          registryCid = seam.registryCid
+          preCid  = seam.preapprovalCid
+      seed <- mkSeedDisclosure input.executor
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+          submitOpts = foldl (\opts d -> opts <> disclose d) (actAs input.executor) toDisc
+      pure (mgrCid, csCid, nodeCid, registryCid, preCid, submitOpts)
+
+  ntt <- submit submitOpts do
     exerciseCmd mgrCid Receive with
       executor = input.executor
       coreStateCid = csCid
@@ -460,6 +524,9 @@ data PreapproveDepositInput = PreapproveDepositInput with
     admin     : Party  -- the deployment's token admin (co-signatory of the pre-approval)
     tokenKind : Text   -- selects the token disclosure (see resolveTokenSeam)
     user      : Party  -- the recipient opting in
+    -- 'None' on the same-participant fast path; 'Some' when the CLI ran
+    -- 'Playground.Prepare:preparePreapprove' on the admin's own participant first (phase 5).
+    remote    : Optional RemoteSeam
   deriving (Eq, Show)
 
 data PreapproveDepositOutput = PreapproveDepositOutput with
@@ -475,9 +542,16 @@ data PreapproveDepositOutput = PreapproveDepositOutput with
 -- command error.
 preapproveDeposit : PreapproveDepositInput -> Script PreapproveDepositOutput
 preapproveDeposit input = do
-  (tokenCid, _registryCid, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
-  let baseOpts = actAs input.user
-  mCid <- submit (foldl (\opts d -> opts <> disclose d) baseOpts dTokens) do
+  (tokenCid, submitOpts) <- case input.remote of
+    None -> do
+      (tokenCid, _registryCid, dTokens) <- resolveTokenSeam input.admin (parseTokenKind input.tokenKind)
+      pure (tokenCid, foldl (\opts d -> opts <> disclose d) (actAs input.user) dTokens)
+    Some seam -> do
+      let tokenCid = fromSomeNote "playground: remote seam missing tokenCid" seam.tokenCid
+      seed <- mkSeedDisclosure input.user
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+      pure (tokenCid, foldl (\opts d -> opts <> disclose d) (actAs input.user) toDisc)
+  mCid <- submit submitOpts do
     exerciseCmd tokenCid PreApproveDeposit with user = input.user
   pure PreapproveDepositOutput with preapproved = isSome mCid
 
