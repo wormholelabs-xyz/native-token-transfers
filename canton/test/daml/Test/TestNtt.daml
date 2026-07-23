@@ -221,6 +221,12 @@ discloseTransferFactory gg = do
 b32 : Text -> Bytes32
 b32 = leftPadTo 32
 
+-- | The placeholder Wormhole chain id the fixtures use for this Canton
+-- deployment (the fixture NTT payload's @recipientChain@ is 72). A real
+-- deployment uses its assigned id.
+cantonChainId : Int
+cantonChainId = 72
+
 -- | Assert that a submission failed with a message containing @needle@.
 expectAbort : Text -> Either SubmitError a -> Script ()
 expectAbort needle res = case res of
@@ -355,6 +361,7 @@ deploy operator gg admin config = do
     exerciseCmd govCid RegisterManager with
       namespace = admin
       admin
+      chainId = cantonChainId
       transceiverEmitterCid = emitterCid
       instrumentId
       instrumentNonce = 0
@@ -404,6 +411,7 @@ testBurnMintRegistrationRequiresBoundInstrument = do
     exerciseCmd govCid RegisterManager with
       namespace = admin
       admin
+      chainId = cantonChainId
       transceiverEmitterCid = emitterCid
       instrumentId = InstrumentId with admin = gg, id = "NTT"
       instrumentNonce = 0
@@ -431,6 +439,7 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
       exerciseCmd govCid RegisterManager with
         namespace = mallory
         admin = mallory
+        chainId = cantonChainId
         transceiverEmitterCid = emitterCid
         instrumentId = d.instrumentId
         instrumentNonce = nonce
@@ -455,6 +464,7 @@ testRegistrationBounds = do
     exerciseCmd govCid RegisterManager with
       namespace = admin
       admin
+      chainId = cantonChainId
       transceiverEmitterCid = emitterCid
       instrumentId = InstrumentId with admin = outsider, id = nttInstrumentIdFor admin 0
       instrumentNonce = 0
@@ -467,6 +477,7 @@ testRegistrationBounds = do
     exerciseCmd govCid RegisterManager with
       namespace = admin
       admin
+      chainId = cantonChainId
       transceiverEmitterCid = emitterCid
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
@@ -481,6 +492,7 @@ testRegistrationBounds = do
     exerciseCmd govCid RegisterManager with
       namespace = admin
       admin
+      chainId = cantonChainId
       transceiverEmitterCid = emitterCid
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
@@ -488,6 +500,55 @@ testRegistrationBounds = do
       tokenDecimals = 8
       factory = BurnMintFactoryCid (coerceContractId emitterCid)
   expectAbort "factory type does not match" res
+
+  -- The deployment's own chain id must be a positive uint16.
+  res <- trySubmit (actAs admin <> disclose govDisc) do
+    exerciseCmd govCid RegisterManager with
+      namespace = admin
+      admin
+      chainId = 0
+      transceiverEmitterCid = emitterCid
+      instrumentId = bridgedInstrument gg
+      instrumentNonce = 0
+      tokenConfig = LockUnlock
+      tokenDecimals = 8
+      factory = TransferFactoryCid (coerceContractId emitterCid)
+  expectAbort "chainId must be a positive uint16" res
+
+-- | 'SetPeer' rejects an out-of-range chain id, the deployment's own chain id
+-- (INV-021: a peer must not be on the manager's own chain), and zero
+-- addresses. Only the trusted admin can set peers, so these guards catch
+-- misconfiguration rather than an attack.
+testSetPeerGuards : Script ()
+testSetPeerGuards = do
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "SetPeerAdmin"
+  d <- deploy operator gg admin LockUnlock
+  let goodPeer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+
+  res <- trySubmit admin do
+    exerciseCmd d.mgrCid SetPeer with chainId = 70000, peer = goodPeer
+  expectAbort "positive uint16" res
+
+  res <- trySubmit admin do
+    exerciseCmd d.mgrCid SetPeer with chainId = cantonChainId, peer = goodPeer
+  expectAbort "own chain" res
+
+  res <- trySubmit admin do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "", transceiverAddress = b32 "cc", decimals = 8
+  expectAbort "manager address must be non-zero" res
+
+  res <- trySubmit admin do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 0
+  expectAbort "peer decimals must be a positive uint8" res
+
+  -- A well-formed peer on another chain is accepted.
+  _ <- submit admin do exerciseCmd d.mgrCid SetPeer with chainId = 2, peer = goodPeer
+  pure ()
 
 ----------------------------------------------------------------------
 -- The locked ledger
@@ -530,7 +591,7 @@ sendScaffold operator gg admin config csId = do
   mgrCid <- submit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   csDisc <- fromSome <$> queryDisclosure operator csId
   factoryDisc <- case config of
     BurnMint -> discloseBurnMintFactory gg
@@ -626,6 +687,93 @@ testTransferLockAccounting = do
       h.amount === 0.015
       ledger2.custodyHoldingCid === Some (toInterfaceContractId @Holding cid)
     _ -> abort ("expected one merged custody holding, got: " <> show custody2)
+
+-- | A send to a peer whose token has fewer decimals than the amount carries is
+-- trimmed to the peer's decimals, and any leftover dust is rejected up front so
+-- the amount locked here always equals the amount the peer will release. A
+-- round amount the peer can represent goes through. (Token decimals 8, peer
+-- decimals 3.)
+testTransferTrimsToPeerDecimals : Script ()
+testTransferTrimsToPeerDecimals = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "DustAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  mgrCid <- submit alice do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 5
+      peer = Peer with managerAddress = b32 "b5", transceiverAddress = b32 "c5", decimals = 3
+  let d' = d with mgrCid
+      sendTo chainId rawAmount holding =
+        exerciseCmd d'.mgrCid Transfer with
+          user = alice
+          transceiverEmitterCid = d'.emitterCid
+          coreStateCid = csId
+          ledgerCid = d'.ledgerCid
+          recipientChain = chainId
+          recipientAddress = b32 "ee"
+          sourceToken = b32 "dd"
+          rawAmount
+          nonce = 0
+          consistencyLevel = 0
+          inputHoldingCids = [holding]
+          feeAllocation = None
+          extraArgs = emptyExtraArgs
+
+  -- 0.00158434 at 8 decimals cannot be represented at 3 decimals: rejected.
+  dustHolding <- mkHolding gg alice d.instrumentId 0.00158434
+  res <- trySubmitWithDiscs alice discs do sendTo 5 158434 dustHolding
+  expectAbort "dust the peer cannot represent" res
+
+  -- 0.001 is representable at 3 decimals: locked, and the ledger is credited
+  -- by exactly that amount.
+  roundHolding <- mkHolding gg alice d.instrumentId 0.001
+  _ <- submitWithDiscs alice discs do sendTo 5 100000 roundHolding
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.001
+
+-- | Pausing halts outbound sends and lifting the pause restores them; config
+-- (here, SetPaused itself) keeps working while paused.
+testPauseHaltsSend : Script ()
+testPauseHaltsSend = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "PauseAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  holding <- mkHolding gg alice d.instrumentId 0.01
+
+  pausedMgr <- submit alice do exerciseCmd d.mgrCid SetPaused with newPaused = True
+  let dP = d with mgrCid = pausedMgr
+  res <- trySubmitWithDiscs alice discs do sendTransfer alice dP csId [holding]
+  expectAbort "deployment is paused" res
+
+  liveMgr <- submit alice do exerciseCmd dP.mgrCid SetPaused with newPaused = False
+  let dL = dP with mgrCid = liveMgr
+  _ <- submitWithDiscs alice discs do sendTransfer alice dL csId [holding]
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.balance === 0.01
+
+-- | Pausing also halts inbound release: the pause check runs before any VAA
+-- verification, so a paused deployment rejects an otherwise-valid relay.
+testPauseHaltsRelease : Script ()
+testPauseHaltsRelease = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PauseRelAdmin"
+  recipient <- allocateParty "PauseRelRecipient"
+  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  pausedMgr <- submit admin do exerciseCmd mgrCid SetPaused with newPaused = True
+  (nodeCid, _) <- coveringDisclosure operator admin nttTransferDigest
+
+  res <- trySubmit (actAs operator) do
+    exerciseCmd pausedMgr Release with
+      executor = operator
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      vaaBytes = nttTransferVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      recipient
+      ledgerCid = fromSome ledgerCid
+      inputHoldingCids = []
+      extraArgs = emptyExtraArgs
+  expectAbort "deployment is paused" res
 
 -- | Anyone can merge custody fragments back into one pot and repoint the
 -- ledger's hint: the repair path for stale hints and explicit-input releases.
@@ -971,11 +1119,11 @@ testGgAdminnedOps = do
   submitMustFail alice do
     exerciseCmd mgrCid SetPeer with
       chainId = 3
-      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1"
+      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1", decimals = 8
   _ <- submit gg do
     exerciseCmd mgrCid SetPeer with
       chainId = 3
-      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1"
+      peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1", decimals = 8
   pure ()
 
 -- | The propose-accept handoff: the current admin leaves a standing
@@ -1178,7 +1326,7 @@ testNttSend = do
   _ <- submit alice do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   [(mgrCid, _)] <- query @NttManager operator
   let d' = d with mgrCid
 
@@ -1252,7 +1400,7 @@ testNttTransferByDifferentUser = do
   mgrCid <- submit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   (mgrCid, _) <- submit (actAs admin <> actAs gg) do
     exerciseCmd mgrCid TransferAdmin with
       newAdmin = gg
@@ -1308,7 +1456,7 @@ testNttTransferRequiresUserAuthority = do
   mgrCid <- submit admin do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   let doTransfer = exerciseCmd mgrCid Transfer with
         user = bob
         transceiverEmitterCid = d.emitterCid
@@ -1350,7 +1498,15 @@ nttTransferDigest = (parseVAA nttTransferVAA).hash
 setupFixedManager
   : Party -> Party -> Party -> NttTokenConfig
   -> Script (ContractId NttManager, NttFactory, Optional (ContractId LockedLedger))
-setupFixedManager operator gg admin config = do
+setupFixedManager operator gg admin config =
+  setupFixedManagerOn operator gg admin config cantonChainId
+
+-- | 'setupFixedManager' with an explicit local chain id, for the inbound
+-- destination-chain check.
+setupFixedManagerOn
+  : Party -> Party -> Party -> NttTokenConfig -> Int
+  -> Script (ContractId NttManager, NttFactory, Optional (ContractId LockedLedger))
+setupFixedManagerOn operator gg admin config chainId = do
   let instrumentId = bridgedInstrument gg
   factory <- case config of
     BurnMint -> do
@@ -1365,6 +1521,7 @@ setupFixedManager operator gg admin config = do
       namespace = admin
       admin
       guardianGovernance = gg
+      chainId
       managerId = 999
       managerAddress = b32 "aa"
       transceiverEmitterId = 999
@@ -1373,10 +1530,11 @@ setupFixedManager operator gg admin config = do
       tokenDecimals = 8
       peers = Map.empty
       factory
+      paused = False
   mgrCid <- submit admin do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc"
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
   ledgerCid <- case config of
     LockUnlock -> Some <$> submit (actAs operator <> actAs admin <> actAs gg) do
       createCmd LockedLedger with
@@ -1419,6 +1577,37 @@ testReceiveByExecutorRecipientMismatchFails = do
       inputHoldingCids = []
       extraArgs = emptyExtraArgs
   expectAbort "recipient does not match" res
+
+-- | Inbound enforces the destination chain: the VAA's NativeTokenTransfer
+-- carries @recipientChain = 72@, so a deployment whose own chain id is not 72
+-- rejects it with "not destined for this chain" (INV-019 inbound half). The
+-- check sits after the peer/manager checks and before the recipient binding,
+-- so a wrong chain id fails regardless of the recipient.
+testReceiveWrongChainRejected : Script ()
+testReceiveWrongChainRejected = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "WrongChainAdmin"
+  relayer <- allocateParty "WrongChainRelayer"
+  recipient <- allocateParty "WrongChainRecipient"
+  -- Same fixed deployment, but its own chain id is 99, not the fixture's 72.
+  (mgrCid, _, ledgerCid) <- setupFixedManagerOn operator gg admin LockUnlock 99
+  (nodeCid, nodeDisc) <- coveringDisclosure operator admin nttTransferDigest
+  dMgr <- fromSome <$> queryDisclosure operator mgrCid
+  dCs  <- fromSome <$> queryDisclosure operator csId
+  dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
+
+  res <- trySubmitWithDiscs relayer [dMgr, dCs, nodeDisc, dLedger] do
+    exerciseCmd mgrCid Release with
+      executor = relayer
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      vaaBytes = nttTransferVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      recipient
+      ledgerCid = fromSome ledgerCid
+      inputHoldingCids = []
+      extraArgs = emptyExtraArgs
+  expectAbort "not destined for this chain" res
 
 -- | The guardian trust root is pinned to the committed @guardianGovernance@,
 -- not the operator. A compromised operator could co-sign a forged 'CoreState'

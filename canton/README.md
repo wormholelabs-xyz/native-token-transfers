@@ -175,7 +175,8 @@ checks, in order:
    signature (`TestNtt:testReceivePinsGuardianGovernance`).
 2. Verify the VAA's guardian signatures and consume its digest, atomically,
    with the core `VerifyAndConsumeVAA` (the per-consumer replay trie, scoped
-   to `admin`, so each deployment consumes a VAA at most once).
+   to the stable `namespace`, so each deployment consumes a VAA at most once
+   and the scope is unaffected by an admin handoff).
 3. Check the VAA emitter is the configured peer transceiver for its source
    chain, and that the nested message's source and recipient manager addresses
    match the peer and this deployment.
@@ -321,16 +322,17 @@ assumed. It cannot be enforced by lookup (no contract keys, so "nobody has
 claimed this instrument yet" is not an on-ledger-checkable fact), and a
 claimed-instruments set on the root would grow without bound. Instead the
 binding lives in the instrument's identity: `RegisterManager` requires
-`instrumentId.id == nttInstrumentIdFor admin nonce`, a hash commitment to the
-registering admin. A CIP-0056 instrument id is fixed at creation, so whoever
-creates the instrument decides, once and forever, which admin can bind a
-manager to it. This is the role EVM NTT's `setMinter` pointer plays, attached
-to the immutable instrument identity instead of a mutable token field
+`instrumentId.id == nttInstrumentIdFor namespace nonce`, a hash commitment to
+the registering namespace. A CIP-0056 instrument id is fixed at creation, so
+whoever creates the instrument decides, once and forever, which namespace can
+bind a manager to it. This is the role EVM NTT's `setMinter` pointer plays,
+attached to the immutable instrument identity instead of a mutable token field
 (`TestNtt:testBurnMintInstrumentIsExclusiveToItsAdmin`). Two consequences: the
-admin party must be durable (the binding cannot be re-pointed; recovery from a
-lost admin party means a new instrument and a holder migration), and the
-instrument must be created with the binding already in its id, which is a
-deployment-setup requirement documented rather than enforced here.
+namespace party must be durable (the binding cannot be re-pointed; recovery
+from a lost namespace party means a new instrument and a holder migration) —
+which it already is, since the namespace is the deployment's stable identity —
+and the instrument must be created with the binding already in its id, which is
+a deployment-setup requirement documented rather than enforced here.
 
 **Synchronous settlement.** Lock and release require the registry's
 `TransferFactory_Transfer` to settle in the same transaction; a `Pending` or

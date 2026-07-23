@@ -136,17 +136,29 @@ requireBurnMintFactory = \case
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
 -- | A peer NTT deployment on another chain: its manager address (the
--- @recipientManager@/@sourceManager@ in the transceiver message) and its
--- transceiver address (the emitter of inbound VAAs). Both 32 bytes.
+-- @recipientManager@/@sourceManager@ in the transceiver message), its
+-- transceiver address (the emitter of inbound VAAs, both 32 bytes), and the
+-- number of decimals of the peer's token. The decimals let an outbound
+-- transfer trim to the precision the peer can represent, so no dust is silently
+-- dropped when the far side rescales; this mirrors the peer @decimals@ the
+-- reference @setPeer@ stores.
 data Peer = Peer with
     managerAddress     : Bytes32
     transceiverAddress : Bytes32
+    decimals           : Int
   deriving (Eq, Show)
 
 normalizePeer : Peer -> Peer
-normalizePeer p = Peer with
+normalizePeer p = p with
     managerAddress = normalizeHex p.managerAddress
     transceiverAddress = normalizeHex p.transceiverAddress
+
+-- | Whether a 32-byte address is all zeros (the unset/sentinel address the
+-- reference @setPeer@ rejects).
+isZeroAddress : Bytes32 -> Bool
+isZeroAddress b =
+  normalizeHex (leftPadTo 32 b)
+    == "0000000000000000000000000000000000000000000000000000000000000000"
 
 -- | Domain-separation tag for NTT manager addresses.
 nttManagerAddressTag : Text
@@ -295,6 +307,8 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
     (wm.sourceManager == peer.managerAddress)
   let mm = decodeNttManagerMessage wm.managerPayload
       ntt = decodeNativeTokenTransfer mm.payload
+  assertMsg "ntt: transfer is not destined for this chain"
+    (ntt.recipientChain == mgr.chainId)
   assertMsg "ntt: recipient does not match VAA recipientAddress"
     (recipientAddressFor recipient == normalizeHex ntt.recipientAddress)
   pure ntt
@@ -305,6 +319,7 @@ template NttManager
     namespace            : Party           -- stable identity: address preimages, replay scope, emitter owner
     admin                : Party           -- operational role and lock/unlock custodian; transferable
     guardianGovernance   : Party           -- gg: mint authority and trust anchor
+    chainId              : Int             -- this deployment's own Wormhole chain id (uint16)
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
     managerAddress       : Bytes32         -- nttManagerAddressFor operator namespace managerId
     transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = namespace)
@@ -313,6 +328,7 @@ template NttManager
     tokenDecimals        : Int             -- the local token's decimals (0..10)
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
+    paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
   where
     -- See the module header for what each signature contributes. All four are
     -- inherited from the NttGovernance root at registration (namespace and
@@ -326,7 +342,31 @@ template NttManager
         chainId : Int
         peer    : Peer
       controller admin
-      do create this with peers = Map.insert chainId (normalizePeer peer) peers
+      do
+        assertMsg "ntt: peer chain id must be a positive uint16"
+          (chainId > 0 && chainId <= 65535)
+        assertMsg "ntt: peer chain id must not be this deployment's own chain"
+          (chainId /= this.chainId)
+        assertMsg "ntt: peer decimals must be a positive uint8"
+          (peer.decimals > 0 && peer.decimals <= 255)
+        assertMsg "ntt: peer manager address must be non-zero"
+          (not (isZeroAddress peer.managerAddress))
+        assertMsg "ntt: peer transceiver address must be non-zero"
+          (not (isZeroAddress peer.transceiverAddress))
+        create this with peers = Map.insert chainId (normalizePeer peer) peers
+
+    -- | Emergency halt. While @paused@, 'Transfer', 'Release', and 'Mint' all
+    -- abort; config choices ('SetPeer', 'SetFactory', 'TransferAdmin') keep
+    -- working, matching the reference, where pause blocks value movement but not
+    -- administration. Controlled by @admin@, so on a gg-adminned deployment
+    -- pausing is a governance action. (The reference additionally allows a
+    -- separate pauser role to pause but only the owner to unpause; a dedicated
+    -- pauser party could be added here the same way.)
+    choice SetPaused : ContractId NttManager
+      with
+        newPaused : Bool
+      controller admin
+      do create this with paused = newPaused
 
     -- | Repoint the committed registry factory. Needed only when the registry
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
@@ -436,11 +476,18 @@ template NttManager
         extraArgs             : ExtraArgs
       controller user
       do
+        assertMsg "ntt: deployment is paused" (not paused)
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
                      (Map.lookup recipientChain peers)
-            trimmed = trimAmount rawAmount tokenDecimals
+            trimmed = trimAmountTo rawAmount tokenDecimals peer.decimals
             amount = trimmedToDecimal trimmed
         assertMsg "ntt: transfer amount is zero after trimming" (amount > 0.0)
+        -- Reject dust the peer cannot represent: the trimmed amount must
+        -- rescale back to exactly what the user asked to send, so the amount
+        -- locked or burned here equals the amount the peer will release or
+        -- mint. Without this a low-decimals peer would silently drop precision.
+        assertMsg "ntt: transfer amount has dust the peer cannot represent"
+          (untrimAmount trimmed tokenDecimals == rawAmount)
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
           (transceiver.owner == namespace
@@ -553,6 +600,7 @@ template NttManager
         extraArgs        : ExtraArgs
       controller executor
       do
+        assertMsg "ntt: deployment is paused" (not paused)
         assertMsg "ntt: release is only for lock/unlock deployments"
           (tokenConfig == LockUnlock)
         ledger <- resolveLedger this ledgerCid
@@ -655,6 +703,7 @@ template NttManager
         extraArgs             : ExtraArgs
       controller executor
       do
+        assertMsg "ntt: deployment is paused" (not paused)
         assertMsg "ntt: mint is only for burn/mint deployments"
           (tokenConfig == BurnMint)
         ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid
