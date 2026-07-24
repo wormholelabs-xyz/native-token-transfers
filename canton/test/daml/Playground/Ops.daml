@@ -11,7 +11,9 @@
 -- deployment's transceiver 'Emitter' sequence *before* exercising 'Transfer' and recomputes
 -- the exact published payload with the same 'Wormhole.Ntt.Payload' encoders 'Transfer' uses
 -- internally -- bit-exact input for `guardian sign-vaa`, matching what a real off-ledger
--- watcher would have observed.
+-- watcher would have observed. The recompute trims via 'Wormhole.Ntt.Amount.trimAmountTo'
+-- rawAmount tokenDecimals peer.decimals -- peer-decimals-aware, matching 'Transfer''s own
+-- trim -- not the peer-decimals-blind 'trimAmount'.
 --
 -- ## Receive requires prior recipient opt-in, both modes
 --
@@ -36,7 +38,7 @@ import Wormhole.Core.Bytes (normalizeHex, leftPadTo, intToBytesN)
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
-import Wormhole.Ntt.Amount (trimAmount)
+import Wormhole.Ntt.Amount (trimAmountTo)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Deposit qualified as Deposit
 import Wormhole.Ntt.Manager hiding (resolveLedger)
@@ -83,6 +85,7 @@ data SetPeerInput = SetPeerInput with
     chain           : Int
     peerManager     : Text
     peerTransceiver : Text
+    decimals        : Int
   deriving (Eq, Show)
 
 data SetPeerOutput = SetPeerOutput with
@@ -95,11 +98,10 @@ setPeer input = do
   _ <- submit input.admin do
     exerciseCmd mgrCid SetPeer with
       chainId = input.chain
-      -- TODO(phase 1): thread decimals from SetPeerInput
       peer = Peer with
         managerAddress = input.peerManager
         transceiverAddress = input.peerTransceiver
-        decimals = 8
+        decimals = input.decimals
   pure SetPeerOutput with managerId = input.managerId
 
 ----------------------------------------------------------------------
@@ -336,7 +338,7 @@ transferOut input = do
   -- the module header; this is what `guardian sign-vaa` needs.
   let peer = fromSomeNote ("playground: no peer for chain " <> show input.recipientChain)
                (Map.lookup input.recipientChain mgr'.peers)
-      trimmed = trimAmount input.rawAmount mgr'.tokenDecimals
+      trimmed = trimAmountTo input.rawAmount mgr'.tokenDecimals peer.decimals
       ntt = NativeTokenTransfer with
         decimals = trimmed.decimals
         amount = trimmed.amount

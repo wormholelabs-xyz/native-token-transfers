@@ -73,9 +73,58 @@ func TestCmd_PeerSet_UnknownDeployment(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
 	seedStateFile(t, stateFile, state.New())
 	_, _, err := runPlayground(t, append(baseFlags(stateFile),
-		"peer", "set", "--deployment", "missing", "--chain", "2", "--manager", "aa", "--transceiver", "bb")...)
+		"peer", "set", "--deployment", "missing", "--chain", "2", "--manager", "aa", "--transceiver", "bb", "--decimals", "8")...)
 	if err == nil || !contains(err.Error(), `unknown deployment "missing"`) {
 		t.Fatalf("expected an unknown-deployment error, got %v", err)
+	}
+}
+
+// TestCmd_PeerSet_MissingDecimalsFlag pins --decimals as required: every OTHER peer-set flag
+// present but --decimals absent must still fail as a required-flag error, before any script
+// call reaches the runner (the fakeRunner records zero calls).
+func TestCmd_PeerSet_MissingDecimalsFlag(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.Deployments["lockunlock"] = state.Deployment{Name: "lockunlock", ManagerID: 1, Admin: "admin::abc", Peers: map[int]state.Peer{}}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"peer", "set", "--deployment", "lockunlock", "--chain", "2", "--manager", "aa", "--transceiver", "bb")...)
+	if err == nil {
+		t.Fatalf("expected a required-flag error for missing --decimals")
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("expected no script call when --decimals is missing, got %v", r.scriptNames())
+	}
+}
+
+// TestCmd_PeerSet_WiresDecimalsIntoSetPeerInput pins that --decimals flows through
+// setPeerOnLedger into Playground.Ops:setPeer's own input, not just persisted state.
+func TestCmd_PeerSet_WiresDecimalsIntoSetPeerInput(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.Deployments["burnmint"] = state.Deployment{Name: "burnmint", ManagerID: 1, Admin: "admin::abc", Peers: map[int]state.Peer{}}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"peer", "set", "--deployment", "burnmint", "--chain", "9",
+		"--manager", "aa", "--transceiver", "bb", "--decimals", "3")...)
+	if err != nil {
+		t.Fatalf("peer set: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected exactly one script call, got %d: %v", len(r.calls), r.scriptNames())
+	}
+	input, ok := r.calls[0].Input.(setPeerInput)
+	if !ok {
+		t.Fatalf("setPeer input type mismatch: %T", r.calls[0].Input)
+	}
+	if input.Decimals != 3 {
+		t.Fatalf("expected Decimals=3 in setPeerInput, got %+v", input)
 	}
 }
 
@@ -431,7 +480,8 @@ func TestCmd_Deploy_CallsDeployRegistryAsGgThenDeployNttAsAdmin(t *testing.T) {
 	seedStateFile(t, stateFile, s)
 
 	cfgPath := filepath.Join(t.TempDir(), "deploy.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"name":"wiringdeploy","mode":"burn-mint","tokenKind":"mock","decimals":8}`), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"name":"wiringdeploy","mode":"burn-mint","tokenKind":"mock","decimals":8,`+
+		`"peers":[{"chain":9,"manager":"aa","transceiver":"bb","decimals":8}]}`), 0o600); err != nil {
 		t.Fatalf("write deploy config: %v", err)
 	}
 
@@ -442,6 +492,7 @@ func TestCmd_Deploy_CallsDeployRegistryAsGgThenDeployNttAsAdmin(t *testing.T) {
 		"managerId": 0, "managerAddress": "aa", "transceiverAddress": "bb",
 		"admin": "wiringdeploy-admin::abc", "instrumentAdmin": "gg::abc", "instrumentId": "wormhole-ntt:xyz",
 	}
+	r.outputs["Playground.Ops:setPeer"] = map[string]any{"managerId": 0}
 
 	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile), "deploy", "--config", cfgPath)...)
 	if err != nil {
@@ -479,6 +530,25 @@ func TestCmd_Deploy_CallsDeployRegistryAsGgThenDeployNttAsAdmin(t *testing.T) {
 	}
 	if nttInput.Admin != "wiringdeploy-admin::abc" {
 		t.Fatalf("deployNtt should be admin-routed, got %+v", nttInput)
+	}
+
+	// The config's peer (chain 9, decimals 8) must be forwarded to Playground.Ops:setPeer at
+	// deploy time -- not just persisted to the state file.
+	peerIdx := -1
+	for i, n := range names {
+		if n == "Playground.Ops:setPeer" {
+			peerIdx = i
+		}
+	}
+	if peerIdx == -1 {
+		t.Fatalf("expected deploy to call Playground.Ops:setPeer for the config's peer, got %v", names)
+	}
+	peerInput, ok := r.calls[peerIdx].Input.(setPeerInput)
+	if !ok {
+		t.Fatalf("setPeer input type mismatch: %T", r.calls[peerIdx].Input)
+	}
+	if peerInput.Decimals != 8 {
+		t.Fatalf("expected the config's peer decimals (8) forwarded to setPeer, got %+v", peerInput)
 	}
 }
 

@@ -32,6 +32,7 @@ type peerStatus struct {
 	Chain              int    `json:"chain"`
 	ManagerAddress     string `json:"managerAddress"`
 	TransceiverAddress string `json:"transceiverAddress"`
+	Decimals           int    `json:"decimals"`
 }
 
 type deploymentStatus struct {

@@ -20,10 +20,13 @@ import (
 const DefaultFileName = "playground.state.json"
 
 // Peer is a configured remote-chain peer for one deployment (Wormhole.Ntt.Manager.Peer,
-// mirrored 1:1: both fields are 32-byte hex).
+// mirrored 1:1: the addresses are 32-byte hex, Decimals is the peer token's decimals (1-255)
+// -- outbound transfers to this peer trim to min(8, tokenDecimals, Decimals) and reject
+// amounts that don't round-trip, see Wormhole.Ntt.Amount.trimAmountTo).
 type Peer struct {
 	ManagerAddress     string `json:"managerAddress"`
 	TransceiverAddress string `json:"transceiverAddress"`
+	Decimals           int    `json:"decimals"`
 }
 
 // Deployment is one NTT deployment's stable identity: everything `transfer`/`receive`/

@@ -708,7 +708,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// still passes, and the VAA's own recipientManager is unaffected -- gate 4 still
 		// passes -- so gate 5 is the only thing left to fire).
 		out = h.mustRun(t, "peer", "set", "--deployment", "lockunlock", "--chain", "2",
-			"--manager", addr32("dd"), "--transceiver", addr32("cc"))
+			"--manager", addr32("dd"), "--transceiver", addr32("cc"), "--decimals", "8")
 		require.Contains(t, out, "peer set: lockunlock chain=2")
 
 		out, err = h.run(t, "receive", "--deployment", "lockunlock",
@@ -718,7 +718,7 @@ func TestPlaygroundE2E(t *testing.T) {
 
 		// Restore the peer to its original manager.
 		out = h.mustRun(t, "peer", "set", "--deployment", "lockunlock", "--chain", "2",
-			"--manager", addr32("bb"), "--transceiver", addr32("cc"))
+			"--manager", addr32("bb"), "--transceiver", addr32("cc"), "--decimals", "8")
 		require.Contains(t, out, "peer set: lockunlock chain=2")
 
 		// Control: the SAME VAA now succeeds -- proving the restore took effect on-ledger and
@@ -907,7 +907,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		// file `sign-transfer` reads) and the receive side (the on-ledger Manager.Receive
 		// checks) -- additive, so no restore is needed afterward.
 		out := h.mustRun(t, "peer", "set", "--deployment", "lockunlock", "--chain", "3",
-			"--manager", addr32("dd"), "--transceiver", addr32("ee"))
+			"--manager", addr32("dd"), "--transceiver", addr32("ee"), "--decimals", "8")
 		require.Contains(t, out, "peer set: lockunlock chain=3")
 
 		s := h.loadState(t)
@@ -917,6 +917,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.True(t, ok, "chain 3 should have been persisted to the state file")
 		require.Equal(t, addr32("dd"), p.ManagerAddress)
 		require.Equal(t, addr32("ee"), p.TransceiverAddress)
+		require.Equal(t, 8, p.Decimals)
 
 		// On-ledger read-back via Playground.Query:listContracts' peer listing (observe).
 		out = h.mustRun(t, "observe", "--deployment", "lockunlock")
@@ -925,6 +926,7 @@ func TestPlaygroundE2E(t *testing.T) {
 				Chain              int    `json:"chain"`
 				ManagerAddress     string `json:"managerAddress"`
 				TransceiverAddress string `json:"transceiverAddress"`
+				Decimals           int    `json:"decimals"`
 			} `json:"peers"`
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
@@ -935,6 +937,7 @@ func TestPlaygroundE2E(t *testing.T) {
 				foundChain3 = true
 				require.Equal(t, addr32("dd"), peer.ManagerAddress)
 				require.Equal(t, addr32("ee"), peer.TransceiverAddress)
+				require.Equal(t, 8, peer.Decimals)
 			}
 		}
 		require.True(t, foundChain3, "the on-ledger peer listing should include the newly configured chain 3")
@@ -951,6 +954,57 @@ func TestPlaygroundE2E(t *testing.T) {
 			"--vaa", vaaHex, "--recipient", "Carol", "--pubkey", pubKeyHex)
 		require.Contains(t, out, "recipientChain=72")
 		require.Contains(t, out, "amount=777")
+	})
+
+	t.Run("low-decimals peer: outbound trims to the peer's precision and dust is rejected", func(t *testing.T) {
+		// A peer registered at decimals=3 (vs burnmint's tokenDecimals=8) exercises the
+		// peer-decimals-aware recompute end to end: Playground.Ops:setPeer threads
+		// SetPeerInput.decimals through to Wormhole.Ntt.Manager.Peer, and transferOut's
+		// recompute uses trimAmountTo rawAmount tokenDecimals peer.decimals -- every peer up
+		// to now (chains 2/3) was registered at decimals=8, same as tokenDecimals, so the
+		// peer-decimals-blind trimAmount would have produced the same result and couldn't
+		// tell the two recomputes apart.
+		out := h.mustRun(t, "peer", "set", "--deployment", "burnmint", "--chain", "9",
+			"--manager", addr32("aa"), "--transceiver", addr32("ab"), "--decimals", "3")
+		require.Contains(t, out, "peer set: burnmint chain=9")
+
+		// Dust: 123456 raw units at 8 decimals is 0.00123456; trimmed to the peer's 3
+		// decimals that becomes 0.001 (123456 / 10^5 == 1), which does not round-trip back to
+		// 123456 -- Wormhole.Ntt.Manager.Transfer's dust assert rejects it before any value
+		// moves.
+		out, err := h.run(t, "transfer", "--deployment", "burnmint",
+			"--user", "Bob", "--chain", "9",
+			"--recipient-address", addr32("ee"), "--amount", "123456")
+		require.Error(t, err, "an amount with dust the peer's decimals cannot represent must be rejected")
+		require.Contains(t, out, "dust the peer cannot represent")
+
+		// Exact multiple: 500000 raw units at 8 decimals trims cleanly to 5 at 3 decimals
+		// (500000 / 10^(8-3) == 5, no remainder) -- succeeds, and the CLI's recomputed
+		// payload decodes to exactly the peer-decimals-aware trim (the transfer would itself
+		// have aborted on the on-ledger dust assert had the on-ledger trim disagreed with
+		// this recompute -- see Playground.Ops.daml's module header).
+		out = h.mustRun(t, "transfer", "--deployment", "burnmint",
+			"--user", "Bob", "--chain", "9",
+			"--recipient-address", addr32("ee"), "--amount", "500000")
+		payloadHex := extractField(t, out, "payload")
+		wtm := wire.DecodeWormholeTransceiverMessage(mustHex(t, payloadHex))
+		mm := wire.DecodeNttManagerMessage(wtm.ManagerPayload)
+		ntt := wire.DecodeNativeTokenTransfer(mm.Payload)
+		require.Equal(t, uint8(3), ntt.Decimals)
+		require.Equal(t, uint64(5), ntt.Amount)
+
+		// Same-chain rejection: a peer cannot be registered at this deployment's own chain id
+		// (72, cantonChainId).
+		out, err = h.run(t, "peer", "set", "--deployment", "burnmint", "--chain", "72",
+			"--manager", addr32("ac"), "--transceiver", addr32("ad"), "--decimals", "8")
+		require.Error(t, err, "a peer at this deployment's own chain id must be rejected")
+		require.Contains(t, out, "must not be this deployment's own chain")
+
+		// Zero-address rejection: an all-zero peer manager address is never a valid peer.
+		out, err = h.run(t, "peer", "set", "--deployment", "burnmint", "--chain", "9",
+			"--manager", strings.Repeat("00", 32), "--transceiver", addr32("ab"), "--decimals", "3")
+		require.Error(t, err, "an all-zero peer manager address must be rejected")
+		require.Contains(t, out, "peer manager address must be non-zero")
 	})
 
 	// The only subtest driving REAL Canton Coin (Amulet) rather than a local mock registry:

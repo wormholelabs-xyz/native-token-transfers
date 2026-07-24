@@ -75,7 +75,7 @@ func TestLoad_PopulatedFieldsRoundTrip(t *testing.T) {
 				"mode": "burn-mint",
 				"tokenKind": "mock",
 				"tokenDecimals": 6,
-				"peers": {"2": {"managerAddress": "pm", "transceiverAddress": "pt"}}
+				"peers": {"2": {"managerAddress": "pm", "transceiverAddress": "pt", "decimals": 5}}
 			}
 		},
 		"emitters": {"e1": {"emitterId": 5, "address": "addr", "owner": "owner::abc"}},
@@ -100,7 +100,7 @@ func TestLoad_PopulatedFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("deployment mismatch: ok=%v %+v", ok, d)
 	}
 	p, ok := d.Peer(2)
-	if !ok || p.ManagerAddress != "pm" || p.TransceiverAddress != "pt" {
+	if !ok || p.ManagerAddress != "pm" || p.TransceiverAddress != "pt" || p.Decimals != 5 {
 		t.Fatalf("peer mismatch: ok=%v %+v", ok, p)
 	}
 	e, ok := s.Emitter("e1")
