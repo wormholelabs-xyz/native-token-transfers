@@ -1,0 +1,485 @@
+-- | Does an attacker-supplied token factory inherit gg's authority when the
+-- manager calls into it?
+--
+-- NTT registration is permissionless and commits a caller-supplied factory
+-- that the gg-signed manager later exercises. The worry: because the manager
+-- is signed by gg, a malicious factory implementation might wield gg's
+-- authority inside its own choice body — to create contracts signed by gg,
+-- or to spend gg's holdings.
+--
+-- The Daml authorization model says otherwise. The authority available
+-- inside a choice body is @signatories(contract) UNION controllers(choice)@;
+-- the caller's authority is used only to authorize the exercise itself and
+-- does NOT flow down into the callee's body. So a factory signed by the
+-- attacker can wield gg's authority only if gg is a CONTROLLER of the
+-- factory choice.
+--
+-- The proxies here reproduce the manager faithfully: a gg-signed contract
+-- (standing in for the gg-signed NttManager) exercises an attacker-authored
+-- factory whose implementation tries to create a contract signed by
+-- @expectedAdmin@ (gg, exactly the value the manager passes). gg's authority
+-- reaches the proxy's choice body through the proxy's signatory, precisely
+-- as it reaches the manager's Transfer/Mint bodies — the submission is NOT
+-- made as gg. If gg is not a controller of the factory choice, the forged
+-- create is rejected. The unit-level probes establish where the leak is and
+-- which shapes are safe; the tests at the end drive the real
+-- 'RegisterManager' and 'NttManager.Transfer' paths.
+module Test.TestFactoryAuthority where
+
+import Daml.Script
+import DA.Optional (fromSome)
+import DA.Time (hours, addRelTime)
+
+import Splice.Api.Token.HoldingV1 (Holding, HoldingView (..), InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.BurnMintV1
+import Splice.Api.Token.TransferInstructionV1
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.State (Emitter)
+import Wormhole.Ntt.Governance (NttGovernance, RegisterManager (..))
+import Wormhole.Ntt.Manager qualified as M
+import Test.TestNtt (nttSetup, coreRegistries, cantonChainId, b32)
+
+-- | A contract signed by @victim@. If an attacker-authored factory can create
+-- one of these, it wielded @victim@'s (gg's) authority.
+template ForgedWithGgAuthority
+  with
+    victim : Party
+    thief  : Party
+  where
+    signatory victim
+    observer thief
+
+-- | An attacker's TransferFactory. Signed by the attacker (@thief@) alone,
+-- but its interface view reports @viewAdmin@ as the admin — the view is
+-- implementation-controlled and may lie. On transfer it tries to forge a
+-- contract signed by the @expectedAdmin@ the caller passed (gg).
+template EvilTransferFactory
+  with
+    thief        : Party
+    viewAdmin    : Party
+    attemptForge : Bool
+  where
+    signatory thief
+
+    interface instance TransferFactory for EvilTransferFactory where
+      view = TransferFactoryView with admin = viewAdmin, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        if attemptForge
+          then do
+            _ <- create ForgedWithGgAuthority with victim = arg.expectedAdmin, thief
+            pure ()
+          else pure ()
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = []
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = viewAdmin, meta = emptyMetadata
+
+-- | An attacker's BurnMintFactory, same idea, with a possibly-lying view admin.
+template EvilBurnMintFactory
+  with
+    thief        : Party
+    viewAdmin    : Party
+    attemptForge : Bool
+  where
+    signatory thief
+
+    interface instance BurnMintFactory for EvilBurnMintFactory where
+      view = BurnMintFactoryView with admin = viewAdmin, meta = emptyMetadata
+
+      burnMintFactory_burnMintImpl _self arg = do
+        if attemptForge
+          then do
+            _ <- create ForgedWithGgAuthority with victim = arg.expectedAdmin, thief
+            pure ()
+          else pure ()
+        pure BurnMintFactory_BurnMintResult with outputCids = []
+
+      burnMintFactory_publicFetchImpl _self _arg =
+        pure BurnMintFactoryView with admin = viewAdmin, meta = emptyMetadata
+
+-- | Exercise a burn/mint factory with the argument shape the manager uses: a
+-- placeholder instrument administered by @expectedAdmin@, no holdings, no
+-- outputs. Just enough to reach the factory's choice body — all that matters
+-- in these probes is which authority crosses into it.
+probeBurnMint : ContractId BurnMintFactory -> Party -> [Party] -> Update ()
+probeBurnMint factoryCid expectedAdmin extraActors = do
+  _ <- exercise factoryCid BurnMintFactory_BurnMint with
+    expectedAdmin
+    instrumentId = InstrumentId with admin = expectedAdmin, id = "X"
+    inputHoldingCids = []
+    outputs = []
+    extraActors
+    extraArgs = emptyExtraArgs
+  pure ()
+
+-- | Stands in for the gg-signed NttManager: a contract signed by gg whose
+-- choice body (controlled by an ordinary caller) exercises a factory, exactly
+-- as the manager's Transfer/Mint bodies do. gg's authority is present in the
+-- body via the signatory, not via the submission.
+template ManagerProxy
+  with
+    gg     : Party
+    caller : Party
+  where
+    signatory gg
+    observer caller
+
+    nonconsuming choice RunTransferFactory : ()
+      with
+        factoryCid    : ContractId TransferFactory
+        expectedAdmin : Party
+      controller caller
+      do
+        now <- getTime
+        _ <- exercise factoryCid TransferFactory_Transfer with
+          expectedAdmin
+          transfer = Transfer with
+            sender = caller
+            receiver = caller
+            amount = 1.0
+            instrumentId = InstrumentId with admin = expectedAdmin, id = "X"
+            requestedAt = now
+            executeBefore = now `addRelTime` hours 24
+            inputHoldingCids = []
+            meta = emptyMetadata
+          extraArgs = emptyExtraArgs
+        pure ()
+
+    nonconsuming choice RunBurnMintFactory : ()
+      with
+        factoryCid    : ContractId BurnMintFactory
+        expectedAdmin : Party
+      controller caller
+      do probeBurnMint factoryCid expectedAdmin [caller]
+
+-- | An admin-owned deployment: the manager is signed by @admin@ (the mint
+-- authority) and NOT by gg. This models a burn/mint deployment that does not
+-- lend gg's authority — the mint runs on the admin's own authority, the way
+-- lock/unlock custody starts admin-owned. gg is absent from the choice body,
+-- so there is nothing for a lying factory view to capture.
+template AdminOwnedProxy
+  with
+    admin  : Party
+    caller : Party
+  where
+    signatory admin
+    observer caller
+
+    nonconsuming choice RunBurnMintFactoryAO : ()
+      with
+        factoryCid    : ContractId BurnMintFactory
+        expectedAdmin : Party
+      controller caller
+      do probeBurnMint factoryCid expectedAdmin [caller]
+
+-- | A privilege de-escalation proxy for the burn/mint operation: signed and
+-- controlled by the minter (the deployment's stable party) alone, never gg.
+-- Driving the factory THROUGH this contract resets the ambient authority to
+-- {minter} at the choice boundary, so a gg-signed manager can run a burn/mint
+-- without ever lending gg to the factory.
+template BurnMintDeescalationProxy
+  with
+    minter : Party
+  where
+    signatory minter
+
+    nonconsuming choice RunBurnMintDeescalated : ()
+      with
+        factoryCid    : ContractId BurnMintFactory
+        expectedAdmin : Party
+      controller minter
+      do probeBurnMint factoryCid expectedAdmin [minter]
+
+-- | Models the real manager once the replay trie forces gg to be a permanent
+-- signatory: signed by BOTH gg and admin. It runs burn/mint through the
+-- de-escalation proxy instead of exercising the factory directly.
+template ManagerWithGgAndAdmin
+  with
+    gg     : Party
+    admin  : Party
+    caller : Party
+  where
+    signatory gg, admin
+    observer caller
+
+    nonconsuming choice MintViaDeescalation : ()
+      with
+        factoryCid    : ContractId BurnMintFactory
+        expectedAdmin : Party
+      controller caller
+      do
+        deesc <- create BurnMintDeescalationProxy with minter = admin
+        _ <- exercise deesc RunBurnMintDeescalated with factoryCid, expectedAdmin
+        pure ()
+
+-- | The de-escalation mitigation, with gg PERMANENTLY on the manager. The
+-- manager routes burn/mint through an admin-signed proxy; the factory body
+-- then carries only {admin}, so a lying view.admin = gg controller cannot be
+-- satisfied and no gg-signed contract is forged. Contrast with
+-- testEvilBurnMintFactoryForgesGgContract, where the gg-signed manager drives
+-- the factory directly and leaks.
+testDeescalationProxyBlocksGgLeak : Script ()
+testDeescalationProxyBlocksGgLeak = do
+  gg <- allocateParty "GgD"
+  admin <- allocateParty "AdminD"
+  factorySigner <- allocateParty "FacD"
+  caller <- allocateParty "CallerD"
+  mgr <- submit (actAs gg <> actAs admin) do
+    createCmd ManagerWithGgAndAdmin with gg, admin, caller
+  factoryCid <- submit factorySigner do
+    createCmd EvilBurnMintFactory with thief = factorySigner, viewAdmin = gg, attemptForge = True
+  fdisc <- fromSome <$> queryDisclosure factorySigner factoryCid
+  submitMustFail (actAs caller <> disclose fdisc) do
+    exerciseCmd mgr MintViaDeescalation with
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      expectedAdmin = gg
+  forged <- query @ForgedWithGgAuthority gg
+  assertMsg "de-escalation proxy failed to firewall gg" (null forged)
+
+-- | And an honest admin-minted burn/mint still works through the proxy: the
+-- factory's view.admin = admin, which the proxy's {admin} body satisfies.
+testDeescalationProxyStillMints : Script ()
+testDeescalationProxyStillMints = do
+  gg <- allocateParty "GgD2"
+  admin <- allocateParty "AdminD2"
+  caller <- allocateParty "CallerD2"
+  mgr <- submit (actAs gg <> actAs admin) do
+    createCmd ManagerWithGgAndAdmin with gg, admin, caller
+  factoryCid <- submit admin do
+    createCmd EvilBurnMintFactory with thief = admin, viewAdmin = admin, attemptForge = False
+  fdisc <- fromSome <$> queryDisclosure admin factoryCid
+  submit (actAs caller <> disclose fdisc) do
+    exerciseCmd mgr MintViaDeescalation with
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      expectedAdmin = admin
+
+-- | The mitigation. When the burn/mint manager is NOT gg-signed, even a
+-- factory that lies (view.admin = gg) and is driven with expectedAdmin = gg
+-- cannot capture gg: the choice's gg controller can no longer be satisfied,
+-- so the call is rejected before the forge and no gg-signed contract appears.
+-- Contrast with testEvilBurnMintFactoryForgesGgContract, where the gg-signed
+-- proxy leaks.
+testAdminOwnedManagerCannotLeakGg : Script ()
+testAdminOwnedManagerCannotLeakGg = do
+  gg <- allocateParty "GgAO"
+  admin <- allocateParty "AdminAO"
+  factorySigner <- allocateParty "FactoryAO"
+  caller <- allocateParty "CallerAO"
+  proxy <- submit admin do createCmd AdminOwnedProxy with admin, caller
+  factoryCid <- submit factorySigner do
+    createCmd EvilBurnMintFactory with thief = factorySigner, viewAdmin = gg, attemptForge = True
+  fdisc <- fromSome <$> queryDisclosure factorySigner factoryCid
+  submitMustFail (actAs caller <> disclose fdisc) do
+    exerciseCmd proxy RunBurnMintFactoryAO with
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      expectedAdmin = gg
+  forged <- query @ForgedWithGgAuthority gg
+  assertMsg "gg leaked from a manager that was not gg-signed" (null forged)
+
+-- | And the admin-owned mint still works without gg: the admin drives its own
+-- factory (view.admin = admin) on its own authority.
+testAdminOwnedManagerMintsWithoutGg : Script ()
+testAdminOwnedManagerMintsWithoutGg = do
+  admin <- allocateParty "AdminAO2"
+  caller <- allocateParty "CallerAO2"
+  proxy <- submit admin do createCmd AdminOwnedProxy with admin, caller
+  factoryCid <- submit admin do
+    createCmd EvilBurnMintFactory with thief = admin, viewAdmin = admin, attemptForge = False
+  fdisc <- fromSome <$> queryDisclosure admin factoryCid
+  submit (actAs caller <> disclose fdisc) do
+    exerciseCmd proxy RunBurnMintFactoryAO with
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      expectedAdmin = admin
+
+-- | Control: the proxy can drive a benign (non-forging) attacker factory to
+-- completion, so any failure in the forging variant is the forge itself, not
+-- an incidental error in the call path.
+testEvilTransferFactoryBenignPathWorks : Script ()
+testEvilTransferFactoryBenignPathWorks = do
+  gg <- allocateParty "GgT"
+  thief <- allocateParty "ThiefT"
+  caller <- allocateParty "CallerT"
+  proxy <- submit (actAs gg <> actAs caller) do createCmd ManagerProxy with gg, caller
+  factoryCid <- submit thief do createCmd EvilTransferFactory with thief, viewAdmin = gg, attemptForge = False
+  fdisc <- fromSome <$> queryDisclosure thief factoryCid
+  submit (actAs caller <> disclose fdisc) do
+    exerciseCmd proxy RunTransferFactory with
+      factoryCid = toInterfaceContractId @TransferFactory factoryCid
+      expectedAdmin = gg
+
+-- | The attack: the attacker factory tries to create a gg-signed contract
+-- while driven by the gg-signed proxy. It must fail — gg's manager-signatory
+-- authority does not reach the factory body. The factory is disclosed to the
+-- caller (as a real submission would disclose the committed factory), so the
+-- call actually reaches the factory body; the only thing that can then fail
+-- is the forge itself. If this ever SUCCEEDS, gg's authority leaked and the
+-- submitMustFail turns into a loud test failure.
+testEvilTransferFactoryCannotForgeGgContract : Script ()
+testEvilTransferFactoryCannotForgeGgContract = do
+  gg <- allocateParty "GgT2"
+  thief <- allocateParty "ThiefT2"
+  caller <- allocateParty "CallerT2"
+  proxy <- submit (actAs gg <> actAs caller) do createCmd ManagerProxy with gg, caller
+  factoryCid <- submit thief do createCmd EvilTransferFactory with thief, viewAdmin = gg, attemptForge = True
+  fdisc <- fromSome <$> queryDisclosure thief factoryCid
+  submitMustFail (actAs caller <> disclose fdisc) do
+    exerciseCmd proxy RunTransferFactory with
+      factoryCid = toInterfaceContractId @TransferFactory factoryCid
+      expectedAdmin = gg
+  -- No gg-signed contract was forged.
+  forged <- query @ForgedWithGgAuthority gg
+  assertMsg "gg authority leaked into the transfer factory" (null forged)
+
+-- | Control for the burn/mint pair: the same call path with the forge
+-- disabled runs to completion, so the vulnerability test below measures the
+-- forge alone.
+testEvilBurnMintFactoryBenignPathWorks : Script ()
+testEvilBurnMintFactoryBenignPathWorks = do
+  gg <- allocateParty "GgB"
+  thief <- allocateParty "ThiefB"
+  caller <- allocateParty "CallerB"
+  proxy <- submit (actAs gg <> actAs caller) do createCmd ManagerProxy with gg, caller
+  factoryCid <- submit thief do createCmd EvilBurnMintFactory with thief, viewAdmin = gg, attemptForge = False
+  fdisc <- fromSome <$> queryDisclosure thief factoryCid
+  submit (actAs caller <> disclose fdisc) do
+    exerciseCmd proxy RunBurnMintFactory with
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      expectedAdmin = gg
+
+-- | THE VULNERABILITY. Unlike the transfer factory, an attacker's burn/mint
+-- factory CAN forge a gg-signed contract when a gg-signed contract exercises
+-- it directly: BurnMintFactory_BurnMint is controlled by the factory's view
+-- admin, which the implementation controls and can set to gg; the gg-signed
+-- caller satisfies that controller, and gg's authority is delegated into the
+-- attacker's choice body. This test passes when the forge SUCCEEDS — it
+-- documents the leak, not a safe outcome. It is why the manager never
+-- exercises the committed factory directly and burns through
+-- 'M.BurnMintMinterProxy' instead;
+-- testExternalMinterMaliciousFactoryFirewallsGg shows that de-escalation
+-- holding on the real burn path.
+testEvilBurnMintFactoryForgesGgContract : Script ()
+testEvilBurnMintFactoryForgesGgContract = do
+  gg <- allocateParty "GgB2"
+  thief <- allocateParty "ThiefB2"
+  caller <- allocateParty "CallerB2"
+  proxy <- submit (actAs gg <> actAs caller) do createCmd ManagerProxy with gg, caller
+  factoryCid <- submit thief do createCmd EvilBurnMintFactory with thief, viewAdmin = gg, attemptForge = True
+  fdisc <- fromSome <$> queryDisclosure thief factoryCid
+  submit (actAs caller <> disclose fdisc) do
+    exerciseCmd proxy RunBurnMintFactory with
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      expectedAdmin = gg
+  forged <- query @ForgedWithGgAuthority gg
+  assertMsg "expected the attacker's burn/mint factory to forge a gg-signed contract" (not (null forged))
+
+-- | The registration submission the end-to-end tests share: @admin@ registers
+-- a burn/mint deployment for @inst@, committing @factoryCid@ — an
+-- attacker-supplied factory, which is why these tests cannot use TestNtt's
+-- honest 'Test.TestNtt.deploy'. Returns the disclosures the submission needs
+-- and the command itself, so each test decides whether it must succeed or
+-- fail.
+registerBurnMint
+  : Party -> Party -> InstrumentId -> ContractId BurnMintFactory
+  -> Script ([Disclosure], Commands (ContractId M.NttManager, ContractId Emitter))
+registerBurnMint operator admin inst factoryCid = do
+  [(govCid, _)] <- query @NttGovernance operator
+  govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  let register = exerciseCmd govCid RegisterManager with
+        admin
+        chainId = cantonChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        instrumentId = inst
+        instrumentNonce = 0
+        tokenConfig = M.BurnMint
+        tokenDecimals = 8
+        factory = M.BurnMintFactoryCid factoryCid
+        coreStateCid = None
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+  pure ([govDisc, emRegDisc, rrRegDisc], (\(_, mgrCid, emitterCid, _) -> (mgrCid, emitterCid)) <$> register)
+
+-- | Through the real registration: an attacker cannot permissionlessly stand
+-- up a gg-minted deployment (instrument admin = gg), because 'RegisterManager'
+-- requires the instrument's admin to co-sign and the attacker cannot supply
+-- gg's authority. This closes the permissionless entry point the exploit
+-- relied on.
+testAttackerCannotRegisterGgMintedManager : Script ()
+testAttackerCannotRegisterGgMintedManager = do
+  (operator, gg, _) <- nttSetup
+  attacker <- allocateParty "AttackerGgMint"
+  evilFactory <- submit attacker do
+    createCmd EvilBurnMintFactory with thief = attacker, viewAdmin = gg, attemptForge = True
+  let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
+  (discs, register) <- registerBurnMint operator attacker inst
+    (toInterfaceContractId @BurnMintFactory evilFactory)
+  submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
+
+-- | A holding signed by its owner alone whose interface view lies about the
+-- instrument (claiming a gg-administered id). The manager's burn path reads
+-- only the view (owner, instrument, lock), never the signatories, so this
+-- passes its input checks — letting the attacker reach the committed factory
+-- with no genuine gg-issued holdings.
+template FakeHolding
+  with
+    owner      : Party
+    instrument : InstrumentId
+    amount     : Decimal
+  where
+    signatory owner
+    interface instance Holding for FakeHolding where
+      view = HoldingView with
+        owner
+        instrumentId = instrument
+        amount
+        lock = None
+        meta = emptyMetadata
+
+-- | The fix, end-to-end through the real manager. An external-minter
+-- deployment (minter = the registering party, not gg) commits a MALICIOUS
+-- factory whose view claims gg as admin, then drives a real burn. Because
+-- the outbound burn now routes through the minter-signed de-escalation proxy,
+-- gg never reaches the factory: the lying view.admin = gg controller cannot
+-- be satisfied, the burn aborts, and no gg-signed contract is forged.
+-- Contrast with testEvilBurnMintFactoryForgesGgContract, which forges one on
+-- this very path when driven directly.
+testExternalMinterMaliciousFactoryFirewallsGg : Script ()
+testExternalMinterMaliciousFactoryFirewallsGg = do
+  (operator, gg, csId) <- nttSetup
+  minter <- allocateParty "ExtMinter"   -- external minter and admin; also the attacker
+  evilFactory <- submit minter do
+    createCmd EvilBurnMintFactory with thief = minter, viewAdmin = gg, attemptForge = True
+  let inst = InstrumentId with admin = minter, id = M.nttInstrumentIdFor minter 0
+  (discs, register) <- registerBurnMint operator minter inst
+    (toInterfaceContractId @BurnMintFactory evilFactory)
+  (mgrCid, emitterCid) <- submit (actAs minter <> mconcat (map disclose discs)) register
+  mgrCid <- submit minter do
+    exerciseCmd mgrCid M.SetPeer with
+      chainId = 2
+      peer = M.Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+  fakeHolding <- submit minter do
+    createCmd FakeHolding with owner = minter, instrument = inst, amount = 1.0
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  submitMustFail (actAs minter <> disclose csDisc) do
+    exerciseCmd mgrCid M.Transfer with
+      user = minter
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      ledgerCid = None
+      recipientChain = 2
+      recipientAddress = b32 "ee"
+      sourceToken = b32 "dd"
+      rawAmount = 100000000
+      nonce = 0
+      consistencyLevel = 0
+      inputHoldingCids = [toInterfaceContractId @Holding fakeHolding]
+      feeAllocation = None
+      extraArgs = emptyExtraArgs
+  forged <- query @ForgedWithGgAuthority gg
+  assertMsg "external-minter de-escalation failed to firewall gg via the real manager" (null forged)

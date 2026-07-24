@@ -393,8 +393,13 @@ deploy operator gg admin config = do
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  -- Burn/mint registration is co-signed by the instrument's minter (here gg);
+  -- lock/unlock is admin-only.
+  let minterActAs = case config of
+        BurnMint -> actAs gg
+        LockUnlock -> mempty
   (_, mgrCid, emitterCid, ledgerCid) <-
-    submit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+    submit (actAs admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
       exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
@@ -484,7 +489,9 @@ testBurnMintRegistrationRequiresBoundInstrument = do
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
-  res <- trySubmit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+  -- gg (the instrument admin) co-signs; the id binding still rejects the
+  -- unbound instrument id.
+  res <- trySubmit (actAs admin <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
@@ -501,10 +508,11 @@ testBurnMintRegistrationRequiresBoundInstrument = do
   expectAbort "not bound to the registering admin" res
 
 -- | The exclusivity attack the binding exists to stop: mallory registers her
--- own manager for an instrument that alice already bridges (it is
--- gg-administered, so the admin check alone would pass), aiming to mint it
--- against VAAs from a peer she controls. The id is bound to alice, so
--- mallory's registration fails no matter what nonce she picks.
+-- own manager for an instrument that alice already bridges, aiming to mint it
+-- against VAAs from a peer she controls. Even with the instrument admin (gg)
+-- co-signing, the id is bound to alice, so mallory's registration fails no
+-- matter what nonce she picks — a second defense behind the required minter
+-- co-signature.
 testBurnMintInstrumentIsExclusiveToItsAdmin : Script ()
 testBurnMintInstrumentIsExclusiveToItsAdmin = do
   (operator, gg, _) <- nttSetup
@@ -515,7 +523,7 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
   forA_ [0, 1, 7] \nonce -> do
-    res <- trySubmit (actAs mallory <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+    res <- trySubmit (actAs mallory <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
       exerciseCmd govCid RegisterManager with
         admin = mallory
         chainId = cantonChainId
@@ -544,7 +552,10 @@ testRegistrationBounds = do
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
   let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc
 
-  res <- trySubmit (actAs admin <> discs) do
+  -- A burn/mint instrument's minter must co-sign registration (it lends its
+  -- mint authority). Here the external minter @outsider@ does not co-sign, so
+  -- the registration is unauthorized.
+  submitMustFail (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
@@ -558,7 +569,6 @@ testRegistrationBounds = do
       coreStateCid = None
       emitterFeeAllocation = None
       claimFeeAllocation = None
-  expectAbort "requires guardianGovernance to administer" res
 
   res <- trySubmit (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
@@ -1824,6 +1834,7 @@ setupFixedManagerOn operator gg admin config chainId = do
       peers = Map.empty
       factory
       paused = False
+      minter = None
   mgrCid <- submit admin do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
