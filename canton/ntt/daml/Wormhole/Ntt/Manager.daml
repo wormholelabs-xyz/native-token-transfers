@@ -370,6 +370,16 @@ template NttManager
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
+    factoryEpoch         : Int             -- monotonic vetting epoch: 0 at registration, bumped
+                                            -- by 'SetFactory'. '(managerAddress, factoryEpoch)'
+                                            -- uniquely names the committed factory the guardian
+                                            -- quorum vetted when it signed an
+                                            -- 'AcceptAdminTransferByVaa' governance VAA — manager
+                                            -- lineage is linear and only 'SetFactory' changes
+                                            -- @factory@, so the pair is a stable, deterministic
+                                            -- stand-in for a factory contract-id hash (which
+                                            -- Daml-LF 2.3 on this SDK cannot compute; there is no
+                                            -- 'contractIdToText').
   where
     -- See the module header for what each signature contributes. All three
     -- are inherited from the NttGovernance root at registration (admin from
@@ -421,7 +431,7 @@ template NttManager
       do
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig newFactory)
-        create this with factory = newFactory
+        create this with factory = newFactory, factoryEpoch = factoryEpoch + 1
 
     -- | Hand the operational role — and, for lock/unlock, the reserve it owns —
     -- to @newAdmin@. Both admins authorize: the old admin resigns, and the new
@@ -489,6 +499,107 @@ template NttManager
             Some <$> exercise lcid' SetAdmin with newAdmin
         mgrCid' <- create this with admin = newAdmin
         pure (mgrCid', ledgerCid')
+
+    -- | Governance-VAA-gated admin acceptance: any @executor@ permissionlessly
+    -- relays a guardian-signed 'Wormhole.Ntt.Payload.AcceptAdminToGovernance'
+    -- VAA against a standing 'AdminTransferProposal' (the current admin's
+    -- self-signed offer to @guardianGovernance@), completing the handoff with
+    -- no live @guardianGovernance@ signature. This is gg's ONLY opt-in path
+    -- meant for production use — gg's side of the handoff is inherited from
+    -- this manager's own signatories (see the module header), and the old
+    -- admin's side comes from the proposal's standing consent, so the whole
+    -- ceremony needs nobody's live signature but the relayer's (who carries no
+    -- authority of its own).
+    --
+    -- Order of checks, each failing closed before anything moves:
+    --
+    --   1. The proposal actually offers the role to gg, names this deployment,
+    --      and was made by the deployment's CURRENT admin (a stale proposal
+    --      from a since-replaced admin must not apply — mirrors
+    --      'AcceptAdminTransfer's own check, kept here too for an early,
+    --      specific error message before any VAA work runs).
+    --   2. The disclosed 'CoreState' is pinned to this deployment's own
+    --      guardian trust anchor and operator (mirrors 'verifyInboundTransfer';
+    --      a compromised operator co-signing a forged CoreState under a
+    --      throwaway gg must not pass).
+    --   3. The VAA verifies and its digest is consumed into gg's replay trie,
+    --      sub-scoped by this deployment's @namespace@ — governance and
+    --      transfer VAAs share one trie, so a governance VAA can never be
+    --      replayed as (or by) a transfer one.
+    --   4. Governance hardening, mirroring the core's own
+    --      'Wormhole.Core.State.SubmitGovernanceVAA': signed by the CURRENT
+    --      guardian set only (not merely an unexpired one — a superseded set's
+    --      governance action must not apply), and the standard emitter chain /
+    --      address checks.
+    --   5. The parsed action's chain, managerAddress, and factoryEpoch must
+    --      match this deployment exactly. @factoryEpoch@ is the real
+    --      TOCTOU pin: it names the exact committed factory the guardian
+    --      quorum vetted when it signed, so a hostile old admin cannot rotate
+    --      in a look-alike factory ('SetFactory' bumps the epoch) between the
+    --      quorum's vetting and this relay. @vettedFactory@, below, is
+    --      trivially satisfied by construction (it is checked against this
+    --      manager's own current @factory@) — the epoch is what actually binds
+    --      the factory the guardians saw.
+    --
+    -- @coreStateCid@ is read with a direct 'fetch' rather than a choice-read
+    -- like 'GetGuardianGovernance': 'CoreState' exposes no choice for
+    -- @governanceChainId@/@governanceContract@/@guardianSetIndex@, so there is
+    -- no read choice to call. The fetch is authorized without borrowing any
+    -- extra authority: 'CoreState' is co-signed by @operator@ and
+    -- @guardianGovernance@, and this choice's body already carries both
+    -- (inherited from THIS manager's own signatories, per the module header),
+    -- so 'fetch' here needs nothing beyond what the choice already has.
+    nonconsuming choice AcceptAdminTransferByVaa : (ContractId NttManager, Optional (ContractId LockedLedger))
+      with
+        executor      : Party
+        proposalCid   : ContractId AdminTransferProposal
+        coreStateCid  : ContractId CoreState
+        replayNodeCid : ContractId ReplayNode
+        vaaBytes      : Bytes
+        pubKeys       : [(Int, Bytes)]
+        ledgerCid     : Optional (ContractId LockedLedger)  -- required for lock/unlock
+        extraArgs     : ExtraArgs
+      controller executor
+      do
+        proposal <- fetch proposalCid
+        assertMsg "ntt: accept-admin-by-vaa proposal's new admin is not the guardian trust anchor"
+          (proposal.newAdmin == guardianGovernance)
+        assertMsg "ntt: accept-admin-by-vaa proposal is not for this deployment"
+          (proposal.managerAddress == managerAddress)
+        assertMsg "ntt: accept-admin-by-vaa proposal is not by the deployment's current admin"
+          (proposal.admin == admin)
+
+        cs <- fetch coreStateCid
+        assertMsg "ntt: core state is not the committed guardian trust anchor"
+          (cs.guardianGovernance == guardianGovernance)
+        assertMsg "ntt: core state operator mismatch"
+          (cs.operator == operator)
+
+        (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
+          encodedVAA = vaaBytes
+          pubKeys
+          consumer = guardianGovernance
+          namespace
+          replayNodeCid
+
+        assertMsg "ntt governance: not signed by current guardian set"
+          (vaa.guardianSetIndex == cs.guardianSetIndex)
+        assertMsg "ntt governance: wrong emitter chain"
+          (vaa.emitterChain == cs.governanceChainId)
+        assertMsg "ntt governance: wrong emitter address"
+          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+
+        let action = parseNttGovernance vaa.payload
+        assertMsg "ntt governance: wrong target chain" (action.chain == chainId)
+        assertMsg "ntt governance: wrong manager address"
+          (normalizeHex action.managerAddress == managerAddress)
+        assertMsg "ntt governance: wrong factory epoch" (action.factoryEpoch == factoryEpoch)
+
+        exercise proposalCid AcceptAdminTransfer with
+          mgrCid = self
+          ledgerCid
+          vettedFactory = factory
+          extraArgs
 
     -- | Outbound transfer. Trims the amount to the wire form, moves @user@'s
     -- tokens (lock into the custodian's reserve, crediting the deployment's

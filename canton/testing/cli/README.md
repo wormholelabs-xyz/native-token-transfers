@@ -106,11 +106,14 @@ instead of per-service compose state.
 | `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Mint`/`Release`, executor-only. A replayed VAA exits non-zero. The recipient must have run `preapprove` first — for both burn-mint and lock-unlock `mock` deployments — else the delivery is rejected and the VAA stays deliverable. Rejected outright for `amulet` (receiving against real Amulet is out of scope), and rejected while the deployment is paused. |
 | `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deliveries: a standing `DepositPreapproval` (burn-mint `mock`) or `MockTransferPreapproval` (lock-unlock `mock`), created self-signed by the recipient. Idempotent. For `amulet` this is a ledger-surfaced no-op (`preapproved=false`); real Amulet's own `TransferPreapproval` is out of scope here. |
 | `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing pre-approval (owner-only `Revoke`, either template). |
-| `pause --deployment NAME` | Admin-controlled: halt a deployment's value movement (`Transfer`/`Release`/`Mint`) via `NttManager.SetPaused`. While paused, `transfer` and `receive` both fail with "deployment is paused". |
+| `pause --deployment NAME` | Admin-controlled (submits as whoever CURRENTLY holds the role): halt a deployment's value movement (`Transfer`/`Release`/`Mint`) via `NttManager.SetPaused`. While paused, `transfer` and `receive` both fail with "deployment is paused"; config choices — including `admin accept-gg-vaa`'s underlying `TransferAdmin` — keep working. |
 | `unpause --deployment NAME` | Admin-controlled: lift a pause, restoring `transfer`/`receive`. |
+| `admin propose-gg --deployment NAME` | Have the deployment's CURRENT admin create a standing `AdminTransferProposal` offering the operational role to `guardianGovernance` — the propose half of the VAA-gated custody opt-in (see [Guardian custody opt-in](#guardian-custody-opt-in)). Prints `managerAddress=` and `factoryEpoch=`, the two fields `guardian sign-governance accept-admin` binds its VAA to. |
+| `admin accept-gg-vaa --deployment NAME --vaa HEX --pubkey HEX [--executor HINT]` | Permissionlessly relay a guardian-signed accept-admin VAA through `NttManager.AcceptAdminTransferByVaa`, completing the handoff with no live `gg` signature. On success, updates the state file's recorded admin for this deployment to `gg`. A replayed VAA exits non-zero. Succeeds even while the deployment is paused (an admin/config operation, not a value movement). |
 | `guardian sign-transfer --deployment NAME --to-recipient HINT --amount N [--source-chain N] [--sequence N]` | Sign an inbound NTT transfer VAA as if it came from the deployment's configured peer. |
 | `guardian sign-vaa --emitter-chain N --emitter HEX --sequence N --payload HEX` | Sign an arbitrary payload as a VAA (not NTT-specific). |
 | `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72 — `cantonChainId`, the playground's fixed Wormhole chain id, also literally `NttManager.chainId` now, not just a VAA convention); `--apply` also submits it via `SubmitGovernanceVAA`. |
+| `guardian sign-governance accept-admin --deployment NAME [--factory-epoch N]` | Sign an NTT `AcceptAdminTransferToGovernance` governance VAA (module `Ntt`, target chain 72 — checked against the target manager's own `chainId`) authorizing `gg`'s acceptance of the named deployment's admin role. `--factory-epoch` must match the deployment's CURRENT factory epoch at relay time (default `0`, the registration epoch); `admin propose-gg`'s output reports the live value to sign against. |
 | `guardian verify-vaa --deployment NAME --vaa HEX` | Verify a VAA on-ledger via `CoreState.ParseAndVerifyVAA` (no replay-consume) — cross-checks the CLI's off-chain signature against the live guardian set. |
 | `status` | Print the guardian set, message fee, and every deployment (including each deployment's `chainId`, its peers with their `decimals`, and `paused`). |
 | `contracts list` | Print every live `CoreState`/`Emitter`/`NttManager` (plus the replay-node count) as JSON. |
@@ -188,6 +191,50 @@ gap. Burn/mint uses the model's own `DepositPreapproval` for the same
 purpose. Either way, `preapprove` is the one-time recipient opt-in and
 `receive` (any executor) is the permissionless relay — see the Commands
 table above.
+
+### Guardian custody opt-in
+
+Handing a deployment's `admin` role to `guardianGovernance` (`gg`) is the
+guardian quorum's custody opt-in (see the core NTT README's "Custody follows
+the admin"). In production this is completed without any live `gg`
+signature — guardians sign an off-chain governance VAA, and any executor
+relays it permissionlessly:
+
+```sh
+# The deployment's CURRENT admin creates the standing offer.
+./ntt-playground admin propose-gg --deployment lockunlock
+# managerAddress=... factoryEpoch=0
+
+# The guardian quorum signs an acceptance VAA bound to that (managerAddress,
+# factoryEpoch) pair.
+./ntt-playground guardian sign-governance accept-admin \
+  --deployment lockunlock --factory-epoch 0
+# vaa=... pubkey=...
+
+# For a lock/unlock deployment with a non-empty reserve, gg needs its own
+# standing pre-approval first -- the pot's receiver is gg itself.
+./ntt-playground preapprove --deployment lockunlock --user GuardianGovernance
+
+# Any executor relays the VAA; no gg signature is submitted here.
+./ntt-playground admin accept-gg-vaa --deployment lockunlock \
+  --vaa <vaa> --pubkey <pubkey> --executor Erin
+```
+
+`admin accept-gg-vaa` updates the state file's recorded admin for the
+deployment to `gg` on success, so later commands (`status`, a subsequent
+`receive`) see the new admin without a fresh ledger round-trip. Re-submitting
+the same VAA fails as a replay (the digest was already consumed in `gg`'s
+replay trie), and `receive` against the deployment continues to work
+unchanged — the handoff repoints custody only, nothing on the wire.
+
+Both `admin` subcommands run the sandbox-first `remote = None` path
+`Playground.Ops:acceptAdminTransferByVaa` supports today: this works
+unmodified on the single-participant `sandbox` profile. On a multi-participant
+`localnet` topology, `admin accept-gg-vaa` needs the executing participant to
+see operator/admin/`gg`'s contracts directly, so pass an `--executor` hint
+already co-located with them (the default, no `--executor`, stays on the
+operator's own participant). A `RemoteSeam` extension mirroring `receive`'s
+(see [Topology](#topology)) is follow-up work.
 
 ### Real Amulet (`amulet`)
 
@@ -511,5 +558,11 @@ Documented, not implemented — this CLI is devnet-only throughout.
 
 Out of scope for this CLI, listed here rather than silently dropped:
 
-- Guardian-set-upgrade governance signing (only `SetMessageFee` is
-  implemented under `guardian sign-governance`).
+- Guardian-set-upgrade governance signing (`guardian sign-governance` covers
+  the Core `SetMessageFee` action and NTT's `AcceptAdminTransferToGovernance`
+  action only; rotating the guardian set itself is not implemented).
+- Demoting `gg` by governance VAA (`admin accept-gg-vaa` only covers an
+  ordinary admin handing the role TO `gg`; `gg` handing it back still needs
+  the direct `TransferAdmin` path — see the core NTT README's follow-ups).
+- A `RemoteSeam` extension for `admin accept-gg-vaa` on the multi-participant
+  `localnet` topology (see [Guardian custody opt-in](#guardian-custody-opt-in)).

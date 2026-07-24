@@ -731,9 +731,22 @@ preapprove input =
           -- bridged instrument per admin.
           instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor input.admin 0
       case parseTokenMode input.mode of
+        -- Both idempotency checks below filter by @p.owner == input.user@ in addition to the
+        -- instrument -- not just belt-and-braces. Both preapproval templates make the
+        -- instrument admin (@gg@) an OBSERVER precisely so its tooling/relayers can resolve
+        -- every recipient's contract (see 'Wormhole.Ntt.Deposit.DepositPreapproval' and
+        -- 'Playground.MockRegistry.MockTransferPreapproval''s doc comments), which means
+        -- @query \@T gg@ returns EVERY recipient's preapproval for this deployment, all
+        -- sharing the same instrument. Filtering on the instrument alone means preapproving
+        -- gg for ITS OWN party (the gg custody opt-in's `preapprove --user
+        -- GuardianGovernance`, needed when the pot move's receiver is gg) would see some
+        -- OTHER recipient's preapproval, wrongly conclude "already preapproved", and skip the
+        -- create silently -- `preapproved=true` with no contract actually created. The extra
+        -- owner filter is what makes this idempotent for every caller, gg included, not just
+        -- ordinary recipients.
         BurnMint -> do
           pres <- query @DepositPreapproval input.user
-          case [ () | (_, p) <- pres, p.instrumentId == instrumentId ] of
+          case [ () | (_, p) <- pres, p.owner == input.user, p.instrumentId == instrumentId ] of
             [] -> do
               _ <- submit input.user do
                 createCmd DepositPreapproval with owner = input.user, instrumentId
@@ -741,7 +754,7 @@ preapprove input =
             _ -> pure () -- already preapproved for this instrument -- no-op
         LockUnlock -> do
           pres <- query @MockTransferPreapproval input.user
-          case [ () | (_, p) <- pres, p.instrument == instrumentId ] of
+          case [ () | (_, p) <- pres, p.owner == input.user, p.instrument == instrumentId ] of
             [] -> do
               _ <- submit input.user do
                 createCmd MockTransferPreapproval with
@@ -788,3 +801,142 @@ revoke input =
             [] -> abort "playground: no MockTransferPreapproval to revoke"
             _ -> abort "playground: more than one MockTransferPreapproval visible to user"
       pure RevokeOutput with revoked = True
+
+----------------------------------------------------------------------
+-- proposeAdminTransferToGg / acceptAdminTransferByVaa
+----------------------------------------------------------------------
+--
+-- The gg custody opt-in (Wormhole.Ntt.Manager's header) is now VAA-gated: the CURRENT admin
+-- self-signs a standing 'AdminTransferProposal' naming guardianGovernance (propose), and a
+-- guardian-signed 'Wormhole.Ntt.Payload.AcceptAdminToGovernance' VAA lets ANY executor
+-- permissionlessly complete the handoff (accept) -- gg never signs live. Sandbox-first: both
+-- scripts below only support the 'remote = None' fast path (everything resolved/queried as
+-- operator/gg, exactly like receiveVaa's 'None' branch). A 'RemoteSeam' extension (routing the
+-- accept step's disclosure gathering through 'Playground.Prepare' when the executor's
+-- participant differs from gg's, mirroring receiveVaa/transferOut) is follow-up work, not
+-- implemented here.
+
+data ProposeAdminTransferToGgInput = ProposeAdminTransferToGgInput with
+    operator  : Party
+    managerId : Int
+  deriving (Eq, Show)
+
+data ProposeAdminTransferToGgOutput = ProposeAdminTransferToGgOutput with
+    managerAddress : Text  -- feeds `guardian sign-governance accept-admin --deployment`
+    factoryEpoch   : Int   -- ditto -- the TOCTOU pin the guardians vet when they sign
+  deriving (Eq, Show)
+
+-- | The deployment's CURRENT admin creates the standing self-signed offer
+-- ('Wormhole.Ntt.Manager.AdminTransferProposal') naming @guardianGovernance@ as the new
+-- admin -- the propose half of the VAA-gated custody opt-in (see
+-- 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa's doc comment and 'acceptAdminTransferByVaa'
+-- below). Returns the deployment's stable @managerAddress@ and its CURRENT @factoryEpoch@,
+-- exactly the two fields a guardian quorum's governance VAA must bind to (`guardian
+-- sign-governance accept-admin`).
+proposeAdminTransferToGg : ProposeAdminTransferToGgInput -> Script ProposeAdminTransferToGgOutput
+proposeAdminTransferToGg input = do
+  (_mgrCid, mgr) <- resolveManager input.operator input.managerId
+  _ <- submit mgr.admin do
+    createCmd AdminTransferProposal with
+      admin = mgr.admin
+      newAdmin = mgr.guardianGovernance
+      managerAddress = mgr.managerAddress
+  pure ProposeAdminTransferToGgOutput with
+    managerAddress = normalizeHex mgr.managerAddress
+    factoryEpoch = mgr.factoryEpoch
+
+data AcceptAdminTransferByVaaInput = AcceptAdminTransferByVaaInput with
+    operator  : Party
+    managerId : Int
+    executor  : Party
+    vaaBytes  : Text
+    pubKeys   : [(Int, Text)]
+  deriving (Eq, Show)
+
+data AcceptAdminTransferByVaaOutput = AcceptAdminTransferByVaaOutput with
+    managerAddress : Text
+    admin          : Party  -- the successor admin (guardianGovernance, on success)
+  deriving (Eq, Show)
+
+-- | Permissionlessly relay a guardian-signed accept-admin governance VAA against the
+-- deployment's standing 'AdminTransferProposal', completing the gg custody opt-in with no
+-- live gg signature (see 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa'). Mirrors
+-- 'receiveVaa''s disclosure-gathering pattern: manager, core state, and the covering replay
+-- node (@consumer = gg@, @namespace = mgr.namespace@, keyed off the VAA's own digest, exactly
+-- as 'receiveVaa' resolves it). The proposal is queried as gg (its observer, since
+-- @newAdmin = gg@ here) and disclosed to the executor. For LockUnlock, the nested
+-- 'Wormhole.Ntt.Manager.TransferAdmin' pot move additionally needs the ledger, and -- only
+-- when the pot is non-empty -- the pot holding, the committed factory, and gg's OWN
+-- 'Playground.MockRegistry.MockTransferPreapproval' (the move's receiver is gg, and the mock
+-- registry's factory requires the RECEIVER's standing pre-approval unless sender == receiver
+-- -- see 'Playground.MockRegistry.MockPreapprovedTransferFactory' and transferOut/receiveVaa's
+-- identical pattern for the admin/recipient side). gg must have run `preapprove` for its own
+-- party first; a zero-balance ledger needs none of this (mirrors 'TransferAdmin' itself).
+acceptAdminTransferByVaa : AcceptAdminTransferByVaaInput -> Script AcceptAdminTransferByVaaOutput
+acceptAdminTransferByVaa input = do
+  (mgrCid, mgr) <- resolveManager input.operator input.managerId
+  csCid <- resolveCoreState input.operator
+  csDisc <- fromSome <$> queryDisclosure input.operator csCid
+  mgrDisc <- fromSome <$> queryDisclosure input.operator mgrCid
+
+  let gg = mgr.guardianGovernance
+      digest = (parseVAA input.vaaBytes).hash
+  (nodeCid, nodeDisc) <- coveringDisclosure input.operator gg mgr.namespace digest
+
+  -- The standing proposal: gg is its OBSERVER (newAdmin = gg), so it is queryable as gg;
+  -- disclose it to the executor, who (in the permissionless-relay case) is neither admin nor
+  -- gg. Filtering by managerAddress AND the deployment's CURRENT admin picks out the live
+  -- proposal even if a stale one (from a since-replaced admin) is also visible -- the choice
+  -- itself re-checks this, this is just so the script resolves a sensible candidate to
+  -- disclose.
+  proposals <- query @AdminTransferProposal gg
+  proposalCid <- case
+    [ cid | (cid, p) <- proposals, p.managerAddress == mgr.managerAddress, p.admin == mgr.admin ] of
+    [cid] -> pure cid
+    [] -> abort "playground: no standing AdminTransferProposal for this deployment's current admin -- run `admin propose-gg` first"
+    _ -> abort "playground: more than one AdminTransferProposal for this deployment's current admin"
+  proposalDisc <- fromSome <$> queryDisclosure gg proposalCid
+
+  (ledgerCid, ledgerDiscs, extraArgs) <- case mgr.tokenConfig of
+    BurnMint -> pure (None, [], emptyExtraArgs)
+    LockUnlock -> do
+      (lcid, ledger) <- resolveLedger input.operator mgr.managerAddress
+      ld <- fromSome <$> queryDisclosure input.operator lcid
+      case ledger.custodyHoldingCid of
+        None -> pure (Some lcid, [ld], emptyExtraArgs)
+        Some potCid -> do
+          potDisc <- fromSome <$> queryDisclosure gg (coerceContractId potCid : ContractId Cip56MockHolding)
+          facDisc <- case mgr.factory of
+            TransferFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
+            BurnMintFactoryCid _ -> abort "playground: lock/unlock deployment has a burn/mint factory -- inconsistent state"
+          pres <- query @MockTransferPreapproval gg
+          preCid <- case [ cid | (cid, p) <- pres, p.owner == gg, p.instrument == mgr.instrumentId ] of
+            [cid] -> pure cid
+            [] -> abort "playground: guardianGovernance has no standing transfer pre-approval -- run `preapprove --user GuardianGovernance` first"
+            _ -> abort "playground: more than one MockTransferPreapproval for guardianGovernance"
+          preDisc <- fromSome <$> queryDisclosure gg preCid
+          let ea = ExtraArgs with
+                context = ChoiceContext with
+                  values = TextMap.fromList
+                    [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+                meta = emptyMetadata
+          pure (Some lcid, [ld, potDisc, facDisc, preDisc], ea)
+
+  let submitOpts = foldl (\opts d -> opts <> disclose d) (actAs input.executor)
+        ([csDisc, mgrDisc, nodeDisc, proposalDisc] ++ ledgerDiscs)
+
+  (mgrCid', _ledgerCid') <- submit submitOpts do
+    exerciseCmd mgrCid AcceptAdminTransferByVaa with
+      executor = input.executor
+      proposalCid
+      coreStateCid = csCid
+      replayNodeCid = nodeCid
+      vaaBytes = input.vaaBytes
+      pubKeys = input.pubKeys
+      ledgerCid
+      extraArgs
+
+  Some mgr' <- queryContractId input.operator mgrCid'
+  pure AcceptAdminTransferByVaaOutput with
+    managerAddress = normalizeHex mgr.managerAddress
+    admin = mgr'.admin

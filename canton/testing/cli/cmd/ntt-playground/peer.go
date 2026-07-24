@@ -75,7 +75,10 @@ func newPeerSetCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
-			if err := setPeerOnLedger(ctx, a, runner, s.Operator, d.ManagerID, d.Admin, chain, manager, transceiver, decimals); err != nil {
+			// SetPeer's controller is the manager's live `admin` signatory -- submit as
+			// whoever CURRENTLY holds the role, not the registering admin (they differ once
+			// `admin accept-gg-vaa` has run).
+			if err := setPeerOnLedger(ctx, a, runner, s.Operator, d.ManagerID, d.CurrentAdminOrAdmin(), chain, manager, transceiver, decimals); err != nil {
 				return err
 			}
 

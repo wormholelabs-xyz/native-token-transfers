@@ -58,7 +58,10 @@ func newPauseUnpauseCmd(a *app, use, short string, paused bool) *cobra.Command {
 			}
 			defer cleanup()
 
-			if err := setPausedOnLedger(ctx, runner, s.Operator, d.ManagerID, d.Admin, paused); err != nil {
+			// SetPaused's controller is the manager's live `admin` signatory -- submit as
+			// whoever CURRENTLY holds the role, not the registering admin (they differ once
+			// `admin accept-gg-vaa` has run); mirrors peer.go's setPeerOnLedger call.
+			if err := setPausedOnLedger(ctx, runner, s.Operator, d.ManagerID, d.CurrentAdminOrAdmin(), paused); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s paused=%t\n", use, deployment, paused)

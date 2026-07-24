@@ -219,9 +219,9 @@ func newGuardianSignVaaCmd(a *app) *cobra.Command {
 func newGuardianSignGovernanceCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sign-governance",
-		Short: "Sign (and optionally apply) a Core governance VAA",
+		Short: "Sign (and optionally apply) a Core or NTT governance VAA",
 	}
-	cmd.AddCommand(newGuardianSignGovernanceSetFeeCmd(a))
+	cmd.AddCommand(newGuardianSignGovernanceSetFeeCmd(a), newGuardianSignGovernanceAcceptAdminCmd(a))
 	return cmd
 }
 
@@ -282,6 +282,62 @@ func newGuardianSignGovernanceSetFeeCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// newGuardianSignGovernanceAcceptAdminCmd builds `guardian sign-governance accept-admin`: the
+// guardian quorum's signature authorizing guardianGovernance's acceptance of a deployment's
+// admin role (see Wormhole.Ntt.Manager.AcceptAdminTransferByVaa and Wormhole.Ntt.Payload's
+// governance-packet doc comment). The deployment's managerAddress is read from the state
+// file (populated by `deploy`/`admin accept-gg-vaa`); --factory-epoch must match the
+// deployment's CURRENT Wormhole.Ntt.Manager.NttManager.factoryEpoch at relay time -- the
+// TOCTOU pin naming the exact committed factory the guardians vetted (see `admin propose-gg`'s
+// output, which reports the live epoch to sign against).
+func newGuardianSignGovernanceAcceptAdminCmd(a *app) *cobra.Command {
+	var deployment string
+	var factoryEpoch uint64
+
+	cmd := &cobra.Command{
+		Use:   "accept-admin",
+		Short: "Sign an NTT AcceptAdminTransferToGovernance governance VAA authorizing gg's admin-role acceptance",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := a.loadState()
+			if err != nil {
+				return err
+			}
+			d, ok := s.Deployment(deployment)
+			if !ok {
+				return fmt.Errorf("guardian sign-governance accept-admin: unknown deployment %q", deployment)
+			}
+			if s.Guardian.PrivateKeyHex == "" {
+				return fmt.Errorf("guardian sign-governance accept-admin: no guardian key in state -- run `init` first")
+			}
+			key, err := guardian.KeyFromHex(s.Guardian.PrivateKeyHex)
+			if err != nil {
+				return err
+			}
+			managerAddress, err := decodeHex32(d.ManagerAddress)
+			if err != nil {
+				return fmt.Errorf("guardian sign-governance accept-admin: deployment manager address: %w", err)
+			}
+
+			seq := s.NextGuardianSequence("governance", guardian.DefaultGovernanceChain)
+			if err := a.saveState(s); err != nil {
+				return err
+			}
+			a.vlogf(cmd, "sign-governance accept-admin: sequence=%d (auto) deployment=%s factoryEpoch=%d", seq, deployment, factoryEpoch)
+			vaa, err := guardian.SignAcceptAdmin(key, guardian.GovernanceParams{Sequence: seq}, 72, managerAddress, factoryEpoch)
+			if err != nil {
+				return err
+			}
+			a.vlogf(cmd, "sign-governance accept-admin: signed %d-byte body", len(vaa)-vaaHeaderLen)
+			fmt.Fprintf(cmd.OutOrStdout(), "vaa=%s\npubkey=%s\n", hex.EncodeToString(vaa), hex.EncodeToString(key.PubKeyUncompressed()))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name")
+	cmd.Flags().Uint64Var(&factoryEpoch, "factory-epoch", 0, "the committed factory epoch this VAA binds to (default: 0, the deployment's registration epoch)")
+	_ = cmd.MarkFlagRequired("deployment")
+	return cmd
+}
+
 func newGuardianVerifyVaaCmd(a *app) *cobra.Command {
 	var deployment, vaaHex, pubKeyHex, verifierHint string
 
@@ -302,7 +358,7 @@ func newGuardianVerifyVaaCmd(a *app) *cobra.Command {
 				}
 			} else if deployment != "" {
 				if d, ok := s.Deployment(deployment); ok {
-					verifier = d.Admin
+					verifier = d.CurrentAdminOrAdmin()
 				}
 			}
 			a.vlogf(cmd, "verify-vaa: verifier=%s", verifier)

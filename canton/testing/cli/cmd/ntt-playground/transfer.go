@@ -233,11 +233,15 @@ func newTransferCmd(a *app) *cobra.Command {
 			var amuletSeam *amuletSeamJSON
 			if d.TokenKind == "amulet" {
 				amountDecimal := formatDecimal(amount, d.TokenDecimals) // full instrument scale (e.g. 10 decimals for Amulet), not the 8-decimal wire trim
-				a.vlogf(cmd, "transfer: resolving real transfer-factory (sender=%s receiver=%s amount=%s)", userParty, d.Admin, amountDecimal)
+				// The lock's receiver is whoever CURRENTLY custodies the reserve (the manager's
+				// live `admin` field on-ledger), not the registering admin -- they can differ
+				// once `admin accept-gg-vaa` has run.
+				receiver := d.CurrentAdminOrAdmin()
+				a.vlogf(cmd, "transfer: resolving real transfer-factory (sender=%s receiver=%s amount=%s)", userParty, receiver, amountDecimal)
 				factory, err := amuletClient.GetTransferFactory(ctx, userHint, amulet.TransferArgs{
 					DSO:      d.InstrumentAdmin,
 					Sender:   userParty,
-					Receiver: d.Admin,
+					Receiver: receiver,
 					Amount:   amountDecimal,
 				})
 				if err != nil {

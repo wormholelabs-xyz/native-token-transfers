@@ -235,6 +235,50 @@ func SignSetMessageFee(key *Key, p GovernanceParams, cantonChain uint16, fee uin
 	})
 }
 
+// ----------------------------------------------------------------------
+// NTT governance VAAs
+// ----------------------------------------------------------------------
+
+// NttGovernanceModule is "Ntt" left-padded to 32 bytes, the NTT module identifier
+// carried by every NTT governance packet -- distinct from coreGovernanceModule
+// ("Core"). Matches Wormhole.Ntt.Payload:nttGovernanceModule (Payload.daml).
+var NttGovernanceModule = func() [32]byte {
+	var m [32]byte
+	copy(m[32-3:], []byte("Ntt"))
+	return m
+}()
+
+// AcceptAdminAction is the NTT governance module's AcceptAdminTransferToGovernance
+// action code -- the only NTT governance action defined so far.
+const AcceptAdminAction = 1
+
+// SignAcceptAdmin builds and signs an NTT AcceptAdminTransferToGovernance
+// governance VAA targeting cantonChain (72 in production), authorizing the
+// guardian quorum's acceptance of the admin role for the manager identified by
+// managerAddress at factoryEpoch -- payload = module(32="Ntt") || action(1=1) ||
+// chain(2) || managerAddress(32) || factoryEpoch(8, big-endian uint64). Mirrors
+// Wormhole.Ntt.Payload:encodeNttGovernance (Payload.daml) and
+// SignSetMessageFee's shape for the Core module.
+func SignAcceptAdmin(key *Key, p GovernanceParams, cantonChain uint16, managerAddress [32]byte, factoryEpoch uint64) ([]byte, error) {
+	p = p.withDefaults()
+	payload := make([]byte, 0, 32+1+2+32+8)
+	payload = append(payload, NttGovernanceModule[:]...)
+	payload = append(payload, AcceptAdminAction)
+	payload = beAppend(payload, uint64(cantonChain), 2)
+	payload = append(payload, managerAddress[:]...)
+	payload = beAppend(payload, factoryEpoch, 8)
+
+	return Sign(key, VAAParams{
+		Timestamp:        p.Timestamp,
+		Nonce:            p.Nonce,
+		EmitterChain:     p.EmitterChain,
+		EmitterAddress:   p.EmitterAddress,
+		Sequence:         p.Sequence,
+		ConsistencyLevel: p.ConsistencyLevel,
+		Payload:          payload,
+	})
+}
+
 // beAppend appends v's low n bytes, big-endian, to b.
 func beAppend(b []byte, v uint64, n int) []byte {
 	tmp := make([]byte, 8)

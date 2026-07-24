@@ -132,3 +132,39 @@ func TestSignSetMessageFeeMatchesFixture(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expected, vaa)
 }
+
+// TestSignAcceptAdminMatchesPinnedPayload pins SignAcceptAdmin's payload encoding
+// (module || action || chain || managerAddress || factoryEpoch, 75 bytes) against
+// a hand-computed hex vector -- the cross-language convention 'SignSetMessageFee'
+// follows against Test.TestCore:govSetFeeVAA, except here the Daml fixture
+// (Test.TestNtt's accept-admin section) is generated FROM this vector, not the
+// other way around: this test is the ground truth both sides pin against. Chain
+// 72, managerAddress 0x00..aa (Daml's `b32 "aa"`), factoryEpoch 0.
+func TestSignAcceptAdminMatchesPinnedPayload(t *testing.T) {
+	const expectedPayload = "00000000000000000000000000000000000000000000000000000000004e747401" +
+		"0048" +
+		"00000000000000000000000000000000000000000000000000000000000000aa" +
+		"0000000000000000"
+	require.Len(t, expectedPayload, 150) // 75 bytes
+
+	key, err := KeyFromHex(devnetGuardianKeyHex)
+	require.NoError(t, err)
+
+	vaa, err := SignAcceptAdmin(key, GovernanceParams{
+		Sequence:  1,
+		Timestamp: 1700000000,
+	}.withDefaults(), 72, b32(0xaa), 0)
+	require.NoError(t, err)
+
+	// body = timestamp(4) || nonce(4) || emitterChain(2) || emitterAddress(32) ||
+	// sequence(8) || consistencyLevel(1) || payload; vaa = version(1) ||
+	// guardianSetIndex(4) || sigCount(1) || guardianIndex(1) || signature(65) || body.
+	body := vaa[1+4+1+1+65:]
+	payload := body[4+4+2+32+8+1:]
+	require.Equal(t, expectedPayload, hex.EncodeToString(payload))
+
+	// Envelope sanity: default governance chain (Solana, 1) / address (0x00..04).
+	emitterChain := uint16(body[8])<<8 | uint16(body[9])
+	require.EqualValues(t, DefaultGovernanceChain, emitterChain)
+	require.Equal(t, DefaultGovernanceAddress[:], body[10:42])
+}

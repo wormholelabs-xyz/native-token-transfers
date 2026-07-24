@@ -735,3 +735,186 @@ func TestCmd_PauseUnpause_MissingRequiredFlags(t *testing.T) {
 		t.Fatalf("expected a required-flag error for `unpause` with no --deployment")
 	}
 }
+
+// ----------------------------------------------------------------------
+// guardian sign-governance accept-admin: required flags / unknown deployment / no guardian key
+// ----------------------------------------------------------------------
+
+func TestCmd_GuardianSignGovernanceAcceptAdmin_MissingRequiredFlags(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	_, _, err := runPlayground(t, append(baseFlags(stateFile), "guardian", "sign-governance", "accept-admin")...)
+	if err == nil {
+		t.Fatalf("expected a required-flag error")
+	}
+}
+
+func TestCmd_GuardianSignGovernanceAcceptAdmin_UnknownDeployment(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedStateFile(t, stateFile, state.New())
+	_, _, err := runPlayground(t, append(baseFlags(stateFile),
+		"guardian", "sign-governance", "accept-admin", "--deployment", "missing")...)
+	if err == nil || !contains(err.Error(), `unknown deployment "missing"`) {
+		t.Fatalf("expected an unknown-deployment error, got %v", err)
+	}
+}
+
+func TestCmd_GuardianSignGovernanceAcceptAdmin_NoGuardianKey(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Deployments["ntt1"] = state.Deployment{ManagerID: 1, ManagerAddress: strings.Repeat("00", 31) + "aa"}
+	seedStateFile(t, stateFile, s)
+	_, _, err := runPlayground(t, append(baseFlags(stateFile),
+		"guardian", "sign-governance", "accept-admin", "--deployment", "ntt1")...)
+	if err == nil || !contains(err.Error(), "no guardian key in state") {
+		t.Fatalf("expected a no-guardian-key error, got %v", err)
+	}
+}
+
+// TestCmd_GuardianSignGovernanceAcceptAdmin_SignsAgainstDeploymentManagerAddress pins the
+// happy path: given a guardian key and a deployment's managerAddress, the command signs
+// without error and prints a vaa= line (the payload's exact bytes are pinned by
+// internal/guardian's own unit test against the Daml fixtures, not re-checked here).
+func TestCmd_GuardianSignGovernanceAcceptAdmin_SignsAgainstDeploymentManagerAddress(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Guardian.PrivateKeyHex = "cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0"
+	s.Deployments["ntt1"] = state.Deployment{ManagerID: 1, ManagerAddress: strings.Repeat("00", 31) + "aa"}
+	seedStateFile(t, stateFile, s)
+	stdout, _, err := runPlayground(t, append(baseFlags(stateFile),
+		"guardian", "sign-governance", "accept-admin", "--deployment", "ntt1", "--factory-epoch", "0")...)
+	if err != nil {
+		t.Fatalf("guardian sign-governance accept-admin: %v", err)
+	}
+	if !contains(stdout, "vaa=") || !contains(stdout, "pubkey=") {
+		t.Fatalf("expected vaa=/pubkey= output, got %q", stdout)
+	}
+}
+
+// ----------------------------------------------------------------------
+// admin propose-gg / admin accept-gg-vaa
+// ----------------------------------------------------------------------
+
+func TestCmd_AdminProposeGg_UnknownDeployment(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedStateFile(t, stateFile, state.New())
+	_, _, err := runPlayground(t, append(baseFlags(stateFile),
+		"admin", "propose-gg", "--deployment", "missing")...)
+	if err == nil || !contains(err.Error(), `unknown deployment "missing"`) {
+		t.Fatalf("expected an unknown-deployment error, got %v", err)
+	}
+}
+
+// TestCmd_AdminProposeGg_CallsProposeAdminTransferToGg pins the script name + routing:
+// Playground.Ops:proposeAdminTransferToGg, called with the deployment's managerId.
+func TestCmd_AdminProposeGg_CallsProposeAdminTransferToGg(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.Deployments["ntt1"] = state.Deployment{Name: "ntt1", ManagerID: 3, Admin: "ntt1-admin::abc"}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:proposeAdminTransferToGg"] = map[string]any{
+		"managerAddress": strings.Repeat("00", 31) + "aa", "factoryEpoch": 0,
+	}
+
+	stdout, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"admin", "propose-gg", "--deployment", "ntt1")...)
+	if err != nil {
+		t.Fatalf("admin propose-gg: %v", err)
+	}
+	if len(r.calls) != 1 || r.calls[0].Script != "Playground.Ops:proposeAdminTransferToGg" {
+		t.Fatalf("expected exactly one Playground.Ops:proposeAdminTransferToGg call, got %v", r.scriptNames())
+	}
+	in, ok := r.calls[0].Input.(proposeAdminTransferToGgInput)
+	if !ok {
+		t.Fatalf("proposeAdminTransferToGg input type mismatch: %T", r.calls[0].Input)
+	}
+	if in.Operator != "operator::abc" || in.ManagerID != 3 {
+		t.Fatalf("unexpected proposeAdminTransferToGg input: %+v", in)
+	}
+	if !contains(stdout, "factoryEpoch=0") {
+		t.Fatalf("expected factoryEpoch=0 in output, got %q", stdout)
+	}
+}
+
+func TestCmd_AdminAcceptGgVaa_MissingRequiredFlags(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	_, _, err := runPlayground(t, append(baseFlags(stateFile), "admin", "accept-gg-vaa")...)
+	if err == nil {
+		t.Fatalf("expected a required-flag error")
+	}
+}
+
+func TestCmd_AdminAcceptGgVaa_UnknownDeployment(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedStateFile(t, stateFile, state.New())
+	_, _, err := runPlayground(t, append(baseFlags(stateFile),
+		"admin", "accept-gg-vaa", "--deployment", "missing", "--vaa", "aa", "--pubkey", "bb")...)
+	if err == nil || !contains(err.Error(), `unknown deployment "missing"`) {
+		t.Fatalf("expected an unknown-deployment error, got %v", err)
+	}
+}
+
+func TestCmd_AdminAcceptGgVaa_MissingPubkey(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Deployments["ntt1"] = state.Deployment{ManagerID: 1}
+	seedStateFile(t, stateFile, s)
+	_, _, err := runPlayground(t, append(baseFlags(stateFile),
+		"admin", "accept-gg-vaa", "--deployment", "ntt1", "--vaa", "aa", "--pubkey", "")...)
+	if err == nil || !contains(err.Error(), "--pubkey is required") {
+		t.Fatalf("expected a missing-pubkey error, got %v", err)
+	}
+}
+
+// TestCmd_AdminAcceptGgVaa_UpdatesDeploymentAdminOnSuccess pins the CLI-side effect the plan
+// calls for: on a successful relay, the state file's Deployment.CurrentAdmin is updated to the
+// script's reported successor admin (guardianGovernance, in practice) so later commands
+// (status, a subsequent `receive`) see the new admin without a fresh ledger round-trip --
+// while Deployment.Admin (the REGISTERING admin, hash-bound into the instrument id and
+// manager/transceiver addresses forever) stays untouched. See state.Deployment's doc comment.
+func TestCmd_AdminAcceptGgVaa_UpdatesDeploymentAdminOnSuccess(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.Deployments["ntt1"] = state.Deployment{Name: "ntt1", ManagerID: 1, Admin: "ntt1-admin::abc", CurrentAdmin: "ntt1-admin::abc"}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:acceptAdminTransferByVaa"] = map[string]any{
+		"managerAddress": strings.Repeat("00", 31) + "aa", "admin": "gg::abc",
+	}
+
+	stdout, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"admin", "accept-gg-vaa", "--deployment", "ntt1", "--vaa", "aabbcc", "--pubkey", "dd")...)
+	if err != nil {
+		t.Fatalf("admin accept-gg-vaa: %v", err)
+	}
+	if len(r.calls) != 1 || r.calls[0].Script != "Playground.Ops:acceptAdminTransferByVaa" {
+		t.Fatalf("expected exactly one Playground.Ops:acceptAdminTransferByVaa call, got %v", r.scriptNames())
+	}
+	in, ok := r.calls[0].Input.(acceptAdminTransferByVaaInput)
+	if !ok {
+		t.Fatalf("acceptAdminTransferByVaa input type mismatch: %T", r.calls[0].Input)
+	}
+	if in.Executor != "operator::abc" {
+		t.Fatalf("expected the default executor to be operator, got %+v", in)
+	}
+	if !contains(stdout, "admin=gg::abc") {
+		t.Fatalf("expected admin=gg::abc in output, got %q", stdout)
+	}
+
+	reloaded, err := state.Load(stateFile)
+	if err != nil {
+		t.Fatalf("reload state: %v", err)
+	}
+	if reloaded.Deployments["ntt1"].CurrentAdmin != "gg::abc" {
+		t.Fatalf("expected Deployment.CurrentAdmin to be updated to gg::abc, got %+v", reloaded.Deployments["ntt1"])
+	}
+	if reloaded.Deployments["ntt1"].Admin != "ntt1-admin::abc" {
+		t.Fatalf("expected Deployment.Admin (the registering admin) to stay untouched, got %+v", reloaded.Deployments["ntt1"])
+	}
+}

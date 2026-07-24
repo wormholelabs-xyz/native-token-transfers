@@ -32,25 +32,58 @@ type Peer struct {
 // Deployment is one NTT deployment's stable identity: everything `transfer`/`receive`/
 // `guardian sign-transfer` need without touching the ledger.
 type Deployment struct {
-	Name               string       `json:"name"`
-	ManagerID          int          `json:"managerId"`
-	ManagerAddress     string       `json:"managerAddress"`
-	TransceiverAddress string       `json:"transceiverAddress"`
-	Admin              string       `json:"admin"` // full party id
-	Mode               string       `json:"mode"`  // "burn-mint" | "lock-unlock"
-	TokenKind          string       `json:"tokenKind"` // "mock" | "amulet"
-	TokenDecimals      int          `json:"tokenDecimals"`
-	Peers              map[int]Peer `json:"peers"` // keyed by chain id
+	Name               string `json:"name"`
+	ManagerID          int    `json:"managerId"`
+	ManagerAddress     string `json:"managerAddress"`
+	TransceiverAddress string `json:"transceiverAddress"`
+	// Admin is the REGISTERING admin -- fixed at `deploy` time and never updated afterward,
+	// full party id. This is the party `Wormhole.Ntt.Manager.nttInstrumentIdFor` and
+	// `nttManagerAddressFor` hash-bind into the instrument id and manager/transceiver
+	// addresses respectively; those bindings are computed once at registration and stored on
+	// the manager, so they survive any later `TransferAdmin`/`AcceptAdminTransferByVaa`
+	// handoff untouched (see Wormhole.Ntt.Manager's header). Every CLI call that re-derives
+	// one of those identities (`preapprove`, `fundUser`, `transferOut`'s/`receiveVaa`'s
+	// now-vestigial `admin` field) must keep passing THIS field, not CurrentAdmin below --
+	// passing the wrong one computes a different hash than what is actually bound on-ledger.
+	Admin string `json:"admin"` // full party id
+	// CurrentAdmin is whoever presently holds the deployment's operational role -- i.e. the
+	// manager's live `admin` signatory. Equal to Admin at deploy time; updated by `admin
+	// accept-gg-vaa` on a successful gg custody opt-in (and would be updated by any future
+	// direct-TransferAdmin CLI command too, were one added). Every CLI call that needs to
+	// ACT as the current admin (`peer set`'s SetPeer submission, `guardian verify-vaa`'s
+	// default verifier, an amulet lock's receiver) should read this via CurrentAdminOrAdmin(),
+	// not Admin directly. Empty on a state file predating this field -- CurrentAdminOrAdmin()
+	// falls back to Admin in that case, which is exactly the migration behavior needed (an
+	// old state file was always written before any deployment could have changed hands by
+	// VAA).
+	CurrentAdmin  string       `json:"currentAdmin,omitempty"`
+	Mode          string       `json:"mode"`      // "burn-mint" | "lock-unlock"
+	TokenKind     string       `json:"tokenKind"` // "mock" | "amulet"
+	TokenDecimals int          `json:"tokenDecimals"`
+	Peers         map[int]Peer `json:"peers"` // keyed by chain id
 
 	// InstrumentAdmin/InstrumentID are the deployment's bridged CIP-56 instrument identity
 	// (Splice.Api.Token.HoldingV1.InstrumentId): InstrumentAdmin is gg for "mock", the real
 	// DSO party for "amulet"; InstrumentID is the instrument's text id (the
 	// Wormhole.Ntt.Manager.nttInstrumentIdFor-bound hash for burn/mint "mock", the shared
 	// "NTT" text for lock/unlock "mock", "Amulet" for "amulet"). There is no separate
-	// custody party any more: lock/unlock custody is admin-owned (see
-	// Wormhole.Ntt.Manager's header) -- Admin above doubles as the custody party.
+	// custody party any more: lock/unlock custody is owned by whoever CURRENTLY holds the
+	// admin role (see Wormhole.Ntt.Manager's header) -- CurrentAdminOrAdmin() resolves the
+	// custodian's own party, not Admin directly.
 	InstrumentAdmin string `json:"instrumentAdmin,omitempty"`
 	InstrumentID    string `json:"instrumentId,omitempty"`
+}
+
+// CurrentAdminOrAdmin returns whoever currently holds the deployment's operational role:
+// CurrentAdmin if set, else Admin (the registering admin) -- the fallback a state file
+// written before this field existed needs, and exactly correct for one too: no deployment in
+// such a file could have changed hands by VAA yet, since `admin accept-gg-vaa` is the only
+// thing that ever sets CurrentAdmin.
+func (d Deployment) CurrentAdminOrAdmin() string {
+	if d.CurrentAdmin != "" {
+		return d.CurrentAdmin
+	}
+	return d.Admin
 }
 
 // legacyStateMarkers are JSON keys that only ever appeared in a pre-CIP-56-rework state

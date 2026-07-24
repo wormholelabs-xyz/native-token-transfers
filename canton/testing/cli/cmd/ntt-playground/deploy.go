@@ -279,7 +279,8 @@ func newDeployCmd(a *app) *cobra.Command {
 				ManagerID:          out.ManagerID,
 				ManagerAddress:     out.ManagerAddress,
 				TransceiverAddress: out.TransceiverAddress,
-				Admin:              out.Admin,
+				Admin:              out.Admin, // the REGISTERING admin -- fixed forever, see state.Deployment's doc comment
+				CurrentAdmin:       out.Admin, // == Admin at deploy time; diverges only after `admin accept-gg-vaa`
 				Mode:               cfg.Mode,
 				TokenKind:          cfg.TokenKind,
 				TokenDecimals:      cfg.Decimals,

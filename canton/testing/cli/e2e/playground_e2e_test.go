@@ -201,6 +201,19 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
+// decimalsEqual compares two Daml `Decimal` literals as printed by `balance` NUMERICALLY,
+// not as bare strings: the query path `balance` reads through can render a zero (or other)
+// value in scientific notation (e.g. "0E-10") rather than the "0.0"-style literal other parts
+// of the CLI emit, so a literal string comparison is fragile in a way a numeric one isn't.
+func decimalsEqual(t *testing.T, a, b string) bool {
+	t.Helper()
+	fa, err := strconv.ParseFloat(a, 64)
+	require.NoErrorf(t, err, "parse decimal %q", a)
+	fb, err := strconv.ParseFloat(b, 64)
+	require.NoErrorf(t, err, "parse decimal %q", b)
+	return fa == fb
+}
+
 func TestPlaygroundE2E(t *testing.T) {
 	if playgroundProfile == "localnet" {
 		if _, err := network.ResolveLocalNetDir(cantonDir); err != nil {
@@ -530,6 +543,126 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 	})
 
+	// New (Phase 3+4 of the accept-admin-transfer-by-vaa plan): the guardian-quorum custody
+	// opt-in is now VAA-gated end to end -- `admin propose-gg` (the current admin's standing
+	// self-signed offer), `guardian sign-governance accept-admin` (the guardians' signature),
+	// and `admin accept-gg-vaa` (any executor permissionlessly relaying it) -- exercised on
+	// the lock-unlock mock deployment, whose non-empty custody pot exercises the harder,
+	// real-world path (the nested pot move needs gg's own MockTransferPreapproval; see
+	// admin.go's doc comment / Playground.Ops:acceptAdminTransferByVaa's).
+	t.Run("gg custody opt-in via governance VAA (lock-unlock)", func(t *testing.T) {
+		// Deploys its OWN dedicated lock-unlock deployment ("lockunlock-gg") rather than
+		// reusing the shared "lockunlock" one: the opt-in below permanently repoints the
+		// deployment's admin to gg, and every later subtest in this suite still expects
+		// "lockunlock"'s admin to be lockunlock-admin (peer set, receive, inbound-binding
+		// checks, ...). Mirrors "lock-unlock deployment: abbreviated receive + transfer"'s own
+		// deploy call, just under a distinct name -- see testdata/deploy-lockunlock.json.
+		out := h.mustRun(t, "deploy", "--config", testdataPath("deploy-lockunlock.json"), "--name", "lockunlock-gg")
+		require.Contains(t, out, "deploy: lockunlock-gg")
+		registeringAdmin := h.loadState(t).Deployments["lockunlock-gg"].Admin
+		require.NotEmpty(t, registeringAdmin)
+
+		// A fresh lock, so this subtest's "pot moved intact" assertion is self-contained.
+		out = h.mustRun(t, "preapprove", "--deployment", "lockunlock-gg", "--user", "Ivan")
+		require.Contains(t, out, "preapproved=true")
+		out = h.mustRun(t, "transfer", "--deployment", "lockunlock-gg",
+			"--user", "Ivan", "--chain", "2",
+			"--recipient-address", addr32("ee"),
+			"--amount", "100000", "--sign")
+		require.Contains(t, out, "emitterChain=72")
+
+		out = h.mustRun(t, "balance", "--party", "lockunlock-gg-admin", "--deployment", "lockunlock-gg")
+		adminBalanceBefore := extractField(t, out, "cip56HoldingTotal")
+
+		// The nested TransferAdmin pot move's receiver is gg itself -- the mock registry's
+		// transfer factory requires the RECEIVER's own standing pre-approval (unless
+		// sender == receiver, which doesn't apply here). gg must opt in before the handoff can
+		// carry a non-empty reserve.
+		out = h.mustRun(t, "preapprove", "--deployment", "lockunlock-gg", "--user", "GuardianGovernance")
+		require.Contains(t, out, "preapproved=true")
+
+		out = h.mustRun(t, "admin", "propose-gg", "--deployment", "lockunlock-gg")
+		factoryEpoch := extractField(t, out, "factoryEpoch")
+		require.NotEmpty(t, extractField(t, out, "managerAddress"))
+
+		out = h.mustRun(t, "guardian", "sign-governance", "accept-admin",
+			"--deployment", "lockunlock-gg", "--factory-epoch", factoryEpoch)
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		require.NotEmpty(t, vaaHex)
+
+		s := h.loadState(t)
+		out = h.mustRun(t, "admin", "accept-gg-vaa", "--deployment", "lockunlock-gg",
+			"--vaa", vaaHex, "--pubkey", pubKeyHex, "--executor", "Erin")
+		require.Equal(t, s.GuardianGovernance, extractField(t, out, "admin"),
+			"the deployment's admin should now be guardianGovernance")
+
+		// The state file's own record of the CURRENT admin follows suit -- Admin itself (the
+		// REGISTERING admin) must stay untouched: it is the key `nttInstrumentIdFor`/
+		// `nttManagerAddressFor` hash-bind into the instrument id and manager/transceiver
+		// addresses, fixed forever at registration (see state.Deployment's doc comment).
+		s = h.loadState(t)
+		require.Equal(t, s.GuardianGovernance, s.Deployments["lockunlock-gg"].CurrentAdmin)
+		require.Equal(t, registeringAdmin, s.Deployments["lockunlock-gg"].Admin,
+			"the registering admin must be unchanged by the handoff")
+
+		// `status` (the ledger's own view, not just the CLI's cached state) agrees.
+		statusOut := h.mustRun(t, "status")
+		var status struct {
+			Deployments []struct {
+				ManagerID int    `json:"managerId"`
+				Admin     string `json:"admin"`
+			} `json:"deployments"`
+		}
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(statusOut)), &status), "status should print JSON:\n%s", statusOut)
+		lockunlockGgManagerID := s.Deployments["lockunlock-gg"].ManagerID
+		found := false
+		for _, d := range status.Deployments {
+			if d.ManagerID == lockunlockGgManagerID {
+				found = true
+				require.Equal(t, s.GuardianGovernance, d.Admin, "ledger-side status should also report gg as admin")
+			}
+		}
+		require.True(t, found, "lockunlock-gg manager should be present in status")
+
+		// The reserve moved to gg INTACT: gg's holding total now equals what the old admin
+		// held before the handoff, and the old admin holds none of it any more -- the
+		// accounting the ledger's `balance` field itself never changes (TransferAdmin only
+		// repoints custody, see Wormhole.Ntt.Manager's header), observed here via the CLI's
+		// only ledger-balance-adjacent read. Compared numerically (decimalsEqual), not as bare
+		// strings: Daml renders a zero Decimal in scientific notation (e.g. "0E-10") on this
+		// query path, which a literal "0.0" string comparison would wrongly reject.
+		out = h.mustRun(t, "balance", "--party", "GuardianGovernance", "--deployment", "lockunlock-gg")
+		require.True(t, decimalsEqual(t, adminBalanceBefore, extractField(t, out, "cip56HoldingTotal")),
+			"the custody pot should have moved to gg intact: %s vs %s", adminBalanceBefore, out)
+		out = h.mustRun(t, "balance", "--party", "lockunlock-gg-admin", "--deployment", "lockunlock-gg")
+		require.True(t, decimalsEqual(t, "0", extractField(t, out, "cip56HoldingTotal")),
+			"the old admin should no longer hold any of the reserve, got %s", out)
+
+		// A subsequent receive (Release, custodian = gg now) still works end to end.
+		out = h.mustRun(t, "preapprove", "--deployment", "lockunlock-gg", "--user", "Judy")
+		require.Contains(t, out, "preapproved=true")
+		out = h.mustRun(t, "guardian", "sign-transfer",
+			"--deployment", "lockunlock-gg", "--to-recipient", "Judy", "--amount", "1000", "--source-chain", "2")
+		vaaHex2 := extractField(t, out, "vaa")
+		pubKeyHex2 := extractField(t, out, "pubkey")
+		out = h.mustRun(t, "receive", "--deployment", "lockunlock-gg",
+			"--vaa", vaaHex2, "--recipient", "Judy", "--pubkey", pubKeyHex2)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=1000")
+
+		// Re-submitting the SAME accept-admin VAA must fail as a replay, not merely "no
+		// proposal": a fresh self-referential proposal (gg offering the role to itself) makes
+		// Playground.Ops:acceptAdminTransferByVaa's proposal lookup succeed again, so the
+		// resubmission reaches Wormhole.Core.State.VerifyAndConsumeVAA and is rejected there,
+		// on the digest gg's replay trie already consumed the first time.
+		_ = h.mustRun(t, "admin", "propose-gg", "--deployment", "lockunlock-gg")
+		out, err := h.run(t, "admin", "accept-gg-vaa", "--deployment", "lockunlock-gg",
+			"--vaa", vaaHex, "--pubkey", pubKeyHex, "--executor", "Erin")
+		require.Error(t, err, "re-submitting the same accept-admin VAA must be rejected as a replay")
+		require.Contains(t, out, "digest already consumed")
+	})
+
 	t.Run("party list shows allocated parties", func(t *testing.T) {
 		s := h.loadState(t)
 		require.NotEmpty(t, s.Users["Alice"], "Alice should have been allocated by the inbound transfer step")
@@ -620,10 +753,11 @@ func TestPlaygroundE2E(t *testing.T) {
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &listed), "contracts list should print JSON:\n%s", out)
 		require.Equal(t, 0, listed.GuardianSetIndex)
-		// One manager per deploy subtest: "deploy burn-mint" and "lock-unlock deployment".
+		// One manager per deploy subtest: "deploy burn-mint", "lock-unlock deployment", and
+		// the dedicated "lockunlock-gg" the gg-custody-opt-in subtest deploys for itself.
 		// Bump this count whenever a deploy subtest is added. (The real-Amulet "amulet"
 		// deploy runs after this subtest, and only on localnet, so it is not counted here.)
-		require.Len(t, listed.Managers, 2, "burnmint + lockunlock managers")
+		require.Len(t, listed.Managers, 3, "burnmint + lockunlock + lockunlock-gg managers")
 		require.GreaterOrEqual(t, len(listed.Emitters), 2, "two transceiver emitters + the standalone one")
 	})
 

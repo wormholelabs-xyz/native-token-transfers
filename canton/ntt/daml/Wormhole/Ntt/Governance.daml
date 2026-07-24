@@ -155,6 +155,7 @@ template NttGovernance
           peers = Map.empty
           factory
           paused = False
+          factoryEpoch = 0
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with
             operator

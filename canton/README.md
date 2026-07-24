@@ -59,7 +59,10 @@ Three parties sign every `NttManager`, and each signature has one job:
 - `admin` is the operational role: it maintains the peer table, rotates the
   committed factory, and owns the lock/unlock reserve. It is transferable
   (`TransferAdmin`, usually via the propose-accept `AdminTransferProposal`);
-  handing it to `gg` is the guardian quorum's custody opt-in.
+  handing it to `gg` is the guardian quorum's custody opt-in. In production
+  this handoff is completed by relaying a guardian-signed governance VAA
+  (`AcceptAdminTransferByVaa`), not by a live `gg` signature — see "Custody
+  follows the admin" below.
 - `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
   same party that anchors the core and receives message fees. It administers
   burn/mint instruments, owns the deployment's transceiver `Emitter`, is the
@@ -94,7 +97,11 @@ root — and the manager's choice bodies lend the manager's signatures to move
 tokens. Value can only move inside fixed template code, and every inbound
 movement first verifies and consumes a VAA, so no single signatory can move
 bridged value, and nobody has to co-sign at transfer time. That is what keeps
-both deployment and relaying permissionless.
+both deployment and relaying permissionless. The custody opt-in is no
+exception: `AcceptAdminTransferByVaa` composes `gg`'s side of the handoff from
+authority the manager's own signatories already carry (see the module header),
+so `gg` never signs live to accept a deployment — genesis remains its only
+live signature.
 
 A rogue movement of a `gg`-owned reserve would take either a native spend by
 the guardian quorum or a new `gg`-signed contract, which is also a quorum act.
@@ -155,6 +162,23 @@ prefix `0x994E5454`; `NttManagerMessage`; `WormholeTransceiverMessage`, prefix
 `0x9945FF10`). Amounts travel as the NTT `TrimmedAmount`: an integer plus a
 scale byte, at most 8 decimals. Round-trips are covered by
 `TestNtt:testNttCodec`.
+
+The module also encodes NTT's own governance packets — currently just
+`AcceptAdminToGovernance`, the guardian quorum's authorization to accept a
+deployment's admin role (see "Accepting the opt-in without a live `gg`
+signature" above):
+
+```
+module(32)         = ASCII "Ntt" left-padded  (0x00…004e7474)
+action(1)          = 1  (AcceptAdminTransferToGovernance)
+chain(2)           = must equal the target deployment's own NttManager.chainId (72 on Canton)
+managerAddress(32) = must equal the target deployment's managerAddress
+factoryEpoch(8)    = uint64 big-endian; must equal the target's factoryEpoch
+```
+
+75 bytes total, mirroring the core's own governance packet layout under a
+distinct module id (`"Ntt"` vs. `"Core"`), so an NTT governance VAA can never
+be confused with — or replayed as — a core one.
 
 ## Send (`NttManager.Transfer`)
 
@@ -295,6 +319,53 @@ round-trip), so the handoff recreates it once to move that observership to the
 incoming admin. The same choice serves plain admin succession between ordinary
 parties, and lets `gg` hand the role back.
 
+**Accepting the opt-in without a live `gg` signature.** `AdminTransferProposal.AcceptAdminTransfer`
+is `controller newAdmin`, so completing the handoff to `gg` directly would
+still need `gg` to actively co-submit — the one live signature the design
+otherwise avoids after genesis (see "Parties and the trust model"). Instead,
+guardians sign an off-chain governance VAA authorizing the acceptance, and any
+executor relays it permissionlessly via `NttManager.AcceptAdminTransferByVaa`
+— the same model as Solana contract-upgrade governance. The VAA is an NTT
+governance packet (module `"Ntt"`, action `1`, mirroring the core's own
+packet layout — see the wire codec section) carrying `chain`, `managerAddress`,
+and `factoryEpoch`. `AcceptAdminTransferByVaa`:
+
+1. Checks the standing `AdminTransferProposal` actually offers the role to
+   `gg`, names this deployment, and was made by the deployment's CURRENT
+   admin (a stale proposal from a since-replaced admin must not apply).
+2. Pins the disclosed `CoreState` to the deployment's own committed guardian
+   trust anchor and operator (the same pin `Release`/`Mint` use), then
+   verifies the VAA and consumes its digest in `gg`'s replay trie — sub-scoped
+   by the deployment's `namespace`, so governance and transfer VAAs share one
+   trie and a governance VAA can never be replayed as (or by) a transfer one.
+3. Applies the core's own governance hardening: signed by the CURRENT
+   guardian set only (not merely an unexpired one), and the standard emitter
+   chain/address checks.
+4. Checks the parsed `chain`, `managerAddress`, and `factoryEpoch` match this
+   deployment exactly. `factoryEpoch` (bumped by every `SetFactory`) is the
+   real binding: it names the exact committed factory the quorum vetted when
+   it signed, closing a TOCTOU window where a hostile old admin rotates in a
+   look-alike factory between vetting and relay.
+5. Exercises `AdminTransferProposal.AcceptAdminTransfer` on itself, exactly as
+   the direct path does — nothing about the pot move, the ledger, or the
+   factory commitment differs from the propose-accept path above; only who
+   supplies `gg`'s authority does (the manager's own inherited signatures,
+   not a live co-submission).
+
+Authority composes without any live `gg` signature: `gg`'s side comes from the
+manager's own signatories (inherited from the `NttGovernance` root, see above),
+and the old admin's side comes from the standing, self-signed
+`AdminTransferProposal`. The executor relaying the VAA carries no authority of
+its own. Demotion by VAA (`gg` handing the role back) is future work; today
+only the acceptance direction is VAA-gated.
+
+Like the direct `TransferAdmin`/`AcceptAdminTransfer` path it wraps,
+`AcceptAdminTransferByVaa` is a config/admin operation, not a value movement,
+so `paused` never gates it — a deployment can accept the opt-in (or hand off
+the role between ordinary parties) while paused exactly as it can while live;
+only `Transfer`/`Release`/`Mint` check `paused` (see `NttManager.SetPaused`'s
+doc comment).
+
 **Why the partition is by owner.** Isolation between deployments follows from
 ownership, not from accounting or holding topology. Reserves of distinct
 admins cannot mix, no matter what any factory reports: a deployment that
@@ -405,11 +476,11 @@ fail-closed pattern the core publish path uses.
   A real lock/unlock deployment bridges a token whose admin is not `gg` and
   relies on that registry's `TransferPreapproval`; exercising that end to end
   is future work.
-- Accepting an admin handoff by governance VAA: `gg` accepts an
-  `AdminTransferProposal` by acting on it, which today means a quorum action
-  per acceptance. A guardian-signed acceptance VAA, verified on-ledger like
-  other governance actions, would let anyone submit the quorum's standing
-  approval.
+- Demoting `gg` by governance VAA: only the ACCEPTANCE direction (an ordinary
+  admin handing the role to `gg`) is VAA-gated today, via
+  `AcceptAdminTransferByVaa` — see "Custody follows the admin" above. `gg`
+  handing the role back still runs the direct `TransferAdmin` path (a live
+  `gg` signature). Symmetric VAA-gated demotion is future work.
 - Inbound rate limits (EVM NTT parity): a governance-set cap on inbound
   release/mint rate would bound the damage from a compromised peer beyond the
   `LockedLedger` cap. Not required for isolation, so deferred.
