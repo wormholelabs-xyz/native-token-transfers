@@ -17,6 +17,7 @@ type setPeerInput struct {
 	Chain           int    `json:"chain"`
 	PeerManager     string `json:"peerManager"`
 	PeerTransceiver string `json:"peerTransceiver"`
+	Decimals        int    `json:"decimals"`
 }
 
 type setPeerOutput struct {
@@ -25,7 +26,7 @@ type setPeerOutput struct {
 
 // setPeerOnLedger runs Playground.Ops:setPeer against an already-open runner -- shared by
 // `deploy` (config-file peers) and the standalone `peer set` command.
-func setPeerOnLedger(ctx context.Context, a *app, runner scriptRunner, operator string, managerID int, admin string, chain int, peerManager, peerTransceiver string) error {
+func setPeerOnLedger(ctx context.Context, a *app, runner scriptRunner, operator string, managerID int, admin string, chain int, peerManager, peerTransceiver string, decimals int) error {
 	var out setPeerOutput
 	return runner.Run(ctx, "Playground.Ops:setPeer", setPeerInput{
 		Operator:        operator,
@@ -34,6 +35,7 @@ func setPeerOnLedger(ctx context.Context, a *app, runner scriptRunner, operator 
 		Chain:           chain,
 		PeerManager:     peerManager,
 		PeerTransceiver: peerTransceiver,
+		Decimals:        decimals,
 	}, &out)
 }
 
@@ -51,6 +53,7 @@ func newPeerSetCmd(a *app) *cobra.Command {
 	var chain int
 	var manager string
 	var transceiver string
+	var decimals int
 
 	cmd := &cobra.Command{
 		Use:   "set",
@@ -72,19 +75,19 @@ func newPeerSetCmd(a *app) *cobra.Command {
 			}
 			defer cleanup()
 
-			if err := setPeerOnLedger(ctx, a, runner, s.Operator, d.ManagerID, d.Admin, chain, manager, transceiver); err != nil {
+			if err := setPeerOnLedger(ctx, a, runner, s.Operator, d.ManagerID, d.Admin, chain, manager, transceiver, decimals); err != nil {
 				return err
 			}
 
 			if d.Peers == nil {
 				d.Peers = map[int]state.Peer{}
 			}
-			d.Peers[chain] = state.Peer{ManagerAddress: manager, TransceiverAddress: transceiver}
+			d.Peers[chain] = state.Peer{ManagerAddress: manager, TransceiverAddress: transceiver, Decimals: decimals}
 			s.Deployments[deployment] = d
 			if err := a.saveState(s); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "peer set: %s chain=%d manager=%s transceiver=%s\n", deployment, chain, manager, transceiver)
+			fmt.Fprintf(cmd.OutOrStdout(), "peer set: %s chain=%d manager=%s transceiver=%s decimals=%d\n", deployment, chain, manager, transceiver, decimals)
 			return nil
 		},
 	}
@@ -92,9 +95,11 @@ func newPeerSetCmd(a *app) *cobra.Command {
 	cmd.Flags().IntVar(&chain, "chain", 0, "remote Wormhole chain id")
 	cmd.Flags().StringVar(&manager, "manager", "", "peer manager address (32-byte hex)")
 	cmd.Flags().StringVar(&transceiver, "transceiver", "", "peer transceiver address (32-byte hex)")
+	cmd.Flags().IntVar(&decimals, "decimals", 0, "peer token decimals (1-255) -- outbound transfers to this peer trim to min(8, tokenDecimals, decimals)")
 	_ = cmd.MarkFlagRequired("deployment")
 	_ = cmd.MarkFlagRequired("chain")
 	_ = cmd.MarkFlagRequired("manager")
 	_ = cmd.MarkFlagRequired("transceiver")
+	_ = cmd.MarkFlagRequired("decimals")
 	return cmd
 }

@@ -32,6 +32,7 @@ type peerStatus struct {
 	Chain              int    `json:"chain"`
 	ManagerAddress     string `json:"managerAddress"`
 	TransceiverAddress string `json:"transceiverAddress"`
+	Decimals           int    `json:"decimals"`
 }
 
 type deploymentStatus struct {
@@ -40,9 +41,11 @@ type deploymentStatus struct {
 	TransceiverAddress string       `json:"transceiverAddress"`
 	Admin              string       `json:"admin"`
 	Mode               string       `json:"mode"`
+	ChainID            int          `json:"chainId"`
 	TokenDecimals      int          `json:"tokenDecimals"`
 	OutboundSequence   int          `json:"outboundSequence"`
 	Peers              []peerStatus `json:"peers"`
+	Paused             bool         `json:"paused"`
 }
 
 type statusOutput struct {

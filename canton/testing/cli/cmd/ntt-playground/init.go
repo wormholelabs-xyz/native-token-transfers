@@ -9,6 +9,7 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/guardian"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
 // proposeGenesisInput/proposeGenesisOutput mirror Playground.Init.daml's
@@ -133,7 +134,7 @@ func newInitCmd(a *app) *cobra.Command {
 			if fee > 0 {
 				seq := s.NextGuardianSequence("governance", guardian.DefaultGovernanceChain)
 				a.vlogf(cmd, "init: signing SetMessageFee governance VAA (fee=%d, seq=%d) and applying via SubmitGovernanceVAA", fee, seq)
-				vaa, err := guardian.SignSetMessageFee(key, guardian.GovernanceParams{Sequence: seq}, 72, fee)
+				vaa, err := guardian.SignSetMessageFee(key, guardian.GovernanceParams{Sequence: seq}, wire.CantonChainID, fee)
 				if err != nil {
 					return err
 				}

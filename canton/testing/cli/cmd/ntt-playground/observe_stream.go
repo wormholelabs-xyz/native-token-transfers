@@ -11,6 +11,7 @@ import (
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/observer"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
 // guardianWatcherUser is the observer stream's dedicated reader ledger user. It is granted
@@ -21,7 +22,7 @@ const guardianWatcherUser = "guardian-watcher"
 // observedOutput is the JSON shape `observe stream` prints -- camelCase, machine-parseable,
 // one array element per observed WormholeMessage.
 type observedOutput struct {
-	EmitterChain     int    `json:"emitterChain"` // 72, cantonChainId -- constant
+	EmitterChain     int    `json:"emitterChain"` // wire.CantonChainID (72, cantonChainId)
 	EmitterAddress   string `json:"emitterAddress"`
 	Sequence         int    `json:"sequence"`
 	Nonce            int    `json:"nonce"`
@@ -33,7 +34,7 @@ type observedOutput struct {
 
 func toObservedOutput(o observer.Observed) observedOutput {
 	return observedOutput{
-		EmitterChain:     72,
+		EmitterChain:     wire.CantonChainID,
 		EmitterAddress:   o.EmitterAddress,
 		Sequence:         int(o.Sequence),
 		Nonce:            int(o.Nonce),

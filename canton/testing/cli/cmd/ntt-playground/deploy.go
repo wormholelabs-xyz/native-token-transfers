@@ -29,6 +29,7 @@ type peerConfig struct {
 	Chain       int    `json:"chain"`
 	Manager     string `json:"manager"`
 	Transceiver string `json:"transceiver"`
+	Decimals    int    `json:"decimals"`
 }
 
 // validTokenKinds are the only Playground.Types.daml TokenKind strings the CLI accepts
@@ -67,6 +68,11 @@ func parseTokenKind(raw string) (string, error) {
 func validateDeployConfig(cfg deployConfig) error {
 	if cfg.TokenKind == "amulet" && cfg.Mode != "lock-unlock" {
 		return fmt.Errorf("deploy: tokenKind \"amulet\" only supports mode=lock-unlock (Amulet has no BurnMintFactory)")
+	}
+	for _, p := range cfg.Peers {
+		if p.Decimals < 1 || p.Decimals > 255 {
+			return fmt.Errorf("deploy: peer chain %d has invalid decimals %d (want 1-255)", p.Chain, p.Decimals)
+		}
 	}
 	return nil
 }
@@ -283,11 +289,11 @@ func newDeployCmd(a *app) *cobra.Command {
 			}
 
 			for _, p := range cfg.Peers {
-				a.vlogf(cmd, "set peer chain=%d manager=%s transceiver=%s", p.Chain, p.Manager, p.Transceiver)
-				if err := setPeerOnLedger(ctx, a, runner, s.Operator, out.ManagerID, out.Admin, p.Chain, p.Manager, p.Transceiver); err != nil {
+				a.vlogf(cmd, "set peer chain=%d manager=%s transceiver=%s decimals=%d", p.Chain, p.Manager, p.Transceiver, p.Decimals)
+				if err := setPeerOnLedger(ctx, a, runner, s.Operator, out.ManagerID, out.Admin, p.Chain, p.Manager, p.Transceiver, p.Decimals); err != nil {
 					return fmt.Errorf("deploy: set peer chain %d: %w", p.Chain, err)
 				}
-				d.Peers[p.Chain] = state.Peer{ManagerAddress: p.Manager, TransceiverAddress: p.Transceiver}
+				d.Peers[p.Chain] = state.Peer{ManagerAddress: p.Manager, TransceiverAddress: p.Transceiver, Decimals: p.Decimals}
 			}
 
 			s.Deployments[deploymentName] = d

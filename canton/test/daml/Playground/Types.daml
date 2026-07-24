@@ -120,9 +120,14 @@ data PeerStatus = PeerStatus with
     chain              : Int
     managerAddress     : Text
     transceiverAddress : Text
+    decimals           : Int
   deriving (Eq, Show)
 
 peersList : NttManager -> [PeerStatus]
 peersList mgr =
-  [ PeerStatus with chain, managerAddress = p.managerAddress, transceiverAddress = p.transceiverAddress
+  [ PeerStatus with
+      chain
+      managerAddress = p.managerAddress
+      transceiverAddress = p.transceiverAddress
+      decimals = p.decimals
   | (chain, p) <- Map.toList mgr.peers ]

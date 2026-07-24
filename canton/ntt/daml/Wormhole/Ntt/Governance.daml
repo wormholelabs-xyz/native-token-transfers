@@ -22,7 +22,7 @@ import DA.Map qualified as Map
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
-import Wormhole.Core.Replay (defaultSplitThreshold)
+import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
   , RegisterEmitter (..), ClaimReplayRoot (..) )
@@ -46,11 +46,11 @@ template NttGovernance
     -- contract's own signatories, and no separate namespace party exists
     -- anymore.
     --
-    -- The deployment's stable identity is the derived @namespace : Text@
-    -- ('nttNamespaceFor'), committed here from the registering @admin@, the
-    -- bridged instrument, and the allocated manager id, and the manager and
+    -- The deployment's stable identity is the derived @namespace : Text@:
+    -- @"ntt:" <> keccak256(tag ‖ instrument.admin ‖ instrument.id ‖
+    -- registering admin ‖ managerId)@ ('nttNamespaceFor'). The manager and
     -- transceiver addresses are likewise bound to the registering @admin@
-    -- ('nttManagerAddressFor') — both survive 'Wormhole.Ntt.Manager.TransferAdmin'
+    -- ('nttManagerAddressFor'). Both survive 'Wormhole.Ntt.Manager.TransferAdmin'
     -- because they are computed once, here, and stored, never recomputed
     -- against the current admin.
     --
@@ -68,10 +68,11 @@ template NttGovernance
     -- deployment.
     --
     -- @coreStateCid@/@emitterFeeAllocation@/@claimFeeAllocation@ fund the
-    -- registry's onboarding fees, if any (@None@ on the zero-fee registries
-    -- devnet uses); @admin@ pays both, as the co-controlling @payer@ on the
-    -- nested 'RegisterEmitter'/'ClaimReplayRoot' — gg, the requester/consumer
-    -- of both, must not be made to fund its own deployments' onboarding.
+    -- registries' onboarding fees; @None@ when a registry charges none.
+    -- INVARIANT: gg never pays fees. It is the requester/consumer of the
+    -- nested 'RegisterEmitter'/'ClaimReplayRoot' for authority reasons only;
+    -- @admin@ is the co-controlling @payer@ on both, so every charge draws
+    -- from the registering admin's allocations.
     --
     -- Consuming, so concurrent registrations contend on this root (and, via
     -- the nested exercises, on the core's 'EmitterRegistry' and
@@ -81,6 +82,7 @@ template NttGovernance
       : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
       with
         admin                 : Party
+        chainId               : Int   -- this deployment's own Wormhole chain id (uint16)
         emitterRegistryCid    : ContractId EmitterRegistry
         replayRootRegistryCid : ContractId ReplayRootRegistry
         instrumentId          : InstrumentId
@@ -97,6 +99,8 @@ template NttGovernance
         -- fractional digits a Daml Decimal carries.
         assertMsg "ntt: tokenDecimals must be between 0 and 10"
           (tokenDecimals >= 0 && tokenDecimals <= 10)
+        assertMsg "ntt: chainId must be a positive uint16"
+          (chainId > 0 && chainId <= 65535)
         case tokenConfig of
           BurnMint -> do
             assertMsg
@@ -116,19 +120,24 @@ template NttGovernance
           coreStateCid
           feeAllocation = emitterFeeAllocation
         emitter <- fetch emitterCid
+        assertMsg "ntt: emitter registry is not this bridge instance's"
+          (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
 
         let managerAddress = nttManagerAddressFor operator admin nextId
             namespace = nttNamespaceFor instrumentId admin nextId
 
         -- Claim the deployment's replay-trie root, sub-scoped under gg by the
         -- derived namespace.
-        _ <- exercise replayRootRegistryCid ClaimReplayRoot with
+        rootCid <- exercise replayRootRegistryCid ClaimReplayRoot with
           consumer = guardianGovernance
           namespace
           splitThreshold = defaultSplitThreshold
           payer = admin
           coreStateCid
           feeAllocation = claimFeeAllocation
+        root <- fetch rootCid
+        assertMsg "ntt: replay root registry is not this bridge instance's"
+          (root.operator == operator)
 
         reg' <- create this with nextId = nextId + 1
         mgr <- create NttManager with
@@ -136,6 +145,7 @@ template NttGovernance
           namespace
           admin
           guardianGovernance
+          chainId
           managerId = nextId
           managerAddress
           transceiverEmitterId = emitter.emitterId
@@ -144,10 +154,12 @@ template NttGovernance
           tokenDecimals
           peers = Map.empty
           factory
+          paused = False
         ledger <- case tokenConfig of
           LockUnlock -> Some <$> create LockedLedger with
             operator
             guardianGovernance
+            admin
             managerAddress
             balance = 0.0
             custodyHoldingCid = None

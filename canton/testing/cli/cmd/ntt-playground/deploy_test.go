@@ -87,3 +87,41 @@ func TestDeployConfig_AmuletRequiresLockUnlock(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateDeployConfig_PeerDecimals pins peer decimals validation client-side, fail-fast,
+// matching parseTokenKind's philosophy: a peer with decimals outside 1..255 (including the
+// zero-value "absent from the config" case) is rejected before any script call, with an error
+// naming which peer chain is invalid.
+func TestValidateDeployConfig_PeerDecimals(t *testing.T) {
+	cases := []struct {
+		name     string
+		decimals int
+		wantErr  bool
+	}{
+		{"absent (zero value) rejected", 0, true},
+		{"in range accepted", 8, false},
+		{"out of range (256) rejected", 256, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := deployConfig{
+				TokenKind: "mock",
+				Mode:      "burn-mint",
+				Peers:     []peerConfig{{Chain: 9, Decimals: c.decimals}},
+			}
+			err := validateDeployConfig(cfg)
+			if c.wantErr && err == nil {
+				t.Fatalf("validateDeployConfig(%+v): expected an error, got none", cfg)
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("validateDeployConfig(%+v): unexpected error: %v", cfg, err)
+			}
+			if c.wantErr && !strings.Contains(err.Error(), "chain 9") {
+				t.Fatalf("validateDeployConfig(%+v): error should name the peer chain, got: %v", cfg, err)
+			}
+			if c.wantErr && !strings.Contains(err.Error(), "1") {
+				t.Fatalf("validateDeployConfig(%+v): error should name the valid range, got: %v", cfg, err)
+			}
+		})
+	}
+}

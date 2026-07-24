@@ -25,6 +25,11 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// CantonChainID is the placeholder Wormhole chain id this playground's Canton
+// deployment registers and emits under (NttManager.chainId; the fixture VAAs'
+// recipientChain). Mirrors Test.TestNtt.cantonChainId -- keep the two in sync.
+const CantonChainID = 72
+
 // NativeTokenTransferPrefix is 0x994E5454 -- 0x99 'N' 'T' 'T'.
 var NativeTokenTransferPrefix = [4]byte{0x99, 0x4e, 0x54, 0x54}
 

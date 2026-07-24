@@ -117,9 +117,11 @@ data DeploymentStatus = DeploymentStatus with
     transceiverAddress : Text
     admin              : Party
     mode               : Text
+    chainId            : Int
     tokenDecimals      : Int
     outboundSequence   : Int
     peers              : [PeerStatus]
+    paused             : Bool
   deriving (Eq, Show)
 
 data StatusOutput = StatusOutput with
@@ -146,9 +148,11 @@ queryStatus input = do
       transceiverAddress
       admin = m.admin
       mode = showTokenMode m.tokenConfig
+      chainId = m.chainId
       tokenDecimals = m.tokenDecimals
       outboundSequence = emitterSequenceFor ems m
       peers = peersList m
+      paused = m.paused
   pure StatusOutput with
     guardianSetIndex = cs.guardianSetIndex
     guardianKeys = gs.keys

@@ -74,6 +74,8 @@ func newRootCmdForApp(a *app) *cobra.Command {
 		newInitCmd(a),
 		newDeployCmd(a),
 		newPeerCmd(a),
+		newPauseCmd(a),
+		newUnpauseCmd(a),
 		newPartyCmd(a),
 		newEmitterCmd(a),
 		newPublishCmd(a),

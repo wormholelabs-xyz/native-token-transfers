@@ -11,7 +11,9 @@
 -- deployment's transceiver 'Emitter' sequence *before* exercising 'Transfer' and recomputes
 -- the exact published payload with the same 'Wormhole.Ntt.Payload' encoders 'Transfer' uses
 -- internally -- bit-exact input for `guardian sign-vaa`, matching what a real off-ledger
--- watcher would have observed.
+-- watcher would have observed. The recompute trims via 'Wormhole.Ntt.Amount.trimAmountTo'
+-- rawAmount tokenDecimals peer.decimals -- peer-decimals-aware, matching 'Transfer''s own
+-- trim -- not the peer-decimals-blind 'trimAmount'.
 --
 -- ## Receive requires prior recipient opt-in, both modes
 --
@@ -36,13 +38,13 @@ import Wormhole.Core.Bytes (normalizeHex, leftPadTo, intToBytesN)
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
-import Wormhole.Ntt.Amount (trimAmount)
+import Wormhole.Ntt.Amount (trimAmountTo)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Deposit qualified as Deposit
 import Wormhole.Ntt.Manager hiding (resolveLedger)
 import Wormhole.Ntt.Payload
 import Test.TestCore qualified as TestCore
-import Test.TestNtt (Cip56MockHolding (..), MockBurnMintFactory (..))
+import Test.TestNtt (Cip56MockHolding (..), MockBurnMintFactory (..), cantonChainId)
 import Test.TestReplay (coveringDisclosure)
 
 import Playground.Amulet (AmuletSeam (..), amuletHoldings, toDisclosure)
@@ -83,6 +85,7 @@ data SetPeerInput = SetPeerInput with
     chain           : Int
     peerManager     : Text
     peerTransceiver : Text
+    decimals        : Int
   deriving (Eq, Show)
 
 data SetPeerOutput = SetPeerOutput with
@@ -95,8 +98,41 @@ setPeer input = do
   _ <- submit input.admin do
     exerciseCmd mgrCid SetPeer with
       chainId = input.chain
-      peer = Peer with managerAddress = input.peerManager, transceiverAddress = input.peerTransceiver
+      peer = Peer with
+        managerAddress = input.peerManager
+        transceiverAddress = input.peerTransceiver
+        decimals = input.decimals
   pure SetPeerOutput with managerId = input.managerId
+
+----------------------------------------------------------------------
+-- setPaused
+----------------------------------------------------------------------
+
+data SetPausedInput = SetPausedInput with
+    operator  : Party
+    managerId : Int
+    admin     : Party
+    paused    : Bool
+  deriving (Eq, Show)
+
+data SetPausedOutput = SetPausedOutput with
+    managerId : Int
+    paused    : Bool
+  deriving (Eq, Show)
+
+-- | Toggle 'Wormhole.Ntt.Manager.NttManager.paused' via the admin-controlled 'SetPaused'
+-- choice -- the CLI's `pause`/`unpause` commands both route through here, differing only in
+-- @input.paused@. While paused, 'Transfer'/'Release'/'Mint' all abort on-ledger; config
+-- choices (this one included) keep working.
+setPaused : SetPausedInput -> Script SetPausedOutput
+setPaused input = do
+  (mgrCid, _mgr) <- resolveManager input.operator input.managerId
+  _ <- submit input.admin do
+    exerciseCmd mgrCid SetPaused with
+      newPaused = input.paused
+  pure SetPausedOutput with
+    managerId = input.managerId
+    paused = input.paused
 
 ----------------------------------------------------------------------
 -- fundUser ("mock" kind only; "amulet" funds via a real Amulet tap, off-ledger)
@@ -188,7 +224,7 @@ data TransferOutInput = TransferOutInput with
 -- | Bit-exact recomputation of the published VAA payload -- what `guardian sign-vaa` needs.
 data TransferOutOutput = TransferOutOutput with
     outboundSequence : Int
-    emitterChain     : Int    -- 72, cantonChainId
+    emitterChain     : Int    -- cantonChainId (72)
     emitterAddress   : Text   -- this deployment's transceiver Emitter address
     nonce            : Int
     consistencyLevel : Int
@@ -332,7 +368,7 @@ transferOut input = do
   -- the module header; this is what `guardian sign-vaa` needs.
   let peer = fromSomeNote ("playground: no peer for chain " <> show input.recipientChain)
                (Map.lookup input.recipientChain mgr'.peers)
-      trimmed = trimAmount input.rawAmount mgr'.tokenDecimals
+      trimmed = trimAmountTo input.rawAmount mgr'.tokenDecimals peer.decimals
       ntt = NativeTokenTransfer with
         decimals = trimmed.decimals
         amount = trimmed.amount
@@ -368,7 +404,7 @@ transferOut input = do
 
   pure TransferOutOutput with
     outboundSequence = em.sequence
-    emitterChain = 72
+    emitterChain = cantonChainId
     emitterAddress = em.emitterAddress
     nonce = input.nonce
     consistencyLevel = input.consistencyLevel
@@ -419,7 +455,7 @@ data PublishMessageInput = PublishMessageInput with
 
 data PublishMessageOutput = PublishMessageOutput with
     sequence       : Int
-    emitterChain   : Int   -- 72, cantonChainId
+    emitterChain   : Int   -- cantonChainId (72)
     emitterAddress : Text
     payload        : Text
   deriving (Eq, Show)
@@ -457,7 +493,7 @@ publishMessage input = do
       feeAllocation = None
   pure PublishMessageOutput with
     sequence = msg.sequence
-    emitterChain = 72
+    emitterChain = cantonChainId
     emitterAddress = em.emitterAddress
     payload = msg.payload
 

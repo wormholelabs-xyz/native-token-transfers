@@ -250,7 +250,7 @@ func newGuardianSignGovernanceSetFeeCmd(a *app) *cobra.Command {
 				return err
 			}
 			a.vlogf(cmd, "sign-governance set-fee: sequence=%d (auto) fee=%d", seq, fee)
-			vaa, err := guardian.SignSetMessageFee(key, guardian.GovernanceParams{Sequence: seq}, 72, fee)
+			vaa, err := guardian.SignSetMessageFee(key, guardian.GovernanceParams{Sequence: seq}, wire.CantonChainID, fee)
 			if err != nil {
 				return err
 			}

@@ -23,7 +23,7 @@ import Splice.Api.Token.TransferInstructionV1
   ( TransferFactory, TransferFactory_Transfer (..), Transfer (..)
   , TransferInstructionResult_Output (..) )
 import Wormhole.Core.Bytes (leftPadTo, normalizeHex)
-import Wormhole.Ntt.Amount (trimAmount)
+import Wormhole.Ntt.Amount (trimAmount, trimAmountTo)
 import Wormhole.Ntt.Manager (NttTokenConfig (..), nttInstrumentIdFor)
 import Wormhole.Ntt.Payload
   ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer )
@@ -275,3 +275,115 @@ testPlaygroundTransferRecomputeMatches = do
   ntt.sourceToken === normalizeHex (leftPadTo 32 "dd")
   ntt.decimals === trimmed.decimals
   ntt.amount === trimmed.amount
+
+-- | The recompute is PEER-decimals-aware, not just local-token-decimals-aware:
+-- 'transferOut''s independent recompute must match what 'Wormhole.Ntt.Manager.Transfer'
+-- actually trims to on-ledger even when the peer's decimals differ from the deployment's own
+-- 'tokenDecimals'. Pins two things at once: (1) the playground's own 'setPeer' entrypoint
+-- threads 'SetPeerInput.decimals' through to the on-ledger 'Peer.decimals' (not a hardcoded
+-- placeholder), and (2) the recompute uses 'trimAmountTo rawAmount tokenDecimals
+-- peer.decimals' (peer-decimals-aware), not the peer-decimals-blind 'trimAmount' that
+-- 'testPlaygroundTransferRecomputeMatches' above exercises (there every peer is at
+-- decimals=8, same as tokenDecimals, so the two trims coincide and can't tell them apart).
+testPlaygroundTransferRecomputeLowDecimalPeer : Script ()
+testPlaygroundTransferRecomputeLowDecimalPeer = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundRecomputeLowDecimalsAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  holdingCid <- mkHolding gg admin d.instrumentId 1.0
+  Some mgr <- queryContractId operator d.mgrCid
+
+  -- Add a low-decimals peer via the playground's OWN setPeer entrypoint (not raw 'SetPeer'
+  -- as 'sendScaffold' uses for chain 2) -- this is what pins 'SetPeerInput.decimals'
+  -- threading, not just the core model's own guard.
+  _ <- setPeer SetPeerInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    chain = 5
+    peerManager = leftPadTo 32 "aa"
+    peerTransceiver = leftPadTo 32 "bb"
+    decimals = 3
+
+  out <- transferOut TransferOutInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    tokenKind = "mock"
+    user = admin
+    recipientChain = 5
+    recipientAddress = leftPadTo 32 "ee"
+    sourceToken = leftPadTo 32 "dd"
+    rawAmount = 500000  -- 500000 / 10^(8-3) == 5 at 3 decimals: rounds cleanly, no dust
+    nonce = 0
+    consistencyLevel = 0
+    inputHoldingCids = [holdingCid]
+    amulet = None
+    remote = None
+
+  let wm = decodeWormholeTransceiverMessage out.payload
+      mm = decodeNttManagerMessage wm.managerPayload
+      ntt = decodeNativeTokenTransfer mm.payload
+      trimmed = trimAmountTo 500000 mgr.tokenDecimals 3
+  ntt.decimals === 3
+  ntt.amount === 5
+  ntt.decimals === trimmed.decimals
+  ntt.amount === trimmed.amount
+
+----------------------------------------------------------------------
+-- Playground.Ops: setPaused round-trip
+----------------------------------------------------------------------
+
+-- | The playground's 'setPaused' entrypoint threads through to
+-- 'Wormhole.Ntt.Manager.NttManager.paused': pausing sets it, unpausing clears it, and a
+-- normal 'transferOut' succeeds once unpaused. Positive path only -- the rejection-while-
+-- paused case is deliberately NOT a Daml playground test: 'setPaused'/'transferOut' both
+-- 'submit' internally (no 'trySubmit' seam to observe the abort from here), so that negative
+-- case lives in e2e where `h.run` captures the CLI's own error output (same reasoning as
+-- 'testPlaygroundTransferRecomputeLowDecimalPeer''s doc note on the dust/same-chain/zero-
+-- address negatives above).
+testPlaygroundSetPausedRoundTrip : Script ()
+testPlaygroundSetPausedRoundTrip = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundPauseAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  holdingCid <- mkHolding gg admin d.instrumentId 1.0
+  Some mgr <- queryContractId operator d.mgrCid
+
+  _ <- setPaused SetPausedInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    paused = True
+
+  (_, mgrPaused) <- resolveManager operator mgr.managerId
+  mgrPaused.paused === True
+
+  _ <- setPaused SetPausedInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    paused = False
+
+  (_, mgrUnpaused) <- resolveManager operator mgr.managerId
+  mgrUnpaused.paused === False
+
+  -- A normal transferOut succeeds once unpaused -- proves 'setPaused False' actually clears
+  -- the on-ledger halt, not just that the query reads back False.
+  _ <- transferOut TransferOutInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    tokenKind = "mock"
+    user = admin
+    recipientChain = 2
+    recipientAddress = leftPadTo 32 "ee"
+    sourceToken = leftPadTo 32 "dd"
+    rawAmount = 1000000
+    nonce = 0
+    consistencyLevel = 0
+    inputHoldingCids = [holdingCid]
+    amulet = None
+    remote = None
+
+  pure ()
