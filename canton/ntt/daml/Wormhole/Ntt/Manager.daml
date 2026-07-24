@@ -80,8 +80,8 @@
 -- commitment is typed by mode ('NttFactory'), matched against 'NttTokenConfig'
 -- at registration and rotation, so no call site coerces a contract id. @admin@
 -- refreshes it with 'SetFactory' on the rare occasion the registry is
--- upgraded; on a gg-adminned deployment that rotation is automatically a
--- governance action.
+-- upgraded; for burn/mint the 'effectiveMinter' co-signs that rotation, so
+-- the committed factory stays minter-vetted for the deployment's whole life.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -169,8 +169,9 @@ effectiveMinter mgr = fromOptional mgr.guardianGovernance mgr.minter
 -- external minter this fully firewalls gg. For a gg-minted deployment
 -- (@minter@ = gg) the proxy still carries gg — necessarily, since gg is the
 -- real mint authority — which is why a gg-minted deployment can only ever
--- commit a gg-vetted factory (gg co-signs
--- 'Wormhole.Ntt.Governance.RegisterManager').
+-- commit a gg-vetted factory (gg co-signs both
+-- 'Wormhole.Ntt.Governance.RegisterManager' and every later 'SetFactory'
+-- rotation).
 --
 -- Created and consumed inside 'NttManager.Transfer'; never persisted.
 template BurnMintMinterProxy
@@ -481,12 +482,21 @@ template NttManager
 
     -- | Repoint the committed registry factory. Needed only when the registry
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
-    -- the new cid from the registry and commits it here. On a gg-adminned
-    -- deployment this is automatically a governance action.
+    -- the new cid from the registry and commits it here.
+    --
+    -- For burn/mint the 'effectiveMinter' — the party whose mint authority
+    -- the factory wields — co-signs the rotation, mirroring the co-signature
+    -- 'Wormhole.Ntt.Governance.RegisterManager' requires when the factory is
+    -- first committed. Without it a mutable @admin@ could later swap in a
+    -- look-alike factory; on a gg-minted deployment, where gg reaches the
+    -- factory body directly, that would re-open the authority leak the
+    -- de-escalation closes. The committed factory must stay minter-vetted
+    -- for the life of the deployment, not just at registration. Lock/unlock's
+    -- transfer factory never wields gg, so it stays @admin@-only.
     choice SetFactory : ContractId NttManager
       with
         newFactory : NttFactory
-      controller admin
+      controller admin :: (if tokenConfig == BurnMint then [effectiveMinter this] else [])
       do
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig newFactory)

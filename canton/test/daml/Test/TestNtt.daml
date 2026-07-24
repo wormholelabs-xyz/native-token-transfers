@@ -1085,6 +1085,25 @@ testSetFactory = do
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
 
+-- | Rotating a gg-minted deployment's factory is gg-gated: the admin alone
+-- cannot repoint it (that would let a mutable admin swap in a look-alike
+-- factory that the gg-signed manager would then mint through), but the admin
+-- together with gg — the party whose mint authority the factory wields — can.
+-- This keeps the committed factory gg-vetted for the life of the deployment,
+-- not just at registration.
+testSetFactoryGgMintedRequiresGg : Script ()
+testSetFactoryGgMintedRequiresGg = do
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "SFGgAdmin"
+  d <- deploy operator gg admin BurnMint
+  freshFc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = d.instrumentId
+  let freshFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory freshFc)
+  -- Admin alone cannot rotate a gg-minted factory.
+  submitMustFail admin do exerciseCmd d.mgrCid SetFactory with newFactory = freshFactory
+  -- Admin and gg together can.
+  _ <- submit (actAs admin <> actAs gg) do exerciseCmd d.mgrCid SetFactory with newFactory = freshFactory
+  pure ()
+
 ----------------------------------------------------------------------
 -- Admin transfer (custody handoff)
 ----------------------------------------------------------------------

@@ -38,6 +38,7 @@ import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (Emitter)
 import Wormhole.Ntt.Governance (NttGovernance, RegisterManager (..))
 import Wormhole.Ntt.Manager qualified as M
+import Wormhole.Ntt.Deposit (DepositPreapproval (..), Deposit (..))
 import Test.TestNtt (nttSetup, coreRegistries, cantonChainId, b32)
 
 -- | A contract signed by @victim@. If an attacker-authored factory can create
@@ -483,3 +484,77 @@ testExternalMinterMaliciousFactoryFirewallsGg = do
       extraArgs = emptyExtraArgs
   forged <- query @ForgedWithGgAuthority gg
   assertMsg "external-minter de-escalation failed to firewall gg via the real manager" (null forged)
+
+-- | Models the inbound Mint's call into the recipient's DepositPreapproval.
+-- Signed by gg (a lifetime manager signatory) AND the external minter, it
+-- drives the real 'Deposit' choice exactly as 'NttManager.Mint' does.
+-- 'Deposit' is controlled by the instrument admin — the minter — so its body
+-- carries {recipient, minter} and never gg: the inbound counterpart of the
+-- outbound de-escalation. (The VAA verification that 'Mint' runs before this
+-- point is orthogonal guardian-signature checking, and the recipient-hash
+-- binding makes a full VAA-driven mint a live-sandbox test; these tests
+-- exercise the authority boundary the inbound path relies on.)
+template MintManagerProxy
+  with
+    gg       : Party
+    minter   : Party
+    executor : Party
+  where
+    signatory gg, minter
+    observer executor
+
+    nonconsuming choice RunInboundDeposit : ()
+      with
+        preCid     : ContractId DepositPreapproval
+        factoryCid : ContractId BurnMintFactory
+        amount     : Decimal
+      controller executor
+      do
+        exercise preCid Deposit with amount, factoryCid, extraArgs = emptyExtraArgs
+        pure ()
+
+-- | Inbound firewall: for an external minter the inbound mint runs through the
+-- recipient's DepositPreapproval, whose 'Deposit' is controlled by the minter,
+-- not gg. Even driven by a gg-signed manager, a malicious factory reporting
+-- view.admin = gg cannot capture gg here, so no gg-signed contract is forged.
+testExternalMinterInboundMintFirewallsGg : Script ()
+testExternalMinterInboundMintFirewallsGg = do
+  gg <- allocateParty "GgIn"
+  minter <- allocateParty "MinterIn"
+  recipient <- allocateParty "RecipIn"
+  executor <- allocateParty "ExecIn"
+  let inst = InstrumentId with admin = minter, id = "EXT"
+  preCid <- submit recipient do createCmd DepositPreapproval with owner = recipient, instrumentId = inst
+  factoryCid <- submit minter do
+    createCmd EvilBurnMintFactory with thief = minter, viewAdmin = gg, attemptForge = True
+  proxy <- submit (actAs gg <> actAs minter) do createCmd MintManagerProxy with gg, minter, executor
+  fdisc <- fromSome <$> queryDisclosure minter factoryCid
+  pdisc <- fromSome <$> queryDisclosure recipient preCid
+  submitMustFail (actAs executor <> disclose fdisc <> disclose pdisc) do
+    exerciseCmd proxy RunInboundDeposit with
+      preCid
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      amount = 1.0
+  forged <- query @ForgedWithGgAuthority gg
+  assertMsg "inbound mint leaked gg for an external minter" (null forged)
+
+-- | And the external-minter inbound mint works with the minter's own factory
+-- (view.admin = minter), on the minter's authority, with no gg involved.
+testExternalMinterInboundMintWorks : Script ()
+testExternalMinterInboundMintWorks = do
+  gg <- allocateParty "GgIn2"
+  minter <- allocateParty "MinterIn2"
+  recipient <- allocateParty "RecipIn2"
+  executor <- allocateParty "ExecIn2"
+  let inst = InstrumentId with admin = minter, id = "EXT"
+  preCid <- submit recipient do createCmd DepositPreapproval with owner = recipient, instrumentId = inst
+  factoryCid <- submit minter do
+    createCmd EvilBurnMintFactory with thief = minter, viewAdmin = minter, attemptForge = False
+  proxy <- submit (actAs gg <> actAs minter) do createCmd MintManagerProxy with gg, minter, executor
+  fdisc <- fromSome <$> queryDisclosure minter factoryCid
+  pdisc <- fromSome <$> queryDisclosure recipient preCid
+  submit (actAs executor <> disclose fdisc <> disclose pdisc) do
+    exerciseCmd proxy RunInboundDeposit with
+      preCid
+      factoryCid = toInterfaceContractId @BurnMintFactory factoryCid
+      amount = 1.0
