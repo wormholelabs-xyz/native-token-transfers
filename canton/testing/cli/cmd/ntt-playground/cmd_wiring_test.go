@@ -623,3 +623,115 @@ func TestCmd_Receive_AmuletRejectedBeforeAnyScriptRuns(t *testing.T) {
 		t.Fatalf("expected no script calls at all for a rejected amulet receive, got %v", r.scriptNames())
 	}
 }
+
+// ----------------------------------------------------------------------
+// pause / unpause
+// ----------------------------------------------------------------------
+
+// TestCmd_Pause_RunsSetPausedAsAdmin pins plan §5's pause wiring: `pause --deployment X`
+// sends exactly one Playground.Ops:setPaused call carrying the deployment's ManagerID/Admin
+// and Paused: true.
+func TestCmd_Pause_RunsSetPausedAsAdmin(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.Deployments["burnmint"] = state.Deployment{Name: "burnmint", ManagerID: 3, Admin: "admin::abc"}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:setPaused"] = map[string]any{"managerId": 3, "paused": true}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"pause", "--deployment", "burnmint")...)
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected exactly one script call, got %d: %v", len(r.calls), r.scriptNames())
+	}
+	if r.calls[0].Script != "Playground.Ops:setPaused" {
+		t.Fatalf("expected Playground.Ops:setPaused, got %q", r.calls[0].Script)
+	}
+	input, ok := r.calls[0].Input.(setPausedInput)
+	if !ok {
+		t.Fatalf("setPaused input type mismatch: %T", r.calls[0].Input)
+	}
+	if input.ManagerID != 3 || input.Admin != "admin::abc" || !input.Paused {
+		t.Fatalf("expected ManagerID=3 Admin=admin::abc Paused=true, got %+v", input)
+	}
+}
+
+// TestCmd_Unpause_RunsSetPausedAsAdmin mirrors the above for `unpause`: same call, Paused:
+// false.
+func TestCmd_Unpause_RunsSetPausedAsAdmin(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.Deployments["burnmint"] = state.Deployment{Name: "burnmint", ManagerID: 3, Admin: "admin::abc"}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:setPaused"] = map[string]any{"managerId": 3, "paused": false}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"unpause", "--deployment", "burnmint")...)
+	if err != nil {
+		t.Fatalf("unpause: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected exactly one script call, got %d: %v", len(r.calls), r.scriptNames())
+	}
+	input, ok := r.calls[0].Input.(setPausedInput)
+	if !ok {
+		t.Fatalf("setPaused input type mismatch: %T", r.calls[0].Input)
+	}
+	if input.ManagerID != 3 || input.Admin != "admin::abc" || input.Paused {
+		t.Fatalf("expected ManagerID=3 Admin=admin::abc Paused=false, got %+v", input)
+	}
+}
+
+// TestCmd_Pause_UnknownDeployment errors before any script call -- same shape as
+// TestCmd_PeerSet_UnknownDeployment.
+func TestCmd_Pause_UnknownDeployment(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedStateFile(t, stateFile, state.New())
+
+	r := newFakeRunner()
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"pause", "--deployment", "missing")...)
+	if err == nil || !contains(err.Error(), `unknown deployment "missing"`) {
+		t.Fatalf("expected an unknown-deployment error, got %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("expected no script call for an unknown deployment, got %v", r.scriptNames())
+	}
+}
+
+// TestCmd_Unpause_UnknownDeployment mirrors the above for `unpause`.
+func TestCmd_Unpause_UnknownDeployment(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedStateFile(t, stateFile, state.New())
+
+	r := newFakeRunner()
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"unpause", "--deployment", "missing")...)
+	if err == nil || !contains(err.Error(), `unknown deployment "missing"`) {
+		t.Fatalf("expected an unknown-deployment error, got %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("expected no script call for an unknown deployment, got %v", r.scriptNames())
+	}
+}
+
+// TestCmd_PauseUnpause_MissingRequiredFlags pins --deployment as required for both commands.
+func TestCmd_PauseUnpause_MissingRequiredFlags(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	_, _, err := runPlayground(t, append(baseFlags(stateFile), "pause")...)
+	if err == nil {
+		t.Fatalf("expected a required-flag error for `pause` with no --deployment")
+	}
+	_, _, err = runPlayground(t, append(baseFlags(stateFile), "unpause")...)
+	if err == nil {
+		t.Fatalf("expected a required-flag error for `unpause` with no --deployment")
+	}
+}

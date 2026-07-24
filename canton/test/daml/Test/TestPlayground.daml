@@ -329,3 +329,61 @@ testPlaygroundTransferRecomputeLowDecimalPeer = do
   ntt.amount === 5
   ntt.decimals === trimmed.decimals
   ntt.amount === trimmed.amount
+
+----------------------------------------------------------------------
+-- Playground.Ops: setPaused round-trip
+----------------------------------------------------------------------
+
+-- | The playground's 'setPaused' entrypoint threads through to
+-- 'Wormhole.Ntt.Manager.NttManager.paused': pausing sets it, unpausing clears it, and a
+-- normal 'transferOut' succeeds once unpaused. Positive path only -- the rejection-while-
+-- paused case is deliberately NOT a Daml playground test: 'setPaused'/'transferOut' both
+-- 'submit' internally (no 'trySubmit' seam to observe the abort from here), so that negative
+-- case lives in e2e where `h.run` captures the CLI's own error output (same reasoning as
+-- 'testPlaygroundTransferRecomputeLowDecimalPeer''s doc note on the dust/same-chain/zero-
+-- address negatives above).
+testPlaygroundSetPausedRoundTrip : Script ()
+testPlaygroundSetPausedRoundTrip = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundPauseAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  holdingCid <- mkHolding gg admin d.instrumentId 1.0
+  Some mgr <- queryContractId operator d.mgrCid
+
+  _ <- setPaused SetPausedInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    paused = True
+
+  (_, mgrPaused) <- resolveManager operator mgr.managerId
+  mgrPaused.paused === True
+
+  _ <- setPaused SetPausedInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    paused = False
+
+  (_, mgrUnpaused) <- resolveManager operator mgr.managerId
+  mgrUnpaused.paused === False
+
+  -- A normal transferOut succeeds once unpaused -- proves 'setPaused False' actually clears
+  -- the on-ledger halt, not just that the query reads back False.
+  _ <- transferOut TransferOutInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    tokenKind = "mock"
+    user = admin
+    recipientChain = 2
+    recipientAddress = leftPadTo 32 "ee"
+    sourceToken = leftPadTo 32 "dd"
+    rawAmount = 1000000
+    nonce = 0
+    consistencyLevel = 0
+    inputHoldingCids = [holdingCid]
+    amulet = None
+    remote = None
+
+  pure ()

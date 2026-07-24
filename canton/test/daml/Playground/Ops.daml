@@ -105,6 +105,36 @@ setPeer input = do
   pure SetPeerOutput with managerId = input.managerId
 
 ----------------------------------------------------------------------
+-- setPaused
+----------------------------------------------------------------------
+
+data SetPausedInput = SetPausedInput with
+    operator  : Party
+    managerId : Int
+    admin     : Party
+    paused    : Bool
+  deriving (Eq, Show)
+
+data SetPausedOutput = SetPausedOutput with
+    managerId : Int
+    paused    : Bool
+  deriving (Eq, Show)
+
+-- | Toggle 'Wormhole.Ntt.Manager.NttManager.paused' via the admin-controlled 'SetPaused'
+-- choice -- the CLI's `pause`/`unpause` commands both route through here, differing only in
+-- @input.paused@. While paused, 'Transfer'/'Release'/'Mint' all abort on-ledger; config
+-- choices (this one included) keep working.
+setPaused : SetPausedInput -> Script SetPausedOutput
+setPaused input = do
+  (mgrCid, _mgr) <- resolveManager input.operator input.managerId
+  _ <- submit input.admin do
+    exerciseCmd mgrCid SetPaused with
+      newPaused = input.paused
+  pure SetPausedOutput with
+    managerId = input.managerId
+    paused = input.paused
+
+----------------------------------------------------------------------
 -- fundUser ("mock" kind only; "amulet" funds via a real Amulet tap, off-ledger)
 ----------------------------------------------------------------------
 

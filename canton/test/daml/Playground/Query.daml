@@ -120,6 +120,7 @@ data DeploymentStatus = DeploymentStatus with
     tokenDecimals      : Int
     outboundSequence   : Int
     peers              : [PeerStatus]
+    paused             : Bool
   deriving (Eq, Show)
 
 data StatusOutput = StatusOutput with
@@ -149,6 +150,7 @@ queryStatus input = do
       tokenDecimals = m.tokenDecimals
       outboundSequence = emitterSequenceFor ems m
       peers = peersList m
+      paused = m.paused
   pure StatusOutput with
     guardianSetIndex = cs.guardianSetIndex
     guardianKeys = gs.keys

@@ -44,6 +44,7 @@ type deploymentStatus struct {
 	TokenDecimals      int          `json:"tokenDecimals"`
 	OutboundSequence   int          `json:"outboundSequence"`
 	Peers              []peerStatus `json:"peers"`
+	Paused             bool         `json:"paused"`
 }
 
 type statusOutput struct {

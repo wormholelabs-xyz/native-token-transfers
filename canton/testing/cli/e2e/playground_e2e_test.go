@@ -1007,6 +1007,49 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "peer manager address must be non-zero")
 	})
 
+	t.Run("pause halts transfers and unpause restores them", func(t *testing.T) {
+		// burnmint is reused by later subtests (the cross-participant disclosure ones, on
+		// localnet) -- unpause unconditionally on the way out, regardless of how this subtest's
+		// own assertions land, so a failure here can't strand the deployment paused for
+		// whatever runs after it.
+		t.Cleanup(func() {
+			_, _ = h.run(t, "unpause", "--deployment", "burnmint")
+		})
+
+		type observedStatus struct {
+			Paused bool `json:"paused"`
+		}
+
+		out := h.mustRun(t, "pause", "--deployment", "burnmint")
+		require.Contains(t, out, "pause: burnmint paused=true")
+
+		out = h.mustRun(t, "observe", "--deployment", "burnmint")
+		var observed observedStatus
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
+		require.True(t, observed.Paused, "observe should report paused=true")
+
+		out, err := h.run(t, "transfer", "--deployment", "burnmint",
+			"--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "500000")
+		require.Error(t, err, "a transfer while paused must be rejected")
+		require.Contains(t, out, "deployment is paused")
+
+		out = h.mustRun(t, "unpause", "--deployment", "burnmint")
+		require.Contains(t, out, "unpause: burnmint paused=false")
+
+		out = h.mustRun(t, "observe", "--deployment", "burnmint")
+		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
+		require.False(t, observed.Paused, "observe should report paused=false once unpaused")
+
+		// The same transfer now succeeds -- proves `unpause` actually clears the on-ledger
+		// halt, not just that the query reads back false, and leaves burnmint unpaused for
+		// whatever subtest runs next.
+		out = h.mustRun(t, "transfer", "--deployment", "burnmint",
+			"--user", "Bob", "--chain", "2",
+			"--recipient-address", addr32("ee"), "--amount", "500000")
+		require.Contains(t, out, "emitterChain=72")
+	})
+
 	// The only subtest driving REAL Canton Coin (Amulet) rather than a local mock registry:
 	// an "amulet" (lock/unlock) deployment, a real tap + TransferPreapproval, an outbound
 	// lock of 1 CC, and the guardian observation proved off a real Ledger API v2 update stream
