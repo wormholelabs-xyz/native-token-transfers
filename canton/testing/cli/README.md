@@ -60,8 +60,9 @@ go build -o ntt-playground ./cmd/ntt-playground
 ./ntt-playground network down
 ```
 
-State (parties, the guardian key, deployment addresses/peers) persists in
-`playground.state.json` in the working directory between invocations — every
+State (parties, the guardian key, deployment addresses/peers — including each
+peer's configured decimals) persists in `playground.state.json` in the
+working directory between invocations — every
 command after `init` reads and updates it. Never commit this file; it holds a
 private key (devnet-only, but still a secret).
 
@@ -100,18 +101,20 @@ instead of per-service compose state.
 | `deploy --config FILE [--name NAME]` | Deploy an NTT in two steps: `deployRegistry` (gg-submitted) stands up the deployment's mock registry factory contract(s), then `deployNtt` (admin-submitted) resolves them and makes one `RegisterManager` call that atomically registers the `NttManager`, mints its gg-owned transceiver `Emitter`, and claims its replay-trie root — then pre-sets any peers listed in the config. For `amulet` `deployRegistry` is a no-op (the real Splice registry's factory already exists) and `deployNtt` onboards the admin as a validator wallet user first. |
 | `emitter register --name NAME --owner HINT` | Register a standalone core-bridge `Emitter` (not tied to an NTT deployment), keyed under a CLI-local name in state. |
 | `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
-| `peer set --deployment NAME --chain N --manager HEX --transceiver HEX` | Configure (or replace) a peer for a remote chain. |
-| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD]` | Outbound `NttManager.Transfer`. For `mock`, ensures the sender has a standing pre-approval (`preapprove`) and funds it (`fundUser`) before transferring. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `amulet` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved; the receiver is the deployment's admin (custody is admin-owned). |
-| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Mint`/`Release`, executor-only. A replayed VAA exits non-zero. The recipient must have run `preapprove` first — for both burn-mint and lock-unlock `mock` deployments — else the delivery is rejected and the VAA stays deliverable. Rejected outright for `amulet` (receiving against real Amulet is out of scope). |
+| `peer set --deployment NAME --chain N --manager HEX --transceiver HEX --decimals N` | Configure (or replace) a peer for a remote chain. `--decimals` (required, 1-255) is the peer chain token's decimals: outbound transfers to that peer trim to `min(8, tokenDecimals, peerDecimals)` and reject any amount that doesn't round-trip exactly at that precision ("dust the peer cannot represent"). |
+| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD]` | Outbound `NttManager.Transfer`. For `mock`, ensures the sender has a standing pre-approval (`preapprove`) and funds it (`fundUser`) before transferring. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `amulet` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved; the receiver is the deployment's admin (custody is admin-owned). Rejected while the deployment is paused ("deployment is paused"), and rejected if `--amount` doesn't round-trip exactly at the destination peer's configured decimals (dust). |
+| `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Mint`/`Release`, executor-only. A replayed VAA exits non-zero. The recipient must have run `preapprove` first — for both burn-mint and lock-unlock `mock` deployments — else the delivery is rejected and the VAA stays deliverable. Rejected outright for `amulet` (receiving against real Amulet is out of scope), and rejected while the deployment is paused. |
 | `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deliveries: a standing `DepositPreapproval` (burn-mint `mock`) or `MockTransferPreapproval` (lock-unlock `mock`), created self-signed by the recipient. Idempotent. For `amulet` this is a ledger-surfaced no-op (`preapproved=false`); real Amulet's own `TransferPreapproval` is out of scope here. |
 | `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing pre-approval (owner-only `Revoke`, either template). |
+| `pause --deployment NAME` | Admin-controlled: halt a deployment's value movement (`Transfer`/`Release`/`Mint`) via `NttManager.SetPaused`. While paused, `transfer` and `receive` both fail with "deployment is paused". |
+| `unpause --deployment NAME` | Admin-controlled: lift a pause, restoring `transfer`/`receive`. |
 | `guardian sign-transfer --deployment NAME --to-recipient HINT --amount N [--source-chain N] [--sequence N]` | Sign an inbound NTT transfer VAA as if it came from the deployment's configured peer. |
 | `guardian sign-vaa --emitter-chain N --emitter HEX --sequence N --payload HEX` | Sign an arbitrary payload as a VAA (not NTT-specific). |
-| `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72); `--apply` also submits it via `SubmitGovernanceVAA`. |
+| `guardian sign-governance set-fee --fee N [--apply]` | Sign a Core `SetMessageFee` governance VAA (module `Core`, target chain 72 — `cantonChainId`, the playground's fixed Wormhole chain id, also literally `NttManager.chainId` now, not just a VAA convention); `--apply` also submits it via `SubmitGovernanceVAA`. |
 | `guardian verify-vaa --deployment NAME --vaa HEX` | Verify a VAA on-ledger via `CoreState.ParseAndVerifyVAA` (no replay-consume) — cross-checks the CLI's off-chain signature against the live guardian set. |
-| `status` | Print the guardian set, message fee, and every deployment. |
+| `status` | Print the guardian set, message fee, and every deployment (including each deployment's `chainId`, its peers with their `decimals`, and `paused`). |
 | `contracts list` | Print every live `CoreState`/`Emitter`/`NttManager` (plus the replay-node count) as JSON. |
-| `observe --deployment NAME` | Print one deployment's current outbound sequence and peers. |
+| `observe --deployment NAME` | Print one deployment's current outbound sequence, `chainId`, peers (with `decimals`), and `paused` state. |
 | `observe stream --deployment NAME [--from-offset N] [--count N] [--timeout DUR] [--print-offset] [--any-emitter]` | LocalNet only. Read the REAL Ledger API v2 update stream as a dedicated `guardian-watcher` reader user (granted only `CanReadAs(guardianObserver)`, never `actAs`) and print every observed `WormholeMessage` as JSON. `--print-offset` prints the current ledger end (`ledgerEnd=<n>`) and exits, for recording a starting point before a transfer. Filters by the deployment's derived transceiver address unless `--any-emitter`. |
 | `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment, or (for `amulet`) its real Amulet holdings (`amuletHoldingTotal=...`). Custody is admin-owned, so a deployment's own admin hint (the config's `adminHint`, or `<name>-admin` by default) resolves the custodian's own balance — it's a wallet user's real party for `amulet`, an ordinary CLI-allocated party otherwise. |
 
@@ -140,7 +143,7 @@ alongside the party id, so it stays stable even if the config changes later.
   "tokenKind": "mock",
   "decimals": 8,
   "peers": [
-    { "chain": 2, "manager": "00..bb", "transceiver": "00..cc" }
+    { "chain": 2, "manager": "00..bb", "transceiver": "00..cc", "decimals": 8 }
   ]
 }
 ```
@@ -160,7 +163,9 @@ alongside the party id, so it stays stable even if the config changes later.
   instrument-binding admin. For `"amulet"` this party is validator-onboarded
   rather than bare-allocated (see [Real Amulet](#real-amulet-amulet)).
 - `peers`: optional; pre-configures peers at deploy time (equivalent to
-  `peer set` calls after the fact).
+  `peer set` calls after the fact). Each peer entry requires `decimals`
+  (1-255) — the peer chain token's decimals; see the `peer set` row above
+  for how it governs outbound trimming.
 
 See `testdata/deploy-burnmint.json`, `testdata/deploy-lockunlock.json`, and
 `testdata/deploy-amulet.json`.
