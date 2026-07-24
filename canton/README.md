@@ -200,7 +200,8 @@ checks, in order:
 2. Verify the VAA's guardian signatures and consume its digest, atomically,
    with the core `VerifyAndConsumeVAA` (`consumer = gg`, sub-scoped to the
    deployment's derived `namespace`, so each deployment consumes a VAA at most
-   once, independently of every other deployment under the same `gg`).
+   once, independently of every other deployment under the same `gg`, and the
+   scope is unaffected by an admin handoff).
 3. Check the VAA emitter is the configured peer transceiver for its source
    chain, and that the nested message's source and recipient manager addresses
    match the peer and this deployment.
@@ -286,9 +287,13 @@ the manager and transceiver addresses are bound to the registering admin (not
 the current one), the replay scope is the derived `namespace` under `gg` (both
 unaffected by who currently holds `admin`), and the transceiver `Emitter`'s
 owner authority is `gg`'s own, inherited from the manager's signatories rather
-than from `admin` — so peers, in-flight VAAs, the ledger contract, and outbound
-sends are all untouched by the handoff. The same choice serves plain admin
-succession between ordinary parties, and lets `gg` hand the role back.
+than from `admin` — so peers, in-flight VAAs, ledger accounting, and outbound
+sends are all unaffected by the handoff. The one on-ledger side effect is
+bookkeeping: the `LockedLedger` carries the current admin as an observer (pure
+visibility — the admin sees its own reserve accounting without a disclosure
+round-trip), so the handoff recreates it once to move that observership to the
+incoming admin. The same choice serves plain admin succession between ordinary
+parties, and lets `gg` hand the role back.
 
 **Why the partition is by owner.** Isolation between deployments follows from
 ownership, not from accounting or holding topology. Reserves of distinct

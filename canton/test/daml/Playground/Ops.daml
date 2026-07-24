@@ -95,7 +95,11 @@ setPeer input = do
   _ <- submit input.admin do
     exerciseCmd mgrCid SetPeer with
       chainId = input.chain
-      peer = Peer with managerAddress = input.peerManager, transceiverAddress = input.peerTransceiver
+      -- TODO(phase 1): thread decimals from SetPeerInput
+      peer = Peer with
+        managerAddress = input.peerManager
+        transceiverAddress = input.peerTransceiver
+        decimals = 8
   pure SetPeerOutput with managerId = input.managerId
 
 ----------------------------------------------------------------------

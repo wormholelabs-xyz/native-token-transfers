@@ -22,7 +22,7 @@ import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..), nttInstrument
 
 import Playground.MockRegistry (MockPreapprovedTransferFactory (..), MockTransferPreapproval (..))
 import Playground.Types
-import Test.TestNtt (MockBurnMintFactory (..))
+import Test.TestNtt (MockBurnMintFactory (..), cantonChainId)
 
 ----------------------------------------------------------------------
 -- deployRegistry (gg-submitted)
@@ -162,6 +162,7 @@ deployNtt input =
         submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
           exerciseCmd govCid RegisterManager with
             admin = input.admin
+            chainId = cantonChainId
             emitterRegistryCid = emReg
             replayRootRegistryCid = rrReg
             instrumentId
@@ -207,6 +208,7 @@ deployNtt input =
         submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
           exerciseCmd govCid RegisterManager with
             admin = input.admin
+            chainId = cantonChainId
             emitterRegistryCid = emReg
             replayRootRegistryCid = rrReg
             instrumentId
