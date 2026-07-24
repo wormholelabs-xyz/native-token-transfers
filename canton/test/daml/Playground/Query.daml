@@ -117,6 +117,7 @@ data DeploymentStatus = DeploymentStatus with
     transceiverAddress : Text
     admin              : Party
     mode               : Text
+    chainId            : Int
     tokenDecimals      : Int
     outboundSequence   : Int
     peers              : [PeerStatus]
@@ -147,6 +148,7 @@ queryStatus input = do
       transceiverAddress
       admin = m.admin
       mode = showTokenMode m.tokenConfig
+      chainId = m.chainId
       tokenDecimals = m.tokenDecimals
       outboundSequence = emitterSequenceFor ems m
       peers = peersList m

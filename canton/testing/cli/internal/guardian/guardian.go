@@ -144,7 +144,7 @@ func SignTransfer(key *Key, p TransferParams) ([]byte, error) {
 		Amount:           p.Amount,
 		SourceToken:      p.SourceToken,
 		RecipientAddress: p.RecipientAddress,
-		RecipientChain:   72, // cantonChainId
+		RecipientChain:   wire.CantonChainID,
 	}
 	var id [32]byte
 	binary.BigEndian.PutUint64(id[24:], p.Sequence)

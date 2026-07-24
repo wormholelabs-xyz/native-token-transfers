@@ -41,6 +41,7 @@ type deploymentStatus struct {
 	TransceiverAddress string       `json:"transceiverAddress"`
 	Admin              string       `json:"admin"`
 	Mode               string       `json:"mode"`
+	ChainID            int          `json:"chainId"`
 	TokenDecimals      int          `json:"tokenDecimals"`
 	OutboundSequence   int          `json:"outboundSequence"`
 	Peers              []peerStatus `json:"peers"`

@@ -9,6 +9,7 @@ import (
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/disclosure"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/observer"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
 // ----------------------------------------------------------------------
@@ -301,5 +302,15 @@ func TestToObservedOutput(t *testing.T) {
 	if out.EmitterAddress != "aabb" || out.Sequence != 5 || out.Nonce != 6 || out.ConsistencyLevel != 1 ||
 		out.Payload != "cc" || out.EffectiveAt != o.EffectiveAt || out.UpdateID != "upd-1" {
 		t.Fatalf("field passthrough mismatch: %+v", out)
+	}
+}
+
+// TestCantonChainIDConstant pins wire.CantonChainID -- the single Go-side source of truth
+// for the playground's fixed Wormhole chain id -- against the raw value every other pin in
+// this codebase (pure_test.go/cmd_wiring_test.go/internal/wire/ntt_test.go's bare `72`
+// assertions, and Test.TestNtt.cantonChainId on the Daml side) still checks independently.
+func TestCantonChainIDConstant(t *testing.T) {
+	if wire.CantonChainID != 72 {
+		t.Fatalf("expected wire.CantonChainID == 72, got %d", wire.CantonChainID)
 	}
 }

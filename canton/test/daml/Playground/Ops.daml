@@ -44,7 +44,7 @@ import Wormhole.Ntt.Deposit qualified as Deposit
 import Wormhole.Ntt.Manager hiding (resolveLedger)
 import Wormhole.Ntt.Payload
 import Test.TestCore qualified as TestCore
-import Test.TestNtt (Cip56MockHolding (..), MockBurnMintFactory (..))
+import Test.TestNtt (Cip56MockHolding (..), MockBurnMintFactory (..), cantonChainId)
 import Test.TestReplay (coveringDisclosure)
 
 import Playground.Amulet (AmuletSeam (..), amuletHoldings, toDisclosure)
@@ -224,7 +224,7 @@ data TransferOutInput = TransferOutInput with
 -- | Bit-exact recomputation of the published VAA payload -- what `guardian sign-vaa` needs.
 data TransferOutOutput = TransferOutOutput with
     outboundSequence : Int
-    emitterChain     : Int    -- 72, cantonChainId
+    emitterChain     : Int    -- cantonChainId (72)
     emitterAddress   : Text   -- this deployment's transceiver Emitter address
     nonce            : Int
     consistencyLevel : Int
@@ -404,7 +404,7 @@ transferOut input = do
 
   pure TransferOutOutput with
     outboundSequence = em.sequence
-    emitterChain = 72
+    emitterChain = cantonChainId
     emitterAddress = em.emitterAddress
     nonce = input.nonce
     consistencyLevel = input.consistencyLevel
@@ -455,7 +455,7 @@ data PublishMessageInput = PublishMessageInput with
 
 data PublishMessageOutput = PublishMessageOutput with
     sequence       : Int
-    emitterChain   : Int   -- 72, cantonChainId
+    emitterChain   : Int   -- cantonChainId (72)
     emitterAddress : Text
     payload        : Text
   deriving (Eq, Show)
@@ -493,7 +493,7 @@ publishMessage input = do
       feeAllocation = None
   pure PublishMessageOutput with
     sequence = msg.sequence
-    emitterChain = 72
+    emitterChain = cantonChainId
     emitterAddress = em.emitterAddress
     payload = msg.payload
 

@@ -1017,7 +1017,8 @@ func TestPlaygroundE2E(t *testing.T) {
 		})
 
 		type observedStatus struct {
-			Paused bool `json:"paused"`
+			ChainID int  `json:"chainId"`
+			Paused  bool `json:"paused"`
 		}
 
 		out := h.mustRun(t, "pause", "--deployment", "burnmint")
@@ -1027,6 +1028,7 @@ func TestPlaygroundE2E(t *testing.T) {
 		var observed observedStatus
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
 		require.True(t, observed.Paused, "observe should report paused=true")
+		require.Equal(t, 72, observed.ChainID, "observe should report this deployment's registered chainId (cantonChainId)")
 
 		out, err := h.run(t, "transfer", "--deployment", "burnmint",
 			"--user", "Bob", "--chain", "2",
