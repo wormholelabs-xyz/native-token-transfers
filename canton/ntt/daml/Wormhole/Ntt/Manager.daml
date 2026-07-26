@@ -371,15 +371,25 @@ template NttManager
     factory              : NttFactory      -- the registry's committed factory, typed by mode
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
     factoryEpoch         : Int             -- monotonic vetting epoch: 0 at registration, bumped
-                                            -- by 'SetFactory'. '(managerAddress, factoryEpoch)'
-                                            -- uniquely names the committed factory the guardian
-                                            -- quorum vetted when it signed an
-                                            -- 'AcceptAdminTransferByVaa' governance VAA — manager
-                                            -- lineage is linear and only 'SetFactory' changes
-                                            -- @factory@, so the pair is a stable, deterministic
-                                            -- stand-in for a factory contract-id hash (which
-                                            -- Daml-LF 2.3 on this SDK cannot compute; there is no
-                                            -- 'contractIdToText').
+                                            -- by 'SetFactory'. The natural way to bind "the
+                                            -- factory the guardian quorum vetted" into an
+                                            -- 'AcceptAdminTransferByVaa' governance VAA would be
+                                            -- the factory's contract id, but ledger code cannot
+                                            -- relate a contract id to bytes in a VAA payload in
+                                            -- either direction: the LF CONTRACT_ID_TO_TEXT
+                                            -- builtin is specified to return None in ledger code,
+                                            -- and no Text-to-ContractId builtin exists. The epoch
+                                            -- is the ledger-recomputable stand-in the VAA binds
+                                            -- instead: manager lineage is linear and 'SetFactory'
+                                            -- is the only choice that changes @factory@, always
+                                            -- bumping the epoch in the same create, so
+                                            -- '(managerAddress, factoryEpoch)' names the
+                                            -- committed factory value one-to-one and checking the
+                                            -- VAA's epoch against this field is equivalent to
+                                            -- comparing the factory cid itself. That check is
+                                            -- what keeps the permissionless relay honest: a
+                                            -- rotate-after-vetting swap bumps the epoch and the
+                                            -- stale VAA fails closed.
   where
     -- See the module header for what each signature contributes. All three
     -- are inherited from the NttGovernance root at registration (admin from
@@ -539,7 +549,9 @@ template NttManager
     --      quorum's vetting and this relay. @vettedFactory@, below, is
     --      trivially satisfied by construction (it is checked against this
     --      manager's own current @factory@) — the epoch is what actually binds
-    --      the factory the guardians saw.
+    --      the factory the guardians saw. See the @factoryEpoch@ field comment
+    --      for why the VAA binds an epoch rather than the factory's contract
+    --      id (ledger code cannot relate contract ids to payload bytes).
     --
     -- @coreStateCid@ is read with a direct 'fetch' rather than a choice-read
     -- like 'GetGuardianGovernance': 'CoreState' exposes no choice for

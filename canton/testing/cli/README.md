@@ -206,7 +206,9 @@ relays it permissionlessly:
 # managerAddress=... factoryEpoch=0
 
 # The guardian quorum signs an acceptance VAA bound to that (managerAddress,
-# factoryEpoch) pair.
+# factoryEpoch) pair. The epoch stands in for the factory's contract id,
+# which on-ledger code cannot compare against VAA bytes; any factory
+# rotation after vetting bumps it, so a stale VAA fails closed.
 ./ntt-playground guardian sign-governance accept-admin \
   --deployment lockunlock --factory-epoch 0
 # vaa=... pubkey=...
