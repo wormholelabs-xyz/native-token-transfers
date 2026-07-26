@@ -16,10 +16,17 @@ message, and verify-and-consume a VAA. The NTT "Wormhole transceiver" on
 Canton is simply a core `Emitter`.
 
 Like the core, NTT uses no contract keys: every contract is resolved
-off-ledger and passed as an explicit, disclosed contract id. Background for
-the core concepts referenced below (message publishing and fees, the replay
-trie, disclosed-cid submission, the trust model) is in the core
-`canton/README.md`.
+off-ledger and passed as an explicit, disclosed contract id, then validated
+on-ledger by its contents against manager-committed state. This is deliberate,
+not a platform gap. Contract keys exist from SDK 3.5 (Daml-LF 2.3), but they
+are non-unique on Canton 3.x — several live contracts may share a key, negative
+lookups are not validated, and key resolution prefers contracts created in the
+submitting transaction, so a submitter could shadow the intended contract with
+a same-key decoy minted in the same submission. Content validation against
+signatory-protected state is immune to that, and works identically for
+disclosed contracts. Background for the core concepts referenced below
+(message publishing and fees, the replay trie, disclosed-cid submission, the
+trust model) is in the core `canton/README.md`.
 
 ## Packages
 

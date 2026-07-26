@@ -527,7 +527,14 @@ template NttManager
     --      and was made by the deployment's CURRENT admin (a stale proposal
     --      from a since-replaced admin must not apply — mirrors
     --      'AcceptAdminTransfer's own check, kept here too for an early,
-    --      specific error message before any VAA work runs).
+    --      specific error message before any VAA work runs). The proposal cid
+    --      is executor-supplied and validated by contents, never resolved by
+    --      contract key: Canton 3.x keys are non-unique and prefer
+    --      same-transaction creates on lookup, so key resolution could be
+    --      shadowed by a decoy minted in the relayer's own submission.
+    --      Contents-vs-committed-state checks cannot. (Interchangeable
+    --      proposals are harmless: the proposal contributes only the old
+    --      admin's consent; nothing gg inherits flows through it.)
     --   2. The disclosed 'CoreState' is pinned to this deployment's own
     --      guardian trust anchor and operator (mirrors 'verifyInboundTransfer';
     --      a compromised operator co-signing a forged CoreState under a
