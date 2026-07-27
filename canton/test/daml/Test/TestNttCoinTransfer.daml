@@ -810,3 +810,86 @@ testTransferV2PendingProviderReceiverAccept = do
     other -> abort ("expected Completed, got: " <> show other)
   archived <- queryContractId gg instrCid
   archived === None
+
+----------------------------------------------------------------------
+-- v2 TransferInstruction_Reject/Withdraw must validate `actors`
+----------------------------------------------------------------------
+
+-- | Reject returns the locked funds to the sender -- an ambient signatory of
+-- 'NttTransferInstruction' -- so without validating `actors`, any party who
+-- can get itself into `actors` (e.g. gg, ambiently a signatory, or the
+-- sender itself) could unilaterally kill a pending transfer the receiver
+-- never agreed to reject. Confirms only the receiver's account authority
+-- (the interface's own "recipient's decision" contract) can reject.
+testNttCoinTransferV2RejectRequiresReceiverAuthority : Script ()
+testNttCoinTransferV2RejectRequiresReceiverAuthority = do
+  gg <- allocateParty "TransferV2RejectAuthGg"
+  alice <- allocateParty "TransferV2RejectAuthAlice"
+  bob <- allocateParty "TransferV2RejectAuthBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-REJECT-AUTH"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  instrCid <- mkPendingTransferV2 factoryCid gg alice bob instrumentId 0.006 [coinCid]
+
+  -- gg is a signatory of the instruction (so it needs no disclosure to
+  -- submit) but is neither the sender nor the receiver -- gg alone must not
+  -- be able to reject on the receiver's behalf.
+  ggOnly <- trySubmit gg do
+    exerciseCmd instrCid TIV2.TransferInstruction_Reject with actors = [gg], extraArgs = emptyExtraArgs
+  expectAbort "recipient account's authority" ggOnly
+
+  -- the sender is not the receiver either -- reject is the receiver's call.
+  aliceOnly <- trySubmit alice do
+    exerciseCmd instrCid TIV2.TransferInstruction_Reject with actors = [alice], extraArgs = emptyExtraArgs
+  expectAbort "recipient account's authority" aliceOnly
+
+  -- bob, the actual receiver, can reject -- funds return to the sender.
+  rejectRes <- submit bob do
+    exerciseCmd instrCid TIV2.TransferInstruction_Reject with actors = [bob], extraArgs = emptyExtraArgs
+  case rejectRes.output of
+    TIV2.TransferInstructionResult_Failed -> pure ()
+    other -> abort ("expected Failed, got: " <> show other)
+  case rejectRes.senderChangeCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
+
+-- | Withdraw also returns the locked funds to the sender, so the same
+-- griefing concern applies from the other direction: without validating
+-- `actors`, gg or the receiver could unilaterally kill a pending transfer
+-- the sender never asked to withdraw. Confirms only the sender's account
+-- authority (the interface's own "sender's decision" contract) can withdraw.
+testNttCoinTransferV2WithdrawRequiresSenderAuthority : Script ()
+testNttCoinTransferV2WithdrawRequiresSenderAuthority = do
+  gg <- allocateParty "TransferV2WithdrawAuthGg"
+  alice <- allocateParty "TransferV2WithdrawAuthAlice"
+  bob <- allocateParty "TransferV2WithdrawAuthBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-WITHDRAW-AUTH"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  instrCid <- mkPendingTransferV2 factoryCid gg alice bob instrumentId 0.006 [coinCid]
+
+  -- gg is a signatory of the instruction but is neither sender nor receiver.
+  ggOnly <- trySubmit gg do
+    exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with actors = [gg], extraArgs = emptyExtraArgs
+  expectAbort "sender account's authority" ggOnly
+
+  -- the receiver is not the sender either -- withdraw is the sender's call.
+  bobOnly <- trySubmit bob do
+    exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with actors = [bob], extraArgs = emptyExtraArgs
+  expectAbort "sender account's authority" bobOnly
+
+  -- alice, the actual sender, can withdraw -- funds return to her.
+  withdrawRes <- submit alice do
+    exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  case withdrawRes.output of
+    TIV2.TransferInstructionResult_Failed -> pure ()
+    other -> abort ("expected Failed, got: " <> show other)
+  case withdrawRes.senderChangeCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
