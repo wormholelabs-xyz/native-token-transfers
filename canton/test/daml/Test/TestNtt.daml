@@ -51,6 +51,7 @@ import Wormhole.Core.State
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Amount
+import Wormhole.Ntt.Coin
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger
@@ -335,6 +336,12 @@ nttSetup = do
   _ <- submit (actAs operator <> actAs gg) do
     createCmd NttGovernance with operator, guardianGovernance = gg, nextId = 0
   pure (operator, gg, csId)
+
+-- | Bootstrap the genesis, gg-owned canonical 'NttCoinFactory' — one per gg,
+-- created independently of 'nttSetup' (which dozens of lock/unlock and
+-- mock-burn/mint tests call and have no use for a real coin factory).
+nttCoinFactorySetup : Party -> Script (ContractId NttCoinFactory)
+nttCoinFactorySetup gg = submit gg do createCmd NttCoinFactory with guardianGovernance = gg
 
 -- | 'nttSetup' with a mock fee instrument, for the fee tests.
 nttSetupFee : Script (Party, Party, ContractId CoreState, Party, InstrumentId, Party)
