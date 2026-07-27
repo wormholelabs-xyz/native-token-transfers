@@ -1,0 +1,727 @@
+-- | Daml Script tests for the 'Wormhole.Ntt.Coin' 'AllocationFactory' v2 and
+-- 'SettlementFactory' additions, and 'NttCoinAllocationV2': multi-leg net
+-- settlement, iterated/committed allocations.
+--
+-- The critical property these tests exist to prove: a v2 allocation only
+-- ever authorizes ONE party's side of a leg -- a real transfer between two
+-- parties always needs TWO allocations (one per side), and value only
+-- genuinely moves when 'SettlementFactory_SettleBatch' settles both together
+-- in the same transaction. 'testSettleBatchHappyPathTwoAllocations' is the
+-- direct proof of that.
+module Test.TestNttCoinAllocationV2 where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import DA.Time (hours, addRelTime)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.HoldingV2 qualified as HoldingV2
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.AllocationV2 qualified as AV2
+import Splice.Api.Token.AllocationInstructionV2 qualified as AIV2
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Ntt.Coin
+import Test.TestNtt (nttCoinFactorySetup, expectAbort)
+import Test.TestNttCoin (mintCoin)
+
+asAllocationFactoryV2 : ContractId NttCoinFactory -> ContractId AIV2.AllocationFactory
+asAllocationFactoryV2 = toInterfaceContractId @AIV2.AllocationFactory
+
+asSettlementFactory : ContractId NttCoinFactory -> ContractId AV2.SettlementFactory
+asSettlementFactory = toInterfaceContractId @AV2.SettlementFactory
+
+discloseFactory : Party -> ContractId NttCoinFactory -> Script Disclosure
+discloseFactory gg factoryCid = fromSome <$> queryDisclosure gg factoryCid
+
+basicAccount : Party -> HoldingV2.Account
+basicAccount p = HoldingV2.Account with owner = Some p, provider = None, id = ""
+
+-- | A provider-delegated account: @owner@ is the account holder, @provider@
+-- co-signs every movement (see 'Wormhole.Ntt.Coin' module header).
+providerAccount : Party -> Party -> HoldingV2.Account
+providerAccount owner provider = HoldingV2.Account with owner = Some owner, provider = Some provider, id = ""
+
+mkSettlement : [Party] -> Text -> AV2.SettlementInfo
+mkSettlement executors sid = AV2.SettlementInfo with executors, id = sid, cid = None, meta = emptyMetadata
+
+mkLeg : Text -> AV2.TransferSide -> Party -> Decimal -> Text -> AV2.TransferLegSide
+mkLeg transferLegId side otherside amount instrumentId =
+  AV2.TransferLegSide with transferLegId, side, otherside = basicAccount otherside, amount, instrumentId, meta = emptyMetadata
+
+mkSpec : Party -> Party -> [AV2.TransferLegSide] -> AV2.AllocationSpecification
+mkSpec admin authorizer transferLegSides =
+  AV2.AllocationSpecification with
+    admin, authorizer = basicAccount authorizer, transferLegSides
+    settlementDeadline = None, nextIterationFunding = None, committed = False, meta = emptyMetadata
+
+mintCoinV2 : ContractId NttCoinFactory -> Party -> InstrumentId -> Party -> Decimal -> Script (ContractId HoldingV2.Holding)
+mintCoinV2 factoryCid gg instrumentId owner amount =
+  coerceContractId <$> mintCoin factoryCid gg instrumentId owner amount
+
+tryAllocate
+  : ContractId NttCoinFactory -> Party -> Party -> AV2.SettlementInfo -> AV2.AllocationSpecification -> [ContractId HoldingV2.Holding]
+  -> Script (Either SubmitError AIV2.AllocationInstructionResult)
+tryAllocate factoryCid gg authorizerOwner settlement spec inputHoldingCids = do
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  trySubmit (actAs authorizerOwner <> disclose factoryDisc) do
+    exerciseCmd (asAllocationFactoryV2 factoryCid) AIV2.AllocationFactory_Allocate with
+      settlement, allocation = spec, requestedAt = t0, inputHoldingCids
+      extraArgs = emptyExtraArgs, actors = [authorizerOwner]
+
+allocate
+  : ContractId NttCoinFactory -> Party -> Party -> AV2.SettlementInfo -> AV2.AllocationSpecification -> [ContractId HoldingV2.Holding]
+  -> Script AIV2.AllocationInstructionResult
+allocate factoryCid gg authorizerOwner settlement spec inputHoldingCids = do
+  res <- tryAllocate factoryCid gg authorizerOwner settlement spec inputHoldingCids
+  case res of
+    Right ok -> pure ok
+    Left err -> abort ("expected AllocationFactory_Allocate to succeed, got: " <> show err)
+
+theAllocationCidV2 : AIV2.AllocationInstructionResult -> ContractId AV2.Allocation
+theAllocationCidV2 res = case res.output of
+  AIV2.AllocationInstructionResult_Completed{allocationCid} -> allocationCid
+  other -> error ("expected AllocationInstructionResult_Completed, got: " <> show other)
+
+asConcrete : ContractId AV2.Allocation -> ContractId NttCoinAllocationV2
+asConcrete = coerceContractId
+
+trySettleBatch
+  : ContractId NttCoinFactory -> Party -> AV2.SettlementInfo -> [AV2.TransferLeg] -> [AV2.FinalizedAllocation] -> [Party]
+  -> Script (Either SubmitError AV2.SettlementFactory_SettleBatchResult)
+trySettleBatch factoryCid gg settlement transferLegs allocations actors = do
+  factoryDisc <- discloseFactory gg factoryCid
+  trySubmit (foldl (<>) (disclose factoryDisc) (map actAs actors)) do
+    exerciseCmd (asSettlementFactory factoryCid) AV2.SettlementFactory_SettleBatch with
+      settlement, transferLegs, allocations, actors, extraArgs = emptyExtraArgs
+
+settleBatch
+  : ContractId NttCoinFactory -> Party -> AV2.SettlementInfo -> [AV2.TransferLeg] -> [AV2.FinalizedAllocation] -> [Party]
+  -> Script AV2.SettlementFactory_SettleBatchResult
+settleBatch factoryCid gg settlement transferLegs allocations actors = do
+  res <- trySettleBatch factoryCid gg settlement transferLegs allocations actors
+  case res of
+    Right ok -> pure ok
+    Left err -> abort ("expected SettlementFactory_SettleBatch to succeed, got: " <> show err)
+
+finalized : ContractId AV2.Allocation -> AV2.FinalizedAllocation
+finalized cid = AV2.FinalizedAllocation with allocationCid = cid, extraTransferLegSides = [], nextIterationFunding = None
+
+----------------------------------------------------------------------
+-- Allocate
+----------------------------------------------------------------------
+
+testAllocateV2SingleLeg : Script ()
+testAllocateV2SingleLeg = do
+  gg <- allocateParty "AllocV2SingleGg"
+  alice <- allocateParty "AllocV2SingleAlice"
+  bob <- allocateParty "AllocV2SingleBob"
+  carol <- allocateParty "AllocV2SingleCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-SINGLE"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-single"
+      spec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-SINGLE"]
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = asConcrete (theAllocationCidV2 res)
+  Some alloc <- queryContractId gg allocCid
+  alloc.numIterations === 0
+  alloc.originalAllocationCid === None
+  TextMap.lookup "NTT-COIN-ALLOCV2-SINGLE" alloc.lockedAmounts === Some 0.006
+
+testAllocateV2MultiLegMultiInstrument : Script ()
+testAllocateV2MultiLegMultiInstrument = do
+  gg <- allocateParty "AllocV2MultiGg"
+  alice <- allocateParty "AllocV2MultiAlice"
+  bob <- allocateParty "AllocV2MultiBob"
+  carol <- allocateParty "AllocV2MultiCarol"
+  dave <- allocateParty "AllocV2MultiDaveExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instA = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-MULTI-A"
+      instB = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-MULTI-B"
+  coinA <- mintCoinV2 factoryCid gg instA alice 0.01
+  coinB <- mintCoinV2 factoryCid gg instB alice 0.02
+  let settlement = mkSettlement [dave] "settlement-multi"
+      spec = mkSpec gg alice
+        [ mkLeg "leg-a" AV2.SenderSide bob 0.01 "NTT-COIN-ALLOCV2-MULTI-A"
+        , mkLeg "leg-b" AV2.SenderSide carol 0.02 "NTT-COIN-ALLOCV2-MULTI-B"
+        ]
+  res <- allocate factoryCid gg alice settlement spec [coinA, coinB]
+  let allocCid = asConcrete (theAllocationCidV2 res)
+  Some alloc <- queryContractId gg allocCid
+  TextMap.lookup "NTT-COIN-ALLOCV2-MULTI-A" alloc.lockedAmounts === Some 0.01
+  TextMap.lookup "NTT-COIN-ALLOCV2-MULTI-B" alloc.lockedAmounts === Some 0.02
+
+testAllocateV2ReturnsStrayInstrumentChangeUntouched : Script ()
+testAllocateV2ReturnsStrayInstrumentChangeUntouched = do
+  gg <- allocateParty "AllocV2StrayGg"
+  alice <- allocateParty "AllocV2StrayAlice"
+  bob <- allocateParty "AllocV2StrayBob"
+  carol <- allocateParty "AllocV2StrayCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let leg = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-STRAY-LEG"
+      stray = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-STRAY-EXTRA"
+  legCoin <- mintCoinV2 factoryCid gg leg alice 0.006
+  strayCoin <- mintCoinV2 factoryCid gg stray alice 0.05
+  let settlement = mkSettlement [carol] "settlement-stray"
+      spec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-STRAY-LEG"]
+  res <- allocate factoryCid gg alice settlement spec [legCoin, strayCoin]
+  case TextMap.lookup "NTT-COIN-ALLOCV2-STRAY-EXTRA" res.authorizerChangeCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.amount === 0.05
+    other -> abort ("expected stray instrument fully returned as change, got: " <> show other)
+
+testAllocateV2RejectsUnderfundedRequiredTotal : Script ()
+testAllocateV2RejectsUnderfundedRequiredTotal = do
+  gg <- allocateParty "AllocV2UnderfundedGg"
+  alice <- allocateParty "AllocV2UnderfundedAlice"
+  bob <- allocateParty "AllocV2UnderfundedBob"
+  carol <- allocateParty "AllocV2UnderfundedCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-UNDERFUNDED"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-underfunded"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-UNDERFUNDED"])
+        with nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-ALLOCV2-UNDERFUNDED", 0.01)])
+  res <- tryAllocate factoryCid gg alice settlement spec [coinCid]
+  expectAbort "do not cover the allocation's required funding" res
+
+----------------------------------------------------------------------
+-- SettlementFactory_SettleBatch -- the critical value-movement proof
+----------------------------------------------------------------------
+
+testSettleBatchHappyPathTwoAllocations : Script ()
+testSettleBatchHappyPathTwoAllocations = do
+  gg <- allocateParty "SettleHappyGg"
+  alice <- allocateParty "SettleHappyAlice"
+  bob <- allocateParty "SettleHappyBob"
+  carol <- allocateParty "SettleHappyCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-SETTLE-HAPPY"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-happy"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-SETTLE-HAPPY"]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.006 "NTT-COIN-SETTLE-HAPPY"]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let aliceAllocCid = theAllocationCidV2 aliceRes
+      bobAllocCid = theAllocationCidV2 bobRes
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.006, instrumentId = "NTT-COIN-SETTLE-HAPPY", meta = emptyMetadata]
+  settleRes <- settleBatch factoryCid gg settlement transferLegs
+    [finalized aliceAllocCid, finalized bobAllocCid] [carol]
+  case settleRes.allocationSettleResults of
+    [r1, r2] -> do
+      let outputs = [r1.output, r2.output]
+      assertMsg "expected both allocations to settle fully with no next iteration"
+        (all (\o -> o == AV2.AllocationResult_Settled with nextIterationAllocationCid = None) outputs)
+    other -> abort ("expected two settle results, got: " <> show other)
+  bobHoldings <- query @NttCoin gg
+  case [c | (_, c) <- bobHoldings, c.owner == bob] of
+    [c] -> c.amount === 0.006
+    other -> abort ("expected bob to receive exactly one coin, got: " <> show other)
+  archivedAlice <- queryContractId gg (asConcrete aliceAllocCid)
+  archivedBob <- queryContractId gg (asConcrete bobAllocCid)
+  archivedAlice === None
+  archivedBob === None
+
+testSettleBatchRejectsMissingSenderSideAuthorization : Script ()
+testSettleBatchRejectsMissingSenderSideAuthorization = do
+  gg <- allocateParty "SettleMissingSenderGg"
+  alice <- allocateParty "SettleMissingSenderAlice"
+  bob <- allocateParty "SettleMissingSenderBob"
+  carol <- allocateParty "SettleMissingSenderCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-SETTLE-NOSENDER"
+      settlement = mkSettlement [carol] "settlement-nosender"
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.006 "NTT-COIN-SETTLE-NOSENDER"]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.006, instrumentId = "NTT-COIN-SETTLE-NOSENDER", meta = emptyMetadata]
+  res <- trySettleBatch factoryCid gg settlement transferLegs [finalized (theAllocationCidV2 bobRes)] [carol]
+  expectAbort "no matching SenderSide allocation" res
+
+testSettleBatchRejectsMissingReceiverSideAuthorization : Script ()
+testSettleBatchRejectsMissingReceiverSideAuthorization = do
+  gg <- allocateParty "SettleMissingReceiverGg"
+  alice <- allocateParty "SettleMissingReceiverAlice"
+  bob <- allocateParty "SettleMissingReceiverBob"
+  carol <- allocateParty "SettleMissingReceiverCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-SETTLE-NORECEIVER"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-noreceiver"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-SETTLE-NORECEIVER"]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.006, instrumentId = "NTT-COIN-SETTLE-NORECEIVER", meta = emptyMetadata]
+  res <- trySettleBatch factoryCid gg settlement transferLegs [finalized (theAllocationCidV2 aliceRes)] [carol]
+  expectAbort "no matching ReceiverSide allocation" res
+
+testSettleBatchRejectsUncoveredAllocationSides : Script ()
+testSettleBatchRejectsUncoveredAllocationSides = do
+  gg <- allocateParty "SettleUncoveredGg"
+  alice <- allocateParty "SettleUncoveredAlice"
+  bob <- allocateParty "SettleUncoveredBob"
+  dave <- allocateParty "SettleUncoveredDave"
+  carol <- allocateParty "SettleUncoveredCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-SETTLE-UNCOVERED"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.012
+  let settlement = mkSettlement [carol] "settlement-uncovered"
+      -- alice authorizes TWO legs, but only leg-0 will be in the batch's transferLegs.
+      aliceSpec = mkSpec gg alice
+        [ mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-SETTLE-UNCOVERED"
+        , mkLeg "leg-1" AV2.SenderSide dave 0.006 "NTT-COIN-SETTLE-UNCOVERED"
+        ]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.006 "NTT-COIN-SETTLE-UNCOVERED"]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.006, instrumentId = "NTT-COIN-SETTLE-UNCOVERED", meta = emptyMetadata]
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)] [carol]
+  expectAbort "not covered by the given transferLegs" res
+
+testSettleBatchRejectsWrongActors : Script ()
+testSettleBatchRejectsWrongActors = do
+  gg <- allocateParty "SettleWrongActorsGg"
+  alice <- allocateParty "SettleWrongActorsAlice"
+  bob <- allocateParty "SettleWrongActorsBob"
+  carol <- allocateParty "SettleWrongActorsCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-SETTLE-WRONGACTORS"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-wrongactors"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-SETTLE-WRONGACTORS"]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.006 "NTT-COIN-SETTLE-WRONGACTORS"]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.006, instrumentId = "NTT-COIN-SETTLE-WRONGACTORS", meta = emptyMetadata]
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)] [alice]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "expected non-executor submitter to fail"
+
+----------------------------------------------------------------------
+-- Cancel / Withdraw
+----------------------------------------------------------------------
+
+testCancelReturnsAllLockedFundsAcrossInstruments : Script ()
+testCancelReturnsAllLockedFundsAcrossInstruments = do
+  gg <- allocateParty "CancelV2Gg"
+  alice <- allocateParty "CancelV2Alice"
+  bob <- allocateParty "CancelV2Bob"
+  carol <- allocateParty "CancelV2Carol"
+  dave <- allocateParty "CancelV2DaveExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instA = InstrumentId with admin = gg, id = "NTT-COIN-CANCELV2-A"
+      instB = InstrumentId with admin = gg, id = "NTT-COIN-CANCELV2-B"
+  coinA <- mintCoinV2 factoryCid gg instA alice 0.01
+  coinB <- mintCoinV2 factoryCid gg instB alice 0.02
+  let settlement = mkSettlement [dave] "settlement-cancel"
+      spec = mkSpec gg alice
+        [ mkLeg "leg-a" AV2.SenderSide bob 0.01 "NTT-COIN-CANCELV2-A"
+        , mkLeg "leg-b" AV2.SenderSide carol 0.02 "NTT-COIN-CANCELV2-B"
+        ]
+  res <- allocate factoryCid gg alice settlement spec [coinA, coinB]
+  let allocCid = theAllocationCidV2 res
+  cancelRes <- submit dave do exerciseCmd allocCid AV2.Allocation_Cancel with actors = [dave], extraArgs = emptyExtraArgs
+  cancelRes.output === AV2.AllocationResult_Cancelled
+  case TextMap.lookup "NTT-COIN-CANCELV2-A" cancelRes.authorizerHoldingCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.amount === 0.01
+    other -> abort ("expected instrument A returned, got: " <> show other)
+  case TextMap.lookup "NTT-COIN-CANCELV2-B" cancelRes.authorizerHoldingCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.amount === 0.02
+    other -> abort ("expected instrument B returned, got: " <> show other)
+
+testCancelByAdminAloneSucceeds : Script ()
+testCancelByAdminAloneSucceeds = do
+  gg <- allocateParty "CancelAdminV2Gg"
+  alice <- allocateParty "CancelAdminV2Alice"
+  bob <- allocateParty "CancelAdminV2Bob"
+  dave <- allocateParty "CancelAdminV2DaveExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-CANCELADMINV2"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [dave] "settlement-canceladmin"
+      spec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-CANCELADMINV2"]
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+  cancelRes <- submit gg do exerciseCmd allocCid AV2.Allocation_Cancel with actors = [gg], extraArgs = emptyExtraArgs
+  cancelRes.output === AV2.AllocationResult_Cancelled
+
+testWithdrawUncommittedIsAuthorizerUnilateral : Script ()
+testWithdrawUncommittedIsAuthorizerUnilateral = do
+  gg <- allocateParty "WithdrawV2Gg"
+  alice <- allocateParty "WithdrawV2Alice"
+  bob <- allocateParty "WithdrawV2Bob"
+  carol <- allocateParty "WithdrawV2CarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-WITHDRAWV2"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-withdraw"
+      spec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-WITHDRAWV2"]
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+  submitMustFail bob do exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [bob], extraArgs = emptyExtraArgs
+  withdrawRes <- submit alice do
+    exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  withdrawRes.output === AV2.AllocationResult_Withdrawn
+
+testWithdrawCommittedRejectedBeforeDeadline : Script ()
+testWithdrawCommittedRejectedBeforeDeadline = do
+  gg <- allocateParty "WithdrawCommittedBeforeGg"
+  alice <- allocateParty "WithdrawCommittedBeforeAlice"
+  bob <- allocateParty "WithdrawCommittedBeforeBob"
+  carol <- allocateParty "WithdrawCommittedBeforeCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-WITHDRAWCOMMITTEDBEFORE"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  t0 <- getTime
+  let settlement = mkSettlement [carol] "settlement-withdrawcommittedbefore"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-WITHDRAWCOMMITTEDBEFORE"])
+        with committed = True, settlementDeadline = Some (t0 `addRelTime` hours 1)
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+  submitMustFail alice do exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+
+testWithdrawCommittedAllowedAfterDeadline : Script ()
+testWithdrawCommittedAllowedAfterDeadline = do
+  gg <- allocateParty "WithdrawCommittedAfterGg"
+  alice <- allocateParty "WithdrawCommittedAfterAlice"
+  bob <- allocateParty "WithdrawCommittedAfterBob"
+  carol <- allocateParty "WithdrawCommittedAfterCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-WITHDRAWCOMMITTEDAFTER"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  t0 <- getTime
+  let settlement = mkSettlement [carol] "settlement-withdrawcommittedafter"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-WITHDRAWCOMMITTEDAFTER"])
+        with committed = True, settlementDeadline = Some (t0 `addRelTime` hours (-1))
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+  withdrawRes <- submit alice do
+    exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  withdrawRes.output === AV2.AllocationResult_Withdrawn
+
+----------------------------------------------------------------------
+-- Iterated settlement
+----------------------------------------------------------------------
+
+testIteratedSettlementCarriesForwardAndReturnsLeftover : Script ()
+testIteratedSettlementCarriesForwardAndReturnsLeftover = do
+  gg <- allocateParty "IteratedGg"
+  alice <- allocateParty "IteratedAlice"
+  bob <- allocateParty "IteratedBob"
+  carol <- allocateParty "IteratedCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ITERATED"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.03
+  let settlement = mkSettlement [carol] "settlement-iterated"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 "NTT-COIN-ITERATED"])
+        with nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-ITERATED", 0.015)])
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 "NTT-COIN-ITERATED"]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  -- Only the required total (senderTotal 0.01 + reserve 0.015 = 0.025) gets
+  -- locked; the 0.005 surplus over that comes back immediately as allocate-time
+  -- change, not as settle-time leftover.
+  case TextMap.lookup "NTT-COIN-ITERATED" aliceRes.authorizerChangeCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.amount === 0.005
+    other -> abort ("expected allocate-time change of 0.005, got: " <> show other)
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = "NTT-COIN-ITERATED", meta = emptyMetadata]
+      aliceFa = AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-ITERATED", 0.015)])
+      bobFa = finalized (theAllocationCidV2 bobRes)
+  round1 <- settleBatch factoryCid gg settlement transferLegs [aliceFa, bobFa] [carol]
+  let [aliceResult1, _bobResult1] = round1.allocationSettleResults
+  nextAliceCid <- case aliceResult1.output of
+    AV2.AllocationResult_Settled{nextIterationAllocationCid = Some cid} -> pure cid
+    other -> do
+      _ <- abort ("expected alice's round 1 to carry forward, got: " <> show other)
+      pure (error "unreachable")
+  -- 0.025 locked - 0.01 spent - 0.015 carried = 0 leftover this round.
+  TextMap.lookup "NTT-COIN-ITERATED" aliceResult1.authorizerHoldingCids === None
+  Some nextAlloc <- queryContractId gg (asConcrete nextAliceCid)
+  nextAlloc.numIterations === 1
+  TextMap.lookup "NTT-COIN-ITERATED" nextAlloc.lockedAmounts === Some 0.015
+
+  -- Round 2: settle the carried-forward allocation fully (no further iteration).
+  bobRes2 <- allocate factoryCid gg bob settlement bobSpec []
+  let round2Fa = finalized nextAliceCid
+      round2BobFa = finalized (theAllocationCidV2 bobRes2)
+  round2 <- settleBatch factoryCid gg settlement transferLegs [round2Fa, round2BobFa] [carol]
+  let [aliceResult2, _bobResult2] = round2.allocationSettleResults
+  aliceResult2.output === AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+  case TextMap.lookup "NTT-COIN-ITERATED" aliceResult2.authorizerHoldingCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.amount === 0.005
+    other -> abort ("expected round-2 leftover of 0.005, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Defensive checks
+----------------------------------------------------------------------
+
+testAllocateV2RejectsMismatchedAdmin : Script ()
+testAllocateV2RejectsMismatchedAdmin = do
+  gg <- allocateParty "AllocV2MismatchGg"
+  notGg <- allocateParty "AllocV2MismatchNotGg"
+  alice <- allocateParty "AllocV2MismatchAlice"
+  bob <- allocateParty "AllocV2MismatchBob"
+  carol <- allocateParty "AllocV2MismatchCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let settlement = mkSettlement [carol] "settlement-mismatch"
+      spec = mkSpec notGg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-MISMATCH"]
+  res <- tryAllocate factoryCid gg alice settlement spec []
+  expectAbort "admin does not match this factory's admin" res
+
+testAllocateV2RejectsNonAuthorizerActor : Script ()
+testAllocateV2RejectsNonAuthorizerActor = do
+  gg <- allocateParty "AllocV2NonAuthGg"
+  alice <- allocateParty "AllocV2NonAuthAlice"
+  bob <- allocateParty "AllocV2NonAuthBob"
+  carol <- allocateParty "AllocV2NonAuthCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  factoryDisc <- discloseFactory gg factoryCid
+  let settlement = mkSettlement [carol] "settlement-nonauth"
+      spec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-NONAUTH"]
+  t0 <- getTime
+  res <- trySubmit (actAs bob <> disclose factoryDisc) do
+    exerciseCmd (asAllocationFactoryV2 factoryCid) AIV2.AllocationFactory_Allocate with
+      settlement, allocation = spec, requestedAt = t0, inputHoldingCids = []
+      extraArgs = emptyExtraArgs, actors = [bob]
+  expectAbort "requires the authorizer account's owner and provider authority" res
+
+----------------------------------------------------------------------
+-- 1D -- footgun guard: naked Allocation_Settle outside SettleBatch
+----------------------------------------------------------------------
+
+-- | A direct 'Allocation_Settle' (bypassing 'SettlementFactory_SettleBatch')
+-- is already gg+executor authority-gated, but it has no automatic
+-- counterparty and so no automatic soundness check either -- this is a
+-- footgun guard against an accidental direct call, not a security boundary
+-- (see the module header and 'settleBatchContextKey'). The guarded
+-- happy path is already proven by 'testSettleBatchHappyPathTwoAllocations'.
+testNakedAllocationSettleIsRejected : Script ()
+testNakedAllocationSettleIsRejected = do
+  gg <- allocateParty "NakedSettleGg"
+  alice <- allocateParty "NakedSettleAlice"
+  bob <- allocateParty "NakedSettleBob"
+  carol <- allocateParty "NakedSettleCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-NAKEDSETTLE"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [carol] "settlement-nakedsettle"
+      spec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-NAKEDSETTLE"]
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+  naked <- trySubmit (actAs gg <> actAs carol) do
+    exerciseCmd allocCid AV2.Allocation_Settle with
+      actors = [gg, carol], extraTransferLegSides = [], nextIterationFunding = None
+      extraArgs = emptyExtraArgs
+  expectAbort "must be driven through SettlementFactory_SettleBatch" naked
+
+----------------------------------------------------------------------
+-- 1E -- iterated settlement: standing legs recur every round
+----------------------------------------------------------------------
+
+-- | End-to-end proof that a second settlement iteration on a carried-forward
+-- allocation pair behaves exactly like the first: Alice's standing
+-- @SenderSide 0.01@ leg recurs (it is not "consumed" after round 1), and Bob's
+-- standing @ReceiverSide 0.01@ leg likewise recurs on a freshly allocated
+-- (zero-locked, since bob funds nothing) allocation for round 2.
+testIteratedSettlementRoundTwoCompletes : Script ()
+testIteratedSettlementRoundTwoCompletes = do
+  gg <- allocateParty "IteratedRound2Gg"
+  alice <- allocateParty "IteratedRound2Alice"
+  bob <- allocateParty "IteratedRound2Bob"
+  carol <- allocateParty "IteratedRound2CarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ITERATEDROUND2"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.02
+  let settlement = mkSettlement [carol] "settlement-iteratedround2"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 "NTT-COIN-ITERATEDROUND2"])
+        with nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-ITERATEDROUND2", 0.01)])
+      bobSpec = (mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 "NTT-COIN-ITERATEDROUND2"])
+        with nextIterationFunding = Some TextMap.empty
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  -- 0.02 minted, 0.02 required (0.01 round-1 SenderSide + 0.01 reserve) -- no
+  -- allocate-time change.
+  aliceRes.authorizerChangeCids === TextMap.empty
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = "NTT-COIN-ITERATEDROUND2", meta = emptyMetadata]
+      aliceFa = AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-ITERATEDROUND2", 0.01)])
+      bobFa = AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 bobRes, extraTransferLegSides = []
+        nextIterationFunding = Some TextMap.empty
+
+  round1 <- settleBatch factoryCid gg settlement transferLegs [aliceFa, bobFa] [carol]
+  let [aliceResult1, bobResult1] = round1.allocationSettleResults
+  nextAliceCid <- case aliceResult1.output of
+    AV2.AllocationResult_Settled{nextIterationAllocationCid = Some cid} -> pure cid
+    other -> do
+      _ <- abort ("expected alice's round 1 to carry forward, got: " <> show other)
+      pure (error "unreachable")
+  nextBobCid <- case bobResult1.output of
+    AV2.AllocationResult_Settled{nextIterationAllocationCid = Some cid} -> pure cid
+    other -> do
+      _ <- abort ("expected bob's round 1 to carry forward, got: " <> show other)
+      pure (error "unreachable")
+
+  case TextMap.lookup "NTT-COIN-ITERATEDROUND2" bobResult1.authorizerHoldingCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === bob
+      c.amount === 0.01
+    other -> abort ("expected bob credited 0.01 in round 1, got: " <> show other)
+
+  Some nextAlice <- queryContractId gg (asConcrete nextAliceCid)
+  nextAlice.numIterations === 1
+  TextMap.lookup "NTT-COIN-ITERATEDROUND2" nextAlice.lockedAmounts === Some 0.01
+
+  -- Round 2: settle the carried-forward pair fully, no further iteration.
+  let round2AliceFa = finalized nextAliceCid
+      round2BobFa = finalized nextBobCid
+  round2 <- settleBatch factoryCid gg settlement transferLegs [round2AliceFa, round2BobFa] [carol]
+  let [aliceResult2, bobResult2] = round2.allocationSettleResults
+  aliceResult2.output === AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+  bobResult2.output === AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+
+  case TextMap.lookup "NTT-COIN-ITERATEDROUND2" bobResult2.authorizerHoldingCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === bob
+      c.amount === 0.01
+    other -> abort ("expected bob credited a second 0.01 in round 2, got: " <> show other)
+
+  -- Bob received two separate 0.01 coins across the two rounds -- total 0.02,
+  -- no stray change, and both of alice's and bob's iteration contracts are gone.
+  bobHoldings <- query @NttCoin gg
+  case [c.amount | (_, c) <- bobHoldings, c.owner == bob] of
+    amounts | length amounts == 2 && sum amounts == 0.02 -> pure ()
+    other -> abort ("expected bob to hold exactly two 0.01 coins, got: " <> show other)
+  archivedAlice1 <- queryContractId gg (asConcrete (theAllocationCidV2 aliceRes))
+  archivedAlice2 <- queryContractId gg (asConcrete nextAliceCid)
+  archivedBob1 <- queryContractId gg (asConcrete (theAllocationCidV2 bobRes))
+  archivedBob2 <- queryContractId gg (asConcrete nextBobCid)
+  archivedAlice1 === None
+  archivedAlice2 === None
+  archivedBob1 === None
+  archivedBob2 === None
+
+----------------------------------------------------------------------
+-- Phase 2 -- composability: a provider-delegated account as an allocation's
+-- authorizer.
+----------------------------------------------------------------------
+
+-- | An authorizer account with a provider requires BOTH the owner and the
+-- provider in @actors@ to allocate ('accountControlParties') -- the input
+-- holding's own signatories (admin, owner, provider) must all be part of the
+-- transaction's authority to archive it. Change and, ultimately, settled
+-- credits are created against the full authorizer account throughout.
+testAllocateV2ProviderAuthorizer : Script ()
+testAllocateV2ProviderAuthorizer = do
+  gg <- allocateParty "AllocV2ProviderGg"
+  alice <- allocateParty "AllocV2ProviderAlice"
+  aliceProvider <- allocateParty "AllocV2ProviderAliceProvider"
+  bob <- allocateParty "AllocV2ProviderBob"
+  carol <- allocateParty "AllocV2ProviderCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOCV2-PROVIDER"
+      authorizerAcct = providerAccount alice aliceProvider
+      settlement = mkSettlement [carol] "settlement-provider"
+      spec = AV2.AllocationSpecification with
+        admin = gg, authorizer = authorizerAcct
+        transferLegSides = [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-PROVIDER"]
+        settlementDeadline = None, nextIterationFunding = None, committed = False, meta = emptyMetadata
+  -- 'mintCoinV2'/'BurnMintOutput' only produce basic accounts -- create the
+  -- provider-managed holding directly (needs owner + provider's joint
+  -- authority to create, mirroring what settling it will require too).
+  coinCid <- submit (actAs gg <> actAs alice <> actAs aliceProvider) do
+    createCmd NttCoin with
+      instrumentId, owner = alice, provider = Some aliceProvider, accountId = "", amount = 0.01
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+
+  -- Owner alone (missing the provider) ⇒ AllocationFactory_Allocate is
+  -- rejected, even though alice is the account's owner.
+  noProviderRes <- trySubmit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asAllocationFactoryV2 factoryCid) AIV2.AllocationFactory_Allocate with
+      settlement, allocation = spec, requestedAt = t0
+      inputHoldingCids = [toInterfaceContractId @HoldingV2.Holding coinCid]
+      extraArgs = emptyExtraArgs, actors = [alice]
+  expectAbort "requires the authorizer account's owner and provider authority" noProviderRes
+
+  -- Owner + provider jointly ⇒ allocate succeeds, and the allocate-time
+  -- change is credited to the full authorizer account (owner + provider).
+  -- ('allocate'/'tryAllocate' hard-code a single-party submitter, so a
+  -- provider-managed authorizer needs its own direct submission here.)
+  allocRes <- trySubmit (actAs alice <> actAs aliceProvider <> disclose factoryDisc) do
+    exerciseCmd (asAllocationFactoryV2 factoryCid) AIV2.AllocationFactory_Allocate with
+      settlement, allocation = spec, requestedAt = t0
+      inputHoldingCids = [toInterfaceContractId @HoldingV2.Holding coinCid]
+      extraArgs = emptyExtraArgs, actors = [alice, aliceProvider]
+  aliceRes <- case allocRes of
+    Right ok -> pure ok
+    Left err -> abort ("expected AllocationFactory_Allocate to succeed with owner + provider, got: " <> show err)
+  let aliceAllocCid = theAllocationCidV2 aliceRes
+  case TextMap.lookup "NTT-COIN-ALLOCV2-PROVIDER" aliceRes.authorizerChangeCids of
+    Some [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === alice
+      c.provider === Some aliceProvider
+      c.amount === 0.004
+    other -> abort ("expected allocate-time change of 0.004 credited to the full account, got: " <> show other)
+
+  -- bob's ReceiverSide leg must name alice's FULL account (owner + provider)
+  -- as its otherside -- 'mkLeg' only builds basic othersides, so this one is
+  -- constructed directly.
+  let bobSpec = AV2.AllocationSpecification with
+        admin = gg, authorizer = basicAccount bob
+        transferLegSides =
+          [ AV2.TransferLegSide with
+              transferLegId = "leg-0", side = AV2.ReceiverSide, otherside = authorizerAcct
+              amount = 0.006, instrumentId = "NTT-COIN-ALLOCV2-PROVIDER", meta = emptyMetadata
+          ]
+        settlementDeadline = None, nextIterationFunding = None, committed = False, meta = emptyMetadata
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = authorizerAcct, receiver = basicAccount bob
+        amount = 0.006, instrumentId = "NTT-COIN-ALLOCV2-PROVIDER", meta = emptyMetadata]
+  settleRes <- settleBatch factoryCid gg settlement transferLegs
+    [finalized aliceAllocCid, finalized (theAllocationCidV2 bobRes)] [carol]
+  case settleRes.allocationSettleResults of
+    [r1, r2] -> do
+      let outputs = [r1.output, r2.output]
+      assertMsg "expected both allocations to settle fully with no next iteration"
+        (all (\o -> o == AV2.AllocationResult_Settled with nextIterationAllocationCid = None) outputs)
+    other -> abort ("expected two settle results, got: " <> show other)
+  bobHoldings <- query @NttCoin gg
+  case [c | (_, c) <- bobHoldings, c.owner == bob] of
+    [c] -> c.amount === 0.006
+    other -> abort ("expected bob to receive exactly one coin, got: " <> show other)

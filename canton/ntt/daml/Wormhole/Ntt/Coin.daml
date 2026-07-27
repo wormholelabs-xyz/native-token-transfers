@@ -1,0 +1,932 @@
+-- | A genesis, guardian-governance-owned token registry: 'NttCoin' (a
+-- 'Holding'), 'NttCoinFactory' (a genesis 'BurnMintFactory' plus, for
+-- CIP-0056/CIP-0112 compliance, 'TransferFactory' v1+v2), and the supporting
+-- transfer-side templates 'TransferPreapproval'/'NttTransferInstruction'. All
+-- in one module: Daml requires an interface instance to live in either the
+-- interface's or the implementing template's own module, and 'NttCoinFactory'
+-- implements interfaces (BurnMintFactory, TransferFactory v1/v2) whose
+-- helper logic needs to create/inspect 'NttCoin' -- splitting the transfer
+-- helpers into a separate module that both defines and is imported by this
+-- one is a genuine module cycle, not just a style choice.
+--
+-- Modeled on Canton Coin's @AmuletRules@/@Amulet@: 'NttCoinFactory' is
+-- @signatory guardianGovernance@ alone, created once at genesis by the same
+-- k-of-n guardian-quorum flow that creates 'Wormhole.Ntt.Governance.NttGovernance',
+-- and never replaced -- it carries no mutable config, so there is nothing to
+-- rotate the way @AmuletRules_SetConfig@ rotates Amulet's fee schedule. If a
+-- gg-administered deployment ever needs a different factory, the existing
+-- 'Wormhole.Ntt.Manager.NttManager' choice @SetFactory@ (already co-signed by
+-- @effectiveMinter@) re-points at a new cid.
+--
+-- Unlike Amulet -- which has exactly one instrument per @dso@ and so can
+-- derive @instrumentId@ from @dso@ alone -- one @guardianGovernance@ here
+-- administers many distinct instruments (each deployment's registering admin
+-- binds its own @instrumentId.id@; only @instrumentId.admin@ is shared), so
+-- 'NttCoin' stores @instrumentId@ directly rather than deriving it, and
+-- 'NttCoinFactory' is generic over it: its only invariant is
+-- @instrumentId.admin == guardianGovernance@, checked on every burn/mint or
+-- transfer.
+--
+-- 'BurnMintFactory_BurnMint' is jointly controlled by @(view this).admin ::
+-- extraActors@ (the interface's own spec). Every real caller in this codebase
+-- (the outbound-burn 'Wormhole.Ntt.Manager.BurnMintMinterProxy' and the
+-- inbound-mint 'Wormhole.Ntt.Deposit.DepositPreapproval.Deposit') already
+-- includes each output's owner in @extraActors@, so 'NttCoin's
+-- @(instrumentId.admin, owner)@ signatories are always satisfiable with no
+-- extra plumbing.
+--
+-- @TransferFactory_Transfer@'s v1 controller is @transfer.sender@ alone (v2:
+-- caller-chosen @actors@) -- no receiver, no admin. Since 'NttCoin' is
+-- @signatory instrumentId.admin, owner, provider (if any)@, creating the
+-- receiver's new holding needs the receiver's (and its provider's) own
+-- authority, which isn't ambiently present. This is
+-- resolved the same way real Canton Coin does: a three-way branch on (1)
+-- self-transfer / v2 actors already including the receiver (their authority
+-- is already present), (2) the receiver has a standing 'TransferPreapproval'
+-- (a self-signed side contract whose choice inherits the receiver's
+-- authority, exactly like 'Wormhole.Ntt.Deposit.DepositPreapproval' does for
+-- burn/mint deposits), or (3) neither -- lock the sender's funds now and
+-- create a 'NttTransferInstruction' the receiver accepts (or rejects) later.
+--
+-- Account model (CIP-0112): 'NttCoin' supports the full 'HoldingV2.Account'
+-- model on both sides of every v2 path (ordinary transfers, preapprovals,
+-- pending instructions, and v2 allocations) -- provider-delegated accounts
+-- and sub-accounts (@id /= ""@) are genuine, composable holdings, not merely
+-- tolerated inputs. Only the null-owner account (@owner = None@) is rejected
+-- by @TransferFactory@/@AllocationFactory@ v2 (see 'requireAccountOwner'):
+-- the standard reserves null-owner accounts for mint/burn, and NTT routes
+-- mint/burn exclusively through @BurnMintFactory@ -- a deliberate,
+-- spec-compliant scope boundary (CIP-0112 permits but never mandates routing
+-- mint/burn through the standard transfer/allocation interfaces). v1 has no
+-- account concept at all, so v1 paths (and 'BurnMintFactory_BurnMint') stay
+-- basic-account-only (@provider = None, accountId = ""@) by construction --
+-- not a limitation, just v1's own scope.
+--
+-- Authority invariant: creating or archiving any 'NttCoin' requires
+-- @instrumentId.admin :: owner :: provider (if any)@ -- enforced by the
+-- template's own @signatory@ clause regardless of which interface view a
+-- caller reaches it through (see 'accountControlParties'). A
+-- provider-managed coin is therefore never spendable without the provider's
+-- authority actually present in the transaction; a v1-only caller that lacks
+-- a provider's authority simply cannot move a provider-managed coin -- safe,
+-- just unusable via v1, which is the intended restriction (v1 has no
+-- provider concept to begin with).
+--
+-- Locks: the v2 'HoldingV2.Holding' view's @lock@ is always @None@ --
+-- 'NttCoin' has no lock-creating consumer, and the standard treats locks as
+-- optional (there is no standard interface choice to "lock a holding"). This
+-- is a deliberate, spec-compliant scope decision, not a gap: escrow/DvP needs
+-- are already served by allocations (v2 net settlement, below) and, at the
+-- manager layer, by @LockedLedger@. A full lock lifecycle, if ever needed,
+-- is a separate feature.
+--
+-- == Allocation v2 / SettlementFactory
+--
+-- A v2 'AV2.Allocation' only ever authorizes ONE party's (the @authorizer@'s)
+-- side of possibly many legs -- unlike v1 (one contract = one full
+-- sender-to-receiver leg), a real transfer between two parties always needs
+-- TWO allocations (the sender's, with a @SenderSide@ leg; the receiver's,
+-- with a matching @ReceiverSide@ leg). 'Allocation_Settle' on a single
+-- allocation can therefore never move value between parties by itself: each
+-- allocation's own settle only ever touches its own legs (decrementing its
+-- own locked bookkeeping for @SenderSide@ legs -- the real value already
+-- left circulation at allocate time; creating a fresh holding for itself for
+-- @ReceiverSide@ legs, using authority inherited from its own signatories).
+-- Soundness -- that every debit is matched by exactly one credit of the same
+-- amount -- depends entirely on 'SettlementFactory_SettleBatch' validating
+-- that every leg's both sides are present and consistent BEFORE
+-- nested-exercising each allocation's own settle in the same transaction.
+-- 'SettlementFactory_SettleBatch' is therefore the thing that makes the v2
+-- model sound at all, not just a batching convenience; a direct
+-- 'Allocation_Settle' call outside it remains possible (required for
+-- interface conformance) but is an expert/unsafe escape hatch with no
+-- automatic counterparty -- this factory does not special-case or block it,
+-- since there is nothing an individual allocation could mechanically check.
+-- (It does, however, apply a caller-forgeable footgun guard against
+-- *accidental* naked calls -- see 'settleBatchContextKey' -- which is
+-- deliberately not a security control, since the real authorization is the
+-- @admin :: executors@ actors requirement on the choice itself.)
+--
+-- Iterated settlement: an allocation's @transferLegSides@ are a STANDING
+-- authorization, not a one-shot one -- they recur on every settlement
+-- iteration for as long as the allocation keeps carrying forward. A
+-- 'FinalizedAllocation.extraTransferLegSides' passed at settle time is
+-- purely additive on top of those standing legs for that one iteration; it
+-- never replaces or disables them. This is the intended
+-- reusable/recurring-allocation model (e.g. a standing weekly payment leg
+-- that keeps firing each settlement round) and is conservation-safe by
+-- construction, since every iteration's settle still separately balances its
+-- own sender/receiver totals against its own locked bookkeeping. The
+-- executor chooses @nextIterationFunding@ at settle time (bounded by what
+-- remains locked after that round's spend) to fund the following round's
+-- standing legs; it is the executor's responsibility to carry forward enough
+-- to cover them -- an undersized carry simply aborts the next settle
+-- (insufficient locked balance), and the funds are never stranded: they
+-- remain recoverable via 'Allocation_Withdraw' (once any settlement deadline
+-- has passed, for committed allocations) or 'Allocation_Cancel'.
+module Wormhole.Ntt.Coin where
+
+import DA.Action (when)
+import DA.Foldable (forA_)
+import DA.List (dedup)
+import DA.Map qualified as Map
+import DA.Optional (catOptionals, fromOptional, fromSome, isNone, isSome, optionalToList)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.HoldingV1 (Holding, HoldingView (..), InstrumentId (..))
+import Splice.Api.Token.HoldingV2 qualified as HoldingV2
+import Splice.Api.Token.MetadataV1 (AnyValue (..), ExtraArgs (..), emptyMetadata)
+import Splice.Api.Token.BurnMintV1
+  ( BurnMintFactory, BurnMintFactoryView (..)
+  , BurnMintFactory_BurnMintResult (..)
+  )
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
+import Splice.Api.Token.AllocationV1
+import Splice.Api.Token.AllocationInstructionV1
+import Splice.Api.Token.AllocationV2 qualified as AV2
+import Splice.Api.Token.AllocationInstructionV2 qualified as AIV2
+
+template NttCoin
+  with
+    instrumentId : InstrumentId
+    owner        : Party
+    provider     : Optional Party
+    accountId    : Text
+    amount       : Decimal
+  where
+    signatory instrumentId.admin :: owner :: optionalToList provider
+    -- Strictly positive, matching Canton Coin's own holdings (Amulet requires
+    -- initialAmount > 0.0; Chainlink's CoinHolding uses > 0.0) -- a zero-amount
+    -- holding is dust with no economic meaning, so it is rejected outright
+    -- rather than tolerated on-ledger.
+    ensure amount > 0.0
+
+    -- v1 has no provider/sub-account concept, so the v1 view is always the
+    -- bare owner -- callers reaching a provider-managed or sub-account coin
+    -- through v1 still see it (visibility is unaffected), they just can't
+    -- move it without the provider's authority (see module header).
+    interface instance Holding for NttCoin where
+      view = HoldingView with
+        owner
+        instrumentId
+        amount
+        lock = None
+        meta = emptyMetadata
+
+    interface instance HoldingV2.Holding for NttCoin where
+      view = HoldingV2.HoldingView with
+        account = coinAccount owner provider accountId
+        instrumentId = HoldingV2.InstrumentId with admin = instrumentId.admin, id = instrumentId.id
+        amount
+        lock = None
+        meta = emptyMetadata
+
+----------------------------------------------------------------------
+-- Transfer-side helpers and templates
+----------------------------------------------------------------------
+
+-- | Build a full 'HoldingV2.Account' from its three constituent parts.
+coinAccount : Party -> Optional Party -> Text -> HoldingV2.Account
+coinAccount owner provider accountId = HoldingV2.Account with owner = Some owner, provider, id = accountId
+
+-- | A basic account: a plain party, no sub-account, no provider delegation.
+-- Used by every v1 (and 'BurnMintFactory_BurnMint') path, which has no
+-- account concept of its own -- see module header.
+basicAccountV2 : Party -> HoldingV2.Account
+basicAccountV2 p = HoldingV2.Account with owner = Some p, provider = None, id = ""
+
+-- | The parties whose authority is required to move or archive a holding
+-- held in this account: the owner (always, once past the null-owner check
+-- below) plus the provider, if any. Mirrors 'NttCoin's own @signatory@
+-- clause -- see module header's authority invariant.
+accountControlParties : HoldingV2.Account -> [Party]
+accountControlParties acc = catOptionals [acc.owner, acc.provider]
+
+-- | 'NttCoinFactory's @TransferFactory@/@AllocationFactory@ v2 accept any
+-- account except the null-owner one -- see module header. Sub-accounts
+-- (@id /= ""@) and provider-delegated accounts are genuine, composable
+-- accounts, not rejected.
+requireAccountOwner : HoldingV2.Account -> Update Party
+requireAccountOwner acc = case acc.owner of
+  Some p -> pure p
+  None -> abort "ntt: null-owner accounts are for mint/burn only -- use BurnMintFactory"
+
+-- | The @extraArgs.context@ key a caller uses to pass a receiver's standing
+-- 'TransferPreapproval' cid through to 'transferFactory_transferImpl' -- the
+-- interface's choice arguments are fixed, so there's no dedicated field for
+-- it. Absent or undecodable falls back to the pending path (fail-safe: a
+-- caller who doesn't know about this never gets a transfer mis-credited).
+transferPreapprovalContextKey : Text
+transferPreapprovalContextKey = "ntt.transferPreapprovalCid"
+
+lookupTransferPreapprovalCid : ExtraArgs -> Optional (ContractId TransferPreapproval)
+lookupTransferPreapprovalCid extraArgs =
+  case TextMap.lookup transferPreapprovalContextKey extraArgs.context.values of
+    Some (AV_ContractId cid) -> Some (coerceContractId cid)
+    _ -> None
+
+-- | A recipient's standing, self-signed consent to receive ordinary
+-- transfers of one instrument -- the transfer-side analog of
+-- 'Wormhole.Ntt.Deposit.DepositPreapproval'.
+template TransferPreapproval
+  with
+    account      : HoldingV2.Account
+    instrumentId : InstrumentId
+  where
+    signatory accountControlParties account
+    observer instrumentId.admin
+
+    nonconsuming choice TransferPreapproval_Receive : ContractId Holding
+      with
+        receiver             : HoldingV2.Account
+        amount               : Decimal
+        expectedInstrumentId : InstrumentId
+      controller instrumentId.admin
+      do
+        assertMsg "ntt: preapproval owner is not this transfer's receiver" (receiver == account)
+        assertMsg "ntt: preapproval instrument does not match the requested instrumentId"
+          (expectedInstrumentId == instrumentId)
+        toInterfaceContractId @Holding <$> create NttCoin with
+          instrumentId, owner = fromSome account.owner, provider = account.provider, accountId = account.id, amount
+
+-- | The pending state of an in-flight transfer with no standing preapproval:
+-- funds are already debited from the sender (archived + change returned) by
+-- the time this is created; it holds the value directly rather than
+-- referencing a separate locked holding, since nothing else here needs to
+-- reuse a "locked coin" concept. Implements both v1 and v2 @TransferInstruction@
+-- on one template (mirroring how real Canton Coin's own
+-- @AmuletTransferInstruction@ implements both versions on a single contract).
+template NttTransferInstruction
+  with
+    instrumentId    : InstrumentId
+    senderAccount   : HoldingV2.Account   -- ^ owner is always @Some@ -- null-owner rejected upstream
+    receiverAccount : HoldingV2.Account   -- ^ owner is always @Some@ -- null-owner rejected upstream
+    amount          : Decimal
+    requestedAt     : Time
+    executeBefore   : Time
+  where
+    signatory instrumentId.admin :: accountControlParties senderAccount
+    observer accountControlParties receiverAccount
+
+    interface instance TIV1.TransferInstruction for NttTransferInstruction where
+      view = TIV1.TransferInstructionView with
+        originalInstructionCid = None
+        transfer = TIV1.Transfer with
+          sender = fromSome senderAccount.owner
+          receiver = fromSome receiverAccount.owner
+          amount, instrumentId, requestedAt, executeBefore
+          inputHoldingCids = []
+          meta = emptyMetadata
+        status = TIV1.TransferPendingReceiverAcceptance
+        meta = emptyMetadata
+
+      transferInstruction_acceptImpl _self _arg = do
+        now <- getTime
+        assertMsg "ntt: transfer.executeBefore has passed; accept is no longer allowed -- reject or withdraw"
+          (now < executeBefore)
+        rcid <- toInterfaceContractId @Holding <$> create NttCoin with
+          instrumentId, owner = fromSome receiverAccount.owner
+          provider = receiverAccount.provider, accountId = receiverAccount.id, amount
+        pure TIV1.TransferInstructionResult with
+          output = TIV1.TransferInstructionResult_Completed with receiverHoldingCids = [rcid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferInstruction_rejectImpl _self _arg = returnToSenderV1 instrumentId senderAccount amount
+      transferInstruction_withdrawImpl _self _arg = returnToSenderV1 instrumentId senderAccount amount
+      transferInstruction_updateImpl _self _arg =
+        abort "ntt: NttTransferInstruction does not support registry-internal Update steps"
+
+    interface instance TIV2.TransferInstruction for NttTransferInstruction where
+      view = TIV2.TransferInstructionView with
+        originalInstructionCid = None
+        transfer = TIV2.Transfer with
+          sender = senderAccount, receiver = receiverAccount, amount
+          instrumentId = HoldingV2.InstrumentId with admin = instrumentId.admin, id = instrumentId.id
+          requestedAt, executeBefore
+          inputHoldingCids = []
+          meta = emptyMetadata
+        expiresAt = None
+        availableActions = Map.fromList
+          [ (TIV2.TIA_Accept, [accountControlParties receiverAccount])
+          , (TIV2.TIA_Reject, [accountControlParties receiverAccount])
+          , (TIV2.TIA_Withdraw, [accountControlParties senderAccount])
+          ]
+        meta = emptyMetadata
+
+      transferInstruction_acceptImpl self _arg = do
+        now <- getTime
+        assertMsg "ntt: transfer.executeBefore has passed; accept is no longer allowed -- reject or withdraw"
+          (now < executeBefore)
+        rcid <- toInterfaceContractId @HoldingV2.Holding <$> create NttCoin with
+          instrumentId, owner = fromSome receiverAccount.owner
+          provider = receiverAccount.provider, accountId = receiverAccount.id, amount
+        -- TransferInstructionV2's TransferInstruction_Accept is nonconsuming --
+        -- the interface MANDATES the instruction be archived on acceptance (see
+        -- module header / Phase 1 finding 1A); v1's own Accept is a plain
+        -- (consuming) choice, so it needs no explicit archive.
+        archive (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction self)
+        pure TIV2.TransferInstructionResult with
+          output = TIV2.TransferInstructionResult_Completed with receiverHoldingCids = [rcid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferInstruction_rejectImpl self _arg = do
+        result <- returnToSenderV2 instrumentId senderAccount amount
+        archive (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction self)
+        pure result
+
+      transferInstruction_withdrawImpl self _arg = do
+        result <- returnToSenderV2 instrumentId senderAccount amount
+        archive (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction self)
+        pure result
+
+      transferInstruction_acceptExtraObservers _ = []
+      transferInstruction_rejectExtraObservers _ = []
+      transferInstruction_withdrawExtraObservers _ = []
+
+-- | Both 'TIV1.TransferFactory_Transfer' and 'TIV2.TransferFactory_Transfer'
+-- state that the choice MUST fail if @transfer.executeBefore@ is in the past;
+-- v2's @Transfer.requestedAt@ additionally MUST be in the past when
+-- instructing. Shared so both @transferFactory_transferImpl@s enforce the
+-- exact same window (Phase 1 finding 1B).
+assertTransferWindow : Time -> Time -> Update ()
+assertTransferWindow requestedAt executeBefore = do
+  now <- getTime
+  assertMsg "ntt: transfer.requestedAt must not be in the future" (requestedAt <= now)
+  assertMsg "ntt: transfer.executeBefore has passed" (now < executeBefore)
+
+returnToSenderV1 : InstrumentId -> HoldingV2.Account -> Decimal -> Update TIV1.TransferInstructionResult
+returnToSenderV1 instrumentId senderAccount amount = do
+  cid <- toInterfaceContractId @Holding <$> create NttCoin with
+    instrumentId, owner = fromSome senderAccount.owner
+    provider = senderAccount.provider, accountId = senderAccount.id, amount
+  pure TIV1.TransferInstructionResult with
+    output = TIV1.TransferInstructionResult_Failed
+    senderChangeCids = [cid]
+    meta = emptyMetadata
+
+returnToSenderV2 : InstrumentId -> HoldingV2.Account -> Decimal -> Update TIV2.TransferInstructionResult
+returnToSenderV2 instrumentId senderAccount amount = do
+  cid <- toInterfaceContractId @HoldingV2.Holding <$> create NttCoin with
+    instrumentId, owner = fromSome senderAccount.owner
+    provider = senderAccount.provider, accountId = senderAccount.id, amount
+  pure TIV2.TransferInstructionResult with
+    output = TIV2.TransferInstructionResult_Failed
+    senderChangeCids = [cid]
+    meta = emptyMetadata
+
+-- | The shared value-movement core for 'NttCoinFactory's @TransferFactory@
+-- v1 and v2 @transferFactory_transferImpl@s: validates and archives the
+-- sender's inputs, mints exact + change, then completes synchronously
+-- (self-transfer, or receiver authority already present, or a standing
+-- preapproval) or falls through to the pending case -- the caller
+-- constructs the actual 'NttTransferInstruction' (it alone has the original,
+-- version-specific 'TIV1.Transfer'/'TIV2.Transfer' fields to store). Takes
+-- full 'HoldingV2.Account's rather than bare parties so it can move value on
+-- behalf of provider-delegated/sub-accounts on either side (Phase 2) -- the
+-- caller has already run 'requireAccountOwner' on both accounts, so
+-- @senderAccount.owner@/@receiverAccount.owner@ are guaranteed @Some@ here.
+data CoreTransferOutcome
+  = CoreCompleted with receiverCid : ContractId Holding, senderChangeCids : [ContractId Holding]
+  | CorePendingNeeded with senderChangeCids : [ContractId Holding]
+
+nttTransferCore
+  : Party -> Bool -> HoldingV2.Account -> HoldingV2.Account -> Decimal -> InstrumentId -> [ContractId Holding] -> ExtraArgs
+  -> Update CoreTransferOutcome
+nttTransferCore guardianGovernance receiverAuthorityPresent senderAccount receiverAccount amount instrumentId inputHoldingCids extraArgs = do
+  assertMsg "ntt: NttCoinFactory only serves instruments administered by guardianGovernance"
+    (instrumentId.admin == guardianGovernance)
+  let sender = fromSome senderAccount.owner
+  views <- forA inputHoldingCids (fmap view . fetch)
+  forA_ views \hv -> do
+    assertMsg "ntt: transfer input not owned by sender" (hv.owner == sender)
+    assertMsg "ntt: transfer input instrument mismatch" (hv.instrumentId == instrumentId)
+  let total = sum (map (.amount) views)
+  assertMsg "ntt: input holdings do not cover the transfer amount" (total >= amount)
+  forA_ inputHoldingCids archive
+  let change = total - amount
+  senderChangeCids <-
+    if change > 0.0
+      then do
+        cid <- toInterfaceContractId @Holding <$> create NttCoin with
+          instrumentId, owner = sender, provider = senderAccount.provider, accountId = senderAccount.id, amount = change
+        pure [cid]
+      else pure []
+  if receiverAuthorityPresent
+    then do
+      rcid <- toInterfaceContractId @Holding <$> create NttCoin with
+        instrumentId, owner = fromSome receiverAccount.owner
+        provider = receiverAccount.provider, accountId = receiverAccount.id, amount
+      pure CoreCompleted with receiverCid = rcid, senderChangeCids
+    else case lookupTransferPreapprovalCid extraArgs of
+      Some preCid -> do
+        rcid <- exercise preCid TransferPreapproval_Receive with
+          receiver = receiverAccount, amount, expectedInstrumentId = instrumentId
+        pure CoreCompleted with receiverCid = rcid, senderChangeCids
+      None -> pure CorePendingNeeded with senderChangeCids
+
+----------------------------------------------------------------------
+-- NttCoinFactory
+----------------------------------------------------------------------
+
+template NttCoinFactory
+  with
+    guardianGovernance : Party
+  where
+    signatory guardianGovernance
+
+    interface instance BurnMintFactory for NttCoinFactory where
+      view = BurnMintFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+      burnMintFactory_burnMintImpl _self arg = do
+        assertMsg "ntt: NttCoinFactory only serves instruments administered by guardianGovernance"
+          (arg.instrumentId.admin == guardianGovernance)
+        assertMsg "ntt: expectedAdmin does not match this factory's admin"
+          (arg.expectedAdmin == guardianGovernance)
+        forA_ arg.inputHoldingCids \cid -> do
+          hv <- view <$> fetch cid
+          assertMsg "ntt: burn input's instrument does not match the requested instrumentId"
+            (hv.instrumentId == arg.instrumentId)
+          archive cid
+        -- BurnMintFactory is party-based, not account-based -- mint/burn stays
+        -- basic-account-only by construction (see module header).
+        outputCids <- forA arg.outputs \o ->
+          toInterfaceContractId @Holding <$> create NttCoin with
+            instrumentId = arg.instrumentId
+            owner = o.owner
+            provider = None, accountId = ""
+            amount = o.amount
+        pure BurnMintFactory_BurnMintResult with outputCids
+
+      burnMintFactory_publicFetchImpl _self arg = do
+        assertMsg "ntt: expectedAdmin does not match this factory's admin"
+          (arg.expectedAdmin == guardianGovernance)
+        pure BurnMintFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+    interface instance TIV1.TransferFactory for NttCoinFactory where
+      view = TIV1.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        assertMsg "ntt: expectedAdmin does not match this factory's admin"
+          (arg.expectedAdmin == guardianGovernance)
+        let t = arg.transfer
+        assertTransferWindow t.requestedAt t.executeBefore
+        -- v1 is inherently basic (a bare party, no account model) -- lift
+        -- the sender/receiver parties into basic accounts for the shared,
+        -- account-based core (Phase 2).
+        let senderAccount = basicAccountV2 t.sender
+            receiverAccount = basicAccountV2 t.receiver
+        outcome <- nttTransferCore guardianGovernance (t.sender == t.receiver)
+          senderAccount receiverAccount t.amount t.instrumentId t.inputHoldingCids arg.extraArgs
+        case outcome of
+          CoreCompleted{receiverCid, senderChangeCids} ->
+            pure TIV1.TransferInstructionResult with
+              output = TIV1.TransferInstructionResult_Completed with receiverHoldingCids = [receiverCid]
+              senderChangeCids
+              meta = emptyMetadata
+          CorePendingNeeded{senderChangeCids} -> do
+            instructionCid <- create NttTransferInstruction with
+              instrumentId = t.instrumentId, senderAccount, receiverAccount, amount = t.amount
+              requestedAt = t.requestedAt, executeBefore = t.executeBefore
+            pure TIV1.TransferInstructionResult with
+              output = TIV1.TransferInstructionResult_Pending with
+                transferInstructionCid = toInterfaceContractId instructionCid
+              senderChangeCids
+              meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self arg = do
+        assertMsg "ntt: expectedAdmin does not match this factory's admin"
+          (arg.expectedAdmin == guardianGovernance)
+        pure TIV1.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+    interface instance TIV2.TransferFactory for NttCoinFactory where
+      view = TIV2.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+      transferFactory_transferExtraObservers _ = []
+
+      transferFactory_transferImpl _self arg = do
+        let t = arg.transfer
+        assertTransferWindow t.requestedAt t.executeBefore
+        -- Only the null-owner account is rejected -- sub-accounts and
+        -- provider-delegated accounts are genuine, composable accounts on
+        -- both sides (Phase 2, module header).
+        _ <- requireAccountOwner t.sender
+        _ <- requireAccountOwner t.receiver
+        assertMsg "ntt: TransferFactory_Transfer requires the sender account's owner and provider authority"
+          (all (`elem` arg.actors) (accountControlParties t.sender))
+        let instrumentId = InstrumentId with admin = t.instrumentId.admin, id = t.instrumentId.id
+            inputHoldingCids = map coerceContractId t.inputHoldingCids
+            receiverAuthorityPresent = all (`elem` arg.actors) (accountControlParties t.receiver)
+        outcome <- nttTransferCore guardianGovernance receiverAuthorityPresent
+          t.sender t.receiver t.amount instrumentId inputHoldingCids arg.extraArgs
+        case outcome of
+          CoreCompleted{receiverCid, senderChangeCids} ->
+            pure TIV2.TransferInstructionResult with
+              output = TIV2.TransferInstructionResult_Completed with
+                receiverHoldingCids = [coerceContractId receiverCid]
+              senderChangeCids = map coerceContractId senderChangeCids
+              meta = emptyMetadata
+          CorePendingNeeded{senderChangeCids} -> do
+            instructionCid <- create NttTransferInstruction with
+              instrumentId, senderAccount = t.sender, receiverAccount = t.receiver, amount = t.amount
+              requestedAt = t.requestedAt, executeBefore = t.executeBefore
+            pure TIV2.TransferInstructionResult with
+              output = TIV2.TransferInstructionResult_Pending with
+                transferInstructionCid = toInterfaceContractId instructionCid
+              senderChangeCids = map coerceContractId senderChangeCids
+              meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TIV2.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+    interface instance AllocationFactory for NttCoinFactory where
+      view = AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+      allocationFactory_allocateImpl _self arg = do
+        let spec = arg.allocation
+            leg = spec.transferLeg
+        assertMsg "ntt: NttCoinFactory only serves instruments administered by guardianGovernance"
+          (leg.instrumentId.admin == guardianGovernance)
+        assertMsg "ntt: expectedAdmin does not match this factory's admin"
+          (arg.expectedAdmin == guardianGovernance)
+        now <- getTime
+        assertMsg "ntt: allocation window (allocateBefore) has passed" (now < spec.settlement.allocateBefore)
+        views <- forA arg.inputHoldingCids (fmap view . fetch)
+        forA_ views \hv -> do
+          assertMsg "ntt: allocation input not owned by sender" (hv.owner == leg.sender)
+          assertMsg "ntt: allocation input instrument mismatch" (hv.instrumentId == leg.instrumentId)
+        let total = sum (map (.amount) views)
+        assertMsg "ntt: input holdings do not cover the allocation amount" (total >= leg.amount)
+        forA_ arg.inputHoldingCids archive
+        let change = total - leg.amount
+        senderChangeCids <-
+          if change > 0.0
+            then do
+              -- v1 allocations are party-based, not account-based -- basic by
+              -- construction (see module header).
+              cid <- toInterfaceContractId @Holding <$> create NttCoin with
+                instrumentId = leg.instrumentId, owner = leg.sender, provider = None, accountId = "", amount = change
+              pure [cid]
+            else pure []
+        allocationCid <- toInterfaceContractId @Allocation <$> create NttCoinAllocation with
+          instrumentId = leg.instrumentId, allocation = spec
+        pure AllocationInstructionResult with
+          output = AllocationInstructionResult_Completed with allocationCid
+          senderChangeCids
+          meta = emptyMetadata
+
+      allocationFactory_publicFetchImpl _self arg = do
+        assertMsg "ntt: expectedAdmin does not match this factory's admin"
+          (arg.expectedAdmin == guardianGovernance)
+        pure AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+    interface instance AIV2.AllocationFactory for NttCoinFactory where
+      view = AIV2.AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+      allocationFactory_allocateExtraObservers _ = []
+
+      allocationFactory_allocateImpl _self arg = do
+        let spec = arg.allocation
+        assertMsg "ntt: allocation's admin does not match this factory's admin"
+          (spec.admin == guardianGovernance)
+        -- Only the null-owner account is rejected -- a provider-delegated or
+        -- sub-account authorizer is genuine and composable (Phase 2, module
+        -- header); its owner AND provider must both authorize the allocate.
+        _ <- requireAccountOwner spec.authorizer
+        assertMsg "ntt: AllocationFactory_Allocate requires the authorizer account's owner and provider authority"
+          (all (`elem` arg.actors) (accountControlParties spec.authorizer))
+        assertMsg "ntt: transferLegSides amounts must be positive"
+          (all (> 0.0) (map (.amount) spec.transferLegSides))
+
+        now <- getTime
+        let round1Totals = sumSide AV2.SenderSide spec.transferLegSides
+            reserveTotals = fromOptional TextMap.empty spec.nextIterationFunding
+            requiredTotals = textMapUnionWith (+) round1Totals reserveTotals
+
+        inputViews <- forA arg.inputHoldingCids \cid -> do
+          hv <- view <$> fetch cid
+          assertMsg "ntt: allocation input not owned by the authorizer" (hv.account == spec.authorizer)
+          assertMsg "ntt: allocation input's instrument admin does not match this factory's admin"
+            (hv.instrumentId.admin == guardianGovernance)
+          pure hv
+        forA_ arg.inputHoldingCids archive
+        let inputsByInstrument = TextMap.fromListWithR (+) [(hv.instrumentId.id, hv.amount) | hv <- inputViews]
+            instruments = dedup (map fst (TextMap.toList requiredTotals) ++ map fst (TextMap.toList inputsByInstrument))
+
+        results <- forA instruments \instr -> do
+          let have = fromOptional 0.0 (TextMap.lookup instr inputsByInstrument)
+              need = fromOptional 0.0 (TextMap.lookup instr requiredTotals)
+          assertMsg ("ntt: input holdings for " <> instr <> " do not cover the allocation's required funding")
+            (have >= need)
+          let change = have - need
+          changeCids <-
+            if change > 0.0
+              then do
+                cid <- toInterfaceContractId @HoldingV2.Holding <$> create NttCoin with
+                  instrumentId = InstrumentId with admin = guardianGovernance, id = instr
+                  owner = fromSome spec.authorizer.owner
+                  provider = spec.authorizer.provider, accountId = spec.authorizer.id, amount = change
+                pure [cid]
+              else pure []
+          pure (instr, need, changeCids)
+
+        allocationCid <- toInterfaceContractId @AV2.Allocation <$> create NttCoinAllocationV2 with
+          authorizerAccount = spec.authorizer
+          settlement = arg.settlement
+          allocation = spec
+          lockedAmounts = TextMap.filter (> 0.0) (TextMap.fromList [(i, n) | (i, n, _) <- results])
+          originalAllocationCid = None
+          createdAt = now
+          numIterations = 0
+
+        pure AIV2.AllocationInstructionResult with
+          output = AIV2.AllocationInstructionResult_Completed with allocationCid
+          authorizerChangeCids = TextMap.fromList [(i, cs) | (i, _, cs) <- results, not (null cs)]
+          meta = emptyMetadata
+
+      allocationFactory_publicFetchImpl _self _arg =
+        pure AIV2.AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+    interface instance AV2.SettlementFactory for NttCoinFactory where
+      view = AV2.SettlementFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+      settlementFactory_settleBatchExtraObservers _ = []
+
+      settlementFactory_settleBatchImpl _self arg = do
+        assertMsg "ntt: SettlementFactory_SettleBatch requires at least one transfer leg"
+          (not (null arg.transferLegs))
+        assertMsg "ntt: SettlementFactory_SettleBatch requires actors to be exactly settlement.executors"
+          (sameGroup arg.actors arg.settlement.executors)
+        assertMsg "ntt: duplicate transferLegId in transferLegs"
+          (length (dedup (map (.transferLegId) arg.transferLegs)) == length arg.transferLegs)
+
+        allocViews <- forA arg.allocations \fa -> do
+          av <- view <$> fetch fa.allocationCid
+          assertMsg "ntt: allocation's admin does not match this factory's admin"
+            (av.allocation.admin == guardianGovernance)
+          assertMsg "ntt: allocation was not created for this settlement" (av.settlement == arg.settlement)
+          pure (fa, av)
+
+        let entries =
+              [ (s.transferLegId, s.side, av.allocation.authorizer, s.otherside, s.amount, s.instrumentId)
+              | (fa, av) <- allocViews, s <- av.allocation.transferLegSides ++ fa.extraTransferLegSides
+              ]
+
+        forA_ arg.transferLegs \leg -> do
+          let senders = [e | e@(tlid, AV2.SenderSide, _, _, _, _) <- entries, tlid == leg.transferLegId]
+              receivers = [e | e@(tlid, AV2.ReceiverSide, _, _, _, _) <- entries, tlid == leg.transferLegId]
+          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " has no matching SenderSide allocation")
+            (length senders == 1)
+          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " has no matching ReceiverSide allocation")
+            (length receivers == 1)
+          let [(_, _, sAuth, sOther, sAmt, sInstr)] = senders
+              [(_, _, rAuth, rOther, rAmt, rInstr)] = receivers
+          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " SenderSide authorization mismatch")
+            (sAuth == leg.sender && sOther == leg.receiver && sAmt == leg.amount && sInstr == leg.instrumentId)
+          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " ReceiverSide authorization mismatch")
+            (rAuth == leg.receiver && rOther == leg.sender && rAmt == leg.amount && rInstr == leg.instrumentId)
+
+        assertMsg "ntt: allocations authorize transfer leg sides not covered by the given transferLegs"
+          (length entries == 2 * length arg.transferLegs)
+
+        allocationSettleResults <- forA allocViews \(fa, _) ->
+          exercise fa.allocationCid AV2.Allocation_Settle with
+            actors = guardianGovernance :: arg.settlement.executors
+            extraTransferLegSides = fa.extraTransferLegSides
+            nextIterationFunding = fa.nextIterationFunding
+            extraArgs = withSettleBatchContext arg.extraArgs
+
+        pure AV2.SettlementFactory_SettleBatchResult with allocationSettleResults, meta = emptyMetadata
+
+      settlementFactory_publicFetchImpl _self _arg =
+        pure AV2.SettlementFactoryView with admin = guardianGovernance, meta = emptyMetadata
+
+----------------------------------------------------------------------
+-- Allocation v1: NttCoinAllocation
+----------------------------------------------------------------------
+
+-- | A single-contract allocation: value + the allocation record folded
+-- together (spec-sanctioned -- 'AllocationView.holdingCids' MAY be empty for
+-- registries that don't represent locked value as a separate on-ledger
+-- holding). No separate locked-holding indirection, for the same reason as
+-- 'NttTransferInstruction' -- nothing else here needs to reuse a "locked
+-- coin" concept.
+template NttCoinAllocation
+  with
+    instrumentId : InstrumentId
+    allocation   : AllocationSpecification
+  where
+    signatory instrumentId.admin, allocation.transferLeg.sender
+    observer allocation.transferLeg.receiver, allocation.settlement.executor
+
+    interface instance Allocation for NttCoinAllocation where
+      view = AllocationView with allocation, holdingCids = [], meta = emptyMetadata
+
+      allocation_executeTransferImpl _self _arg = do
+        now <- getTime
+        assertMsg "ntt: settlement window (settleBefore) has passed" (now < allocation.settlement.settleBefore)
+        rcid <- toInterfaceContractId @Holding <$> create NttCoin with
+          instrumentId, owner = allocation.transferLeg.receiver, provider = None, accountId = ""
+          amount = allocation.transferLeg.amount
+        pure Allocation_ExecuteTransferResult with
+          senderHoldingCids = [], receiverHoldingCids = [rcid], meta = emptyMetadata
+
+      allocation_cancelImpl _self _arg = do
+        cid <- returnAllocationToSender instrumentId allocation
+        pure Allocation_CancelResult with senderHoldingCids = [cid], meta = emptyMetadata
+
+      allocation_withdrawImpl _self _arg = do
+        cid <- returnAllocationToSender instrumentId allocation
+        pure Allocation_WithdrawResult with senderHoldingCids = [cid], meta = emptyMetadata
+
+-- | v1 allocations are party-based, not account-based -- basic by
+-- construction (see module header).
+returnAllocationToSender : InstrumentId -> AllocationSpecification -> Update (ContractId Holding)
+returnAllocationToSender instrumentId allocation =
+  toInterfaceContractId @Holding <$> create NttCoin with
+    instrumentId, owner = allocation.transferLeg.sender, provider = None, accountId = ""
+    amount = allocation.transferLeg.amount
+
+----------------------------------------------------------------------
+-- Allocation v2: NttCoinAllocationV2 -- see module header for the
+-- multi-leg/SettlementFactory soundness argument.
+----------------------------------------------------------------------
+
+sameGroup : [Party] -> [Party] -> Bool
+sameGroup xs ys = all (`elem` ys) xs && all (`elem` xs) ys
+
+-- | The @extraArgs.context@ key 'settlementFactory_settleBatchImpl' stamps
+-- onto every nested @Allocation_Settle@ it exercises, so
+-- 'allocation_settleImpl' can tell it was reached via
+-- 'AV2.SettlementFactory_SettleBatch' rather than a direct call. This is a
+-- footgun guard against an *accidental* naked @Allocation_Settle@ (which has
+-- no automatic counterparty and so cannot itself check conservation), NOT a
+-- security boundary -- the sentinel is caller-forgeable by anyone who already
+-- holds the @admin :: executors@ authority the choice requires, exactly the
+-- same parties who could authorize a real 'SettlementFactory_SettleBatch'
+-- anyway. The actual authorization is, and remains, that
+-- @Allocation_Settle@ requires the admin (gg) among @actors@ (see module
+-- header).
+settleBatchContextKey : Text
+settleBatchContextKey = "ntt.viaSettleBatch"
+
+-- | Insert the 1D sentinel into a caller-supplied 'ExtraArgs', preserving
+-- whatever context values were already there.
+withSettleBatchContext : ExtraArgs -> ExtraArgs
+withSettleBatchContext extraArgs = extraArgs with
+  context = extraArgs.context with
+    values = TextMap.insert settleBatchContextKey (AV_Bool True) extraArgs.context.values
+
+-- | 'DA.TextMap' has no @unionWith@/@map@ -- these are the two shapes this
+-- module needs, built from the primitives it does export.
+textMapUnionWith : (v -> v -> v) -> TextMap.TextMap v -> TextMap.TextMap v -> TextMap.TextMap v
+textMapUnionWith f a b = TextMap.fromListWithR f (TextMap.toList a ++ TextMap.toList b)
+
+textMapNegate : TextMap.TextMap Decimal -> TextMap.TextMap Decimal
+textMapNegate m = TextMap.fromList [(k, negate v) | (k, v) <- TextMap.toList m]
+
+sumSide : AV2.TransferSide -> [AV2.TransferLegSide] -> TextMap.TextMap Decimal
+sumSide side sides = TextMap.fromListWithR (+) [(s.instrumentId, s.amount) | s <- sides, s.side == side]
+
+-- | Otherside account control parties (owner, plus provider if present) of
+-- the ORIGINAL transferLegSides, deduped. Gives counterparties -- and their
+-- providers, who the standard requires have visibility on all asset
+-- movements of their account -- standing ACS visibility of an allocation
+-- naming them, generalizing v1's @observer allocation.transferLeg.receiver@
+-- to multi-leg.
+legSideOwners : [AV2.TransferLegSide] -> [Party]
+legSideOwners sides = dedup (concatMap (accountControlParties . (.otherside)) sides)
+
+returnLockedFundsToAuthorizerV2
+  : Party -> HoldingV2.Account -> TextMap.TextMap Decimal -> Update (TextMap.TextMap [ContractId HoldingV2.Holding])
+returnLockedFundsToAuthorizerV2 admin account amounts =
+  TextMap.fromList <$> forA (filter ((> 0.0) . snd) (TextMap.toList amounts)) \(instr, amt) -> do
+    cid <- toInterfaceContractId @HoldingV2.Holding <$> create NttCoin with
+      instrumentId = InstrumentId with admin, id = instr
+      owner = fromSome account.owner, provider = account.provider, accountId = account.id, amount = amt
+    pure (instr, [cid])
+
+-- | One authorizer's side of possibly many legs of a settlement -- see the
+-- module header for why value only genuinely moves when
+-- 'AV2.SettlementFactory_SettleBatch' settles matching sender/receiver
+-- allocations together in one transaction. @lockedAmounts@ is bookkeeping
+-- only (no separate escrow holding, same simplification as
+-- 'NttCoinAllocation'/'NttTransferInstruction') -- the real value already
+-- left circulation (archived) at 'AllocationFactory_Allocate' time.
+template NttCoinAllocationV2
+  with
+    authorizerAccount     : HoldingV2.Account   -- ^ owner is always @Some@ -- null-owner rejected upstream
+    settlement            : AV2.SettlementInfo
+    allocation            : AV2.AllocationSpecification
+    lockedAmounts         : TextMap.TextMap Decimal
+    originalAllocationCid : Optional (ContractId AV2.Allocation)
+    createdAt             : Time
+    numIterations         : Int
+  where
+    signatory allocation.admin :: accountControlParties authorizerAccount
+    observer settlement.executors, legSideOwners allocation.transferLegSides
+
+    interface instance AV2.Allocation for NttCoinAllocationV2 where
+      view = AV2.AllocationView with
+        originalAllocationCid, settlement, allocation
+        holdingCids = []
+        createdAt, numIterations
+        expiresAt = None
+        availableActions = Map.fromList
+          [ (AV2.AA_Settle, [allocation.admin :: settlement.executors])
+          , (AV2.AA_Cancel, [settlement.executors, [allocation.admin]])
+          , (AV2.AA_Withdraw, if allocation.committed then [] else [[fromSome authorizerAccount.owner]])
+          ]
+        meta = emptyMetadata
+
+      allocation_settleImpl self arg = do
+        assertMsg "ntt: Allocation_Settle requires exactly admin and executors as actors"
+          (sameGroup arg.actors (allocation.admin :: settlement.executors))
+        -- Footgun guard, not a security boundary -- see 'settleBatchContextKey'.
+        assertMsg "ntt: Allocation_Settle must be driven through SettlementFactory_SettleBatch"
+          (TextMap.lookup settleBatchContextKey arg.extraArgs.context.values == Some (AV_Bool True))
+        now <- getTime
+        forA_ allocation.settlementDeadline \deadline ->
+          assertMsg "ntt: settlement deadline has passed" (now <= deadline)
+        assertMsg "ntt: extraTransferLegSides/nextIterationFunding require iterated settlement to be enabled"
+          ((null arg.extraTransferLegSides && isNone arg.nextIterationFunding) || isSome allocation.nextIterationFunding)
+        assertMsg "ntt: extraTransferLegSides amounts must be positive"
+          (all (> 0.0) (map (.amount) arg.extraTransferLegSides))
+
+        let allSides = allocation.transferLegSides ++ arg.extraTransferLegSides
+            senderTotals = sumSide AV2.SenderSide allSides
+            receiverTotals = sumSide AV2.ReceiverSide allSides
+        forA_ (TextMap.toList senderTotals) \(instr, amt) ->
+          assertMsg ("ntt: locked " <> instr <> " balance does not cover this round's SenderSide legs")
+            (fromOptional 0.0 (TextMap.lookup instr lockedAmounts) >= amt)
+        let remaining = textMapUnionWith (+) lockedAmounts (textMapNegate senderTotals)
+
+        receiverCids <- forA (TextMap.toList receiverTotals) \(instr, amt) -> do
+          cid <- toInterfaceContractId @HoldingV2.Holding <$> create NttCoin with
+            instrumentId = InstrumentId with admin = allocation.admin, id = instr
+            owner = fromSome authorizerAccount.owner
+            provider = authorizerAccount.provider, accountId = authorizerAccount.id, amount = amt
+          pure (instr, [cid])
+
+        archive (coerceContractId @AV2.Allocation @NttCoinAllocationV2 self)
+
+        case arg.nextIterationFunding of
+          None -> do
+            leftoverCids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount remaining
+            pure AV2.AllocationResult with
+              output = AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+              authorizerHoldingCids = textMapUnionWith (++) (TextMap.fromList receiverCids) leftoverCids
+              meta = emptyMetadata
+          Some carry -> do
+            forA_ (TextMap.toList carry) \(instr, amt) -> do
+              assertMsg "ntt: nextIterationFunding amounts must be positive" (amt > 0.0)
+              assertMsg ("ntt: nextIterationFunding for " <> instr <> " exceeds what remains after this round's spend")
+                (amt <= fromOptional 0.0 (TextMap.lookup instr remaining))
+            let trueLeftover = textMapUnionWith (+) remaining (textMapNegate carry)
+            leftoverCids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount trueLeftover
+            nextCid <- toInterfaceContractId @AV2.Allocation <$> create this with
+              lockedAmounts = TextMap.filter (> 0.0) carry
+              originalAllocationCid = Some (fromOptional self originalAllocationCid)
+              numIterations = numIterations + 1
+            pure AV2.AllocationResult with
+              output = AV2.AllocationResult_Settled with nextIterationAllocationCid = Some nextCid
+              authorizerHoldingCids = textMapUnionWith (++) (TextMap.fromList receiverCids) leftoverCids
+              meta = emptyMetadata
+
+      allocation_cancelImpl self arg = do
+        assertMsg "ntt: Allocation_Cancel requires either executors jointly or admin alone"
+          (sameGroup arg.actors settlement.executors || sameGroup arg.actors [allocation.admin])
+        archive (coerceContractId @AV2.Allocation @NttCoinAllocationV2 self)
+        cids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount lockedAmounts
+        pure AV2.AllocationResult with
+          output = AV2.AllocationResult_Cancelled, authorizerHoldingCids = cids, meta = emptyMetadata
+
+      allocation_withdrawImpl self arg = do
+        -- Unilateral by the authorizer account's owner alone (matching the
+        -- interface's own "account parties of the authorizer" language as a
+        -- permission grant, not a joint requirement) -- mirrors the pre-Phase-2
+        -- behavior for basic accounts exactly. This assertMsg is the real
+        -- authorization gate: 'self's own signatories (admin + owner +
+        -- provider, if any) are ambiently available inside this choice body
+        -- regardless of what 'arg.actors' contains, so without this check any
+        -- caller with self-authority as some actor could trigger a withdraw
+        -- (still benign -- funds only ever return to the rightful authorizer
+        -- account -- but not one this choice's own controller list prevents).
+        assertMsg "ntt: Allocation_Withdraw requires the authorizer account owner's authority"
+          (fromSome authorizerAccount.owner `elem` arg.actors)
+        when allocation.committed $ case allocation.settlementDeadline of
+          Some deadline -> do
+            now <- getTime
+            assertMsg "ntt: committed allocation cannot be withdrawn before its settlement deadline"
+              (now > deadline)
+          None -> abort "ntt: committed allocation with no settlement deadline cannot be unilaterally withdrawn -- use Allocation_Cancel"
+        archive (coerceContractId @AV2.Allocation @NttCoinAllocationV2 self)
+        cids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount lockedAmounts
+        pure AV2.AllocationResult with
+          output = AV2.AllocationResult_Withdrawn, authorizerHoldingCids = cids, meta = emptyMetadata
+
+      allocation_settleExtraObservers _ = []
+      allocation_cancelExtraObservers _ = []
+      allocation_withdrawExtraObservers _ = []

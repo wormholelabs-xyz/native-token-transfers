@@ -1,0 +1,249 @@
+-- | Daml Script tests for the 'Wormhole.Ntt.Coin' 'AllocationFactory' v1
+-- addition and 'NttCoinAllocation': DvP/atomic-settlement-style reservation
+-- of 'NttCoin' funds, independent of NTT's own burn/mint bridge flow.
+--
+-- v1 only -- 'AllocationV2'/'AllocationInstructionV2'/'SettlementFactory'
+-- (multi-leg net settlement, iterated/committed allocations) get their own
+-- dedicated design pass; see the approved plan.
+module Test.TestNttCoinAllocation where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import DA.Time (hours, addRelTime)
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding)
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.AllocationV1
+import Splice.Api.Token.AllocationInstructionV1
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Ntt.Coin
+import Test.TestNtt (nttCoinFactorySetup, expectAbort)
+import Test.TestNttCoin (mintCoin)
+
+asAllocationFactory : ContractId NttCoinFactory -> ContractId AllocationFactory
+asAllocationFactory = toInterfaceContractId @AllocationFactory
+
+-- | 'NttCoinFactory' is @signatory guardianGovernance@ alone -- see
+-- 'Test.TestNttCoinTransfer.discloseFactory' for why this is needed.
+discloseFactory : Party -> ContractId NttCoinFactory -> Script Disclosure
+discloseFactory gg factoryCid = fromSome <$> queryDisclosure gg factoryCid
+
+mkAllocationSpec : Time -> Party -> Party -> Party -> Decimal -> InstrumentId -> AllocationSpecification
+mkAllocationSpec requestedAt executor sender receiver amount instrumentId =
+  AllocationSpecification with
+    settlement = SettlementInfo with
+      executor
+      settlementRef = Reference with id = "settlement-1", cid = None
+      requestedAt
+      allocateBefore = requestedAt `addRelTime` hours 1
+      settleBefore = requestedAt `addRelTime` hours 2
+      meta = emptyMetadata
+    transferLegId = "leg-0"
+    transferLeg = TransferLeg with sender, receiver, amount, instrumentId, meta = emptyMetadata
+
+tryAllocate
+  : ContractId NttCoinFactory -> Party -> AllocationSpecification -> [ContractId Holding]
+  -> Script (Either SubmitError AllocationInstructionResult)
+tryAllocate factoryCid gg spec inputHoldingCids = do
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  trySubmit (actAs spec.transferLeg.sender <> disclose factoryDisc) do
+    exerciseCmd (asAllocationFactory factoryCid) AllocationFactory_Allocate with
+      expectedAdmin = gg
+      allocation = spec
+      requestedAt = t0
+      inputHoldingCids
+      extraArgs = emptyExtraArgs
+
+allocate
+  : ContractId NttCoinFactory -> Party -> AllocationSpecification -> [ContractId Holding]
+  -> Script AllocationInstructionResult
+allocate factoryCid gg spec inputHoldingCids = do
+  res <- tryAllocate factoryCid gg spec inputHoldingCids
+  case res of
+    Right ok -> pure ok
+    Left err -> abort ("expected AllocationFactory_Allocate to succeed, got: " <> show err)
+
+theAllocationCid : AllocationInstructionResult -> ContractId Allocation
+theAllocationCid res = case res.output of
+  AllocationInstructionResult_Completed{allocationCid} -> allocationCid
+  other -> error ("expected AllocationInstructionResult_Completed, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Allocate + ExecuteTransfer -- joint executor/sender/receiver authority
+----------------------------------------------------------------------
+
+testNttCoinAllocateExecuteTransferHappyPath : Script ()
+testNttCoinAllocateExecuteTransferHappyPath = do
+  gg <- allocateParty "AllocExecGg"
+  alice <- allocateParty "AllocExecAlice"
+  bob <- allocateParty "AllocExecBob"
+  carol <- allocateParty "AllocExecCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-EXEC"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  -- Missing exactly one of {executor, sender, receiver} must fail.
+  submitMustFail (actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+  submitMustFail (actAs carol <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+  submitMustFail (actAs carol <> actAs alice) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+
+  execRes <- submit (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+  case execRes.receiverHoldingCids of
+    [rcid] -> do
+      Some r <- queryContractId gg (coerceContractId @Holding @NttCoin rcid)
+      r.owner === bob
+      r.amount === 0.006
+    other -> abort ("expected exactly one receiver coin, got: " <> show other)
+  archived <- queryContractId gg (coerceContractId @Allocation @NttCoinAllocation allocCid)
+  archived === None
+
+testNttCoinAllocateReturnsChangeToSender : Script ()
+testNttCoinAllocateReturnsChangeToSender = do
+  gg <- allocateParty "AllocChangeGg"
+  alice <- allocateParty "AllocChangeAlice"
+  bob <- allocateParty "AllocChangeBob"
+  carol <- allocateParty "AllocChangeCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-CHANGE"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.004 instrumentId) [coinCid]
+  case res.senderChangeCids of
+    [changeCid] -> do
+      Some c <- queryContractId gg (coerceContractId @Holding @NttCoin changeCid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one change coin, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Allocate + Cancel -- same joint-authority requirement
+----------------------------------------------------------------------
+
+testNttCoinAllocateCancelReturnsFundsToSender : Script ()
+testNttCoinAllocateCancelReturnsFundsToSender = do
+  gg <- allocateParty "AllocCancelGg"
+  alice <- allocateParty "AllocCancelAlice"
+  bob <- allocateParty "AllocCancelBob"
+  carol <- allocateParty "AllocCancelCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-CANCEL"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  submitMustFail (actAs carol <> actAs alice) do
+    exerciseCmd allocCid Allocation_Cancel with extraArgs = emptyExtraArgs
+  cancelRes <- submit (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_Cancel with extraArgs = emptyExtraArgs
+  case cancelRes.senderHoldingCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Allocate + Withdraw -- sender-unilateral, pre-settlement
+----------------------------------------------------------------------
+
+testNttCoinAllocateWithdrawIsSenderUnilateral : Script ()
+testNttCoinAllocateWithdrawIsSenderUnilateral = do
+  gg <- allocateParty "AllocWithdrawGg"
+  alice <- allocateParty "AllocWithdrawAlice"
+  bob <- allocateParty "AllocWithdrawBob"
+  carol <- allocateParty "AllocWithdrawCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-WITHDRAW"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  submitMustFail bob do exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+  submitMustFail carol do exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+  withdrawRes <- submit alice do
+    exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+  case withdrawRes.senderHoldingCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Defensive check
+----------------------------------------------------------------------
+
+testNttCoinAllocateRejectsMismatchedAdminInstrument : Script ()
+testNttCoinAllocateRejectsMismatchedAdminInstrument = do
+  gg <- allocateParty "AllocMismatchGg"
+  notGg <- allocateParty "AllocMismatchNotGg"
+  alice <- allocateParty "AllocMismatchAlice"
+  bob <- allocateParty "AllocMismatchBob"
+  carol <- allocateParty "AllocMismatchCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = notGg, id = "NTT-COIN-ALLOC-MISMATCH"
+  t0 <- getTime
+  res <- tryAllocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) []
+  expectAbort "only serves instruments administered by guardianGovernance" res
+
+----------------------------------------------------------------------
+-- Deadline enforcement -- allocateBefore / settleBefore
+----------------------------------------------------------------------
+
+-- | 'AllocationV1.Allocation_ExecuteTransfer's own doc says it "SHOULD
+-- succeed provided the settlement.settleBefore deadline has not yet passed";
+-- Phase 1 promotes that SHOULD to a checked assertion.
+testNttCoinAllocateRejectsPastAllocateBefore : Script ()
+testNttCoinAllocateRejectsPastAllocateBefore = do
+  gg <- allocateParty "AllocPastAllocateBeforeGg"
+  alice <- allocateParty "AllocPastAllocateBeforeAlice"
+  bob <- allocateParty "AllocPastAllocateBeforeBob"
+  carol <- allocateParty "AllocPastAllocateBeforeCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-PASTALLOCATEBEFORE"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  let base = mkAllocationSpec t0 carol alice bob 0.006 instrumentId
+      spec = base with settlement = base.settlement with allocateBefore = t0 `addRelTime` hours (-1)
+  res <- tryAllocate factoryCid gg spec [coinCid]
+  expectAbort "allocation window (allocateBefore) has passed" res
+
+testNttCoinExecuteTransferRejectsPastSettleBefore : Script ()
+testNttCoinExecuteTransferRejectsPastSettleBefore = do
+  gg <- allocateParty "AllocPastSettleBeforeGg"
+  alice <- allocateParty "AllocPastSettleBeforeAlice"
+  bob <- allocateParty "AllocPastSettleBeforeBob"
+  carol <- allocateParty "AllocPastSettleBeforeCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-PASTSETTLEBEFORE"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  -- settleBefore = requestedAt + 2h (see mkAllocationSpec) -- move past it.
+  passTime (hours 3)
+
+  submitMustFail (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+
+  -- Cancel remains the recovery path after the settlement window closes.
+  cancelRes <- submit (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_Cancel with extraArgs = emptyExtraArgs
+  case cancelRes.senderHoldingCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
