@@ -54,10 +54,19 @@
 -- and sub-accounts (@id /= ""@) are genuine, composable holdings, not merely
 -- tolerated inputs. Only the null-owner account (@owner = None@) is rejected
 -- by @TransferFactory@/@AllocationFactory@ v2 (see 'requireAccountOwner'):
--- the standard reserves null-owner accounts for mint/burn, and NTT routes
--- mint/burn exclusively through @BurnMintFactory@ -- a deliberate,
+-- the standard reserves null-owner accounts for mint/burn, and bridge
+-- mint/burn is routed through @BurnMintFactory@ as a deliberate,
 -- spec-compliant scope boundary (CIP-0112 permits but never mandates routing
--- mint/burn through the standard transfer/allocation interfaces). v1 has no
+-- mint/burn through the standard transfer/allocation interfaces). That said,
+-- @BurnMintFactory@ is NOT the only code path that can create a holding
+-- without an in-choice debit: 'TransferPreapproval_Receive' is a second,
+-- gg-only mint primitive (controller @instrumentId.admin@ alone) -- it is
+-- debit-balanced only because 'nttTransferCore' debits the sender first in
+-- the same transaction; invoked standalone it is an unbacked mint. It is
+-- gated on gg alone, though -- the instrument's mint authority -- so it is no
+-- more privileged than @BurnMintFactory@ itself, and is therefore acceptable;
+-- it just means bridge mint/burn is not, as previously stated here, the sole
+-- mint path. v1 has no
 -- account concept at all, so v1 paths (and 'BurnMintFactory_BurnMint') stay
 -- basic-account-only (@provider = None, accountId = ""@) by construction --
 -- not a limitation, just v1's own scope.
@@ -237,6 +246,10 @@ template TransferPreapproval
     signatory accountControlParties account
     observer instrumentId.admin
 
+    -- Standalone, this is a gg-only unbacked mint -- acceptable only because
+    -- gg is already the instrument's mint authority. It conserves value (is
+    -- debit-balanced) only when driven from 'nttTransferCore', which debits
+    -- the sender before reaching this choice in the same transaction.
     nonconsuming choice TransferPreapproval_Receive : ContractId Holding
       with
         receiver             : HoldingV2.Account
@@ -332,12 +345,16 @@ template NttTransferInstruction
           senderChangeCids = []
           meta = emptyMetadata
 
-      transferInstruction_rejectImpl self _arg = do
+      transferInstruction_rejectImpl self arg = do
+        assertMsg "ntt: TransferInstruction_Reject requires the recipient account's authority"
+          (all (`elem` arg.actors) (accountControlParties receiverAccount))
         result <- returnToSenderV2 instrumentId senderAccount amount
         archive (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction self)
         pure result
 
-      transferInstruction_withdrawImpl self _arg = do
+      transferInstruction_withdrawImpl self arg = do
+        assertMsg "ntt: TransferInstruction_Withdraw requires the sender account's authority"
+          (all (`elem` arg.actors) (accountControlParties senderAccount))
         result <- returnToSenderV2 instrumentId senderAccount amount
         archive (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction self)
         pure result
