@@ -189,6 +189,27 @@ testAllocateV2RejectsUnderfundedRequiredTotal = do
   res <- tryAllocate factoryCid gg alice settlement spec [coinCid]
   expectAbort "do not cover the allocation's required funding" res
 
+-- | Exploit path: 'spec.transferLegSides' amounts were already checked
+-- positive, but 'spec.nextIterationFunding' fed straight into
+-- @requiredTotals@/@change@ unchecked. With a NEGATIVE reserve entry,
+-- @requiredTotals@ for that instrument would be reduced below the real
+-- SenderSide need, letting @change = have - need@ mint a positive change
+-- coin larger than what was actually put in. A valid, positive SenderSide
+-- leg is present here specifically to isolate the check under test to the
+-- reserve entry, not the leg amounts (already covered elsewhere).
+testAllocateV2RejectsNegativeNextIterationFunding : Script ()
+testAllocateV2RejectsNegativeNextIterationFunding = do
+  gg <- allocateParty "AllocV2NegReserveGg"
+  alice <- allocateParty "AllocV2NegReserveAlice"
+  bob <- allocateParty "AllocV2NegReserveBob"
+  carol <- allocateParty "AllocV2NegReserveCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let settlement = mkSettlement [carol] "settlement-negreserve"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-NEGRESERVE"])
+        with nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-ALLOCV2-NEGRESERVE", -0.01)])
+  res <- tryAllocate factoryCid gg alice settlement spec []
+  expectAbort "nextIterationFunding amounts must be positive" res
+
 ----------------------------------------------------------------------
 -- SettlementFactory_SettleBatch -- the critical value-movement proof
 ----------------------------------------------------------------------
