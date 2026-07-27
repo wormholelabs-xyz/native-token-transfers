@@ -398,6 +398,7 @@ nttTransferCore
 nttTransferCore guardianGovernance receiverAuthorityPresent senderAccount receiverAccount amount instrumentId inputHoldingCids extraArgs = do
   assertMsg "ntt: NttCoinFactory only serves instruments administered by guardianGovernance"
     (instrumentId.admin == guardianGovernance)
+  assertMsg "ntt: transfer amount must be positive" (amount > 0.0)
   let sender = fromSome senderAccount.owner
   views <- forA inputHoldingCids (fmap view . fetch)
   forA_ views \hv -> do
@@ -551,6 +552,7 @@ template NttCoinFactory
           (leg.instrumentId.admin == guardianGovernance)
         assertMsg "ntt: expectedAdmin does not match this factory's admin"
           (arg.expectedAdmin == guardianGovernance)
+        assertMsg "ntt: allocation amount must be positive" (leg.amount > 0.0)
         now <- getTime
         assertMsg "ntt: allocation window (allocateBefore) has passed" (now < spec.settlement.allocateBefore)
         views <- forA arg.inputHoldingCids (fmap view . fetch)
@@ -599,6 +601,8 @@ template NttCoinFactory
           (all (`elem` arg.actors) (accountControlParties spec.authorizer))
         assertMsg "ntt: transferLegSides amounts must be positive"
           (all (> 0.0) (map (.amount) spec.transferLegSides))
+        assertMsg "ntt: nextIterationFunding amounts must be positive"
+          (all ((> 0.0) . snd) (TextMap.toList (fromOptional TextMap.empty spec.nextIterationFunding)))
 
         now <- getTime
         let round1Totals = sumSide AV2.SenderSide spec.transferLegSides

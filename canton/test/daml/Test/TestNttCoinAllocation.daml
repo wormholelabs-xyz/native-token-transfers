@@ -197,6 +197,23 @@ testNttCoinAllocateRejectsMismatchedAdminInstrument = do
   res <- tryAllocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) []
   expectAbort "only serves instruments administered by guardianGovernance" res
 
+-- | Exploit path: with a NEGATIVE @leg.amount@ and EMPTY inputs, the old
+-- @total >= leg.amount@ coverage check (@0.0 >= -0.01@) would pass and
+-- @change = total - leg.amount@ (@0.01@) would mint a positive change coin
+-- from nothing. Confirms the fix rejects it before any coverage/change
+-- logic runs.
+testNttCoinAllocateV1RejectsNegativeAmount : Script ()
+testNttCoinAllocateV1RejectsNegativeAmount = do
+  gg <- allocateParty "AllocNegGg"
+  alice <- allocateParty "AllocNegAlice"
+  bob <- allocateParty "AllocNegBob"
+  carol <- allocateParty "AllocNegCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ALLOC-NEG"
+  t0 <- getTime
+  res <- tryAllocate factoryCid gg (mkAllocationSpec t0 carol alice bob (-0.01) instrumentId) []
+  expectAbort "allocation amount must be positive" res
+
 ----------------------------------------------------------------------
 -- Deadline enforcement -- allocateBefore / settleBefore
 ----------------------------------------------------------------------

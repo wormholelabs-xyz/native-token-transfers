@@ -270,6 +270,62 @@ testNttCoinTransferRejectsMismatchedPreapprovalV1 = do
   -- receiver != owner mismatch aborts inside TransferPreapproval_Receive.
   expectAbort "preapproval owner is not this transfer's receiver" res
 
+-- | Exploit path: with EMPTY inputs and a NEGATIVE amount, the old
+-- @total >= amount@ coverage check (@0.0 >= -0.01@) would pass and
+-- @change = total - amount@ (@0.0 - (-0.01) = 0.01@) would mint a
+-- positive change coin from nothing -- the receiver-side create also uses
+-- the caller-supplied negative @amount@ directly, but that path is never
+-- reached because the new up-front positivity guard aborts first. Confirms
+-- the fix rejects the pure mint-from-nothing case and that the transaction
+-- fails atomically (no coin is created for either party).
+testNttCoinTransferRejectsNegativeAmountV1 : Script ()
+testNttCoinTransferRejectsNegativeAmountV1 = do
+  gg <- allocateParty "TransferNegV1Gg"
+  alice <- allocateParty "TransferNegV1Alice"
+  bob <- allocateParty "TransferNegV1Bob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-NEG-V1"
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  res <- trySubmit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
+      expectedAdmin = gg
+      transfer = mkTransferV1 t0 alice bob (-0.01) instrumentId []
+      extraArgs = emptyExtraArgs
+  expectAbort "transfer amount must be positive" res
+  coins <- query @NttCoin gg
+  coins === []
+
+-- | v2 counterpart: empty inputs, negative amount, both actors present (so
+-- the old code path would have completed synchronously and minted a
+-- positive receiver coin from nothing). Confirms the fix rejects it and
+-- that the transaction fails atomically.
+testNttCoinTransferRejectsNegativeAmountV2 : Script ()
+testNttCoinTransferRejectsNegativeAmountV2 = do
+  gg <- allocateParty "TransferNegV2Gg"
+  alice <- allocateParty "TransferNegV2Alice"
+  bob <- allocateParty "TransferNegV2Bob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = "NTT-COIN-NEG-V2"
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  res <- trySubmit (actAs alice <> actAs bob <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
+      transfer = TIV2.Transfer with
+        sender = basicAccount alice
+        receiver = basicAccount bob
+        amount = -0.01
+        instrumentId = instrumentIdV2
+        requestedAt = t0
+        executeBefore = t0 `addRelTime` hours 24
+        inputHoldingCids = []
+        meta = emptyMetadata
+      actors = [alice, bob]
+      extraArgs = emptyExtraArgs
+  expectAbort "transfer amount must be positive" res
+  coins <- query @NttCoin gg
+  coins === []
+
 ----------------------------------------------------------------------
 -- Transfer v2 -- actors-based synchronous completion + basic-account rejection
 ----------------------------------------------------------------------
