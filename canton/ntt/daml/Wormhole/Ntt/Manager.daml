@@ -103,6 +103,7 @@ import Wormhole.Core.State
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Cip56
+import Wormhole.Ntt.CoinFactory (NttCoinFactory)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Payload
@@ -145,6 +146,26 @@ requireBurnMintFactory : NttFactory -> Update (ContractId BurnMintFactory)
 requireBurnMintFactory = \case
   BurnMintFactoryCid cid -> pure cid
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
+
+-- | Pin a caller-supplied 'NttFactory' to the canonical, gg-administered
+-- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' — the only factory a VAA-gated
+-- choice ('Wormhole.Ntt.Governance.RegisterManagerByVaa', 'SetFactoryByVaa')
+-- may ever commit. A VAA cannot name a contract id, so there is no way for a
+-- guardian-signed action to vet an arbitrary factory; every ByVaa path is
+-- instead restricted to the one factory template gg itself deploys at genesis.
+-- Mirrors the caller-supplied-cid template-pins in 'Wormhole.Ntt.CoinFactory'
+-- (commit 651bc50a): 'fetchFromInterface' checks the cid is genuinely backed by
+-- the 'NttCoinFactory' template — not merely something that implements the
+-- 'BurnMintFactory' interface — and the pin also checks the factory's own
+-- @guardianGovernance@ matches this deployment's.
+requireCanonicalFactory : Party -> NttFactory -> Update ()
+requireCanonicalFactory guardianGovernance factory = do
+  bmCid <- requireBurnMintFactory factory
+  r <- fetchFromInterface @NttCoinFactory bmCid
+  case r of
+    None -> abort "ntt governance: factory is not the canonical NttCoinFactory"
+    Some (_, ncf) -> assertMsg "ntt governance: factory's guardianGovernance does not match this deployment's"
+      (ncf.guardianGovernance == guardianGovernance)
 
 -- | The party that administers this deployment's burn/mint instrument and
 -- therefore authorizes minting/burning: the external @minter@ when present,
@@ -287,6 +308,39 @@ nttInstrumentIdFromText adminText nonce =
 -- identity instead of a mutable token field.
 nttInstrumentIdFor : Party -> Int -> Text
 nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) nonce
+
+-- | Domain-separation tag for NTT registration-VAA bindings.
+nttRegistrationBindingTag : Text
+nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
+
+-- | Text form of 'nttRegistrationBindingFor'. Split out so tests can pin the
+-- encoding against fixed strings — the existing vector-pinning convention
+-- ('nttInstrumentIdFromText', 'nttNamespaceFromText').
+nttRegistrationBindingFromText : Text -> Text -> Int -> Bytes32
+nttRegistrationBindingFromText operatorText adminText nonce =
+  normalizeHex (keccak256 (toHex nttRegistrationBindingTag
+    <> unLenPrefixed (lenPrefixed (toHex operatorText))
+    <> unLenPrefixed (lenPrefixed (toHex adminText))
+    <> intToBytesN nonce 8))
+
+-- | The 32-byte binding a guardian-signed
+-- 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA must carry in its
+-- @registrationBinding@ field: hash-committed to (operator, admin, nonce),
+-- WITH NO @nextId@ in the preimage. A registration VAA is signed off-chain,
+-- ahead of the on-ledger registration it authorizes, so it cannot predict
+-- which @NttGovernance.nextId@ will still be current when it is relayed;
+-- binding to @nextId@ would let any stranger grief a signed registration into
+-- permanent invalidity simply by racing a junk registration first (F1). The
+-- @nonce@ here is instead the same free-standing @instrumentNonce@
+-- 'nttInstrumentIdFor' already uses to let one admin run several deployments.
+--
+-- @operator@ in the preimage is load-bearing, not incidental: two bridge
+-- instances that happen to share the same @guardianGovernance@ party must not
+-- both be able to register against the same (admin, nonce) pair — each
+-- instance's registration VAAs are scoped to its own operator.
+nttRegistrationBindingFor : Party -> Party -> Int -> Bytes32
+nttRegistrationBindingFor operator admin nonce =
+  nttRegistrationBindingFromText (partyToText operator) (partyToText admin) nonce
 
 -- | Domain-separation tag for the derived replay namespace.
 nttNamespaceTag : Text
@@ -676,17 +730,108 @@ template NttManager
         assertMsg "ntt governance: wrong emitter address"
           (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
 
-        let action = parseNttGovernance vaa.payload
-        assertMsg "ntt governance: wrong target chain" (action.chain == chainId)
-        assertMsg "ntt governance: wrong manager address"
-          (normalizeHex action.managerAddress == managerAddress)
-        assertMsg "ntt governance: wrong factory epoch" (action.factoryEpoch == factoryEpoch)
+        -- Exhaustive constructor dispatch (F2): a well-formed but wrong-action
+        -- governance VAA (register or rotate) must abort here, even though
+        -- 'RotateToCanonicalFactory' shares this action's exact byte layout —
+        -- never a shared field-extraction helper across constructors.
+        case parseNttGovernance vaa.payload of
+          AcceptAdminToGovernance chain targetManagerAddress targetFactoryEpoch -> do
+            assertMsg "ntt governance: wrong target chain" (chain == chainId)
+            assertMsg "ntt governance: wrong manager address"
+              (normalizeHex targetManagerAddress == managerAddress)
+            assertMsg "ntt governance: wrong factory epoch" (targetFactoryEpoch == factoryEpoch)
+          _ -> abort "ntt governance: not an accept-admin action"
 
         exercise proposalCid AcceptAdminTransfer with
           mgrCid = self
           ledgerCid
           vettedFactory = factory
           extraArgs
+
+    -- | Governance-VAA-gated factory rotation for gg-minted burn/mint
+    -- deployments: the guardian quorum vets a specific (chain, managerAddress,
+    -- factoryEpoch) rotation off-chain, and @admin@ relays it here with no
+    -- LIVE gg signature needed — gg's authority (the replay consumer, the
+    -- factory's real mint authority) is inherited from this manager's own
+    -- signatories, exactly like 'AcceptAdminTransferByVaa'. Restricted to
+    -- gg-minted deployments (@tokenConfig == BurnMint && minter == None@):
+    -- an external minter's factory is vetted by a LIVE minter co-signature on
+    -- plain 'SetFactory' instead, and lock/unlock's transfer factory never
+    -- wields gg, so it has no governance action to gate.
+    --
+    -- Order of checks, each failing closed before anything moves:
+    --
+    --   1. The restriction above — cheap, and skips VAA work entirely for a
+    --      deployment this choice was never meant for.
+    --   2. The disclosed 'CoreState' is pinned to this deployment's own
+    --      guardian trust anchor and operator (mirrors
+    --      'AcceptAdminTransferByVaa'; a compromised operator co-signing a
+    --      forged CoreState under a throwaway gg must not pass).
+    --   3. The VAA verifies and its digest is consumed into gg's replay trie,
+    --      sub-scoped by this deployment's @namespace@ — the SAME trie
+    --      'Transfer'/'Release'/'Mint'/'AcceptAdminTransferByVaa' share, so a
+    --      rotation VAA can never be replayed as (or by) any of them.
+    --   4. Governance hardening (current guardian set only; standard emitter
+    --      chain/address checks), mirroring the core's own
+    --      'Wormhole.Core.State.SubmitGovernanceVAA'.
+    --   5. Exhaustive constructor dispatch (F2): an accept-admin or
+    --      registration VAA — even one that happens to share this action's
+    --      byte layout — must abort here, never silently satisfy the rotation.
+    --   6. The parsed action's chain, managerAddress, and factoryEpoch must
+    --      match this deployment exactly — the same TOCTOU pin
+    --      'AcceptAdminTransferByVaa's @factoryEpoch@ check documents:
+    --      @factoryEpoch@ names the exact committed factory the quorum vetted,
+    --      so a stale rotation VAA can never apply after a later rotation.
+    --   7. Factory template-pin ('requireCanonicalFactory'): a VAA cannot name
+    --      a contract id, so a ByVaa rotation can only ever commit the
+    --      canonical, gg-administered 'Wormhole.Ntt.CoinFactory.NttCoinFactory'.
+    --
+    -- Plain 'SetFactory' (live, minter-co-signed) remains for external
+    -- minters and lock/unlock; this choice is its VAA-gated counterpart for
+    -- gg-minted deployments only.
+    choice SetFactoryByVaa : ContractId NttManager
+      with
+        newFactory    : NttFactory
+        coreStateCid  : ContractId CoreState
+        replayNodeCid : ContractId ReplayNode
+        vaaBytes      : Bytes
+        pubKeys       : [(Int, Bytes)]
+        extraArgs     : ExtraArgs
+      controller admin
+      do
+        assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
+          (tokenConfig == BurnMint && minter == None)
+
+        cs <- fetch coreStateCid
+        assertMsg "ntt: core state is not the committed guardian trust anchor"
+          (cs.guardianGovernance == guardianGovernance)
+        assertMsg "ntt: core state operator mismatch"
+          (cs.operator == operator)
+
+        (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
+          encodedVAA = vaaBytes
+          pubKeys
+          consumer = guardianGovernance
+          namespace
+          replayNodeCid
+
+        assertMsg "ntt governance: not signed by current guardian set"
+          (vaa.guardianSetIndex == cs.guardianSetIndex)
+        assertMsg "ntt governance: wrong emitter chain"
+          (vaa.emitterChain == cs.governanceChainId)
+        assertMsg "ntt governance: wrong emitter address"
+          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+
+        case parseNttGovernance vaa.payload of
+          RotateToCanonicalFactory chain targetManagerAddress targetFactoryEpoch -> do
+            assertMsg "ntt governance: wrong target chain" (chain == chainId)
+            assertMsg "ntt governance: wrong manager address"
+              (normalizeHex targetManagerAddress == managerAddress)
+            assertMsg "ntt governance: wrong factory epoch" (targetFactoryEpoch == factoryEpoch)
+          _ -> abort "ntt governance: not a rotate-to-canonical-factory action"
+
+        requireCanonicalFactory guardianGovernance newFactory
+        create this with factory = newFactory, factoryEpoch = factoryEpoch + 1
 
     -- | Outbound transfer. Trims the amount to the wire form, moves @user@'s
     -- tokens (lock into the custodian's reserve, crediting the deployment's
