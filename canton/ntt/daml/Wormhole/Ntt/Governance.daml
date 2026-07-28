@@ -165,6 +165,7 @@ template NttGovernance
           peers = Map.empty
           factory
           paused = False
+          factoryEpoch = 0
           -- An external minter (instrument admin ≠ gg) becomes a manager
           -- signatory so the burn/mint paths run on its authority, not gg's;
           -- gg-minted deployments carry None and mint on gg's inherited
