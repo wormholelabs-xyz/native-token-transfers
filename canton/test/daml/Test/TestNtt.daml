@@ -3104,3 +3104,179 @@ testSetFactoryByVaaRejectsWrongConstructor = do
   res <- trySubmitWithDiscs admin [csDisc, dNode] do
     rotateByVaaCmd mgrCid newFactory csId nodeCid acceptAdminHappyVAA
   expectAbort "not a rotate-to-canonical-factory action" res
+
+----------------------------------------------------------------------
+-- RegisterManagerByVaa / SetFactoryByVaa, live three-step harness
+--
+-- 'testRegisterManagerByVaaBindingMismatch's doc comment already explains why
+-- no static VAA can ever exercise 'RegisterManagerByVaa's happy path: the
+-- registration binding commits to the genuinely-allocated (operator, admin)
+-- Party fingerprints, and a fixture VAA is signed ahead of time, before any
+-- Party exists. Exercising it for real needs the same live, Go-orchestrated
+-- pattern as the accept-admin-by-VAA harness above
+-- (canton/testing/go/ntt_register_by_vaa_integration_test.go):
+--
+--   1. 'integrationRegisterByVaaSetup' allocates a fresh admin and stands up
+--      the genesis (operator, gg, the 'NttGovernance' root, the core
+--      registries, the canonical 'NttCoinFactory'), returning their real
+--      party texts and every handle Go needs.
+--   2. Go computes 'nttRegistrationBindingFor's preimage against the ACTUAL
+--      party texts, signs a fresh action-2 VAA, and
+--      'integrationRegisterByVaa' relays it through 'RegisterManagerByVaa' —
+--      asserting the derived instrument id/tokenConfig/minter/factoryEpoch/
+--      factory, then that the SAME VAA replayed against the recreated root is
+--      rejected — and returns the deployment's REAL 'managerAddress'.
+--   3. Go signs a fresh action-3 VAA against that real managerAddress, and
+--      'integrationSetFactoryByVaa' relays it through 'SetFactoryByVaa' —
+--      asserting the epoch bump, then the same replay-rejection.
+--
+-- Mirrors 'integrationAcceptAdminSetup'/'integrationAcceptAdminByVaa' in every
+-- other respect: NOT run by `dpm test` (argument-taking), only compiled —
+-- except the nullary setup, which runs.
+----------------------------------------------------------------------
+
+data RegisterByVaaSetup = RegisterByVaaSetup with
+    operator     : Party
+    admin        : Party
+    gg           : Party
+    govCid       : ContractId NttGovernance
+    emReg        : ContractId EmitterRegistry
+    rrReg        : ContractId ReplayRootRegistry
+    coreStateCid : ContractId CoreState
+    factoryCid   : ContractId NttCoinFactory
+  deriving (Eq, Show)
+
+integrationRegisterByVaaSetup : Script RegisterByVaaSetup
+integrationRegisterByVaaSetup = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "IntegrationRegisterAdmin"
+  [(govCid, _)] <- query @NttGovernance operator
+  (emReg, _, rrReg, _) <- coreRegistries operator
+  factoryCid <- nttCoinFactorySetup gg
+  pure RegisterByVaaSetup with
+    operator, admin, gg, govCid, emReg, rrReg, coreStateCid = csId, factoryCid
+
+data RegisterByVaaInput = RegisterByVaaInput with
+    operator     : Party
+    admin        : Party
+    gg           : Party
+    govCid       : ContractId NttGovernance
+    emReg        : ContractId EmitterRegistry
+    rrReg        : ContractId ReplayRootRegistry
+    coreStateCid : ContractId CoreState
+    factoryCid   : ContractId NttCoinFactory
+    nonce        : Int
+    vaaBytes     : Bytes
+  deriving (Eq, Show)
+
+data RegisterByVaaResult = RegisterByVaaResult with
+    mgrCid         : ContractId NttManager
+    managerAddress : Bytes32
+    factoryEpoch   : Int
+  deriving (Eq, Show)
+
+-- | Step 2: relay the Go-signed, live-binding action-2 VAA through
+-- 'RegisterManagerByVaa'. @operator@/@gg@ co-act alongside the controlling
+-- @admin@ purely for visibility of the contracts they (not @admin@) are
+-- stakeholders of — mirrors 'integrationAcceptAdminByVaa's co-acting pattern,
+-- so the JSON boundary stays plain party-id strings with no explicit
+-- 'disclose' plumbing.
+integrationRegisterByVaa : RegisterByVaaInput -> Script RegisterByVaaResult
+integrationRegisterByVaa input = do
+  let factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory input.factoryCid)
+      actors = actAs input.operator <> actAs input.admin <> actAs input.gg
+  (govCid', mgrCid, _emitterCid, ledgerCid) <- submit actors do
+    exerciseCmd input.govCid RegisterManagerByVaa with
+      admin = input.admin
+      emitterRegistryCid = input.emReg
+      replayRootRegistryCid = input.rrReg
+      instrumentNonce = input.nonce
+      factory
+      coreStateCid = input.coreStateCid
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+      vaaBytes = input.vaaBytes
+      pubKeys = [(0, devnetGuardianPubKey)]
+      extraArgs = emptyExtraArgs
+
+  Some mgr <- queryContractId input.operator mgrCid
+  mgr.admin === input.admin
+  mgr.tokenConfig === BurnMint
+  mgr.minter === None
+  mgr.factoryEpoch === 0
+  mgr.factory === factory
+  mgr.instrumentId === InstrumentId with
+    admin = input.gg
+    id = nttInstrumentIdFor input.admin input.nonce
+  ledgerCid === None
+
+  -- Replay: the identical VAA relayed against the recreated root (same
+  -- admin/nonce/factory — everything except @govCid@) is rejected purely on
+  -- digest membership, before the (now-unreachable, since it just succeeded)
+  -- binding check would even run again.
+  res <- trySubmit actors do
+    exerciseCmd govCid' RegisterManagerByVaa with
+      admin = input.admin
+      emitterRegistryCid = input.emReg
+      replayRootRegistryCid = input.rrReg
+      instrumentNonce = input.nonce
+      factory
+      coreStateCid = input.coreStateCid
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+      vaaBytes = input.vaaBytes
+      pubKeys = [(0, devnetGuardianPubKey)]
+      extraArgs = emptyExtraArgs
+  expectAbort "registration VAA already consumed" res
+
+  pure RegisterByVaaResult with
+    mgrCid
+    managerAddress = mgr.managerAddress
+    factoryEpoch = mgr.factoryEpoch
+
+data SetFactoryByVaaInput = SetFactoryByVaaInput with
+    operator     : Party
+    admin        : Party
+    gg           : Party
+    mgrCid       : ContractId NttManager
+    coreStateCid : ContractId CoreState
+    factoryCid   : ContractId NttCoinFactory
+    vaaBytes     : Bytes
+  deriving (Eq, Show)
+
+-- | Step 3: relay the Go-signed action-3 VAA — targeting the deployment's
+-- REAL 'managerAddress' from step 2, unlike 'rotateHappyVAA's fixed
+-- @setupFixedManager@ address — through 'SetFactoryByVaa'. The replay node is
+-- resolved on-ledger from @mgr.namespace@ (the disclosure-service lookup
+-- 'coveringDisclosure' simulates), so Go never needs to compute or pass it.
+integrationSetFactoryByVaa : SetFactoryByVaaInput -> Script ()
+integrationSetFactoryByVaa input = do
+  Some mgr <- queryContractId input.operator input.mgrCid
+  let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory input.factoryCid)
+      actors = actAs input.operator <> actAs input.admin <> actAs input.gg
+  (nodeCid, _) <- coveringDisclosure input.operator input.gg mgr.namespace (parseVAA input.vaaBytes).hash
+  mgrCid' <- submit actors do
+    exerciseCmd input.mgrCid SetFactoryByVaa with
+      newFactory
+      coreStateCid = input.coreStateCid
+      replayNodeCid = nodeCid
+      vaaBytes = input.vaaBytes
+      pubKeys = [(0, devnetGuardianPubKey)]
+      extraArgs = emptyExtraArgs
+  Some mgr' <- queryContractId input.operator mgrCid'
+  mgr'.factory === newFactory
+  mgr'.factoryEpoch === mgr.factoryEpoch + 1
+
+  -- Replay: re-resolve the covering node (the old one is now archived, having
+  -- been consumed) and relay the same VAA again — rejected on digest
+  -- membership alone.
+  (freshNode, _) <- coveringDisclosure input.operator input.gg mgr'.namespace (parseVAA input.vaaBytes).hash
+  res <- trySubmit actors do
+    exerciseCmd mgrCid' SetFactoryByVaa with
+      newFactory
+      coreStateCid = input.coreStateCid
+      replayNodeCid = freshNode
+      vaaBytes = input.vaaBytes
+      pubKeys = [(0, devnetGuardianPubKey)]
+      extraArgs = emptyExtraArgs
+  expectAbort "digest already consumed" res

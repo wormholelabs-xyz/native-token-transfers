@@ -147,6 +147,67 @@ func signGovernanceVAA(t *testing.T, body []byte) []byte {
 }
 
 // ---------------------------------------------------------------------------
+// The registration binding: mirrors Wormhole.Ntt.Manager.nttRegistrationBindingFromText
+// byte-for-byte. Unlike the governance-packet payload encoders above, this is a
+// domain-separated hash preimage from Wormhole.Core.Bytes
+// (derivedAddressFromText's family: nttInstrumentIdFromText, nttNamespaceFromText,
+// nttRegistrationBindingFromText all share this shape), NOT the wire codec's
+// 2-byte length-prefixed fields ntt_recipient_match_integration_test.go's
+// lenPrefixedMatch builds -- the length prefix here is 4 bytes
+// (Wormhole.Core.Bytes.lenPrefixed: intToBytesN (byteLength b) 4).
+//
+// Exported so ntt_register_by_vaa_integration_test.go (tag `integration`) can
+// compute the SAME binding this file's TestNttRegistrationBindingFromTextPinned
+// pins, against genuinely allocated party texts, without duplicating it.
+// ---------------------------------------------------------------------------
+
+// nttRegistrationBindingTag is Wormhole.Ntt.Manager.nttRegistrationBindingTag.
+const nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
+
+// lenPrefix4 prepends a 4-byte big-endian length to b -- Wormhole.Core.Bytes.lenPrefixed
+// (NOT the 2-byte wire-codec prefix lenPrefixedMatch builds).
+func lenPrefix4(b []byte) []byte {
+	out := make([]byte, 4, 4+len(b))
+	binary.BigEndian.PutUint32(out, uint32(len(b))) //nolint:gosec // party/text fields are small
+	return append(out, b...)
+}
+
+// nttRegistrationBindingFromText mirrors Wormhole.Ntt.Manager.nttRegistrationBindingFromText:
+//
+//	keccak256(tag ‖ lp4(utf8(operatorText)) ‖ lp4(utf8(adminText)) ‖ uint64be(nonce))
+//
+// Ground-truthed against the pinned Daml vector in
+// TestNttRegistrationBindingFromTextPinned below (mirroring
+// Test.TestNtt:testNttRegistrationBindingFromTextVector).
+func nttRegistrationBindingFromText(operatorText, adminText string, nonce uint64) [32]byte {
+	pre := []byte(nttRegistrationBindingTag)
+	pre = append(pre, lenPrefix4([]byte(operatorText))...)
+	pre = append(pre, lenPrefix4([]byte(adminText))...)
+	pre = append(pre, be64(nonce)...)
+	var out [32]byte
+	copy(out[:], crypto.Keccak256(pre))
+	return out
+}
+
+// TestNttRegistrationBindingFromTextPinned proves nttRegistrationBindingFromText
+// matches Wormhole.Ntt.Manager.nttRegistrationBindingFromText byte-for-byte,
+// against the SAME fixed strings Test.TestNtt:testNttRegistrationBindingFromTextVector
+// pins. Plain `go test` (no build tag), so this pin holds BEFORE
+// ntt_register_by_vaa_integration_test.go ever relies on this function against
+// real, live-allocated party ids. If this ever fails, the encoder here has
+// drifted from the Daml side -- fix this file, not the Daml constant.
+func TestNttRegistrationBindingFromTextPinned(t *testing.T) {
+	a0 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220cafebabe", 0)
+	a1 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220cafebabe", 1)
+	b0 := nttRegistrationBindingFromText("vector-operator::1220aaaaaaaa", "vector-admin::1220cafebabe", 0)
+	c0 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220babababa", 0)
+	require.Equal(t, "ade4a39770a697a4d00f9b97591986dedb27e8c1f51b12f1cc51b97a07f1e159", hex.EncodeToString(a0[:]))
+	require.NotEqual(t, a0, a1)
+	require.NotEqual(t, a0, b0)
+	require.NotEqual(t, a0, c0)
+}
+
+// ---------------------------------------------------------------------------
 // Ground truth: reproduce the pinned Daml hex byte-for-byte.
 // ---------------------------------------------------------------------------
 
