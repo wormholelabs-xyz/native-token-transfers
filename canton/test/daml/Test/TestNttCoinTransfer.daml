@@ -1,7 +1,8 @@
 -- | Daml Script tests for the 'HoldingV2'/'TransferFactory' v1+v2 additions
--- to 'Wormhole.Ntt.Coin': ordinary, non-bridge transfers of 'NttCoin' via the
--- standard CIP-0056/CIP-0112 Token Standard interfaces, independent of NTT's
--- own burn/mint bridge flow.
+-- to 'Wormhole.Ntt.CoinFactory': ordinary, non-bridge transfers of 'NttCoin'
+-- via the standard CIP-0056/CIP-0112 Token Standard interfaces, independent
+-- of NTT's own burn/mint bridge flow.
+{-# LANGUAGE AllowAmbiguousTypes #-}
 module Test.TestNttCoinTransfer where
 
 import Daml.Script
@@ -17,6 +18,8 @@ import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Coin
+import Wormhole.Ntt.CoinTransfer
+import Wormhole.Ntt.CoinFactory
 import Test.TestNtt (nttCoinFactorySetup, expectAbort)
 import Test.TestNttCoin (mintCoin)
 
@@ -60,6 +63,17 @@ extraArgsWithPreapproval cid = ExtraArgs with
 -- submitting participant to have the contract in view).
 discloseFactory : Party -> ContractId NttCoinFactory -> Script Disclosure
 discloseFactory gg factoryCid = fromSome <$> queryDisclosure gg factoryCid
+
+-- | Direct-child 'Exercised' events of a given choice name whose interface
+-- template id matches @t@, within one level of a transaction tree's events
+-- (not recursive) -- used to confirm/deny the presence of a nested v1
+-- @TransferInstruction_Accept@ node under an outer v2 accept, distinguishing
+-- it from the (identically-named) v2 choice by its 'AnyChoice' template rep.
+exercisesOf : forall t. HasTemplateTypeRep t => Text -> [TreeEvent] -> [Exercised]
+exercisesOf choiceName events = [e | ExercisedEvent e <- events, e.choice == choiceName, matchesRep e]
+  where
+    matchesRep e = case e.argument of
+      AnyChoice _ rep -> rep == templateTypeRep @t
 
 ----------------------------------------------------------------------
 -- HoldingV2
@@ -469,6 +483,100 @@ testNttCoinTransferV2AcceptArchivesInstruction = do
   submitMustFail bob do
     exerciseCmd instrCid TIV2.TransferInstruction_Accept with actors = [bob], extraArgs = emptyExtraArgs
 
+----------------------------------------------------------------------
+-- v1-nesting compatibility: v2 Accept/Reject/Withdraw SHOULD nest the
+-- corresponding v1 (consuming) choice "where possible" (token-standard
+-- TransferInstructionV2 doc), so v1 transaction parsers still see a familiar
+-- v1 exercise node. Accept's nesting is conditional on the receiver
+-- account's authority shape (see the module comment on 'NttTransferInstruction's
+-- v2 accept impl); Reject/Withdraw nest unconditionally for every account
+-- shape (see .claude/tasks/ntt-v1-nesting-compat.md).
+----------------------------------------------------------------------
+
+-- | Basic receiver account (provider = None, id = "") -- the common case:
+-- v2 accept nests v1's own consuming Accept, so the transaction tree shows a
+-- nested v1 @TransferInstruction_Accept@ node under the outer v2 exercise,
+-- and the instruction is archived by v1's own consuming choice rather than
+-- an explicit v2-side archive.
+testNttCoinTransferV2AcceptNestsV1ForBasicReceiver : Script ()
+testNttCoinTransferV2AcceptNestsV1ForBasicReceiver = do
+  gg <- allocateParty "TransferV2AcceptNestBasicGg"
+  alice <- allocateParty "TransferV2AcceptNestBasicAlice"
+  bob <- allocateParty "TransferV2AcceptNestBasicBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-ACCEPT-NEST-BASIC"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  instrCid <- mkPendingTransferV2 factoryCid gg alice bob instrumentId 0.006 [coinCid]
+  (acceptRes, tree) <- submitResultAndTree bob do
+    exerciseCmd instrCid TIV2.TransferInstruction_Accept with actors = [bob], extraArgs = emptyExtraArgs
+  case acceptRes.output of
+    TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [rcid]} -> do
+      Some r <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin rcid)
+      r.owner === bob
+      r.amount === 0.006
+    other -> abort ("expected Completed, got: " <> show other)
+  archived <- queryContractId gg (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction instrCid)
+  archived === None
+  -- Exactly one root exercise (the outer v2 accept), with exactly one nested
+  -- v1 TransferInstruction_Accept exercise among its children.
+  case tree.rootEvents of
+    [ExercisedEvent outer] -> do
+      outer.choice === "TransferInstruction_Accept"
+      case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Accept" outer.childEvents of
+        [_] -> pure ()
+        other -> abort ("expected exactly one nested v1 Accept exercise, got: " <> show other)
+    other -> abort ("expected exactly one root event, got: " <> show other)
+
+-- | Sub-account receiver (no provider, but @id /= ""@): the same authority
+-- shape as a basic account -- owner authority alone suffices -- so nesting
+-- applies here too, and the account's @id@ (sub-account data) survives
+-- through the nested v1 create untouched.
+testNttCoinTransferV2AcceptNestsV1ForSubAccountReceiver : Script ()
+testNttCoinTransferV2AcceptNestsV1ForSubAccountReceiver = do
+  gg <- allocateParty "TransferV2AcceptNestSubGg"
+  alice <- allocateParty "TransferV2AcceptNestSubAlice"
+  bob <- allocateParty "TransferV2AcceptNestSubBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-ACCEPT-NEST-SUB"
+      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
+      receiverAcct = subAccount bob "sub-recv-1"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  res <- submit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
+      transfer = TIV2.Transfer with
+        sender = basicAccount alice
+        receiver = receiverAcct
+        amount = 0.006
+        instrumentId = instrumentIdV2
+        requestedAt = t0
+        executeBefore = t0 `addRelTime` hours 24
+        inputHoldingCids = [coerceContractId @Holding @HoldingV2.Holding coinCid]
+        meta = emptyMetadata
+      actors = [alice]
+      extraArgs = emptyExtraArgs
+  let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
+      instrCid = coerceContractId @TIV2.TransferInstruction @NttTransferInstruction transferInstructionCid
+
+  (acceptRes, tree) <- submitResultAndTree bob do
+    exerciseCmd transferInstructionCid TIV2.TransferInstruction_Accept with actors = [bob], extraArgs = emptyExtraArgs
+  case acceptRes.output of
+    TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [rcid]} -> do
+      Some hv2 <- queryInterfaceContractId gg rcid
+      hv2.account === receiverAcct
+      hv2.amount === 0.006
+    other -> abort ("expected Completed, got: " <> show other)
+  archived <- queryContractId gg instrCid
+  archived === None
+  case tree.rootEvents of
+    [ExercisedEvent outer] -> do
+      outer.choice === "TransferInstruction_Accept"
+      case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Accept" outer.childEvents of
+        [_] -> pure ()
+        other -> abort ("expected exactly one nested v1 Accept exercise, got: " <> show other)
+    other -> abort ("expected exactly one root event, got: " <> show other)
+
 testNttCoinTransferV2RejectArchivesInstruction : Script ()
 testNttCoinTransferV2RejectArchivesInstruction = do
   gg <- allocateParty "TransferV2RejectArchiveGg"
@@ -764,7 +872,10 @@ testTransferV2PreapprovalProviderAccount = do
 -- requires the receiver's owner AND provider authority (the create of the
 -- receiver's coin needs both signatures, since 'NttCoin's own signatories are
 -- @admin, owner, provider@) -- and the instruction is archived on accept
--- (1A, preserved here through Phase 2's account model).
+-- (1A, preserved here through Phase 2's account model). A provider-managed
+-- receiver always takes the direct (non-nested) v2 accept body -- see the
+-- module comment on 'NttTransferInstruction's v2 accept -- confirmed below
+-- via the transaction tree showing no nested v1 Accept exercise node.
 testTransferV2PendingProviderReceiverAccept : Script ()
 testTransferV2PendingProviderReceiverAccept = do
   gg <- allocateParty "TransferV2PendingProviderGg"
@@ -799,7 +910,7 @@ testTransferV2PendingProviderReceiverAccept = do
   submitMustFail bob do
     exerciseCmd transferInstructionCid TIV2.TransferInstruction_Accept with actors = [bob], extraArgs = emptyExtraArgs
 
-  acceptRes <- submit (actAs bob <> actAs provider) do
+  (acceptRes, tree) <- submitResultAndTree (actAs bob <> actAs provider) do
     exerciseCmd transferInstructionCid TIV2.TransferInstruction_Accept with
       actors = [bob, provider], extraArgs = emptyExtraArgs
   case acceptRes.output of
@@ -807,6 +918,14 @@ testTransferV2PendingProviderReceiverAccept = do
       Some hv2 <- queryInterfaceContractId gg rcid
       hv2.account === receiverAcct
       hv2.amount === 0.006
+      -- Direct branch: no nested v1 TransferInstruction_Accept anywhere in
+      -- the tree (only the outer v2 exercise, its create, and its archive).
+      case tree.rootEvents of
+        [ExercisedEvent outer] ->
+          case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Accept" outer.childEvents of
+            [] -> pure ()
+            other -> abort ("expected no nested v1 Accept exercise, got: " <> show other)
+        other -> abort ("expected exactly one root event, got: " <> show other)
     other -> abort ("expected Completed, got: " <> show other)
   archived <- queryContractId gg instrCid
   archived === None
@@ -893,3 +1012,137 @@ testNttCoinTransferV2WithdrawRequiresSenderAuthority = do
       c.owner === alice
       c.amount === 0.006
     other -> abort ("expected one returned coin, got: " <> show other)
+
+----------------------------------------------------------------------
+-- v1-nesting compatibility: v2 Reject/Withdraw nest v1's own consuming
+-- choice unconditionally (unlike accept, there is no receiver-provider
+-- authority bottleneck -- see the module comment on the reject/withdraw
+-- impls in Wormhole.Ntt.CoinTransfer).
+----------------------------------------------------------------------
+
+-- | v2 Reject nests v1's own 'TIV1.TransferInstruction_Reject' -- safe for
+-- every account shape (the sender-side credit draws authority from the
+-- instruction's own signatories, not from the reject controller).
+testNttCoinTransferV2RejectNestsV1 : Script ()
+testNttCoinTransferV2RejectNestsV1 = do
+  gg <- allocateParty "TransferV2RejectNestGg"
+  alice <- allocateParty "TransferV2RejectNestAlice"
+  bob <- allocateParty "TransferV2RejectNestBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-REJECT-NEST"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  instrCid <- mkPendingTransferV2 factoryCid gg alice bob instrumentId 0.006 [coinCid]
+  (rejectRes, tree) <- submitResultAndTree bob do
+    exerciseCmd instrCid TIV2.TransferInstruction_Reject with actors = [bob], extraArgs = emptyExtraArgs
+  case tree.rootEvents of
+    [ExercisedEvent outer] -> do
+      outer.choice === "TransferInstruction_Reject"
+      case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Reject" outer.childEvents of
+        [_] -> pure ()
+        other -> abort ("expected exactly one nested v1 Reject exercise, got: " <> show other)
+    other -> abort ("expected exactly one root event, got: " <> show other)
+  case rejectRes.output of
+    TIV2.TransferInstructionResult_Failed -> pure ()
+    other -> abort ("expected Failed, got: " <> show other)
+  case rejectRes.senderChangeCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
+  archived <- queryContractId gg (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction instrCid)
+  archived === None
+
+-- | v2 Withdraw nests v1's own 'TIV1.TransferInstruction_Withdraw' for a
+-- basic-account sender.
+testNttCoinTransferV2WithdrawNestsV1 : Script ()
+testNttCoinTransferV2WithdrawNestsV1 = do
+  gg <- allocateParty "TransferV2WithdrawNestGg"
+  alice <- allocateParty "TransferV2WithdrawNestAlice"
+  bob <- allocateParty "TransferV2WithdrawNestBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-WITHDRAW-NEST"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  instrCid <- mkPendingTransferV2 factoryCid gg alice bob instrumentId 0.006 [coinCid]
+  (withdrawRes, tree) <- submitResultAndTree alice do
+    exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  case tree.rootEvents of
+    [ExercisedEvent outer] -> do
+      outer.choice === "TransferInstruction_Withdraw"
+      case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Withdraw" outer.childEvents of
+        [_] -> pure ()
+        other -> abort ("expected exactly one nested v1 Withdraw exercise, got: " <> show other)
+    other -> abort ("expected exactly one root event, got: " <> show other)
+  case withdrawRes.output of
+    TIV2.TransferInstructionResult_Failed -> pure ()
+    other -> abort ("expected Failed, got: " <> show other)
+  case withdrawRes.senderChangeCids of
+    [cid] -> do
+      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin cid)
+      c.owner === alice
+      c.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
+  archived <- queryContractId gg (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction instrCid)
+  archived === None
+
+-- | v2 Withdraw nests v1's own 'TIV1.TransferInstruction_Withdraw' even for a
+-- PROVIDER-MANAGED sender -- unlike accept, withdraw/reject have no
+-- receiver-provider-style authority bottleneck: the sender-side credit
+-- inside v1's own impl draws its authority from the instruction's
+-- signatories (which include the sender's provider), and the v2 actor
+-- assertion (kept verbatim, run first) already guarantees the sender
+-- account's owner+provider are present before nesting is attempted.
+testNttCoinTransferV2WithdrawProviderManagedSenderNestsV1 : Script ()
+testNttCoinTransferV2WithdrawProviderManagedSenderNestsV1 = do
+  gg <- allocateParty "TransferV2WithdrawProviderSenderGg"
+  alice <- allocateParty "TransferV2WithdrawProviderSenderAlice"
+  bob <- allocateParty "TransferV2WithdrawProviderSenderBob"
+  provider <- allocateParty "TransferV2WithdrawProviderSenderProvider"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-WITHDRAW-PROVIDER-SENDER"
+      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
+      senderAcct = providerAccount alice provider
+  -- 'mintCoin' only produces basic accounts -- create the provider-managed
+  -- sender holding directly (admin + owner + provider authority).
+  coinCid <- submit (actAs gg <> actAs alice <> actAs provider) do
+    createCmd NttCoin with instrumentId, owner = alice, provider = Some provider, accountId = "", amount = 0.01
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  pendingRes <- submit (actAs alice <> actAs provider <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
+      transfer = TIV2.Transfer with
+        sender = senderAcct
+        receiver = basicAccount bob
+        amount = 0.006
+        instrumentId = instrumentIdV2
+        requestedAt = t0
+        executeBefore = t0 `addRelTime` hours 24
+        inputHoldingCids = [toInterfaceContractId @HoldingV2.Holding coinCid]
+        meta = emptyMetadata
+      actors = [alice, provider]
+      extraArgs = emptyExtraArgs
+  let TIV2.TransferInstructionResult_Pending{transferInstructionCid = instrCid} = pendingRes.output
+
+  -- alice alone lacks the provider's authority to withdraw a
+  -- provider-managed sender account.
+  submitMustFail alice do
+    exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+
+  (withdrawRes, tree) <- submitResultAndTree (actAs alice <> actAs provider) do
+    exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with
+      actors = [alice, provider], extraArgs = emptyExtraArgs
+  case tree.rootEvents of
+    [ExercisedEvent outer] -> do
+      outer.choice === "TransferInstruction_Withdraw"
+      case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Withdraw" outer.childEvents of
+        [_] -> pure ()
+        other -> abort ("expected exactly one nested v1 Withdraw exercise, got: " <> show other)
+    other -> abort ("expected exactly one root event, got: " <> show other)
+  case withdrawRes.senderChangeCids of
+    [cid] -> do
+      Some hv2 <- queryInterfaceContractId gg cid
+      hv2.account === senderAcct
+      hv2.amount === 0.006
+    other -> abort ("expected one returned coin, got: " <> show other)
+  archived <- queryContractId gg (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction instrCid)
+  archived === None

@@ -1,6 +1,6 @@
--- | Daml Script tests for the 'Wormhole.Ntt.Coin' 'AllocationFactory' v2 and
--- 'SettlementFactory' additions, and 'NttCoinAllocationV2': multi-leg net
--- settlement, iterated/committed allocations.
+-- | Daml Script tests for the 'Wormhole.Ntt.CoinFactory' 'AllocationFactory'
+-- v2 and 'SettlementFactory' additions, and 'NttCoinAllocationV2': multi-leg
+-- net settlement, iterated/committed allocations.
 --
 -- The critical property these tests exist to prove: a v2 allocation only
 -- ever authorizes ONE party's side of a leg -- a real transfer between two
@@ -23,6 +23,8 @@ import Splice.Api.Token.AllocationV2 qualified as AV2
 import Splice.Api.Token.AllocationInstructionV2 qualified as AIV2
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Coin
+import Wormhole.Ntt.CoinAllocationV2
+import Wormhole.Ntt.CoinFactory
 import Test.TestNtt (nttCoinFactorySetup, expectAbort)
 import Test.TestNttCoin (mintCoin)
 

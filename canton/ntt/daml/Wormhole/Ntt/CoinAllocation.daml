@@ -1,0 +1,48 @@
+-- | Allocation v1: 'NttCoinAllocation', 'Wormhole.Ntt.CoinFactory's
+-- @AllocationFactory@ v1 counterpart.
+module Wormhole.Ntt.CoinAllocation where
+
+import Splice.Api.Token.AllocationV1
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Wormhole.Ntt.Coin
+
+-- | A single-contract allocation: value + the allocation record folded
+-- together (spec-sanctioned -- 'AllocationView.holdingCids' MAY be empty for
+-- registries that don't represent locked value as a separate on-ledger
+-- holding). No separate locked-holding indirection, for the same reason as
+-- 'NttTransferInstruction' -- nothing else here needs to reuse a "locked
+-- coin" concept.
+template NttCoinAllocation
+  with
+    instrumentId : InstrumentId
+    allocation   : AllocationSpecification
+  where
+    signatory instrumentId.admin, allocation.transferLeg.sender
+    observer allocation.transferLeg.receiver, allocation.settlement.executor
+
+    interface instance Allocation for NttCoinAllocation where
+      view = AllocationView with allocation, holdingCids = [], meta = emptyMetadata
+
+      allocation_executeTransferImpl _self _arg = do
+        now <- getTime
+        assertMsg "ntt: settlement window (settleBefore) has passed" (now < allocation.settlement.settleBefore)
+        rcid <- toInterfaceContractId @Holding <$>
+          createCoinIn instrumentId (basicAccountV2 allocation.transferLeg.receiver) allocation.transferLeg.amount
+        pure Allocation_ExecuteTransferResult with
+          senderHoldingCids = [], receiverHoldingCids = [rcid], meta = emptyMetadata
+
+      allocation_cancelImpl _self _arg = do
+        cid <- returnAllocationToSender instrumentId allocation
+        pure Allocation_CancelResult with senderHoldingCids = [cid], meta = emptyMetadata
+
+      allocation_withdrawImpl _self _arg = do
+        cid <- returnAllocationToSender instrumentId allocation
+        pure Allocation_WithdrawResult with senderHoldingCids = [cid], meta = emptyMetadata
+
+-- | v1 allocations are party-based, not account-based -- basic by
+-- construction.
+returnAllocationToSender : InstrumentId -> AllocationSpecification -> Update (ContractId Holding)
+returnAllocationToSender instrumentId allocation =
+  toInterfaceContractId @Holding <$>
+    createCoinIn instrumentId (basicAccountV2 allocation.transferLeg.sender) allocation.transferLeg.amount

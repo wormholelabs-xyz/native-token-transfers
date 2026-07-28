@@ -21,6 +21,7 @@ import Splice.Api.Token.BurnMintV1
   )
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Coin
+import Wormhole.Ntt.CoinFactory
 import Wormhole.Ntt.Deposit (DepositPreapproval(..), Deposit(..))
 import Wormhole.Ntt.Manager
 import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32, expectAbort)
