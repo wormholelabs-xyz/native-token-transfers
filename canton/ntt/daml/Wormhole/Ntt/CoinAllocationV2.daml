@@ -1,0 +1,197 @@
+-- | Allocation v2: 'NttCoinAllocationV2', 'Wormhole.Ntt.CoinFactory's
+-- @AllocationFactory@ v2 and @SettlementFactory@ counterparts -- multi-leg
+-- net settlement, iterated/committed allocations.
+module Wormhole.Ntt.CoinAllocationV2 where
+
+import DA.Action (when)
+import DA.Foldable (forA_)
+import DA.List (dedup)
+import DA.Map qualified as Map
+import DA.Optional (fromOptional, fromSome, isNone, isSome)
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.AllocationV2 qualified as AV2
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Splice.Api.Token.HoldingV2 qualified as HoldingV2
+import Splice.Api.Token.MetadataV1 (AnyValue (..), ExtraArgs (..), emptyMetadata)
+import Wormhole.Ntt.Coin
+
+sameGroup : [Party] -> [Party] -> Bool
+sameGroup xs ys = all (`elem` ys) xs && all (`elem` xs) ys
+
+-- | The @extraArgs.context@ key 'settlementFactory_settleBatchImpl' stamps
+-- onto every nested @Allocation_Settle@ it exercises, so
+-- 'allocation_settleImpl' can tell it was reached via
+-- 'AV2.SettlementFactory_SettleBatch' rather than a direct call. This is a
+-- footgun guard against an *accidental* naked @Allocation_Settle@ (which has
+-- no automatic counterparty and so cannot itself check conservation), NOT a
+-- security boundary -- the sentinel is caller-forgeable by anyone who already
+-- holds the @admin :: executors@ authority the choice requires, exactly the
+-- same parties who could authorize a real 'SettlementFactory_SettleBatch'
+-- anyway. The actual authorization is, and remains, that
+-- @Allocation_Settle@ requires the admin (gg) among @actors@ (see module
+-- header).
+settleBatchContextKey : Text
+settleBatchContextKey = "ntt.viaSettleBatch"
+
+-- | Insert the 1D sentinel into a caller-supplied 'ExtraArgs', preserving
+-- whatever context values were already there.
+withSettleBatchContext : ExtraArgs -> ExtraArgs
+withSettleBatchContext extraArgs = extraArgs with
+  context = extraArgs.context with
+    values = TextMap.insert settleBatchContextKey (AV_Bool True) extraArgs.context.values
+
+-- | 'DA.TextMap' has no @unionWith@/@map@ -- these are the two shapes this
+-- module needs, built from the primitives it does export.
+textMapUnionWith : (v -> v -> v) -> TextMap.TextMap v -> TextMap.TextMap v -> TextMap.TextMap v
+textMapUnionWith f a b = TextMap.fromListWithR f (TextMap.toList a ++ TextMap.toList b)
+
+textMapNegate : TextMap.TextMap Decimal -> TextMap.TextMap Decimal
+textMapNegate m = TextMap.fromList [(k, negate v) | (k, v) <- TextMap.toList m]
+
+sumSide : AV2.TransferSide -> [AV2.TransferLegSide] -> TextMap.TextMap Decimal
+sumSide side sides = TextMap.fromListWithR (+) [(s.instrumentId, s.amount) | s <- sides, s.side == side]
+
+-- | Otherside account control parties (owner, plus provider if present) of
+-- the ORIGINAL transferLegSides, deduped. Gives counterparties -- and their
+-- providers, who the standard requires have visibility on all asset
+-- movements of their account -- standing ACS visibility of an allocation
+-- naming them, generalizing v1's @observer allocation.transferLeg.receiver@
+-- to multi-leg.
+legSideOwners : [AV2.TransferLegSide] -> [Party]
+legSideOwners sides = dedup (concatMap (accountControlParties . (.otherside)) sides)
+
+returnLockedFundsToAuthorizerV2
+  : Party -> HoldingV2.Account -> TextMap.TextMap Decimal -> Update (TextMap.TextMap [ContractId HoldingV2.Holding])
+returnLockedFundsToAuthorizerV2 admin account amounts =
+  TextMap.fromList <$> forA (filter ((> 0.0) . snd) (TextMap.toList amounts)) \(instr, amt) -> do
+    cid <- toInterfaceContractId @HoldingV2.Holding <$>
+      createCoinIn (InstrumentId with admin, id = instr) account amt
+    pure (instr, [cid])
+
+-- | One authorizer's side of possibly many legs of a settlement. Because it
+-- authorizes only its own side, 'Allocation_Settle' alone can never move
+-- value between parties: soundness comes from
+-- 'AV2.SettlementFactory_SettleBatch' checking both sides of every leg before
+-- nested-exercising each allocation's settle in one transaction. A naked
+-- settle stays reachable for interface conformance but is an unsafe escape
+-- hatch with no counterparty. @lockedAmounts@ is bookkeeping
+-- only (no separate escrow holding, same simplification as
+-- 'NttCoinAllocation'/'NttTransferInstruction') -- the real value already
+-- left circulation (archived) at 'AllocationFactory_Allocate' time.
+template NttCoinAllocationV2
+  with
+    authorizerAccount     : HoldingV2.Account   -- ^ owner is always @Some@ -- null-owner rejected upstream
+    settlement            : AV2.SettlementInfo
+    allocation            : AV2.AllocationSpecification
+    lockedAmounts         : TextMap.TextMap Decimal
+    originalAllocationCid : Optional (ContractId AV2.Allocation)
+    createdAt             : Time
+    numIterations         : Int
+  where
+    signatory allocation.admin :: accountControlParties authorizerAccount
+    observer settlement.executors, legSideOwners allocation.transferLegSides
+
+    interface instance AV2.Allocation for NttCoinAllocationV2 where
+      view = AV2.AllocationView with
+        originalAllocationCid, settlement, allocation
+        holdingCids = []
+        createdAt, numIterations
+        expiresAt = None
+        availableActions = Map.fromList
+          [ (AV2.AA_Settle, [allocation.admin :: settlement.executors])
+          , (AV2.AA_Cancel, [settlement.executors, [allocation.admin]])
+          , (AV2.AA_Withdraw, if allocation.committed then [] else [[fromSome authorizerAccount.owner]])
+          ]
+        meta = emptyMetadata
+
+      allocation_settleImpl self arg = do
+        assertMsg "ntt: Allocation_Settle requires exactly admin and executors as actors"
+          (sameGroup arg.actors (allocation.admin :: settlement.executors))
+        -- Footgun guard, not a security boundary -- see 'settleBatchContextKey'.
+        assertMsg "ntt: Allocation_Settle must be driven through SettlementFactory_SettleBatch"
+          (TextMap.lookup settleBatchContextKey arg.extraArgs.context.values == Some (AV_Bool True))
+        now <- getTime
+        forA_ allocation.settlementDeadline \deadline ->
+          assertMsg "ntt: settlement deadline has passed" (now <= deadline)
+        assertMsg "ntt: extraTransferLegSides/nextIterationFunding require iterated settlement to be enabled"
+          ((null arg.extraTransferLegSides && isNone arg.nextIterationFunding) || isSome allocation.nextIterationFunding)
+        assertMsg "ntt: extraTransferLegSides amounts must be positive"
+          (all (> 0.0) (map (.amount) arg.extraTransferLegSides))
+
+        -- @allocation.transferLegSides@ is a standing authorization: it recurs
+        -- on every settlement iteration, and @arg.extraTransferLegSides@ is
+        -- additive for this round only -- it never replaces or disables it.
+        let allSides = allocation.transferLegSides ++ arg.extraTransferLegSides
+            senderTotals = sumSide AV2.SenderSide allSides
+            receiverTotals = sumSide AV2.ReceiverSide allSides
+        forA_ (TextMap.toList senderTotals) \(instr, amt) ->
+          assertMsg ("ntt: locked " <> instr <> " balance does not cover this round's SenderSide legs")
+            (fromOptional 0.0 (TextMap.lookup instr lockedAmounts) >= amt)
+        let remaining = textMapUnionWith (+) lockedAmounts (textMapNegate senderTotals)
+
+        receiverCids <- forA (TextMap.toList receiverTotals) \(instr, amt) -> do
+          cid <- toInterfaceContractId @HoldingV2.Holding <$>
+            createCoinIn (InstrumentId with admin = allocation.admin, id = instr) authorizerAccount amt
+          pure (instr, [cid])
+
+        archive (coerceContractId @AV2.Allocation @NttCoinAllocationV2 self)
+
+        case arg.nextIterationFunding of
+          None -> do
+            leftoverCids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount remaining
+            pure AV2.AllocationResult with
+              output = AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+              authorizerHoldingCids = textMapUnionWith (++) (TextMap.fromList receiverCids) leftoverCids
+              meta = emptyMetadata
+          Some carry -> do
+            forA_ (TextMap.toList carry) \(instr, amt) -> do
+              assertMsg "ntt: nextIterationFunding amounts must be positive" (amt > 0.0)
+              assertMsg ("ntt: nextIterationFunding for " <> instr <> " exceeds what remains after this round's spend")
+                (amt <= fromOptional 0.0 (TextMap.lookup instr remaining))
+            let trueLeftover = textMapUnionWith (+) remaining (textMapNegate carry)
+            leftoverCids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount trueLeftover
+            nextCid <- toInterfaceContractId @AV2.Allocation <$> create this with
+              lockedAmounts = TextMap.filter (> 0.0) carry
+              originalAllocationCid = Some (fromOptional self originalAllocationCid)
+              numIterations = numIterations + 1
+            pure AV2.AllocationResult with
+              output = AV2.AllocationResult_Settled with nextIterationAllocationCid = Some nextCid
+              authorizerHoldingCids = textMapUnionWith (++) (TextMap.fromList receiverCids) leftoverCids
+              meta = emptyMetadata
+
+      allocation_cancelImpl self arg = do
+        assertMsg "ntt: Allocation_Cancel requires either executors jointly or admin alone"
+          (sameGroup arg.actors settlement.executors || sameGroup arg.actors [allocation.admin])
+        archive (coerceContractId @AV2.Allocation @NttCoinAllocationV2 self)
+        cids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount lockedAmounts
+        pure AV2.AllocationResult with
+          output = AV2.AllocationResult_Cancelled, authorizerHoldingCids = cids, meta = emptyMetadata
+
+      allocation_withdrawImpl self arg = do
+        -- Unilateral by the authorizer account's owner alone (matching the
+        -- interface's own "account parties of the authorizer" language as a
+        -- permission grant, not a joint requirement) -- mirrors the pre-Phase-2
+        -- behavior for basic accounts exactly. This assertMsg is the real
+        -- authorization gate: 'self's own signatories (admin + owner +
+        -- provider, if any) are ambiently available inside this choice body
+        -- regardless of what 'arg.actors' contains, so without this check any
+        -- caller with self-authority as some actor could trigger a withdraw
+        -- (still benign -- funds only ever return to the rightful authorizer
+        -- account -- but not one this choice's own controller list prevents).
+        assertMsg "ntt: Allocation_Withdraw requires the authorizer account owner's authority"
+          (fromSome authorizerAccount.owner `elem` arg.actors)
+        when allocation.committed $ case allocation.settlementDeadline of
+          Some deadline -> do
+            now <- getTime
+            assertMsg "ntt: committed allocation cannot be withdrawn before its settlement deadline"
+              (now > deadline)
+          None -> abort "ntt: committed allocation with no settlement deadline cannot be unilaterally withdrawn -- use Allocation_Cancel"
+        archive (coerceContractId @AV2.Allocation @NttCoinAllocationV2 self)
+        cids <- returnLockedFundsToAuthorizerV2 allocation.admin authorizerAccount lockedAmounts
+        pure AV2.AllocationResult with
+          output = AV2.AllocationResult_Withdrawn, authorizerHoldingCids = cids, meta = emptyMetadata
+
+      allocation_settleExtraObservers _ = []
+      allocation_cancelExtraObservers _ = []
+      allocation_withdrawExtraObservers _ = []

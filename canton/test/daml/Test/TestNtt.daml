@@ -52,7 +52,7 @@ import Wormhole.Core.State
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Amount
-import Wormhole.Ntt.Coin
+import Wormhole.Ntt.CoinFactory
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger

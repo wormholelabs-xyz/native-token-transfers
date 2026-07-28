@@ -423,7 +423,7 @@ testAttackerCannotRegisterGgMintedManager = do
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
 -- | The same property, restated against a real, honestly-created
--- 'Wormhole.Ntt.Coin.NttCoinFactory' instead of 'EvilBurnMintFactory' — proving
+-- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' instead of 'EvilBurnMintFactory' — proving
 -- the co-signature gate is what protects registration, not the factory's
 -- trustworthiness. An honest canonical factory is exactly as unable to be
 -- committed by an attacker lacking gg's signature as a malicious one.

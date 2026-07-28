@@ -32,7 +32,7 @@ and `metadata` (holdings and choice context), `transfer-instruction`/
 `allocation`/`allocation-v2` + `allocation-instruction-v1`/`-v2` (DvP/atomic
 settlement), and `burn-mint` (NTT's own internal, non-standard bridge mint/burn
 mechanism — deliberately excluded from the Token Standard family, see
-`Wormhole.Ntt.Coin`'s module header). All copies must be the same network-vetted
+`Wormhole.Ntt.CoinFactory`'s module header). All copies must be the same network-vetted
 packages: damlc dedupes transitive DALFs by package-id, and mixing incompatible
 copies risks conflicts.
 
