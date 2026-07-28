@@ -136,3 +136,84 @@ decodeWormholeTransceiverMessage b =
   in if prefix /= wormholeTransceiverPrefix
        then error ("ntt: bad WormholeTransceiver prefix: " <> prefix)
        else WormholeTransceiverMessage with ..
+
+----------------------------------------------------------------------
+-- NTT governance packets
+--
+-- A governance packet is a VAA payload with the layout:
+--
+-- >  module(32) ‖ action(1) ‖ chain(2) ‖ <action-specific>
+--
+-- mirroring the core's own packet layout (@Wormhole.Core.Governance@) but under
+-- NTT's own module id, so an NTT governance VAA can never be confused with (or
+-- replayed as) a core one even before replay-trie scoping is considered.
+----------------------------------------------------------------------
+
+-- | The NTT governance module identifier: ASCII "Ntt" (0x4e7474) left-padded to
+-- 32 bytes. Every NTT governance packet carries this value; a core ("Core")
+-- packet routed here (or vice versa) is rejected at the module check.
+nttGovernanceModule : Bytes32
+nttGovernanceModule = "00000000000000000000000000000000000000000000000000000000004e7474"
+
+-- | 'AcceptAdminToGovernance' — the only NTT governance action defined so far:
+-- the guardian quorum accepts the admin role of the manager identified by
+-- @(managerAddress, factoryEpoch)@ into @guardianGovernance@.
+nttGovernanceAcceptAdminAction : Int
+nttGovernanceAcceptAdminAction = 1
+
+-- | A parsed NTT governance action: the guardian quorum accepts the admin role
+-- of the manager identified by @(managerAddress, factoryEpoch)@ into
+-- @guardianGovernance@. @chain@ must match the target manager's own
+-- @Wormhole.Ntt.Manager.NttManager.chainId@ (72 on Canton) — the same field
+-- 'Wormhole.Ntt.Manager.verifyInboundTransfer' checks an inbound transfer's
+-- @recipientChain@ against, kept consistent here; @managerAddress@ and
+-- @factoryEpoch@ must match the target 'Wormhole.Ntt.Manager.NttManager' —
+-- see 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa' for how each field is
+-- checked.
+--
+-- This is the only NTT governance action defined so far, so it is its own
+-- type rather than one constructor of a sum type: Daml only allows record
+-- (@with@) syntax on a single-constructor 'data' type when the constructor's
+-- name equals the type's (contrast 'Wormhole.Core.Governance.GovernanceAction',
+-- a genuine sum type with 4 constructors, which is why ITS constructors can be
+-- named for their actions instead of repeating the type name). A second NTT
+-- governance action would turn this into a proper
+-- @data NttGovernanceAction = AcceptAdminToGovernance with .. | ..@ sum type.
+data AcceptAdminToGovernance = AcceptAdminToGovernance with
+    chain          : Int      -- uint16: Wormhole chain id
+    managerAddress : Bytes32
+    factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
+  deriving (Eq, Show)
+
+-- | Encode an 'AcceptAdminToGovernance': module(32) ‖ action(1) ‖ chain(2) ‖
+-- managerAddress(32) ‖ factoryEpoch(8) — 75 bytes total. The inverse of
+-- 'parseNttGovernance'.
+encodeNttGovernance : AcceptAdminToGovernance -> Bytes
+encodeNttGovernance action =
+  nttGovernanceModule
+    <> intToHexByte nttGovernanceAcceptAdminAction
+    <> intToBytesN action.chain 2
+    <> leftPadTo 32 action.managerAddress
+    <> intToBytesN action.factoryEpoch 8
+
+-- | Parse an NTT governance packet. Verifies the module is "Ntt" and dispatches
+-- on the action id. Aborts (via 'error', matching 'Wormhole.Core.Governance.parseGovernance')
+-- on the wrong module, an unknown action, or malformed input — the caller
+-- ('Wormhole.Ntt.Manager.AcceptAdminTransferByVaa') runs this only after VAA
+-- signature verification, so a parse failure here means a genuinely
+-- guardian-signed VAA for the wrong purpose, not a forgery.
+parseNttGovernance : Bytes -> AcceptAdminToGovernance
+parseNttGovernance payload =
+  let
+    moduleId = normalizeHex (sliceBytes 0 32 payload)
+    action = bytesToInt (sliceBytes 32 1 payload)
+    chain = bytesToInt (sliceBytes 33 2 payload)
+  in
+    if moduleId /= nttGovernanceModule
+      then error "ntt governance: not the Ntt module"
+      else case action of
+        1 -> AcceptAdminToGovernance with
+               chain
+               managerAddress = normalizeHex (sliceBytes 35 32 payload)
+               factoryEpoch = bytesToInt (sliceBytes 67 8 payload)
+        _ -> error ("ntt governance: unsupported action " <> show action)
