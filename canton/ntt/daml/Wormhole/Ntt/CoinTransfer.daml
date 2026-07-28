@@ -146,7 +146,9 @@ template NttTransferInstruction
       --     'ExternalPartyAmuletRules.ensureNoAccountMeta' rejects any
       --     non-basic account outright ("Amulet only supports basic
       --     accounts"), so it never needs a provider-authority path here.
-      transferInstruction_acceptImpl self arg =
+      transferInstruction_acceptImpl self arg = do
+        assertMsg "ntt: TransferInstruction_Accept requires the recipient account's authority"
+          (all (`elem` arg.actors) (accountControlParties receiverAccount))
         case receiverAccount.provider of
           None ->
             v1ResultToV2 <$> exercise
@@ -253,6 +255,8 @@ data CoreTransferOutcome
 -- | The single-instrument debit: validate ownership + instrument on every
 -- input, check coverage, archive all inputs, mint change back to the given
 -- account. Conservation-critical -- the single audit site for this sequence.
+-- Inputs are pinned to the 'NttCoin' template; an interface view alone is
+-- caller-authored data.
 debitInputs
   : Text                  -- ^ error noun: "transfer" / "allocation"
   -> InstrumentId
@@ -261,12 +265,20 @@ debitInputs
   -> [ContractId Holding]
   -> Update [ContractId Holding]  -- ^ change cids ([] or singleton)
 debitInputs noun instrumentId acc amount inputHoldingCids = do
-  let owner = fromSome acc.owner
-  views <- forA inputHoldingCids (fmap view . fetch)
-  forA_ views \hv -> do
-    assertMsg ("ntt: " <> noun <> " input not owned by sender") (hv.owner == owner)
-    assertMsg ("ntt: " <> noun <> " input instrument mismatch") (hv.instrumentId == instrumentId)
-  let total = sum (map (.amount) views)
+  -- Messages hoisted: Daml is strict, so building them inside the loop costs
+  -- on the happy path.
+  let notMine = "ntt: " <> noun <> " input not owned by sender"
+      notForeign = "ntt: " <> noun <> " input is not an NttCoin issued by this registry"
+      wrongInstrument = "ntt: " <> noun <> " input instrument mismatch"
+  coins <- forA inputHoldingCids \cid -> do
+    r <- fetchFromInterface @NttCoin cid
+    case r of
+      None -> abort notForeign
+      Some (_, coin) -> do
+        assertMsg notMine (coinAccountOf coin == acc)
+        assertMsg wrongInstrument (coin.instrumentId == instrumentId)
+        pure coin
+  let total = sum (map (.amount) coins)
   assertMsg ("ntt: input holdings do not cover the " <> noun <> " amount") (total >= amount)
   forA_ inputHoldingCids archive
   let change = total - amount
