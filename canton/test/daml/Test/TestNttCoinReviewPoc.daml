@@ -1,0 +1,656 @@
+-- | Proof-of-concept scripts for the multi-vote findings of the five-rotation
+-- review of the NttCoin factory. Each script DEMONSTRATES current behaviour
+-- rather than asserting desired behaviour: it is written so that it passes
+-- today and would FAIL once the corresponding defect is fixed. That makes each
+-- one an executable statement of "the code does X", not a regression test.
+--
+-- Scratch artifact for the review; not intended to ship as-is.
+module Test.TestNttCoinReviewPoc where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Map qualified as Map
+import DA.TextMap qualified as TextMap
+import DA.Time (hours, addRelTime)
+
+import Splice.Api.Token.AllocationV2 qualified as AV2
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.HoldingV2 qualified as HoldingV2
+import Splice.Api.Token.MetadataV1 (Metadata (..), emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Ntt.Coin
+import Wormhole.Ntt.CoinFactory ()
+import Wormhole.Ntt.CoinTransfer (NttTransferInstruction, TransferPreapproval (..), TransferPreapproval_Receive (..))
+import Test.TestNtt (nttCoinFactorySetup, expectAbort)
+import Test.TestNttCoin (mintCoin)
+import Test.TestNttCoinAllocationV2
+  ( allocate, basicAccount, discloseFactory, mkLeg, mkSettlement, mkSpec
+  , mintCoinV2, theAllocationCidV2, tryAllocate )
+import Test.TestNttCoinTransfer (asTransferFactoryV1, asTransferFactoryV2, mkTransferV1, providerAccount)
+
+----------------------------------------------------------------------
+-- VOTE 1 (R1 + R4): gross, not net, allocation funding
+----------------------------------------------------------------------
+
+-- | A net-zero allocation on ONE instrument (send 10 X, receive 10 X) is
+-- rejected unless the authorizer pre-funds the GROSS send of 10 X.
+--
+-- The reference nets the sides -- Amulet's `amulet_allocationFactoryV2_allocateImpl`
+-- computes `requiredFundingAmount = outputFundingAmount - netTransferAmount`
+-- via `netAmuletCreditAmount`, and the standard's own helper
+-- `netAllocationCreditAmounts` maps SenderSide to `negate amount` and
+-- ReceiverSide to `+amount` before summing per instrument -- so the reference
+-- accepts this allocation with no input holdings at all.
+-- AllocationV2's module doc lists "only allocating the net amount of funds
+-- transferred to the allocation" as a defining V2 feature.
+--
+-- NttCoinFactory's `round1Totals = sumSide AV2.SenderSide spec.transferLegSides`
+-- counts SenderSide legs only, so `requiredTotals` is the gross 10.0.
+pocNetZeroAllocationRequiresGrossFunding : Script ()
+pocNetZeroAllocationRequiresGrossFunding = do
+  gg <- allocateParty "PocNetZeroGg"
+  alice <- allocateParty "PocNetZeroAlice"
+  bob <- allocateParty "PocNetZeroBob"
+  carol <- allocateParty "PocNetZeroCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-POC-NETZERO"
+      settlement = mkSettlement [carol] "settlement-poc-netzero"
+      -- alice sends 10 X on leg-0 and receives 10 X on leg-1: net 0.
+      spec = mkSpec gg alice
+        [ mkLeg "leg-0" AV2.SenderSide bob 10.0 instr
+        , mkLeg "leg-1" AV2.ReceiverSide bob 10.0 instr
+        ]
+  res <- tryAllocate factoryCid gg alice settlement spec []
+  expectAbort "do not cover the allocation's required funding" res
+
+-- | The same gap at settle: a party who is a NET RECEIVER of an instrument
+-- must still have locked the full gross amount of their outgoing legs.
+-- Here alice locks exactly her net position (6 X) and the allocation is
+-- rejected because her gross send is 10 X.
+pocNetReceiverCannotFundFromReceipts : Script ()
+pocNetReceiverCannotFundFromReceipts = do
+  gg <- allocateParty "PocNetRecvGg"
+  alice <- allocateParty "PocNetRecvAlice"
+  bob <- allocateParty "PocNetRecvBob"
+  carol <- allocateParty "PocNetRecvCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-NETRECV"
+      instr = instrumentId.id
+  -- alice funds her NET obligation only: sends 10, receives 4, net 6.
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 6.0
+  let settlement = mkSettlement [carol] "settlement-poc-netrecv"
+      spec = mkSpec gg alice
+        [ mkLeg "leg-0" AV2.SenderSide bob 10.0 instr
+        , mkLeg "leg-1" AV2.ReceiverSide bob 4.0 instr
+        ]
+  res <- tryAllocate factoryCid gg alice settlement spec [coinCid]
+  expectAbort "do not cover the allocation's required funding" res
+
+----------------------------------------------------------------------
+-- VOTE 2 (R3 + R4): availableActions AA_Withdraw contradicts the guard
+----------------------------------------------------------------------
+
+-- | For a committed allocation past its settlement deadline, the interface
+-- view reports `AA_Withdraw = []` ("nobody can withdraw") while
+-- `allocation_withdrawImpl` in fact lets the authorizer withdraw
+-- successfully. A wallet driven by `availableActions` -- which the standard
+-- describes as informing "wallet users whether they can take an action or
+-- not" -- would never surface the action that would reclaim the funds.
+--
+-- The standard's own default computes
+-- `canWithdraw = not committed || isSome settlementDeadline`, which is
+-- exactly the predicate the guard implements; Amulet uses that default
+-- verbatim.
+pocCommittedWithdrawViewContradictsGuard : Script ()
+pocCommittedWithdrawViewContradictsGuard = do
+  gg <- allocateParty "PocWithdrawViewGg"
+  alice <- allocateParty "PocWithdrawViewAlice"
+  bob <- allocateParty "PocWithdrawViewBob"
+  carol <- allocateParty "PocWithdrawViewCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-WITHDRAWVIEW"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  t0 <- getTime
+  let settlement = mkSettlement [carol] "settlement-poc-withdrawview"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 instrumentId.id])
+        with committed = True, settlementDeadline = Some (t0 `addRelTime` hours 1)
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+
+  -- Move past the settlement deadline: the guard now permits the withdraw.
+  passTime (hours 2)
+
+  -- The view still says nobody may withdraw ...
+  Some av <- queryInterfaceContractId alice allocCid
+  Map.lookup AV2.AA_Withdraw av.availableActions === Some []
+
+  -- ... yet the withdraw succeeds for the authorizer.
+  withdrawRes <- submit alice do
+    exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  withdrawRes.output === AV2.AllocationResult_Withdrawn
+
+----------------------------------------------------------------------
+-- VOTE 3 (R3 + R4, site also flagged by R5): admin cancels a committed
+-- allocation before its deadline
+----------------------------------------------------------------------
+
+-- | `committed = True` is documented to give the executors a guarantee that
+-- the allocation stays available until settlement. The authorizer is
+-- correctly blocked from withdrawing before the deadline -- but gg alone can
+-- cancel at will, returning the funds and destroying the guarantee.
+--
+-- The reference refuses exactly this: `allocationV2_cancelDefaultImpl`
+-- (used verbatim by Amulet) allows the admin to cancel only an EXPIRED
+-- allocation, failing otherwise with "The admin cannot cancel an unexpired
+-- allocation". Since NttCoinAllocationV2's view sets `expiresAt = None`,
+-- the reference guard would forbid admin-cancel outright.
+pocAdminCancelsCommittedAllocationBeforeDeadline : Script ()
+pocAdminCancelsCommittedAllocationBeforeDeadline = do
+  gg <- allocateParty "PocAdminCancelGg"
+  alice <- allocateParty "PocAdminCancelAlice"
+  bob <- allocateParty "PocAdminCancelBob"
+  carol <- allocateParty "PocAdminCancelCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-ADMINCANCEL"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  t0 <- getTime
+  let settlement = mkSettlement [carol] "settlement-poc-admincancel"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 instrumentId.id])
+        with committed = True, settlementDeadline = Some (t0 `addRelTime` hours 24)
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+
+  -- The authorizer is correctly held to the commitment ...
+  submitMustFail alice do
+    exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+
+  -- ... but gg alone dissolves it, well before the deadline.
+  cancelRes <- submit gg do
+    exerciseCmd allocCid AV2.Allocation_Cancel with actors = [gg], extraArgs = emptyExtraArgs
+  cancelRes.output === AV2.AllocationResult_Cancelled
+
+  -- The funds are back with alice, so carol's "guarantee" is gone.
+  cs <- query @NttCoin alice
+  [c] <- pure [c | (_, c) <- cs, c.instrumentId == instrumentId, c.owner == alice]
+  c.amount === 0.006
+
+----------------------------------------------------------------------
+-- R4-2: a committed allocation with an ALREADY-PAST settlement deadline is
+-- accepted at allocate time
+----------------------------------------------------------------------
+
+-- | The v2 allocate never validates `spec.settlementDeadline` against the
+-- current time (the reference calls `assertWithinDeadline
+-- "Allocation.settlementDeadline"`). The resulting contract is
+-- self-contradictory: permanently unsettleable (settle requires
+-- `now <= deadline`) yet immediately withdrawable (committed withdraw
+-- requires `now > deadline`), while its view advertises `committed = True`
+-- and `AA_Withdraw = []`.
+pocPastSettlementDeadlineAcceptedAtAllocate : Script ()
+pocPastSettlementDeadlineAcceptedAtAllocate = do
+  gg <- allocateParty "PocPastDeadlineGg"
+  alice <- allocateParty "PocPastDeadlineAlice"
+  bob <- allocateParty "PocPastDeadlineBob"
+  carol <- allocateParty "PocPastDeadlineCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-PASTDEADLINE"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  t0 <- getTime
+  let settlement = mkSettlement [carol] "settlement-poc-pastdeadline"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 instrumentId.id])
+        with committed = True, settlementDeadline = Some (t0 `addRelTime` hours (-1))
+
+  -- Accepted, despite the deadline already having passed.
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+
+  -- The view claims a live commitment nobody can withdraw ...
+  Some av <- queryInterfaceContractId alice allocCid
+  av.allocation.committed === True
+  Map.lookup AV2.AA_Withdraw av.availableActions === Some []
+
+  -- ... but it can never settle, and the authorizer can take the funds back
+  -- immediately.
+  withdrawRes <- submit alice do
+    exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  withdrawRes.output === AV2.AllocationResult_Withdrawn
+
+----------------------------------------------------------------------
+-- VOTE 5 (R4 + R5): the v1 Holding view drops provider/accountId, and a
+-- provider-less sub-account coin is unspendable through v1
+----------------------------------------------------------------------
+
+-- | `NttCoin`'s v1 `HoldingView` reports the bare `owner` and
+-- `meta = emptyMetadata`, discarding `accountId` and `provider`. The
+-- standard's canonical v1 downcast instead emits
+-- `meta = accountToMeta "account" account meta`, putting the sub-account id
+-- under `cip-112/account.id` and the provider under
+-- `cip-112/account.provider`.
+--
+-- Consequence: through v1, a sub-account coin is byte-identical to a
+-- basic-account coin, so a v1 wallet counts it as spendable balance -- but
+-- the v1 TransferFactory lifts its sender to `basicAccountV2 t.sender`
+-- (accountId ""), and `debitInputs` requires `coinAccountOf coin == acc`, so
+-- the coin can never be spent through v1.
+--
+-- Note this coin has `provider = None`, so the in-code justification for
+-- flattening the view ("they just can't move it without the provider's
+-- authority") does not apply: there is no extra authority that could be
+-- supplied. It is simply unspendable via v1.
+pocSubAccountCoinLooksBasicInV1AndCannotBeSpent : Script ()
+pocSubAccountCoinLooksBasicInV1AndCannotBeSpent = do
+  gg <- allocateParty "PocSubAcctGg"
+  alice <- allocateParty "PocSubAcctAlice"
+  bob <- allocateParty "PocSubAcctBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-SUBACCT"
+
+  -- A basic-account coin and a sub-account coin, same owner and amount.
+  basicCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  subCid <- submit (actAs gg <> actAs alice) do
+    createCmd NttCoin with
+      instrumentId, owner = alice, provider = None, accountId = "savings", amount = 0.01
+
+  -- Through v1 they are indistinguishable: same owner, same amount, no
+  -- account metadata to tell them apart.
+  Some basicV1 <- queryInterfaceContractId alice (toInterfaceContractId @Holding basicCid)
+  Some subV1 <- queryInterfaceContractId alice (toInterfaceContractId @Holding subCid)
+  subV1.owner === basicV1.owner
+  subV1.amount === basicV1.amount
+  subV1.meta === basicV1.meta
+  subV1.meta === emptyMetadata
+  subV1.lock === None
+
+  -- The v2 view does distinguish them.
+  Some subV2 <- queryInterfaceContractId alice (coerceContractId @NttCoin @HoldingV2.Holding subCid)
+  subV2.account === (HoldingV2.Account with owner = Some alice, provider = None, id = "savings")
+
+  -- But the balance a v1 wallet sees in the sub-account cannot be spent
+  -- through the v1 TransferFactory.
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  res <- trySubmit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
+      expectedAdmin = gg
+      transfer = mkTransferV1 t0 alice bob 0.004 instrumentId [toInterfaceContractId @Holding subCid]
+      extraArgs = emptyExtraArgs
+  expectAbort "transfer input not owned by sender" res
+
+----------------------------------------------------------------------
+-- R3-2 (mechanism corroborated by R5's own authority analysis): the v1 view
+-- advertises an accept that v1 can never perform for a provider receiver
+----------------------------------------------------------------------
+
+-- | For a provider-delegated receiver, the v1 `TransferInstructionView`
+-- reports `status = TransferPendingReceiverAcceptance` and
+-- `receiver = <owner>`, telling a v1 wallet the owner can accept
+-- unilaterally. But v1's `TransferInstruction_Accept` has controller
+-- `transfer.receiver` (the owner alone), and the receiver's provider is only
+-- an OBSERVER of `NttTransferInstruction` -- never a controller of the v1
+-- choice -- so the nested `create NttCoin`, which needs the provider as a
+-- signatory, can never be authorized. The v1 accept fails even when the
+-- provider co-submits.
+--
+-- The v2 view of the very same contract correctly reports
+-- `TIA_Accept -> [[owner, provider]]`, so a v1 wallet and a v2 wallet
+-- disagree about who can act on one contract.
+pocV1AcceptUnreachableForProviderReceiver : Script ()
+pocV1AcceptUnreachableForProviderReceiver = do
+  gg <- allocateParty "PocV1AcceptGg"
+  alice <- allocateParty "PocV1AcceptAlice"
+  bob <- allocateParty "PocV1AcceptBob"
+  provider <- allocateParty "PocV1AcceptProvider"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-V1ACCEPT"
+      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
+      receiverAcct = providerAccount bob provider
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  res <- submit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
+      transfer = TIV2.Transfer with
+        sender = basicAccount alice
+        receiver = receiverAcct
+        amount = 0.006
+        instrumentId = instrumentIdV2
+        requestedAt = t0
+        executeBefore = t0 `addRelTime` hours 24
+        inputHoldingCids = [coerceContractId @Holding @HoldingV2.Holding coinCid]
+        meta = emptyMetadata
+      actors = [alice]
+      extraArgs = emptyExtraArgs
+  let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
+      v1Cid = coerceContractId @TIV2.TransferInstruction @TIV1.TransferInstruction transferInstructionCid
+
+  -- The v1 view advertises a pending receiver acceptance by bob alone.
+  Some v1View <- queryInterfaceContractId gg v1Cid
+  v1View.status === TIV1.TransferPendingReceiverAcceptance
+  v1View.transfer.receiver === bob
+
+  -- The v2 view of the SAME contract says both bob and his provider are
+  -- needed.
+  Some v2View <- queryInterfaceContractId gg transferInstructionCid
+  Map.lookup TIV2.TIA_Accept v2View.availableActions === Some [[bob, provider]]
+
+  -- v1 accept is unreachable: bob alone fails (no provider authority) ...
+  r1 <- trySubmit bob do
+    exerciseCmd v1Cid TIV1.TransferInstruction_Accept with extraArgs = emptyExtraArgs
+  case r1 of
+    Left _ -> pure ()
+    Right _ -> abort "expected v1 accept by bob alone to fail"
+
+  -- ... and bob WITH his provider still fails, because the provider's
+  -- authority cannot reach the v1 choice's body.
+  r2 <- trySubmit (actAs bob <> actAs provider) do
+    exerciseCmd v1Cid TIV1.TransferInstruction_Accept with extraArgs = emptyExtraArgs
+  case r2 of
+    Left _ -> pure ()
+    Right _ -> abort "expected v1 accept by bob+provider to fail"
+
+  -- The v2 accept, by contrast, succeeds for the same parties.
+  acceptRes <- submit (actAs bob <> actAs provider) do
+    exerciseCmd transferInstructionCid TIV2.TransferInstruction_Accept with
+      actors = [bob, provider], extraArgs = emptyExtraArgs
+  case acceptRes.output of
+    TIV2.TransferInstructionResult_Completed{} -> pure ()
+    other -> abort ("expected v2 accept to complete, got: " <> show other)
+
+----------------------------------------------------------------------
+-- R2-1 (headline): the v2 provider-authority gates on NttTransferInstruction
+-- are bypassable through the v1 interface on the same contract
+----------------------------------------------------------------------
+
+-- | `NttTransferInstruction` implements BOTH `TIV1.TransferInstruction` and
+-- `TIV2.TransferInstruction`. The v2 Withdraw impl asserts
+-- `all (elem arg.actors) (accountControlParties senderAccount)` -- owner AND
+-- provider -- and `availableActions` advertises
+-- `TIA_Withdraw -> [[owner, provider]]` accordingly.
+--
+-- But v1's Withdraw controller is `(view this).transfer.sender`, which the v1
+-- view defines as `fromSome senderAccount.owner`: the owner ALONE. The v1
+-- body's credit (`returnToSenderV1`) draws the provider's signature from the
+-- instruction's own signatory list, so it needs no provider actor at all.
+--
+-- Net effect: a provider/custodian that relies on the v2 gate to approve
+-- every state change on its delegated account cannot stop the owner from
+-- unilaterally aborting an outbound transfer the provider co-authorized.
+-- The stricter v2 gate is decoration; the effective requirement is the
+-- weaker v1 one.
+--
+-- Contrast Accept, which is genuinely NOT bypassable this way: v1 Accept's
+-- `create NttCoin` needs the receiver's provider as a signatory and that
+-- authority is unreachable in the nested body -- which is exactly why the v2
+-- accept impl branches on `receiverAccount.provider`.
+pocV1WithdrawBypassesV2ProviderGate : Script ()
+pocV1WithdrawBypassesV2ProviderGate = do
+  gg <- allocateParty "PocV1BypassGg"
+  alice <- allocateParty "PocV1BypassAlice"
+  bob <- allocateParty "PocV1BypassBob"
+  p <- allocateParty "PocV1BypassProvider"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-V1BYPASS"
+      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
+      senderAcct = providerAccount alice p
+
+  -- A coin held in alice's provider-delegated account.
+  coinCid <- submit (actAs gg <> actAs alice <> actAs p) do
+    createCmd NttCoin with
+      instrumentId, owner = alice, provider = Some p, accountId = "", amount = 0.01
+
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  -- alice AND her provider jointly instruct an outbound transfer to bob.
+  -- bob's authority is absent, so this parks as a pending instruction.
+  res <- submit (actAs alice <> actAs p <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
+      transfer = TIV2.Transfer with
+        sender = senderAcct
+        receiver = basicAccount bob
+        amount = 0.006
+        instrumentId = instrumentIdV2
+        requestedAt = t0
+        executeBefore = t0 `addRelTime` hours 24
+        inputHoldingCids = [coerceContractId @NttCoin @HoldingV2.Holding coinCid]
+        meta = emptyMetadata
+      actors = [alice, p]
+      extraArgs = emptyExtraArgs
+  let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
+      v1Cid = coerceContractId @TIV2.TransferInstruction @TIV1.TransferInstruction transferInstructionCid
+
+  -- The v2 view promises the provider is required to withdraw.
+  Some v2View <- queryInterfaceContractId gg transferInstructionCid
+  Map.lookup TIV2.TIA_Withdraw v2View.availableActions === Some [[alice, p]]
+
+  -- And the v2 choice does enforce it: alice alone is rejected.
+  r <- trySubmit alice do
+    exerciseCmd transferInstructionCid TIV2.TransferInstruction_Withdraw with
+      actors = [alice], extraArgs = emptyExtraArgs
+  expectAbort "requires the sender account's authority" r
+
+  -- But the SAME contract's v1 Withdraw succeeds for alice alone -- the
+  -- provider never signs, and the funds land back in the provider-managed
+  -- account.
+  v1Res <- submit alice do
+    exerciseCmd v1Cid TIV1.TransferInstruction_Withdraw with extraArgs = emptyExtraArgs
+  v1Res.output === TIV1.TransferInstructionResult_Failed
+  case v1Res.senderChangeCids of
+    [rcid] -> do
+      Some hv2 <- queryInterfaceContractId gg (coerceContractId @Holding @HoldingV2.Holding rcid)
+      hv2.account === senderAcct
+      hv2.amount === 0.006
+    other -> abort ("expected exactly one returned holding, got: " <> show other)
+
+-- | The same asymmetry on Reject: the v2 impl requires the receiver account's
+-- owner AND provider, but v1's Reject controller is the receiver owner alone,
+-- so the owner can unilaterally bounce an inbound credit its provider was
+-- supposed to have a say over.
+pocV1RejectBypassesV2ProviderGate : Script ()
+pocV1RejectBypassesV2ProviderGate = do
+  gg <- allocateParty "PocV1RejBypassGg"
+  alice <- allocateParty "PocV1RejBypassAlice"
+  bob <- allocateParty "PocV1RejBypassBob"
+  p <- allocateParty "PocV1RejBypassProvider"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-V1REJBYPASS"
+      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
+      receiverAcct = providerAccount bob p
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+  res <- submit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
+      transfer = TIV2.Transfer with
+        sender = basicAccount alice
+        receiver = receiverAcct
+        amount = 0.006
+        instrumentId = instrumentIdV2
+        requestedAt = t0
+        executeBefore = t0 `addRelTime` hours 24
+        inputHoldingCids = [coerceContractId @Holding @HoldingV2.Holding coinCid]
+        meta = emptyMetadata
+      actors = [alice]
+      extraArgs = emptyExtraArgs
+  let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
+      v1Cid = coerceContractId @TIV2.TransferInstruction @TIV1.TransferInstruction transferInstructionCid
+
+  -- v2 requires bob AND his provider ...
+  r <- trySubmit bob do
+    exerciseCmd transferInstructionCid TIV2.TransferInstruction_Reject with
+      actors = [bob], extraArgs = emptyExtraArgs
+  expectAbort "requires the recipient account's authority" r
+
+  -- ... but v1 Reject succeeds for bob alone.
+  v1Res <- submit bob do
+    exerciseCmd v1Cid TIV1.TransferInstruction_Reject with extraArgs = emptyExtraArgs
+  v1Res.output === TIV1.TransferInstructionResult_Failed
+
+----------------------------------------------------------------------
+-- R2-6: TransferPreapproval_Receive requires strictly LESS authority than
+-- the designated mint entrypoint
+----------------------------------------------------------------------
+
+-- | `BurnMintFactory_BurnMint` cannot mint into a party's account without
+-- that party co-signing the transaction: `create NttCoin` needs the output
+-- owner's authority, which can only come from `extraActors` (controllers of
+-- the choice). So gg's mint authority is, per transaction, checked by the
+-- recipient.
+--
+-- `TransferPreapproval_Receive` has controller `instrumentId.admin` alone and
+-- takes the credited account's signatures from the STANDING preapproval, so
+-- gg alone can inflate supply into any preapproved account with no live
+-- counterparty involvement and no debit anywhere in the transaction. The
+-- account holder consented to *receive transfers*; it cannot withhold consent
+-- per transaction, only by archiving the preapproval.
+--
+-- It is also a plain template choice rather than a token-standard interface
+-- choice, so the resulting Holding creation carries no BurnMintFactory node
+-- for a CIP-56/112 transaction parser to classify as a mint -- which matters
+-- for a bridge token whose Canton supply must reconcile against burns and
+-- locks on other chains.
+pocPreapprovalIsAWeakerMintPathThanBurnMint : Script ()
+pocPreapprovalIsAWeakerMintPathThanBurnMint = do
+  gg <- allocateParty "PocPreMintGg"
+  bob <- allocateParty "PocPreMintBob"
+  _factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-PREMINT"
+
+  -- bob's standing consent to receive this instrument. Signed by bob alone.
+  preCid <- submit bob do
+    createCmd TransferPreapproval with account = basicAccount bob, instrumentId
+
+  before <- query @NttCoin gg
+  let supplyOf cs = sum [c.amount | (_, c) <- cs, c.instrumentId == instrumentId]
+
+  -- gg alone mints 1,000,000 into bob's account. bob does not act, and there
+  -- is no debit anywhere in the transaction.
+  rcid <- submit gg do
+    exerciseCmd preCid TransferPreapproval_Receive with
+      receiver = basicAccount bob, amount = 1000000.0, expectedInstrumentId = instrumentId
+  Some minted <- queryContractId gg (coerceContractId @Holding @NttCoin rcid)
+  minted.owner === bob
+  minted.amount === 1000000.0
+
+  after <- query @NttCoin gg
+  supplyOf before === 0.0
+  supplyOf after === 1000000.0
+
+----------------------------------------------------------------------
+-- R2-4: settlement.executors is never required to be non-empty
+----------------------------------------------------------------------
+
+-- | The reference enforces `not (null executors)` as a template `ensure`
+-- (`isValidSettlementInfoV2`, used in AmuletAllocationV2's ensure clause).
+-- NttCoinFactory checks it nowhere and NttCoinAllocationV2 has no such
+-- ensure, so an allocation with `executors = []`, `committed = True` and
+-- `settlementDeadline = None` is accepted -- and is then unsettleable
+-- (SettleBatch would need an empty controller list, which the engine
+-- rejects), uncancellable by executors (same reason), and unwithdrawable by
+-- the authorizer (the committed/no-deadline branch aborts). gg is the sole
+-- recovery path.
+pocEmptyExecutorsAllocationStrandsFunds : Script ()
+pocEmptyExecutorsAllocationStrandsFunds = do
+  gg <- allocateParty "PocNoExecGg"
+  alice <- allocateParty "PocNoExecAlice"
+  bob <- allocateParty "PocNoExecBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-NOEXEC"
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  let settlement = mkSettlement [] "settlement-poc-noexec"
+      spec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 instrumentId.id])
+        with committed = True, settlementDeadline = None
+
+  -- Accepted, with no executors at all.
+  res <- allocate factoryCid gg alice settlement spec [coinCid]
+  let allocCid = theAllocationCidV2 res
+
+  -- The authorizer cannot withdraw: committed with no deadline.
+  wr <- trySubmit alice do
+    exerciseCmd allocCid AV2.Allocation_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
+  expectAbort "committed allocation with no settlement deadline" wr
+
+  -- Nor can anyone settle or cancel via the executors branch: an exercise
+  -- with an empty controller list is rejected by the engine.
+  cr <- trySubmit alice do
+    exerciseCmd allocCid AV2.Allocation_Cancel with actors = [], extraArgs = emptyExtraArgs
+  case cr of
+    Left _ -> pure ()
+    Right _ -> abort "expected empty-actors cancel to fail"
+
+  -- gg alone is the only way the funds ever come back.
+  cancelRes <- submit gg do
+    exerciseCmd allocCid AV2.Allocation_Cancel with actors = [gg], extraArgs = emptyExtraArgs
+  cancelRes.output === AV2.AllocationResult_Cancelled
+
+----------------------------------------------------------------------
+-- R2-5 + R4-4: `ensureNoAccountMeta` is never called anywhere, so v1 callers
+-- designating a sub-account are silently mis-credited
+----------------------------------------------------------------------
+
+-- | `cip-112/<field>.id` and `cip-112/<field>.provider` are the standard's own
+-- carriers for expressing a v2 account through a v1 API (`accountToMeta` /
+-- `accountFromMeta`), and they are what the standard's own
+-- `downcast_v2_v1_TransferLeg` emits.
+--
+-- Amulet rejects them outright -- `ensureNoAccountMeta "transfer" "sender"` /
+-- `"receiver"`, commented "no extra account information allowed, as Amulet
+-- only supports basic accounts". Neither `ensureNoAccountMeta` nor any
+-- equivalent appears anywhere in the five new NTT modules.
+--
+-- Because this PR DOES support sub-accounts, ignoring the key is not a
+-- harmless rejection of an unsupported feature: the v1 factory hardcodes
+-- `receiverAccount = basicAccountV2 t.receiver`, so the funds land in the
+-- receiver's DEFAULT account while the call reports `Completed`. The value is
+-- not lost (the right party owns it) but the app's account-level accounting is
+-- silently wrong, with no error to detect it.
+pocV1TransferSilentlyIgnoresAccountMeta : Script ()
+pocV1TransferSilentlyIgnoresAccountMeta = do
+  gg <- allocateParty "PocAcctMetaGg"
+  alice <- allocateParty "PocAcctMetaAlice"
+  bob <- allocateParty "PocAcctMetaBob"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-POC-ACCTMETA"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  factoryDisc <- discloseFactory gg factoryCid
+  t0 <- getTime
+
+  -- The caller asks, in the standard's own encoding, for the credit to land in
+  -- bob's "savings" sub-account managed by a provider.
+  let accountMetaValues = TextMap.fromList
+        [ ("cip-112/receiver.id", "savings")
+        , ("cip-112/receiver.provider", partyToText gg)
+        ]
+      accountMeta = Metadata with values = accountMetaValues
+  res <- submit (actAs alice <> disclose factoryDisc) do
+    exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
+      expectedAdmin = gg
+      transfer = (mkTransferV1 t0 alice bob 0.004 instrumentId [coinCid]) with meta = accountMeta
+      extraArgs = emptyExtraArgs
+
+  -- The call is accepted with no complaint about the account metadata. (It
+  -- parks as Pending because v1's `receiverAuthorityPresent` is
+  -- `sender == receiver`, i.e. self-transfer only -- unrelated to the meta.)
+  let TIV1.TransferInstructionResult_Pending{transferInstructionCid} = res.output
+      instrCid = coerceContractId @TIV1.TransferInstruction @NttTransferInstruction transferInstructionCid
+
+  -- The instruction has already discarded the requested sub-account and
+  -- provider: it records bob's DEFAULT basic account.
+  Some instr <- queryContractId gg instrCid
+  instr.receiverAccount === basicAccount bob
+  instr.receiverAccount.id === ""
+  instr.receiverAccount.provider === None
+
+  -- And on acceptance the coin is duly created in that default account, with
+  -- the caller never told the routing it asked for was dropped.
+  acceptRes <- submit bob do
+    exerciseCmd transferInstructionCid TIV1.TransferInstruction_Accept with extraArgs = emptyExtraArgs
+  case acceptRes.output of
+    TIV1.TransferInstructionResult_Completed{receiverHoldingCids = [rcid]} -> do
+      Some coin <- queryContractId gg (coerceContractId @Holding @NttCoin rcid)
+      coin.owner === bob
+      coin.amount === 0.004
+      coin.accountId === ""
+      coin.provider === None
+    other -> abort ("expected Completed on accept, got: " <> show other)
