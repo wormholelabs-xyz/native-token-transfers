@@ -748,3 +748,674 @@ testAllocateV2ProviderAuthorizer = do
   case [c | (_, c) <- bobHoldings, c.owner == bob] of
     [c] -> c.amount === 0.006
     other -> abort ("expected bob to receive exactly one coin, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Conservation across the settlement lifecycle -- the conserved quantity is
+-- total 'NttCoin' supply plus outstanding 'lockedAmounts' bookkeeping.
+----------------------------------------------------------------------
+
+totalSupply : Party -> Text -> Script Decimal
+totalSupply gg instr = do
+  coins <- query @NttCoin gg
+  pure (sum [c.amount | (_, c) <- coins, c.instrumentId.id == instr])
+
+totalLocked : Party -> Text -> Script Decimal
+totalLocked gg instr = do
+  allocs <- query @NttCoinAllocationV2 gg
+  pure (sum [a | (_, alloc) <- allocs, Some a <- [TextMap.lookup instr alloc.lockedAmounts]])
+
+totalValue : Party -> Text -> Script Decimal
+totalValue gg instr = (+) <$> totalSupply gg instr <*> totalLocked gg instr
+
+nextCid : AV2.AllocationResult -> Script (ContractId AV2.Allocation)
+nextCid r = case r.output of
+  AV2.AllocationResult_Settled{nextIterationAllocationCid = Some cid} -> pure cid
+  other -> abort ("expected a carried-forward allocation, got: " <> show other)
+
+-- | Multi-leg NET settlement: alice and bob are each sender on one leg and
+-- receiver on the other, in the same batch.
+testNettedTwoWayBatchConservesValue : Script ()
+testNettedTwoWayBatchConservesValue = do
+  gg <- allocateParty "NetGg"
+  alice <- allocateParty "NetAlice"
+  bob <- allocateParty "NetBob"
+  carol <- allocateParty "NetCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrX = "NTT-COIN-NET-X"
+      instrY = "NTT-COIN-NET-Y"
+  coinX <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instrX) alice 0.01
+  coinY <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instrY) bob 0.02
+  let settlement = mkSettlement [carol] "settlement-net"
+      aliceSpec = mkSpec gg alice
+        [ mkLeg "leg-x" AV2.SenderSide bob 0.01 instrX
+        , mkLeg "leg-y" AV2.ReceiverSide bob 0.02 instrY
+        ]
+      bobSpec = mkSpec gg bob
+        [ mkLeg "leg-x" AV2.ReceiverSide alice 0.01 instrX
+        , mkLeg "leg-y" AV2.SenderSide alice 0.02 instrY
+        ]
+      transferLegs =
+        [ AV2.TransferLeg with
+            transferLegId = "leg-x", sender = basicAccount alice, receiver = basicAccount bob
+            amount = 0.01, instrumentId = instrX, meta = emptyMetadata
+        , AV2.TransferLeg with
+            transferLegId = "leg-y", sender = basicAccount bob, receiver = basicAccount alice
+            amount = 0.02, instrumentId = instrY, meta = emptyMetadata
+        ]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinX]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec [coinY]
+  _ <- settleBatch factoryCid gg settlement transferLegs
+    [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)] [carol]
+  vx <- totalValue gg instrX
+  vy <- totalValue gg instrY
+  vx === 0.01
+  vy === 0.02
+  coins <- query @NttCoin gg
+  [c.amount | (_, c) <- coins, c.owner == bob, c.instrumentId.id == instrX] === [0.01]
+  [c.amount | (_, c) <- coins, c.owner == alice, c.instrumentId.id == instrY] === [0.02]
+
+-- | An extra SenderSide leg naming an instrument with NO locked balance --
+-- 'fromOptional 0.0' must fail closed, not treat a missing key as unlimited.
+testExtraSenderLegOnUnlockedInstrumentRejected : Script ()
+testExtraSenderLegOnUnlockedInstrumentRejected = do
+  gg <- allocateParty "UnlockedGg"
+  alice <- allocateParty "UnlockedAlice"
+  bob <- allocateParty "UnlockedBob"
+  carol <- allocateParty "UnlockedCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrA = "NTT-COIN-UNLOCKED-A"
+      instrB = "NTT-COIN-UNLOCKED-B"
+  coinA <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instrA) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-unlocked"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instrA])
+        with nextIterationFunding = Some TextMap.empty
+      bobSpec = (mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instrA])
+        with nextIterationFunding = Some TextMap.empty
+      transferLegs =
+        [ AV2.TransferLeg with
+            transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+            amount = 0.01, instrumentId = instrA, meta = emptyMetadata
+        , AV2.TransferLeg with
+            transferLegId = "leg-b", sender = basicAccount alice, receiver = basicAccount bob
+            amount = 99.0, instrumentId = instrB, meta = emptyMetadata
+        ]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinA]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [ AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes
+        extraTransferLegSides = [mkLeg "leg-b" AV2.SenderSide bob 99.0 instrB]
+        nextIterationFunding = None
+    , AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 bobRes
+        extraTransferLegSides = [mkLeg "leg-b" AV2.ReceiverSide alice 99.0 instrB]
+        nextIterationFunding = None
+    ] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> do
+      v <- totalValue gg instrB
+      abort ("unlocked-instrument SenderSide leg accepted; instrument B value now " <> show v)
+
+-- | A carry naming an instrument that has no @remaining@ balance at all.
+testCarryOnUnknownInstrumentRejected : Script ()
+testCarryOnUnknownInstrumentRejected = do
+  gg <- allocateParty "CarryUnknownGg"
+  alice <- allocateParty "CarryUnknownAlice"
+  bob <- allocateParty "CarryUnknownBob"
+  carol <- allocateParty "CarryUnknownCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-CARRYUNKNOWN"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.02
+  let settlement = mkSettlement [carol] "settlement-carryunknown"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr])
+        with nextIterationFunding = Some (TextMap.fromList [(instr, 0.01)])
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [ AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [("NTT-COIN-NOT-AN-INSTRUMENT", 7.0)])
+    , finalized (theAllocationCidV2 bobRes)
+    ] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "carry on an instrument with no remaining balance was accepted"
+
+-- | Extras / carry on an allocation that never enabled iterated settlement.
+testExtrasRejectedWhenIterationDisabled : Script ()
+testExtrasRejectedWhenIterationDisabled = do
+  gg <- allocateParty "NoIterGg"
+  alice <- allocateParty "NoIterAlice"
+  bob <- allocateParty "NoIterBob"
+  carol <- allocateParty "NoIterCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-NOITER"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.02
+  let settlement = mkSettlement [carol] "settlement-noiter"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [ AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [(instr, 0.005)])
+    , finalized (theAllocationCidV2 bobRes)
+    ] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "nextIterationFunding accepted on a non-iterated allocation"
+
+-- | A zero-amount extra leg: the guard is @> 0.0@, so 0.0 must be rejected.
+testZeroAmountExtraLegRejected : Script ()
+testZeroAmountExtraLegRejected = do
+  gg <- allocateParty "ZeroExtraGg"
+  alice <- allocateParty "ZeroExtraAlice"
+  bob <- allocateParty "ZeroExtraBob"
+  carol <- allocateParty "ZeroExtraCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-ZEROEXTRA"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-zeroextra"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr])
+        with nextIterationFunding = Some TextMap.empty
+      bobSpec = (mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr])
+        with nextIterationFunding = Some TextMap.empty
+      transferLegs =
+        [ AV2.TransferLeg with
+            transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+            amount = 0.01, instrumentId = instr, meta = emptyMetadata
+        , AV2.TransferLeg with
+            transferLegId = "leg-z", sender = basicAccount alice, receiver = basicAccount bob
+            amount = 0.0, instrumentId = instr, meta = emptyMetadata
+        ]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [ AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes
+        extraTransferLegSides = [mkLeg "leg-z" AV2.SenderSide bob 0.0 instr]
+        nextIterationFunding = None
+    , AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 bobRes
+        extraTransferLegSides = [mkLeg "leg-z" AV2.ReceiverSide alice 0.0 instr]
+        nextIterationFunding = None
+    ] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "zero-amount extra leg accepted"
+
+-- | An allocation may be settled once only; a second batch naming the same
+-- (now archived) cid must fail rather than re-mint. Also: the same cid listed
+-- twice within one batch.
+testAllocationCannotSettleTwice : Script ()
+testAllocationCannotSettleTwice = do
+  gg <- allocateParty "TwiceGg"
+  alice <- allocateParty "TwiceAlice"
+  bob <- allocateParty "TwiceBob"
+  carol <- allocateParty "TwiceCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-TWICE"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-twice"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let aliceCid = theAllocationCidV2 aliceRes
+      bobCid = theAllocationCidV2 bobRes
+  _ <- settleBatch factoryCid gg settlement transferLegs [finalized aliceCid, finalized bobCid] [carol]
+  replay <- trySettleBatch factoryCid gg settlement transferLegs
+    [finalized aliceCid, finalized bobCid] [carol]
+  case replay of
+    Left _ -> pure ()
+    Right _ -> abort "settled allocation was settled a second time"
+  coin2 <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  alice2 <- allocate factoryCid gg alice settlement aliceSpec [coin2]
+  bob2 <- allocate factoryCid gg bob settlement bobSpec []
+  dup <- trySettleBatch factoryCid gg settlement transferLegs
+    [ finalized (theAllocationCidV2 alice2)
+    , finalized (theAllocationCidV2 alice2)
+    , finalized (theAllocationCidV2 bob2)
+    ] [carol]
+  case dup of
+    Left _ -> pure ()
+    Right _ -> abort "the same allocation was accepted twice in one batch"
+  v <- totalValue gg instr
+  v === 0.02
+
+-- | Settling after a cancel, and cancelling after a settle, must both fail.
+testNoSettleAfterCancelOrWithdraw : Script ()
+testNoSettleAfterCancelOrWithdraw = do
+  gg <- allocateParty "AfterGg"
+  alice <- allocateParty "AfterAlice"
+  bob <- allocateParty "AfterBob"
+  carol <- allocateParty "AfterCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-AFTER"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-after"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let aliceCid = theAllocationCidV2 aliceRes
+  _ <- submit carol do
+    exerciseCmd aliceCid AV2.Allocation_Cancel with actors = [carol], extraArgs = emptyExtraArgs
+  v1 <- totalValue gg instr
+  v1 === 0.01
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [finalized aliceCid, finalized (theAllocationCidV2 bobRes)] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "a cancelled allocation was settled"
+  v2 <- totalValue gg instr
+  v2 === 0.01
+
+testHappyPathConservesValue : Script ()
+testHappyPathConservesValue = do
+  gg <- allocateParty "HappyGg"
+  alice <- allocateParty "HappyAlice"
+  bob <- allocateParty "HappyBob"
+  carol <- allocateParty "HappyCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-HAPPY"
+      instrumentId = InstrumentId with admin = gg, id = instr
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.006
+  v0 <- totalValue gg instr
+  v0 === 0.006
+  let settlement = mkSettlement [carol] "settlement-happy"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.006 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.006 instr]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  v1 <- totalValue gg instr
+  v1 === 0.006
+  let transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.006, instrumentId = instr, meta = emptyMetadata]
+  _ <- settleBatch factoryCid gg settlement transferLegs
+    [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)] [carol]
+  v2 <- totalValue gg instr
+  v2 === 0.006
+
+----------------------------------------------------------------------
+-- Naked Allocation_Settle: 'settleBatchContextKey' is caller-forgeable by
+-- design (module header); this pins the consequence -- a ReceiverSide-only
+-- allocation settled this way mints unbacked supply, by design (Step 8).
+----------------------------------------------------------------------
+
+testNakedSettleReceiverSideMintsUnbackedByDesign : Script ()
+testNakedSettleReceiverSideMintsUnbackedByDesign = do
+  gg <- allocateParty "NakedGg"
+  alice <- allocateParty "NakedAlice"
+  bob <- allocateParty "NakedBob"
+  carol <- allocateParty "NakedCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-NAKED-UNBACKED"
+      settlement = mkSettlement [carol] "settlement-naked-unbacked"
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 5.0 instr]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  before <- totalValue gg instr
+  before === 0.0
+  let forged = withSettleBatchContext emptyExtraArgs
+  settleRes <- submit (actAs gg <> actAs carol) do
+    exerciseCmd (theAllocationCidV2 bobRes) AV2.Allocation_Settle with
+      actors = [gg, carol], extraTransferLegSides = [], nextIterationFunding = None
+      extraArgs = forged
+  settleRes.output === AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+  after <- totalValue gg instr
+  assertMsg ("naked settle minted unbacked value: " <> show before <> " -> " <> show after)
+    (after == 5.0)
+
+----------------------------------------------------------------------
+-- Iterated settlement over three rounds, with extraTransferLegSides
+----------------------------------------------------------------------
+
+testThreeRoundIteratedConservation : Script ()
+testThreeRoundIteratedConservation = do
+  gg <- allocateParty "Iter3Gg"
+  alice <- allocateParty "Iter3Alice"
+  bob <- allocateParty "Iter3Bob"
+  carol <- allocateParty "Iter3CarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-ITER3"
+      instrumentId = InstrumentId with admin = gg, id = instr
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.05
+  let settlement = mkSettlement [carol] "settlement-iter3"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr])
+        with nextIterationFunding = Some (TextMap.fromList [(instr, 0.04)])
+      bobSpec = (mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr])
+        with nextIterationFunding = Some TextMap.empty
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  v0 <- totalValue gg instr
+  v0 === 0.05
+
+  let carryOf a = AV2.FinalizedAllocation with
+        allocationCid = a, extraTransferLegSides = []
+        nextIterationFunding = Some TextMap.empty
+      carryAmt a x = AV2.FinalizedAllocation with
+        allocationCid = a, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [(instr, x)])
+
+  -- Round 1: spend 0.01, carry 0.03 (0.04 locked remains, so 0.01 comes back).
+  r1 <- settleBatch factoryCid gg settlement transferLegs
+    [carryAmt (theAllocationCidV2 aliceRes) 0.03, carryOf (theAllocationCidV2 bobRes)] [carol]
+  let [a1, b1] = r1.allocationSettleResults
+  v1 <- totalValue gg instr
+  v1 === 0.05
+  aNext1 <- nextCid a1
+  bNext1 <- nextCid b1
+
+  -- Round 2: standing leg recurs, plus an additive extra leg for this round only.
+  let extraLegs = [ mkLeg "leg-x" AV2.SenderSide bob 0.005 instr ]
+      extraRecv = [ mkLeg "leg-x" AV2.ReceiverSide alice 0.005 instr ]
+      transferLegs2 = transferLegs ++
+        [AV2.TransferLeg with
+          transferLegId = "leg-x", sender = basicAccount alice, receiver = basicAccount bob
+          amount = 0.005, instrumentId = instr, meta = emptyMetadata]
+  r2 <- settleBatch factoryCid gg settlement transferLegs2
+    [ AV2.FinalizedAllocation with
+        allocationCid = aNext1, extraTransferLegSides = extraLegs
+        nextIterationFunding = Some (TextMap.fromList [(instr, 0.01)])
+    , AV2.FinalizedAllocation with
+        allocationCid = bNext1, extraTransferLegSides = extraRecv
+        nextIterationFunding = Some TextMap.empty
+    ] [carol]
+  let [a2, b2] = r2.allocationSettleResults
+  v2 <- totalValue gg instr
+  v2 === 0.05
+  aNext2 <- nextCid a2
+  bNext2 <- nextCid b2
+
+  -- Round 3: final round, no carry.
+  r3 <- settleBatch factoryCid gg settlement transferLegs
+    [finalized aNext2, finalized bNext2] [carol]
+  let [a3, b3] = r3.allocationSettleResults
+  a3.output === AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+  b3.output === AV2.AllocationResult_Settled with nextIterationAllocationCid = None
+  v3 <- totalValue gg instr
+  v3 === 0.05
+  locked <- totalLocked gg instr
+  locked === 0.0
+  bobTotal <- do
+    coins <- query @NttCoin gg
+    pure (sum [c.amount | (_, c) <- coins, c.owner == bob, c.instrumentId.id == instr])
+  bobTotal === 0.035
+
+-- | A carry larger than what remains after the round's spend must be
+-- rejected -- otherwise the successor would be funded with value already
+-- handed to the counterparty.
+testCarryCannotExceedRemaining : Script ()
+testCarryCannotExceedRemaining = do
+  gg <- allocateParty "CarryGg"
+  alice <- allocateParty "CarryAlice"
+  bob <- allocateParty "CarryBob"
+  carol <- allocateParty "CarryCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-CARRY"
+      instrumentId = InstrumentId with admin = gg, id = instr
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.02
+  let settlement = mkSettlement [carol] "settlement-carry"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr])
+        with nextIterationFunding = Some (TextMap.fromList [(instr, 0.01)])
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  -- locked 0.02, spends 0.01, so remaining is 0.01 -- ask for 0.0100000001.
+  res <- trySettleBatch factoryCid gg settlement transferLegs
+    [ AV2.FinalizedAllocation with
+        allocationCid = theAllocationCidV2 aliceRes, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [(instr, 0.0100000001)])
+    , finalized (theAllocationCidV2 bobRes)
+    ] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "carry exceeding remaining was accepted -- conservation broken"
+
+----------------------------------------------------------------------
+-- Deadline boundary
+----------------------------------------------------------------------
+
+-- | @settle@ allows @now <= deadline@ and committed @withdraw@ allows
+-- @now > deadline@ -- checks there is no instant at which BOTH are open.
+testSettleAndWithdrawAreDisjointAtDeadline : Script ()
+testSettleAndWithdrawAreDisjointAtDeadline = do
+  gg <- allocateParty "DeadlineGg"
+  alice <- allocateParty "DeadlineAlice"
+  bob <- allocateParty "DeadlineBob"
+  carol <- allocateParty "DeadlineCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-DEADLINE"
+      instrumentId = InstrumentId with admin = gg, id = instr
+  coinCid <- mintCoinV2 factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  let settlement = mkSettlement [carol] "settlement-deadline"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr])
+        with committed = True, settlementDeadline = Some t0
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  -- Exactly AT the deadline: withdraw must be closed...
+  submitMustFail alice do
+    exerciseCmd (theAllocationCidV2 aliceRes) AV2.Allocation_Withdraw with
+      actors = [alice], extraArgs = emptyExtraArgs
+  -- ...and settle must still be open.
+  _ <- settleBatch factoryCid gg settlement transferLegs
+    [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)] [carol]
+  v <- totalValue gg instr
+  v === 0.01
+
+----------------------------------------------------------------------
+-- Pure TextMap arithmetic
+----------------------------------------------------------------------
+
+testTextMapArithmetic : Script ()
+testTextMapArithmetic = do
+  other <- allocateParty "MathOtherside"
+  let a = TextMap.fromList [("x", 10.0), ("y", 5.0)]
+      b = TextMap.fromList [("x", 3.0), ("z", 7.0)]
+  textMapUnionWith (+) a b === TextMap.fromList [("x", 13.0), ("y", 5.0), ("z", 7.0)]
+  textMapUnionWith (+) a TextMap.empty === a
+  textMapUnionWith (+) TextMap.empty a === a
+  textMapNegate a === TextMap.fromList [("x", -10.0), ("y", -5.0)]
+  textMapUnionWith (+) a (textMapNegate a) === TextMap.fromList [("x", 0.0), ("y", 0.0)]
+  -- Duplicate legIds within one side must SUM, not overwrite.
+  let sides =
+        [ mkLeg "L1" AV2.SenderSide other 1.0 "x"
+        , mkLeg "L1" AV2.SenderSide other 2.0 "x"
+        , mkLeg "L2" AV2.ReceiverSide other 4.0 "x"
+        ]
+  sumSide AV2.SenderSide sides === TextMap.fromList [("x", 3.0)]
+  sumSide AV2.ReceiverSide sides === TextMap.fromList [("x", 4.0)]
+  sumSide AV2.SenderSide [] === (TextMap.empty : TextMap.TextMap Decimal)
+
+----------------------------------------------------------------------
+-- SettleBatch's per-leg consistency checks -- the core soundness gate. The
+-- pre-existing suite only covered a MISSING side, never a mismatched one.
+----------------------------------------------------------------------
+
+-- | The two sides of a leg disagree on the amount: the sender's decrement and
+-- the receiver's mint would differ, which is exactly a conservation break.
+testLegAmountMismatchRejected : Script ()
+testLegAmountMismatchRejected = do
+  gg <- allocateParty "AmtGg"
+  alice <- allocateParty "AmtAlice"
+  bob <- allocateParty "AmtBob"
+  carol <- allocateParty "AmtCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-AMT"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-amt"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.001 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let mkBatch amt = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = amt, instrumentId = instr, meta = emptyMetadata]
+      fas = [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)]
+  lo <- trySettleBatch factoryCid gg settlement (mkBatch 0.001) fas [carol]
+  hi <- trySettleBatch factoryCid gg settlement (mkBatch 0.01) fas [carol]
+  case (lo, hi) of
+    (Left _, Left _) -> pure ()
+    _ -> do
+      v <- totalValue gg instr
+      abort ("mismatched leg amounts settled; value now " <> show v)
+
+-- | The two sides of a leg disagree on the instrument.
+testLegInstrumentMismatchRejected : Script ()
+testLegInstrumentMismatchRejected = do
+  gg <- allocateParty "InstrGg"
+  alice <- allocateParty "InstrAlice"
+  bob <- allocateParty "InstrBob"
+  carol <- allocateParty "InstrCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrA = "NTT-COIN-INSTR-A"
+      instrB = "NTT-COIN-INSTR-B"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instrA) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-instr"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instrA]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instrB]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let fas = [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)]
+      mkBatch i = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = i, meta = emptyMetadata]
+  ra <- trySettleBatch factoryCid gg settlement (mkBatch instrA) fas [carol]
+  rb <- trySettleBatch factoryCid gg settlement (mkBatch instrB) fas [carol]
+  case (ra, rb) of
+    (Left _, Left _) -> pure ()
+    _ -> do
+      va <- totalValue gg instrA
+      vb <- totalValue gg instrB
+      abort ("cross-instrument leg settled; A=" <> show va <> " B=" <> show vb)
+
+-- | Allocations minted for a DIFFERENT settlement must not be usable in this
+-- batch.
+testForeignSettlementAllocationRejected : Script ()
+testForeignSettlementAllocationRejected = do
+  gg <- allocateParty "FsGg"
+  alice <- allocateParty "FsAlice"
+  bob <- allocateParty "FsBob"
+  carol <- allocateParty "FsCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-FS"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  let s1 = mkSettlement [carol] "settlement-fs-1"
+      s2 = mkSettlement [carol] "settlement-fs-2"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice s1 aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob s2 bobSpec []
+  res <- trySettleBatch factoryCid gg s1 transferLegs
+    [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)] [carol]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "an allocation from another settlement was accepted"
+
+-- | An empty batch, and a batch with duplicate leg ids.
+testDegenerateBatchesRejected : Script ()
+testDegenerateBatchesRejected = do
+  gg <- allocateParty "DegGg"
+  alice <- allocateParty "DegAlice"
+  bob <- allocateParty "DegBob"
+  carol <- allocateParty "DegCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-DEG"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.01
+  let settlement = mkSettlement [carol] "settlement-deg"
+      aliceSpec = mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr]
+      bobSpec = mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr]
+      leg = AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let fas = [finalized (theAllocationCidV2 aliceRes), finalized (theAllocationCidV2 bobRes)]
+  emptyRes <- trySettleBatch factoryCid gg settlement [] fas [carol]
+  case emptyRes of
+    Left _ -> pure ()
+    Right _ -> abort "empty transferLegs accepted"
+  dupRes <- trySettleBatch factoryCid gg settlement [leg, leg] fas [carol]
+  case dupRes of
+    Left _ -> pure ()
+    Right _ -> abort "duplicate transferLegId accepted"
+
+----------------------------------------------------------------------
+-- Successor lineage
+----------------------------------------------------------------------
+
+-- | @originalAllocationCid@ must keep pointing at the ROUND-1 allocation
+-- across every later round, not at the immediate predecessor.
+testLineagePointsAtRoundOneAcrossRounds : Script ()
+testLineagePointsAtRoundOneAcrossRounds = do
+  gg <- allocateParty "LinGg"
+  alice <- allocateParty "LinAlice"
+  bob <- allocateParty "LinBob"
+  carol <- allocateParty "LinCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instr = "NTT-COIN-LINEAGE"
+  coinCid <- mintCoinV2 factoryCid gg (InstrumentId with admin = gg, id = instr) alice 0.03
+  let settlement = mkSettlement [carol] "settlement-lineage"
+      aliceSpec = (mkSpec gg alice [mkLeg "leg-0" AV2.SenderSide bob 0.01 instr])
+        with nextIterationFunding = Some (TextMap.fromList [(instr, 0.02)])
+      bobSpec = (mkSpec gg bob [mkLeg "leg-0" AV2.ReceiverSide alice 0.01 instr])
+        with nextIterationFunding = Some TextMap.empty
+      transferLegs = [AV2.TransferLeg with
+        transferLegId = "leg-0", sender = basicAccount alice, receiver = basicAccount bob
+        amount = 0.01, instrumentId = instr, meta = emptyMetadata]
+  aliceRes <- allocate factoryCid gg alice settlement aliceSpec [coinCid]
+  bobRes <- allocate factoryCid gg bob settlement bobSpec []
+  let originalAlice = theAllocationCidV2 aliceRes
+      carryAmt a x = AV2.FinalizedAllocation with
+        allocationCid = a, extraTransferLegSides = []
+        nextIterationFunding = Some (TextMap.fromList [(instr, x)])
+      carryNone a = AV2.FinalizedAllocation with
+        allocationCid = a, extraTransferLegSides = []
+        nextIterationFunding = Some TextMap.empty
+  -- locked 0.03, spend 0.01 => remaining 0.02, all carried.
+  r1 <- settleBatch factoryCid gg settlement transferLegs
+    [carryAmt originalAlice 0.02, carryNone (theAllocationCidV2 bobRes)] [carol]
+  let [a1, b1] = r1.allocationSettleResults
+  aNext1 <- nextCid a1
+  bNext1 <- nextCid b1
+  Some gen1 <- queryContractId gg (asConcrete aNext1)
+  gen1.numIterations === 1
+  gen1.originalAllocationCid === Some originalAlice
+  r2 <- settleBatch factoryCid gg settlement transferLegs
+    [carryAmt aNext1 0.005, carryNone bNext1] [carol]
+  let [a2, _] = r2.allocationSettleResults
+  aNext2 <- nextCid a2
+  Some gen2 <- queryContractId gg (asConcrete aNext2)
+  gen2.numIterations === 2
+  -- Still the ORIGINAL, not aNext1.
+  gen2.originalAllocationCid === Some originalAlice

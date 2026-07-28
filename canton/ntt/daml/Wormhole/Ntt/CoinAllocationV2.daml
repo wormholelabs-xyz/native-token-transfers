@@ -75,7 +75,8 @@ returnLockedFundsToAuthorizerV2 admin account amounts =
 -- 'AV2.SettlementFactory_SettleBatch' checking both sides of every leg before
 -- nested-exercising each allocation's settle in one transaction. A naked
 -- settle stays reachable for interface conformance but is an unsafe escape
--- hatch with no counterparty. @lockedAmounts@ is bookkeeping
+-- hatch with no counterparty -- a ReceiverSide-only allocation settled this
+-- way mints unbacked supply. @lockedAmounts@ is bookkeeping
 -- only (no separate escrow holding, same simplification as
 -- 'NttCoinAllocation'/'NttTransferInstruction') -- the real value already
 -- left circulation (archived) at 'AllocationFactory_Allocate' time.
@@ -91,6 +92,9 @@ template NttCoinAllocationV2
   where
     signatory allocation.admin :: accountControlParties authorizerAccount
     observer settlement.executors, legSideOwners allocation.transferLegSides
+    -- The settle credit goes to @authorizerAccount@; leg matching reads
+    -- @allocation.authorizer@. They must be the same account.
+    ensure authorizerAccount == allocation.authorizer
 
     interface instance AV2.Allocation for NttCoinAllocationV2 where
       view = AV2.AllocationView with

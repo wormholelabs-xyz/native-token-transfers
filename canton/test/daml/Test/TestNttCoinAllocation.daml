@@ -267,3 +267,152 @@ testNttCoinExecuteTransferRejectsPastSettleBefore = do
       c.owner === alice
       c.amount === 0.006
     other -> abort ("expected one returned coin, got: " <> show other)
+
+----------------------------------------------------------------------
+-- Replay and deadline-boundary properties audited independently -- ported
+-- unchanged, since they pass against both the pre- and post-fix code.
+----------------------------------------------------------------------
+
+-- | Total genuine 'NttCoin' balance of one party for one instrument, as seen
+-- by gg (a signatory of every 'NttCoin').
+v1CoinBalance : Party -> Party -> InstrumentId -> Script Decimal
+v1CoinBalance gg owner instrumentId = do
+  coins <- query @NttCoin gg
+  pure (sum [c.amount | (_, c) <- coins, c.owner == owner, c.instrumentId == instrumentId])
+
+-- | 'allocation_withdrawImpl' mints a coin and never archives the allocation
+-- explicitly -- if 'Allocation_Withdraw' were nonconsuming this would be an
+-- unbounded mint.
+testV1WithdrawIsNotReplayable : Script ()
+testV1WithdrawIsNotReplayable = do
+  gg <- allocateParty "AuthV1WdrGg"
+  alice <- allocateParty "AuthV1WdrAlice"
+  bob <- allocateParty "AuthV1WdrBob"
+  carol <- allocateParty "AuthV1WdrCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-V1-WDR"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  _ <- submit alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+  gone <- queryContractId gg (coerceContractId @Allocation @NttCoinAllocation allocCid)
+  gone === None
+  submitMustFail alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+  bal <- v1CoinBalance gg alice instrumentId
+  bal === 0.01
+
+testV1CancelIsNotReplayable : Script ()
+testV1CancelIsNotReplayable = do
+  gg <- allocateParty "AuthV1CancelGg"
+  alice <- allocateParty "AuthV1CancelAlice"
+  bob <- allocateParty "AuthV1CancelBob"
+  carol <- allocateParty "AuthV1CancelCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-V1-CANCEL"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  _ <- submit (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_Cancel with extraArgs = emptyExtraArgs
+  gone <- queryContractId gg (coerceContractId @Allocation @NttCoinAllocation allocCid)
+  gone === None
+  submitMustFail (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_Cancel with extraArgs = emptyExtraArgs
+  bal <- v1CoinBalance gg alice instrumentId
+  bal === 0.01
+
+-- | The headline double-spend: settle the allocation to the receiver, then
+-- try to also pull it back to the sender.
+testV1ExecuteThenWithdrawIsBlocked : Script ()
+testV1ExecuteThenWithdrawIsBlocked = do
+  gg <- allocateParty "AuthV1DblGg"
+  alice <- allocateParty "AuthV1DblAlice"
+  bob <- allocateParty "AuthV1DblBob"
+  carol <- allocateParty "AuthV1DblCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-V1-DBL"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  _ <- submit (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+  submitMustFail alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+  submitMustFail (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_Cancel with extraArgs = emptyExtraArgs
+
+  aliceBal <- v1CoinBalance gg alice instrumentId
+  bobBal <- v1CoinBalance gg bob instrumentId
+  aliceBal === 0.004
+  bobBal === 0.006
+
+-- | 'allocation_executeTransferImpl' uses a STRICT @now < settleBefore@. Pin
+-- the exact boundary: at @now == settleBefore@ execute must fail.
+testV1ExecuteAtExactSettleBefore : Script ()
+testV1ExecuteAtExactSettleBefore = do
+  gg <- allocateParty "AuthV1BoundGg"
+  alice <- allocateParty "AuthV1BoundAlice"
+  bob <- allocateParty "AuthV1BoundBob"
+  carol <- allocateParty "AuthV1BoundCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-V1-BOUND"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  -- settleBefore = t0 + 2h exactly.
+  passTime (hours 2)
+  submitMustFail (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+
+-- | 'allocationFactory_allocateImpl' uses a STRICT @now < allocateBefore@. At
+-- @now == allocateBefore@ allocate must fail.
+testV1AllocateAtExactAllocateBefore : Script ()
+testV1AllocateAtExactAllocateBefore = do
+  gg <- allocateParty "AuthV1AllocBoundGg"
+  alice <- allocateParty "AuthV1AllocBoundAlice"
+  bob <- allocateParty "AuthV1AllocBoundBob"
+  carol <- allocateParty "AuthV1AllocBoundCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-V1-ALLOC-BOUND"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  let spec = mkAllocationSpec t0 carol alice bob 0.006 instrumentId
+      atDeadline = spec with
+        settlement = spec.settlement with allocateBefore = t0
+  res <- tryAllocate factoryCid gg atDeadline [coinCid]
+  case res of
+    Left _ -> pure ()
+    Right _ -> abort "allocate succeeded at exactly allocateBefore (expected strict <)"
+
+-- | Withdraw carries NO deadline check at all, so the sender can unilaterally
+-- pull funds out DURING the settlement window, before @settleBefore@, leaving
+-- the executor/receiver with a worthless allocation. Documents the actual
+-- semantics (v2 gates this behind @allocation.committed@; v1 has no such flag).
+testV1WithdrawDuringSettlementWindow : Script ()
+testV1WithdrawDuringSettlementWindow = do
+  gg <- allocateParty "AuthV1WindowGg"
+  alice <- allocateParty "AuthV1WindowAlice"
+  bob <- allocateParty "AuthV1WindowBob"
+  carol <- allocateParty "AuthV1WindowCarolExecutor"
+  factoryCid <- nttCoinFactorySetup gg
+  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-V1-WINDOW"
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  t0 <- getTime
+  res <- allocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) [coinCid]
+  let allocCid = theAllocationCid res
+
+  -- Well inside the settlement window (settleBefore = t0 + 2h).
+  passTime (hours 1)
+  _ <- submit alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs = emptyExtraArgs
+
+  submitMustFail (actAs carol <> actAs alice <> actAs bob) do
+    exerciseCmd allocCid Allocation_ExecuteTransfer with extraArgs = emptyExtraArgs
+  bobBal <- v1CoinBalance gg bob instrumentId
+  bobBal === 0.0

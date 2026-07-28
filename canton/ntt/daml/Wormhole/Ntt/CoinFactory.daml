@@ -32,6 +32,16 @@ import Wormhole.Ntt.CoinAllocation
 import Wormhole.Ntt.CoinAllocationV2
 import Wormhole.Ntt.CoinTransfer
 
+-- | One authorized leg side, flattened across allocations, for SettleBatch's
+-- per-leg matching.
+data LegSideEntry = LegSideEntry with
+  transferLegId : Text
+  side          : AV2.TransferSide
+  authorizer    : HoldingV2.Account
+  otherside     : HoldingV2.Account
+  amount        : Decimal
+  instrumentId  : Text
+
 template NttCoinFactory
   with
     guardianGovernance : Party
@@ -47,9 +57,12 @@ template NttCoinFactory
         assertMsg "ntt: expectedAdmin does not match this factory's admin"
           (arg.expectedAdmin == guardianGovernance)
         forA_ arg.inputHoldingCids \cid -> do
-          hv <- view <$> fetch cid
-          assertMsg "ntt: burn input's instrument does not match the requested instrumentId"
-            (hv.instrumentId == arg.instrumentId)
+          r <- fetchFromInterface @NttCoin cid
+          case r of
+            None -> abort "ntt: burn input is not an NttCoin issued by this registry"
+            Some (_, coin) ->
+              assertMsg "ntt: burn input's instrument does not match the requested instrumentId"
+                (coin.instrumentId == arg.instrumentId)
           archive cid
         -- BurnMintFactory is party-based, not account-based -- mint/burn stays
         -- basic-account-only by construction.
@@ -192,14 +205,17 @@ template NttCoinFactory
             reserveTotals = fromOptional TextMap.empty spec.nextIterationFunding
             requiredTotals = textMapUnionWith (+) round1Totals reserveTotals
 
-        inputViews <- forA arg.inputHoldingCids \cid -> do
-          hv <- view <$> fetch cid
-          assertMsg "ntt: allocation input not owned by the authorizer" (hv.account == spec.authorizer)
-          assertMsg "ntt: allocation input's instrument admin does not match this factory's admin"
-            (hv.instrumentId.admin == guardianGovernance)
-          pure hv
+        inputCoins <- forA arg.inputHoldingCids \cid -> do
+          r <- fetchFromInterface @NttCoin cid
+          case r of
+            None -> abort "ntt: allocation input is not an NttCoin issued by this registry"
+            Some (_, coin) -> do
+              assertMsg "ntt: allocation input not owned by the authorizer" (coinAccountOf coin == spec.authorizer)
+              assertMsg "ntt: allocation input's instrument admin does not match this factory's admin"
+                (coin.instrumentId.admin == guardianGovernance)
+              pure coin
         forA_ arg.inputHoldingCids archive
-        let inputsByInstrument = TextMap.fromListWithR (+) [(hv.instrumentId.id, hv.amount) | hv <- inputViews]
+        let inputsByInstrument = TextMap.fromListWithR (+) [(c.instrumentId.id, c.amount) | c <- inputCoins]
             instruments = dedup (map fst (TextMap.toList requiredTotals) ++ map fst (TextMap.toList inputsByInstrument))
 
         results <- forA instruments \instr -> do
@@ -247,31 +263,40 @@ template NttCoinFactory
         assertMsg "ntt: duplicate transferLegId in transferLegs"
           (length (dedup (map (.transferLegId) arg.transferLegs)) == length arg.transferLegs)
 
+        -- Pinned: the nested Allocation_Settle below makes gg a controller, so the target template must be ours.
         allocViews <- forA arg.allocations \fa -> do
-          av <- view <$> fetch fa.allocationCid
-          assertMsg "ntt: allocation's admin does not match this factory's admin"
-            (av.allocation.admin == guardianGovernance)
-          assertMsg "ntt: allocation was not created for this settlement" (av.settlement == arg.settlement)
-          pure (fa, av)
+          r <- fetchFromInterface @NttCoinAllocationV2 fa.allocationCid
+          case r of
+            None -> abort "ntt: allocation is not an NttCoinAllocationV2 issued by this registry"
+            Some (_, av) -> do
+              assertMsg "ntt: allocation's admin does not match this factory's admin"
+                (av.allocation.admin == guardianGovernance)
+              assertMsg "ntt: allocation was not created for this settlement" (av.settlement == arg.settlement)
+              pure (fa, av)
 
         let entries =
-              [ (s.transferLegId, s.side, av.allocation.authorizer, s.otherside, s.amount, s.instrumentId)
+              [ LegSideEntry with
+                  transferLegId = s.transferLegId, side = s.side
+                  authorizer = av.allocation.authorizer, otherside = s.otherside
+                  amount = s.amount, instrumentId = s.instrumentId
               | (fa, av) <- allocViews, s <- av.allocation.transferLegSides ++ fa.extraTransferLegSides
               ]
 
         forA_ arg.transferLegs \leg -> do
-          let senders = [e | e@(tlid, AV2.SenderSide, _, _, _, _) <- entries, tlid == leg.transferLegId]
-              receivers = [e | e@(tlid, AV2.ReceiverSide, _, _, _, _) <- entries, tlid == leg.transferLegId]
-          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " has no matching SenderSide allocation")
-            (length senders == 1)
-          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " has no matching ReceiverSide allocation")
-            (length receivers == 1)
-          let [(_, _, sAuth, sOther, sAmt, sInstr)] = senders
-              [(_, _, rAuth, rOther, rAmt, rInstr)] = receivers
-          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " SenderSide authorization mismatch")
-            (sAuth == leg.sender && sOther == leg.receiver && sAmt == leg.amount && sInstr == leg.instrumentId)
-          assertMsg ("ntt: transferLeg " <> leg.transferLegId <> " ReceiverSide authorization mismatch")
-            (rAuth == leg.receiver && rOther == leg.sender && rAmt == leg.amount && rInstr == leg.instrumentId)
+          let mine = [e | e <- entries, e.transferLegId == leg.transferLegId]
+              senders = [e | e <- mine, e.side == AV2.SenderSide]
+              receivers = [e | e <- mine, e.side == AV2.ReceiverSide]
+              legErr what = "ntt: transferLeg " <> leg.transferLegId <> " " <> what
+          assertMsg (legErr "has no matching SenderSide allocation") (length senders == 1)
+          assertMsg (legErr "has no matching ReceiverSide allocation") (length receivers == 1)
+          let [s] = senders
+              [r] = receivers
+          assertMsg (legErr "SenderSide authorization mismatch")
+            (s.authorizer == leg.sender && s.otherside == leg.receiver
+              && s.amount == leg.amount && s.instrumentId == leg.instrumentId)
+          assertMsg (legErr "ReceiverSide authorization mismatch")
+            (r.authorizer == leg.receiver && r.otherside == leg.sender
+              && r.amount == leg.amount && r.instrumentId == leg.instrumentId)
 
         assertMsg "ntt: allocations authorize transfer leg sides not covered by the given transferLegs"
           (length entries == 2 * length arg.transferLegs)

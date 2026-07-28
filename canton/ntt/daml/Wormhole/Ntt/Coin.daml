@@ -79,3 +79,7 @@ requireAccountOwner : HoldingV2.Account -> Update Party
 requireAccountOwner acc = case acc.owner of
   Some p -> pure p
   None -> abort "ntt: null-owner accounts are for mint/burn only -- use BurnMintFactory"
+
+-- | The account an 'NttCoin' is held in. Inverse of 'createCoinIn'.
+coinAccountOf : NttCoin -> HoldingV2.Account
+coinAccountOf c = coinAccount c.owner c.provider c.accountId
