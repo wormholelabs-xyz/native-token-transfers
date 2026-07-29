@@ -149,15 +149,10 @@ requireBurnMintFactory = \case
 
 -- | Pin a caller-supplied 'NttFactory' to the canonical, gg-administered
 -- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' — the only factory a VAA-gated
--- choice ('Wormhole.Ntt.Governance.RegisterManagerByVaa', 'SetFactoryByVaa')
--- may ever commit. A VAA cannot name a contract id, so there is no way for a
--- guardian-signed action to vet an arbitrary factory; every ByVaa path is
--- instead restricted to the one factory template gg itself deploys at genesis.
--- Mirrors the caller-supplied-cid template-pins in 'Wormhole.Ntt.CoinFactory'
--- (commit 651bc50a): 'fetchFromInterface' checks the cid is genuinely backed by
--- the 'NttCoinFactory' template — not merely something that implements the
--- 'BurnMintFactory' interface — and the pin also checks the factory's own
--- @guardianGovernance@ matches this deployment's.
+-- choice may ever commit, since a VAA cannot name a contract id and so cannot
+-- vet an arbitrary factory. Checks the cid is genuinely backed by the
+-- 'NttCoinFactory' template (not merely an interface implementer) and that
+-- its @guardianGovernance@ matches this deployment's.
 requireCanonicalFactory : Party -> NttFactory -> Update ()
 requireCanonicalFactory guardianGovernance factory = do
   bmCid <- requireBurnMintFactory factory
@@ -313,9 +308,8 @@ nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) non
 nttRegistrationBindingTag : Text
 nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
 
--- | Text form of 'nttRegistrationBindingFor'. Split out so tests can pin the
--- encoding against fixed strings — the existing vector-pinning convention
--- ('nttInstrumentIdFromText', 'nttNamespaceFromText').
+-- | Text form of 'nttRegistrationBindingFor', split out so tests can pin
+-- the encoding against fixed strings.
 nttRegistrationBindingFromText : Text -> Text -> Int -> Bytes32
 nttRegistrationBindingFromText operatorText adminText nonce =
   normalizeHex (keccak256 (toHex nttRegistrationBindingTag
@@ -326,18 +320,11 @@ nttRegistrationBindingFromText operatorText adminText nonce =
 -- | The 32-byte binding a guardian-signed
 -- 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA must carry in its
 -- @registrationBinding@ field: hash-committed to (operator, admin, nonce),
--- WITH NO @nextId@ in the preimage. A registration VAA is signed off-chain,
--- ahead of the on-ledger registration it authorizes, so it cannot predict
--- which @NttGovernance.nextId@ will still be current when it is relayed;
--- binding to @nextId@ would let any stranger grief a signed registration into
--- permanent invalidity simply by racing a junk registration first (F1). The
--- @nonce@ here is instead the same free-standing @instrumentNonce@
--- 'nttInstrumentIdFor' already uses to let one admin run several deployments.
---
--- @operator@ in the preimage is load-bearing, not incidental: two bridge
--- instances that happen to share the same @guardianGovernance@ party must not
--- both be able to register against the same (admin, nonce) pair — each
--- instance's registration VAAs are scoped to its own operator.
+-- with no @nextId@ in the preimage — a signed-off-chain VAA cannot predict
+-- which @NttGovernance.nextId@ will still be current when relayed, so binding
+-- to it would let a stranger grief a registration by racing a junk one first.
+-- @operator@ is included so two instances sharing a @guardianGovernance@
+-- cannot both register against the same (admin, nonce) pair.
 nttRegistrationBindingFor : Party -> Party -> Int -> Bytes32
 nttRegistrationBindingFor operator admin nonce =
   nttRegistrationBindingFromText (partyToText operator) (partyToText admin) nonce
@@ -549,9 +536,8 @@ template NttManager
     -- for the life of the deployment, not just at registration. Lock/unlock's
     -- transfer factory never wields gg, so it stays @admin@-only.
     --
-    -- Every rotation bumps @factoryEpoch@, which invalidates any
-    -- 'AcceptAdminTransferByVaa' governance VAA the guardians signed against
-    -- the now-superseded factory (see that field's doc comment).
+    -- Every rotation bumps @factoryEpoch@, invalidating any
+    -- 'AcceptAdminTransferByVaa' VAA signed against the superseded factory.
     choice SetFactory : ContractId NttManager
       with
         newFactory : NttFactory
@@ -630,66 +616,19 @@ template NttManager
 
     -- | Governance-VAA-gated admin acceptance: any @executor@ permissionlessly
     -- relays a guardian-signed 'Wormhole.Ntt.Payload.AcceptAdminToGovernance'
-    -- VAA against a standing 'AdminTransferProposal' (the current admin's
-    -- self-signed offer to @guardianGovernance@), completing the handoff with
-    -- no live @guardianGovernance@ signature. This is gg's ONLY opt-in path
-    -- meant for production use — gg's side of the handoff is inherited from
-    -- this manager's own signatories (see the module header), and the old
-    -- admin's side comes from the proposal's standing consent, so the whole
-    -- ceremony needs nobody's live signature but the relayer's (who carries no
-    -- authority of its own). On a burn/mint deployment with an external
-    -- @minter@, the nested 'TransferAdmin' recreate below carries the minter's
-    -- signature inherited from this manager (a signatory on every re-create);
-    -- a gg-minted deployment simply has @minter = None@ and needs nothing
-    -- extra.
+    -- VAA against a standing 'AdminTransferProposal', completing the handoff
+    -- with no live @guardianGovernance@ signature — gg's side is inherited
+    -- from this manager's own signatories, the old admin's from the
+    -- proposal's standing consent.
     --
-    -- Order of checks, each failing closed before anything moves:
+    -- The proposal cid is caller-supplied and validated by its contents, not
+    -- resolved by contract key: Canton 3.x key lookup can be shadowed by a
+    -- decoy created in the relayer's own submission.
     --
-    --   1. The proposal actually offers the role to gg, names this deployment,
-    --      and was made by the deployment's CURRENT admin (a stale proposal
-    --      from a since-replaced admin must not apply — mirrors
-    --      'AcceptAdminTransfer's own check, kept here too for an early,
-    --      specific error message before any VAA work runs). The proposal cid
-    --      is executor-supplied and validated by contents, never resolved by
-    --      contract key: Canton 3.x keys are non-unique and prefer
-    --      same-transaction creates on lookup, so key resolution could be
-    --      shadowed by a decoy minted in the relayer's own submission.
-    --      Contents-vs-committed-state checks cannot. (Interchangeable
-    --      proposals are harmless: the proposal contributes only the old
-    --      admin's consent; nothing gg inherits flows through it.)
-    --   2. The disclosed 'CoreState' is pinned to this deployment's own
-    --      guardian trust anchor and operator (mirrors 'verifyInboundTransfer';
-    --      a compromised operator co-signing a forged CoreState under a
-    --      throwaway gg must not pass).
-    --   3. The VAA verifies and its digest is consumed into gg's replay trie,
-    --      sub-scoped by this deployment's @namespace@ — governance and
-    --      transfer VAAs share one trie, so a governance VAA can never be
-    --      replayed as (or by) a transfer one.
-    --   4. Governance hardening, mirroring the core's own
-    --      'Wormhole.Core.State.SubmitGovernanceVAA': signed by the CURRENT
-    --      guardian set only (not merely an unexpired one — a superseded set's
-    --      governance action must not apply), and the standard emitter chain /
-    --      address checks.
-    --   5. The parsed action's chain, managerAddress, and factoryEpoch must
-    --      match this deployment exactly. @factoryEpoch@ is the real
-    --      TOCTOU pin: it names the exact committed factory the guardian
-    --      quorum vetted when it signed, so a hostile old admin cannot rotate
-    --      in a look-alike factory ('SetFactory' bumps the epoch) between the
-    --      quorum's vetting and this relay. @vettedFactory@, below, is
-    --      trivially satisfied by construction (it is checked against this
-    --      manager's own current @factory@) — the epoch is what actually binds
-    --      the factory the guardians saw. See the @factoryEpoch@ field comment
-    --      for why the VAA binds an epoch rather than the factory's contract
-    --      id (ledger code cannot relate contract ids to payload bytes).
-    --
-    -- @coreStateCid@ is read with a direct 'fetch' rather than a choice-read
-    -- like 'GetGuardianGovernance': 'CoreState' exposes no choice for
-    -- @governanceChainId@/@governanceContract@/@guardianSetIndex@, so there is
-    -- no read choice to call. The fetch is authorized without borrowing any
-    -- extra authority: 'CoreState' is co-signed by @operator@ and
-    -- @guardianGovernance@, and this choice's body already carries both
-    -- (inherited from THIS manager's own signatories, per the module header),
-    -- so 'fetch' here needs nothing beyond what the choice already has.
+    -- @factoryEpoch@ in the parsed action is the TOCTOU pin: it names the
+    -- exact factory the guardian quorum vetted when it signed, so a hostile
+    -- admin cannot rotate in a look-alike factory between vetting and this
+    -- relay ('SetFactory' bumps the epoch on every rotation).
     nonconsuming choice AcceptAdminTransferByVaa : (ContractId NttManager, Optional (ContractId LockedLedger))
       with
         executor      : Party
@@ -730,10 +669,9 @@ template NttManager
         assertMsg "ntt governance: wrong emitter address"
           (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
 
-        -- Exhaustive constructor dispatch (F2): a well-formed but wrong-action
-        -- governance VAA (register or rotate) must abort here, even though
-        -- 'RotateToCanonicalFactory' shares this action's exact byte layout —
-        -- never a shared field-extraction helper across constructors.
+        -- Exhaustive constructor dispatch: a register or rotate VAA must
+        -- abort here, even though 'RotateToCanonicalFactory' shares this
+        -- action's exact byte layout.
         case parseNttGovernance vaa.payload of
           AcceptAdminToGovernance chain targetManagerAddress targetFactoryEpoch -> do
             assertMsg "ntt governance: wrong target chain" (chain == chainId)
@@ -750,45 +688,11 @@ template NttManager
 
     -- | Governance-VAA-gated factory rotation for gg-minted burn/mint
     -- deployments: the guardian quorum vets a specific (chain, managerAddress,
-    -- factoryEpoch) rotation off-chain, and @admin@ relays it here with no
-    -- LIVE gg signature needed — gg's authority (the replay consumer, the
-    -- factory's real mint authority) is inherited from this manager's own
-    -- signatories, exactly like 'AcceptAdminTransferByVaa'. Restricted to
-    -- gg-minted deployments (@tokenConfig == BurnMint && minter == None@):
-    -- an external minter's factory is vetted by a LIVE minter co-signature on
-    -- plain 'SetFactory' instead, and lock/unlock's transfer factory never
-    -- wields gg, so it has no governance action to gate.
-    --
-    -- Order of checks, each failing closed before anything moves:
-    --
-    --   1. The restriction above — cheap, and skips VAA work entirely for a
-    --      deployment this choice was never meant for.
-    --   2. The disclosed 'CoreState' is pinned to this deployment's own
-    --      guardian trust anchor and operator (mirrors
-    --      'AcceptAdminTransferByVaa'; a compromised operator co-signing a
-    --      forged CoreState under a throwaway gg must not pass).
-    --   3. The VAA verifies and its digest is consumed into gg's replay trie,
-    --      sub-scoped by this deployment's @namespace@ — the SAME trie
-    --      'Transfer'/'Release'/'Mint'/'AcceptAdminTransferByVaa' share, so a
-    --      rotation VAA can never be replayed as (or by) any of them.
-    --   4. Governance hardening (current guardian set only; standard emitter
-    --      chain/address checks), mirroring the core's own
-    --      'Wormhole.Core.State.SubmitGovernanceVAA'.
-    --   5. Exhaustive constructor dispatch (F2): an accept-admin or
-    --      registration VAA — even one that happens to share this action's
-    --      byte layout — must abort here, never silently satisfy the rotation.
-    --   6. The parsed action's chain, managerAddress, and factoryEpoch must
-    --      match this deployment exactly — the same TOCTOU pin
-    --      'AcceptAdminTransferByVaa's @factoryEpoch@ check documents:
-    --      @factoryEpoch@ names the exact committed factory the quorum vetted,
-    --      so a stale rotation VAA can never apply after a later rotation.
-    --   7. Factory template-pin ('requireCanonicalFactory'): a VAA cannot name
-    --      a contract id, so a ByVaa rotation can only ever commit the
-    --      canonical, gg-administered 'Wormhole.Ntt.CoinFactory.NttCoinFactory'.
-    --
-    -- Plain 'SetFactory' (live, minter-co-signed) remains for external
-    -- minters and lock/unlock; this choice is its VAA-gated counterpart for
-    -- gg-minted deployments only.
+    -- factoryEpoch) rotation off-chain, and @admin@ relays it with no live gg
+    -- signature needed, mirroring 'AcceptAdminTransferByVaa'. Restricted to
+    -- gg-minted deployments (@tokenConfig == BurnMint && minter == None@);
+    -- an external minter rotates via a live-co-signed plain 'SetFactory'
+    -- instead, and lock/unlock's transfer factory never wields gg.
     choice SetFactoryByVaa : ContractId NttManager
       with
         newFactory    : NttFactory

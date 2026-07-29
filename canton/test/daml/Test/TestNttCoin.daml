@@ -1,13 +1,10 @@
 -- | Daml Script tests for 'Wormhole.Ntt.Coin': the genesis, gg-owned
 -- 'NttCoinFactory' and its paired 'NttCoin' holding.
 --
--- Unlike 'Test.TestNtt's 'MockBurnMintFactory' (one hardcoded instrument per
--- freshly-created instance), 'NttCoinFactory' is a single, real, multi-tenant
--- singleton meant to be committed by many unrelated deployments — so most
--- tests here exist to pin down properties the mock never needed: that
--- @expectedAdmin@ is actually validated, that one instrument's coins can't be
--- burned against another instrument's id, and that the same factory cid
--- really does serve two independent admins' deployments.
+-- Unlike 'Test.TestNtt's single-instrument 'MockBurnMintFactory', the real
+-- 'NttCoinFactory' is a multi-tenant singleton, so these tests pin down
+-- @expectedAdmin@ validation, cross-instrument burn isolation, and sharing
+-- across independent admins' deployments.
 module Test.TestNttCoin where
 
 import Daml.Script
@@ -154,8 +151,7 @@ testBurnMintRejectsZeroAmountOutput = do
   expectAbort "NttCoin" res
 
 ----------------------------------------------------------------------
--- Defensive checks a multi-tenant factory needs that a one-instrument mock
--- never did
+-- Defensive checks specific to a multi-tenant factory
 ----------------------------------------------------------------------
 
 testNttCoinRejectsMismatchedAdminInstrument : Script ()
@@ -199,9 +195,8 @@ testNttCoinRejectsCrossInstrumentBurn = do
 -- Canonical sharing across unrelated deployments
 ----------------------------------------------------------------------
 
--- | One 'NttCoinFactory' cid; two different admins each register their own
--- burn/mint deployment against it via the real 'RegisterManager' — proving
--- genuine canonical sharing, not per-deployment duplication.
+-- | One 'NttCoinFactory' cid served to two different admins' deployments —
+-- proving genuine sharing, not per-deployment duplication.
 testNttCoinFactoryServesTwoDistinctAdmins : Script ()
 testNttCoinFactoryServesTwoDistinctAdmins = do
   (operator, gg, _) <- nttSetup
@@ -226,14 +221,9 @@ testNttCoinFactoryServesTwoDistinctAdmins = do
 -- End-to-end round trip against the real factory
 ----------------------------------------------------------------------
 
--- | Register a real burn/mint deployment against 'factoryCid' (mirrors
--- 'Test.TestNtt.deploy's BurnMint branch, substituting the real factory for
--- 'MockBurnMintFactory'), then: seed alice with a coin, burn it via an
--- outbound 'Transfer' (checking change), and mint a fresh coin to alice via
--- 'Deposit' (mirroring 'Test.TestNtt.testDepositMintSucceeds' — a full
--- VAA-driven 'Mint' needs a fixture naming a fixed party, per this suite's own
--- documented limitation that a static VAA fixture cannot name a freshly
--- allocated Party; see 'Test.TestNtt' module header).
+-- | End-to-end round trip against the real factory: mint, burn via outbound
+-- 'Transfer' (checking change), then re-mint via 'Deposit' -- not a
+-- VAA-driven 'Mint', since a static VAA fixture can't name a fresh Party.
 testNttCoinEndToEndRoundTrip : Script ()
 testNttCoinEndToEndRoundTrip = do
   (operator, gg, csId) <- nttSetup

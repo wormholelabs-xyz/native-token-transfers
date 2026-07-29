@@ -1,7 +1,5 @@
--- | Daml Script tests for the 'HoldingV2'/'TransferFactory' v1+v2 additions
--- to 'Wormhole.Ntt.CoinFactory': ordinary, non-bridge transfers of 'NttCoin'
--- via the standard CIP-0056/CIP-0112 Token Standard interfaces, independent
--- of NTT's own burn/mint bridge flow.
+-- | Tests for the 'HoldingV2'/'TransferFactory' v1+v2 'NttCoin' transfer
+-- paths (CIP-0056/CIP-0112), independent of the burn/mint bridge flow.
 {-# LANGUAGE AllowAmbiguousTypes #-}
 module Test.TestNttCoinTransfer where
 
@@ -33,7 +31,7 @@ basicAccount : Party -> HoldingV2.Account
 basicAccount p = HoldingV2.Account with owner = Some p, provider = None, id = ""
 
 -- | A provider-delegated account: @owner@ is the account holder, @provider@
--- co-signs every movement (see module header's authority invariant).
+-- co-signs every movement.
 providerAccount : Party -> Party -> HoldingV2.Account
 providerAccount owner provider = HoldingV2.Account with owner = Some owner, provider = Some provider, id = ""
 
@@ -56,19 +54,13 @@ extraArgsWithPreapproval cid = ExtraArgs with
     values = TextMap.fromList [(transferPreapprovalContextKey, AV_ContractId (coerceContractId cid))]
   meta = emptyMetadata
 
--- | 'NttCoinFactory' is @signatory guardianGovernance@ alone, so a submitter
--- who isn't gg needs it disclosed before they can exercise a choice on it
--- (visibility, distinct from authorization -- 'TransferFactory_Transfer's
--- controller is the sender alone, but Canton privacy still requires the
--- submitting participant to have the contract in view).
+-- | 'NttCoinFactory' is @signatory guardianGovernance@ alone; disclose it so
+-- a non-gg submitter has visibility to exercise a choice on it.
 discloseFactory : Party -> ContractId NttCoinFactory -> Script Disclosure
 discloseFactory gg factoryCid = fromSome <$> queryDisclosure gg factoryCid
 
 -- | Direct-child 'Exercised' events of a given choice name whose interface
--- template id matches @t@, within one level of a transaction tree's events
--- (not recursive) -- used to confirm/deny the presence of a nested v1
--- @TransferInstruction_Accept@ node under an outer v2 accept, distinguishing
--- it from the (identically-named) v2 choice by its 'AnyChoice' template rep.
+-- template matches @t@, distinguishing e.g. a nested v1 accept from v2's own.
 exercisesOf : forall t. HasTemplateTypeRep t => Text -> [TreeEvent] -> [Exercised]
 exercisesOf choiceName events = [e | ExercisedEvent e <- events, e.choice == choiceName, matchesRep e]
   where
@@ -192,7 +184,6 @@ testNttCoinTransferAcceptCompletesPendingV1 = do
   let TIV1.TransferInstructionResult_Pending{transferInstructionCid} = res.output
       instrCid = coerceContractId @TIV1.TransferInstruction @NttTransferInstruction transferInstructionCid
 
-  -- alice (sender) cannot accept; bob (receiver) can.
   submitMustFail alice do exerciseCmd transferInstructionCid TIV1.TransferInstruction_Accept with extraArgs = emptyExtraArgs
   acceptRes <- submit bob do
     exerciseCmd transferInstructionCid TIV1.TransferInstruction_Accept with extraArgs = emptyExtraArgs
@@ -222,7 +213,6 @@ testNttCoinTransferRejectReturnsFundsToSenderV1 = do
       extraArgs = emptyExtraArgs
   let TIV1.TransferInstructionResult_Pending{transferInstructionCid} = res.output
 
-  -- bob (sender-only choice) cannot withdraw; alice cannot accept/reject (not receiver).
   submitMustFail alice do exerciseCmd transferInstructionCid TIV1.TransferInstruction_Reject with extraArgs = emptyExtraArgs
   rejectRes <- submit bob do
     exerciseCmd transferInstructionCid TIV1.TransferInstruction_Reject with extraArgs = emptyExtraArgs
@@ -284,14 +274,8 @@ testNttCoinTransferRejectsMismatchedPreapprovalV1 = do
   -- receiver != owner mismatch aborts inside TransferPreapproval_Receive.
   expectAbort "preapproval owner is not this transfer's receiver" res
 
--- | Exploit path: with EMPTY inputs and a NEGATIVE amount, the old
--- @total >= amount@ coverage check (@0.0 >= -0.01@) would pass and
--- @change = total - amount@ (@0.0 - (-0.01) = 0.01@) would mint a
--- positive change coin from nothing -- the receiver-side create also uses
--- the caller-supplied negative @amount@ directly, but that path is never
--- reached because the new up-front positivity guard aborts first. Confirms
--- the fix rejects the pure mint-from-nothing case and that the transaction
--- fails atomically (no coin is created for either party).
+-- | With empty inputs and a negative amount, the positivity guard must abort
+-- before the coverage/change arithmetic can mint a change coin from nothing.
 testNttCoinTransferRejectsNegativeAmountV1 : Script ()
 testNttCoinTransferRejectsNegativeAmountV1 = do
   gg <- allocateParty "TransferNegV1Gg"
@@ -310,10 +294,8 @@ testNttCoinTransferRejectsNegativeAmountV1 = do
   coins <- query @NttCoin gg
   coins === []
 
--- | v2 counterpart: empty inputs, negative amount, both actors present (so
--- the old code path would have completed synchronously and minted a
--- positive receiver coin from nothing). Confirms the fix rejects it and
--- that the transaction fails atomically.
+-- | v2 counterpart: same negative-amount exploit check, with both actors
+-- present so the transfer would otherwise complete synchronously.
 testNttCoinTransferRejectsNegativeAmountV2 : Script ()
 testNttCoinTransferRejectsNegativeAmountV2 = do
   gg <- allocateParty "TransferNegV2Gg"
@@ -403,10 +385,9 @@ testNttCoinTransferV2PendingWhenOnlySenderIsActor = do
     TIV2.TransferInstructionResult_Pending _ -> pure ()
     other -> abort ("expected Pending, got: " <> show other)
 
--- | Phase 2: sub-accounts and provider-delegated accounts are genuine,
--- composable accounts (see other tests in this section) -- only the
--- null-owner account (reserved for mint/burn, routed exclusively through
--- 'BurnMintFactory') is rejected here.
+-- | Sub-accounts and provider-delegated accounts are ordinary accounts; only
+-- the null-owner account (reserved for mint/burn via 'BurnMintFactory') is
+-- rejected here.
 testNttCoinTransferV2RejectsNullOwnerAccount : Script ()
 testNttCoinTransferV2RejectsNullOwnerAccount = do
   gg <- allocateParty "TransferV2NullOwnerGg"
@@ -432,12 +413,11 @@ testNttCoinTransferV2RejectsNullOwnerAccount = do
   expectAbort "null-owner accounts are for mint/burn only" res
 
 ----------------------------------------------------------------------
--- 1A -- v2 TransferInstruction accept/reject/withdraw must self-archive
+-- v2 TransferInstruction accept/reject/withdraw must self-archive
 ----------------------------------------------------------------------
 
--- | Drive a v2 transfer to the pending state (only the sender is an actor,
--- so 'nttTransferCore' falls through to 'CorePendingNeeded') and return the
--- resulting v2-typed instruction handle.
+-- | Drive a v2 transfer to pending (only the sender is an actor) and return
+-- the resulting instruction handle.
 mkPendingTransferV2
   : ContractId NttCoinFactory -> Party -> Party -> Party -> InstrumentId -> Decimal -> [ContractId Holding]
   -> Script (ContractId TIV2.TransferInstruction)
@@ -484,20 +464,14 @@ testNttCoinTransferV2AcceptArchivesInstruction = do
     exerciseCmd instrCid TIV2.TransferInstruction_Accept with actors = [bob], extraArgs = emptyExtraArgs
 
 ----------------------------------------------------------------------
--- v1-nesting compatibility: v2 Accept/Reject/Withdraw SHOULD nest the
--- corresponding v1 (consuming) choice "where possible" (token-standard
--- TransferInstructionV2 doc), so v1 transaction parsers still see a familiar
--- v1 exercise node. Accept's nesting is conditional on the receiver
--- account's authority shape (see the module comment on 'NttTransferInstruction's
--- v2 accept impl); Reject/Withdraw nest unconditionally for every account
--- shape (see .claude/tasks/ntt-v1-nesting-compat.md).
+-- v1-nesting compatibility: v2 Accept/Reject/Withdraw nest the corresponding
+-- v1 choice where possible, so v1 transaction parsers still see a familiar
+-- v1 exercise node. Accept's nesting depends on the receiver account's
+-- authority shape; Reject/Withdraw nest unconditionally.
 ----------------------------------------------------------------------
 
--- | Basic receiver account (provider = None, id = "") -- the common case:
--- v2 accept nests v1's own consuming Accept, so the transaction tree shows a
--- nested v1 @TransferInstruction_Accept@ node under the outer v2 exercise,
--- and the instruction is archived by v1's own consuming choice rather than
--- an explicit v2-side archive.
+-- | Basic receiver account: v2 accept nests v1's own consuming Accept, and
+-- the instruction is archived by that nested choice.
 testNttCoinTransferV2AcceptNestsV1ForBasicReceiver : Script ()
 testNttCoinTransferV2AcceptNestsV1ForBasicReceiver = do
   gg <- allocateParty "TransferV2AcceptNestBasicGg"
@@ -517,8 +491,6 @@ testNttCoinTransferV2AcceptNestsV1ForBasicReceiver = do
     other -> abort ("expected Completed, got: " <> show other)
   archived <- queryContractId gg (coerceContractId @TIV2.TransferInstruction @NttTransferInstruction instrCid)
   archived === None
-  -- Exactly one root exercise (the outer v2 accept), with exactly one nested
-  -- v1 TransferInstruction_Accept exercise among its children.
   case tree.rootEvents of
     [ExercisedEvent outer] -> do
       outer.choice === "TransferInstruction_Accept"
@@ -527,10 +499,8 @@ testNttCoinTransferV2AcceptNestsV1ForBasicReceiver = do
         other -> abort ("expected exactly one nested v1 Accept exercise, got: " <> show other)
     other -> abort ("expected exactly one root event, got: " <> show other)
 
--- | Sub-account receiver (no provider, but @id /= ""@): the same authority
--- shape as a basic account -- owner authority alone suffices -- so nesting
--- applies here too, and the account's @id@ (sub-account data) survives
--- through the nested v1 create untouched.
+-- | Sub-account receiver: same authority shape as a basic account, so
+-- nesting applies here too and the sub-account id survives through.
 testNttCoinTransferV2AcceptNestsV1ForSubAccountReceiver : Script ()
 testNttCoinTransferV2AcceptNestsV1ForSubAccountReceiver = do
   gg <- allocateParty "TransferV2AcceptNestSubGg"
@@ -616,7 +586,7 @@ testNttCoinTransferV2WithdrawArchivesInstruction = do
     exerciseCmd instrCid TIV2.TransferInstruction_Withdraw with actors = [alice], extraArgs = emptyExtraArgs
 
 ----------------------------------------------------------------------
--- 1B -- executeBefore / requestedAt window enforcement
+-- executeBefore / requestedAt window enforcement
 ----------------------------------------------------------------------
 
 testNttCoinTransferRejectsExpiredExecuteBeforeV1 : Script ()
@@ -688,10 +658,8 @@ testNttCoinTransferRejectsFutureRequestedAtV2 = do
       extraArgs = emptyExtraArgs
   expectAbort "requestedAt must not be in the future" res
 
--- | Construct a pending v1 transfer whose 'executeBefore' has already
--- passed by the time accept is attempted (ledger time advanced via
--- 'passTime'), and confirm accept is gated while reject/withdraw still
--- return funds -- the desired cleanup path stays open after expiry.
+-- | A pending v1 transfer whose 'executeBefore' has passed by the time
+-- accept is attempted: accept is gated, but reject/withdraw still return funds.
 testNttCoinTransferAcceptRejectedAfterExecuteBefore : Script ()
 testNttCoinTransferAcceptRejectedAfterExecuteBefore = do
   gg <- allocateParty "TransferAcceptExpiredGg"
@@ -725,16 +693,12 @@ testNttCoinTransferAcceptRejectedAfterExecuteBefore = do
     other -> abort ("expected one returned coin, got: " <> show other)
 
 ----------------------------------------------------------------------
--- Phase 2 -- composability: provider-delegated accounts and sub-accounts on
--- both the send and receive sides of the v2 paths.
+-- Composability: provider-delegated accounts and sub-accounts on both the
+-- send and receive sides of the v2 paths.
 ----------------------------------------------------------------------
 
--- | A provider-managed receiver completes synchronously once BOTH the
--- owner and the provider are present in @actors@ (the authority split
--- 'accountControlParties' enforces); with the provider missing, the
--- transfer falls through to the pending path exactly like any other
--- receiver-authority-absent case -- the receiver is never credited without
--- the provider's own authority.
+-- | A provider-managed receiver completes synchronously only when both
+-- owner and provider are present in @actors@; otherwise it falls to pending.
 testTransferV2ToProviderManagedReceiver : Script ()
 testTransferV2ToProviderManagedReceiver = do
   gg <- allocateParty "TransferV2ProviderRecvGg"
@@ -756,8 +720,6 @@ testTransferV2ToProviderManagedReceiver = do
         meta = emptyMetadata
   factoryDisc <- discloseFactory gg factoryCid
 
-  -- Owner + provider both present ⇒ completes synchronously, and the
-  -- resulting coin's v2 view carries the full provider account.
   coinCid1 <- mintCoin factoryCid gg instrumentId alice 0.01
   t0 <- getTime
   res <- submit (actAs alice <> actAs bob <> actAs provider <> disclose factoryDisc) do
@@ -772,8 +734,6 @@ testTransferV2ToProviderManagedReceiver = do
       hv2.amount === 0.006
     other -> abort ("expected Completed, got: " <> show other)
 
-  -- Provider missing from actors ⇒ receiver authority is incomplete, so the
-  -- transfer goes pending instead of crediting the receiver anyway.
   coinCid2 <- mintCoin factoryCid gg instrumentId alice 0.01
   t1 <- getTime
   res2 <- submit (actAs alice <> actAs bob <> disclose factoryDisc) do
@@ -785,8 +745,7 @@ testTransferV2ToProviderManagedReceiver = do
     TIV2.TransferInstructionResult_Pending _ -> pure ()
     other -> abort ("expected Pending when the provider's authority is missing, got: " <> show other)
 
--- | A sub-account sender (a plain owner, distinguished only by a non-empty
--- @accountId@) transfers exactly like a basic account, and both the pending
+-- | A sub-account sender transfers like a basic account; both the pending
 -- instruction and the change coin carry the sub-account through.
 testTransferV2FromSubAccountSender : Script ()
 testTransferV2FromSubAccountSender = do
@@ -797,9 +756,8 @@ testTransferV2FromSubAccountSender = do
   let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-SUB-SENDER"
       instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
       senderAcct = subAccount alice "sub-1"
-  -- 'mintCoin'/'BurnMintOutput' only produce basic accounts -- create the
-  -- sub-account holding directly (admin + owner authority, no provider) to
-  -- seed this test.
+  -- 'mintCoin' only produces basic accounts; create the sub-account holding
+  -- directly to seed this test.
   coinCid <- submit (actAs gg <> actAs alice) do
     createCmd NttCoin with instrumentId, owner = alice, provider = None, accountId = "sub-1", amount = 0.01
   factoryDisc <- discloseFactory gg factoryCid
@@ -829,9 +787,8 @@ testTransferV2FromSubAccountSender = do
       hv2.amount === 0.004
     other -> abort ("expected one change coin carrying the sub-account, got: " <> show other)
 
--- | A provider-managed receiver with a matching standing 'TransferPreapproval'
--- (signed by owner + provider jointly, matching the account's own
--- signatories) completes synchronously, same as the basic-account case.
+-- | A provider-managed receiver with a matching standing preapproval (signed
+-- by owner + provider jointly) completes synchronously, like the basic-account case.
 testTransferV2PreapprovalProviderAccount : Script ()
 testTransferV2PreapprovalProviderAccount = do
   gg <- allocateParty "TransferV2PreapprovalProviderGg"
@@ -869,13 +826,8 @@ testTransferV2PreapprovalProviderAccount = do
     other -> abort ("expected Completed, got: " <> show other)
 
 -- | No standing preapproval, provider-managed receiver ⇒ pending; accepting
--- requires the receiver's owner AND provider authority (the create of the
--- receiver's coin needs both signatures, since 'NttCoin's own signatories are
--- @admin, owner, provider@) -- and the instruction is archived on accept
--- (1A, preserved here through Phase 2's account model). A provider-managed
--- receiver always takes the direct (non-nested) v2 accept body -- see the
--- module comment on 'NttTransferInstruction's v2 accept -- confirmed below
--- via the transaction tree showing no nested v1 Accept exercise node.
+-- requires both owner and provider authority, and takes the direct
+-- (non-nested) v2 accept path.
 testTransferV2PendingProviderReceiverAccept : Script ()
 testTransferV2PendingProviderReceiverAccept = do
   gg <- allocateParty "TransferV2PendingProviderGg"
@@ -905,8 +857,7 @@ testTransferV2PendingProviderReceiverAccept = do
   let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
       instrCid = coerceContractId @TIV2.TransferInstruction @NttTransferInstruction transferInstructionCid
 
-  -- bob alone lacks the provider's authority to create the provider-managed
-  -- receiver coin -- the accept must fail.
+  -- bob alone lacks the provider's authority; accept must fail.
   submitMustFail bob do
     exerciseCmd transferInstructionCid TIV2.TransferInstruction_Accept with actors = [bob], extraArgs = emptyExtraArgs
 
@@ -918,8 +869,6 @@ testTransferV2PendingProviderReceiverAccept = do
       Some hv2 <- queryInterfaceContractId gg rcid
       hv2.account === receiverAcct
       hv2.amount === 0.006
-      -- Direct branch: no nested v1 TransferInstruction_Accept anywhere in
-      -- the tree (only the outer v2 exercise, its create, and its archive).
       case tree.rootEvents of
         [ExercisedEvent outer] ->
           case exercisesOf @TIV1.TransferInstruction "TransferInstruction_Accept" outer.childEvents of
@@ -934,12 +883,9 @@ testTransferV2PendingProviderReceiverAccept = do
 -- v2 TransferInstruction_Reject/Withdraw must validate `actors`
 ----------------------------------------------------------------------
 
--- | Reject returns the locked funds to the sender -- an ambient signatory of
--- 'NttTransferInstruction' -- so without validating `actors`, any party who
--- can get itself into `actors` (e.g. gg, ambiently a signatory, or the
--- sender itself) could unilaterally kill a pending transfer the receiver
--- never agreed to reject. Confirms only the receiver's account authority
--- (the interface's own "recipient's decision" contract) can reject.
+-- | Reject returns funds to the sender, so without validating @actors@, any
+-- party able to include itself (e.g. gg, an ambient signatory) could reject
+-- on the receiver's behalf. Only the receiver's account authority may reject.
 testNttCoinTransferV2RejectRequiresReceiverAuthority : Script ()
 testNttCoinTransferV2RejectRequiresReceiverAuthority = do
   gg <- allocateParty "TransferV2RejectAuthGg"
@@ -950,9 +896,7 @@ testNttCoinTransferV2RejectRequiresReceiverAuthority = do
   coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
   instrCid <- mkPendingTransferV2 factoryCid gg alice bob instrumentId 0.006 [coinCid]
 
-  -- gg is a signatory of the instruction (so it needs no disclosure to
-  -- submit) but is neither the sender nor the receiver -- gg alone must not
-  -- be able to reject on the receiver's behalf.
+  -- gg is a signatory (no disclosure needed) but neither sender nor receiver.
   ggOnly <- trySubmit gg do
     exerciseCmd instrCid TIV2.TransferInstruction_Reject with actors = [gg], extraArgs = emptyExtraArgs
   expectAbort "recipient account's authority" ggOnly
@@ -975,11 +919,9 @@ testNttCoinTransferV2RejectRequiresReceiverAuthority = do
       c.amount === 0.006
     other -> abort ("expected one returned coin, got: " <> show other)
 
--- | Withdraw also returns the locked funds to the sender, so the same
--- griefing concern applies from the other direction: without validating
--- `actors`, gg or the receiver could unilaterally kill a pending transfer
--- the sender never asked to withdraw. Confirms only the sender's account
--- authority (the interface's own "sender's decision" contract) can withdraw.
+-- | Withdraw returns funds to the sender, so without validating @actors@, gg
+-- or the receiver could withdraw on the sender's behalf. Only the sender's
+-- account authority may withdraw.
 testNttCoinTransferV2WithdrawRequiresSenderAuthority : Script ()
 testNttCoinTransferV2WithdrawRequiresSenderAuthority = do
   gg <- allocateParty "TransferV2WithdrawAuthGg"
@@ -1015,14 +957,11 @@ testNttCoinTransferV2WithdrawRequiresSenderAuthority = do
 
 ----------------------------------------------------------------------
 -- v1-nesting compatibility: v2 Reject/Withdraw nest v1's own consuming
--- choice unconditionally (unlike accept, there is no receiver-provider
--- authority bottleneck -- see the module comment on the reject/withdraw
--- impls in Wormhole.Ntt.CoinTransfer).
+-- choice unconditionally (unlike accept, there is no authority bottleneck).
 ----------------------------------------------------------------------
 
--- | v2 Reject nests v1's own 'TIV1.TransferInstruction_Reject' -- safe for
--- every account shape (the sender-side credit draws authority from the
--- instruction's own signatories, not from the reject controller).
+-- | v2 Reject nests v1's own 'TIV1.TransferInstruction_Reject' for every
+-- account shape.
 testNttCoinTransferV2RejectNestsV1 : Script ()
 testNttCoinTransferV2RejectNestsV1 = do
   gg <- allocateParty "TransferV2RejectNestGg"
@@ -1086,12 +1025,8 @@ testNttCoinTransferV2WithdrawNestsV1 = do
   archived === None
 
 -- | v2 Withdraw nests v1's own 'TIV1.TransferInstruction_Withdraw' even for a
--- PROVIDER-MANAGED sender -- unlike accept, withdraw/reject have no
--- receiver-provider-style authority bottleneck: the sender-side credit
--- inside v1's own impl draws its authority from the instruction's
--- signatories (which include the sender's provider), and the v2 actor
--- assertion (kept verbatim, run first) already guarantees the sender
--- account's owner+provider are present before nesting is attempted.
+-- provider-managed sender, since the sender-side credit draws its authority
+-- from the instruction's own signatories (which include the provider).
 testNttCoinTransferV2WithdrawProviderManagedSenderNestsV1 : Script ()
 testNttCoinTransferV2WithdrawProviderManagedSenderNestsV1 = do
   gg <- allocateParty "TransferV2WithdrawProviderSenderGg"
@@ -1102,8 +1037,8 @@ testNttCoinTransferV2WithdrawProviderManagedSenderNestsV1 = do
   let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-V2-WITHDRAW-PROVIDER-SENDER"
       instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
       senderAcct = providerAccount alice provider
-  -- 'mintCoin' only produces basic accounts -- create the provider-managed
-  -- sender holding directly (admin + owner + provider authority).
+  -- 'mintCoin' only produces basic accounts; create the provider-managed
+  -- holding directly.
   coinCid <- submit (actAs gg <> actAs alice <> actAs provider) do
     createCmd NttCoin with instrumentId, owner = alice, provider = Some provider, accountId = "", amount = 0.01
   factoryDisc <- discloseFactory gg factoryCid

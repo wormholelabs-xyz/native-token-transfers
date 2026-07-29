@@ -191,14 +191,9 @@ testAllocateV2RejectsUnderfundedRequiredTotal = do
   res <- tryAllocate factoryCid gg alice settlement spec [coinCid]
   expectAbort "do not cover the allocation's required funding" res
 
--- | Exploit path: 'spec.transferLegSides' amounts were already checked
--- positive, but 'spec.nextIterationFunding' fed straight into
--- @requiredTotals@/@change@ unchecked. With a NEGATIVE reserve entry,
--- @requiredTotals@ for that instrument would be reduced below the real
--- SenderSide need, letting @change = have - need@ mint a positive change
--- coin larger than what was actually put in. A valid, positive SenderSide
--- leg is present here specifically to isolate the check under test to the
--- reserve entry, not the leg amounts (already covered elsewhere).
+-- | 'nextIterationFunding' feeds @requiredTotals@/@change@ unchecked; a
+-- NEGATIVE reserve entry would let @change = have - need@ mint a positive
+-- coin larger than what was actually put in.
 testAllocateV2RejectsNegativeNextIterationFunding : Script ()
 testAllocateV2RejectsNegativeNextIterationFunding = do
   gg <- allocateParty "AllocV2NegReserveGg"
@@ -537,15 +532,11 @@ testAllocateV2RejectsNonAuthorizerActor = do
   expectAbort "requires the authorizer account's owner and provider authority" res
 
 ----------------------------------------------------------------------
--- 1D -- footgun guard: naked Allocation_Settle outside SettleBatch
+-- Footgun guard: naked Allocation_Settle outside SettleBatch
 ----------------------------------------------------------------------
 
--- | A direct 'Allocation_Settle' (bypassing 'SettlementFactory_SettleBatch')
--- is already gg+executor authority-gated, but it has no automatic
--- counterparty and so no automatic soundness check either -- this is a
--- footgun guard against an accidental direct call, not a security boundary
--- (see the module header and 'settleBatchContextKey'). The guarded
--- happy path is already proven by 'testSettleBatchHappyPathTwoAllocations'.
+-- | A direct 'Allocation_Settle' has no automatic counterparty and so no
+-- automatic soundness check -- a footgun guard, not a security boundary.
 testNakedAllocationSettleIsRejected : Script ()
 testNakedAllocationSettleIsRejected = do
   gg <- allocateParty "NakedSettleGg"
@@ -566,14 +557,11 @@ testNakedAllocationSettleIsRejected = do
   expectAbort "must be driven through SettlementFactory_SettleBatch" naked
 
 ----------------------------------------------------------------------
--- 1E -- iterated settlement: standing legs recur every round
+-- Iterated settlement: standing legs recur every round
 ----------------------------------------------------------------------
 
--- | End-to-end proof that a second settlement iteration on a carried-forward
--- allocation pair behaves exactly like the first: Alice's standing
--- @SenderSide 0.01@ leg recurs (it is not "consumed" after round 1), and Bob's
--- standing @ReceiverSide 0.01@ leg likewise recurs on a freshly allocated
--- (zero-locked, since bob funds nothing) allocation for round 2.
+-- | A standing leg is not "consumed" after round 1 -- it recurs on the
+-- carried-forward allocation in round 2, for both sender and receiver.
 testIteratedSettlementRoundTwoCompletes : Script ()
 testIteratedSettlementRoundTwoCompletes = do
   gg <- allocateParty "IteratedRound2Gg"
@@ -658,15 +646,12 @@ testIteratedSettlementRoundTwoCompletes = do
   archivedBob2 === None
 
 ----------------------------------------------------------------------
--- Phase 2 -- composability: a provider-delegated account as an allocation's
--- authorizer.
+-- Composability: a provider-delegated account as an allocation's authorizer
 ----------------------------------------------------------------------
 
 -- | An authorizer account with a provider requires BOTH the owner and the
--- provider in @actors@ to allocate ('accountControlParties') -- the input
--- holding's own signatories (admin, owner, provider) must all be part of the
--- transaction's authority to archive it. Change and, ultimately, settled
--- credits are created against the full authorizer account throughout.
+-- provider in @actors@ to allocate -- the input holding's signatories must
+-- all be part of the transaction's authority to archive it.
 testAllocateV2ProviderAuthorizer : Script ()
 testAllocateV2ProviderAuthorizer = do
   gg <- allocateParty "AllocV2ProviderGg"
@@ -682,17 +667,15 @@ testAllocateV2ProviderAuthorizer = do
         admin = gg, authorizer = authorizerAcct
         transferLegSides = [mkLeg "leg-0" AV2.SenderSide bob 0.006 "NTT-COIN-ALLOCV2-PROVIDER"]
         settlementDeadline = None, nextIterationFunding = None, committed = False, meta = emptyMetadata
-  -- 'mintCoinV2'/'BurnMintOutput' only produce basic accounts -- create the
-  -- provider-managed holding directly (needs owner + provider's joint
-  -- authority to create, mirroring what settling it will require too).
+  -- 'mintCoinV2' only produces basic accounts -- create the provider-managed
+  -- holding directly, under owner + provider's joint authority.
   coinCid <- submit (actAs gg <> actAs alice <> actAs aliceProvider) do
     createCmd NttCoin with
       instrumentId, owner = alice, provider = Some aliceProvider, accountId = "", amount = 0.01
   factoryDisc <- discloseFactory gg factoryCid
   t0 <- getTime
 
-  -- Owner alone (missing the provider) ⇒ AllocationFactory_Allocate is
-  -- rejected, even though alice is the account's owner.
+  -- Owner alone, missing the provider, is rejected.
   noProviderRes <- trySubmit (actAs alice <> disclose factoryDisc) do
     exerciseCmd (asAllocationFactoryV2 factoryCid) AIV2.AllocationFactory_Allocate with
       settlement, allocation = spec, requestedAt = t0
@@ -700,10 +683,8 @@ testAllocateV2ProviderAuthorizer = do
       extraArgs = emptyExtraArgs, actors = [alice]
   expectAbort "requires the authorizer account's owner and provider authority" noProviderRes
 
-  -- Owner + provider jointly ⇒ allocate succeeds, and the allocate-time
-  -- change is credited to the full authorizer account (owner + provider).
-  -- ('allocate'/'tryAllocate' hard-code a single-party submitter, so a
-  -- provider-managed authorizer needs its own direct submission here.)
+  -- Owner + provider jointly succeeds; change is credited to the full
+  -- authorizer account (owner + provider).
   allocRes <- trySubmit (actAs alice <> actAs aliceProvider <> disclose factoryDisc) do
     exerciseCmd (asAllocationFactoryV2 factoryCid) AIV2.AllocationFactory_Allocate with
       settlement, allocation = spec, requestedAt = t0
@@ -721,9 +702,8 @@ testAllocateV2ProviderAuthorizer = do
       c.amount === 0.004
     other -> abort ("expected allocate-time change of 0.004 credited to the full account, got: " <> show other)
 
-  -- bob's ReceiverSide leg must name alice's FULL account (owner + provider)
-  -- as its otherside -- 'mkLeg' only builds basic othersides, so this one is
-  -- constructed directly.
+  -- bob's ReceiverSide leg must name alice's FULL account as its otherside --
+  -- 'mkLeg' only builds basic othersides, so this one is constructed directly.
   let bobSpec = AV2.AllocationSpecification with
         admin = gg, authorizer = basicAccount bob
         transferLegSides =
@@ -750,8 +730,7 @@ testAllocateV2ProviderAuthorizer = do
     other -> abort ("expected bob to receive exactly one coin, got: " <> show other)
 
 ----------------------------------------------------------------------
--- Conservation across the settlement lifecycle -- the conserved quantity is
--- total 'NttCoin' supply plus outstanding 'lockedAmounts' bookkeeping.
+-- Conservation: total supply plus outstanding lockedAmounts stays constant
 ----------------------------------------------------------------------
 
 totalSupply : Party -> Text -> Script Decimal
@@ -1054,9 +1033,8 @@ testHappyPathConservesValue = do
   v2 === 0.006
 
 ----------------------------------------------------------------------
--- Naked Allocation_Settle: 'settleBatchContextKey' is caller-forgeable by
--- design (module header); this pins the consequence -- a ReceiverSide-only
--- allocation settled this way mints unbacked supply, by design (Step 8).
+-- Naked Allocation_Settle: caller-forgeable settleBatchContextKey mints
+-- unbacked supply by design
 ----------------------------------------------------------------------
 
 testNakedSettleReceiverSideMintsUnbackedByDesign : Script ()
@@ -1255,8 +1233,7 @@ testTextMapArithmetic = do
   sumSide AV2.SenderSide [] === (TextMap.empty : TextMap.TextMap Decimal)
 
 ----------------------------------------------------------------------
--- SettleBatch's per-leg consistency checks -- the core soundness gate. The
--- pre-existing suite only covered a MISSING side, never a mismatched one.
+-- SettleBatch's per-leg consistency checks -- the core soundness gate
 ----------------------------------------------------------------------
 
 -- | The two sides of a leg disagree on the amount: the sender's decrement and

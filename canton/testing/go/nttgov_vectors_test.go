@@ -1,20 +1,17 @@
 // Vector tooling for the VAA-gated NTT governance actions
-// (RegisterManagerByVaa, SetFactoryByVaa): reusable encode + devnet-guardian-sign
-// helpers, pinned-payload ground truth for the Daml hex fixtures in
-// Test.TestNtt, and a generator to (re)print them. Plain `go test` (no build
-// tag) -- unlike ntt_recipient_match_integration_test.go this never touches a
-// sandbox.
+// (RegisterManagerByVaa, SetFactoryByVaa): encode/sign helpers and pinned
+// payload fixtures matching the Daml hex in Test.TestNtt. Plain `go test`
+// (no build tag); never touches a sandbox.
 //
-// Wire format (Wormhole.Ntt.Payload, mirrored exactly):
+// Wire format (Wormhole.Ntt.Payload):
 //
 //	governance packet: module(32) "Ntt" left-padded ‖ action(1) ‖ chain(2) ‖ <action-specific>
 //	  action 1 (accept-admin):        managerAddress(32) ‖ factoryEpoch(8)        -- 75B payload
 //	  action 2 (register-burn-mint):  registrationBinding(32) ‖ tokenDecimals(1)  -- 68B payload
 //	  action 3 (rotate-factory):      managerAddress(32) ‖ factoryEpoch(8)        -- 75B payload
 //
-// The VAA body wraps the payload exactly like ntt_recipient_match_integration_test.go's
-// signNttTransferVAA: timestamp 1700000000, nonce 0, consistencyLevel 0, guardian
-// set index 0, single devnet-guardian signature at index 0.
+// VAA body: timestamp 1700000000, nonce 0, consistencyLevel 0, guardian set
+// index 0, single devnet-guardian signature at index 0.
 package canton
 
 import (
@@ -27,20 +24,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// devnetGuardianKeyHex is the devnet guardian's secp256k1 private key --
-// matches Test.TestCore's devnetGuardianPubKey and
-// ntt_recipient_match_integration_test.go's signer.
+// devnetGuardianKeyHex is the devnet guardian's secp256k1 private key.
 const devnetGuardianKeyHex = "cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0"
 
-// The standard governance emitter every fixture in this file targets:
-// chain 1, address 0x00..04 -- matches Test.TestCore's govSetFeeVAA and the
-// ported acceptAdmin* fixtures in Test.TestNtt.
+// govEmitterChain/govEmitterAddress: the standard governance emitter (chain
+// 1, address 0x00..04) every fixture in this file targets.
 const govEmitterChain = 1
 
 func govEmitterAddress() [32]byte { return b32Tail(0x04) }
 
-// b32Tail returns a 32-byte array whose last byte is `last`, matching the
-// 0x00..XX addresses ('b32' in Test.TestNtt) the Daml fixtures target.
+// b32Tail returns a 32-byte address with only the last byte set.
 func b32Tail(last byte) [32]byte {
 	var b [32]byte
 	b[31] = last
@@ -108,7 +101,7 @@ func encodeRotateToCanonicalFactoryPayload(chain uint16, managerAddress [32]byte
 func buildGovernanceVAABody(emitterChain uint16, emitterAddress [32]byte, sequence uint64, payload []byte) []byte {
 	body := make([]byte, 0, 4+4+2+32+8+1+len(payload))
 	body = append(body, be32(1700000000)...) // timestamp
-	body = append(body, 0, 0, 0, 0)           // nonce 0
+	body = append(body, 0, 0, 0, 0)          // nonce 0
 	body = append(body, be16(emitterChain)...)
 	body = append(body, emitterAddress[:]...)
 	body = append(body, be64(sequence)...)
@@ -147,18 +140,11 @@ func signGovernanceVAA(t *testing.T, body []byte) []byte {
 }
 
 // ---------------------------------------------------------------------------
-// The registration binding: mirrors Wormhole.Ntt.Manager.nttRegistrationBindingFromText
-// byte-for-byte. Unlike the governance-packet payload encoders above, this is a
-// domain-separated hash preimage from Wormhole.Core.Bytes
-// (derivedAddressFromText's family: nttInstrumentIdFromText, nttNamespaceFromText,
-// nttRegistrationBindingFromText all share this shape), NOT the wire codec's
-// 2-byte length-prefixed fields ntt_recipient_match_integration_test.go's
-// lenPrefixedMatch builds -- the length prefix here is 4 bytes
-// (Wormhole.Core.Bytes.lenPrefixed: intToBytesN (byteLength b) 4).
+// Registration binding: a domain-separated hash preimage (Wormhole.Core.Bytes),
+// using a 4-byte length prefix -- NOT the wire codec's 2-byte prefix.
 //
-// Exported so ntt_register_by_vaa_integration_test.go (tag `integration`) can
-// compute the SAME binding this file's TestNttRegistrationBindingFromTextPinned
-// pins, against genuinely allocated party texts, without duplicating it.
+// Exported so ntt_register_by_vaa_integration_test.go can compute the same
+// binding against real, allocated party texts.
 // ---------------------------------------------------------------------------
 
 // nttRegistrationBindingTag is Wormhole.Ntt.Manager.nttRegistrationBindingTag.
@@ -175,10 +161,6 @@ func lenPrefix4(b []byte) []byte {
 // nttRegistrationBindingFromText mirrors Wormhole.Ntt.Manager.nttRegistrationBindingFromText:
 //
 //	keccak256(tag ‖ lp4(utf8(operatorText)) ‖ lp4(utf8(adminText)) ‖ uint64be(nonce))
-//
-// Ground-truthed against the pinned Daml vector in
-// TestNttRegistrationBindingFromTextPinned below (mirroring
-// Test.TestNtt:testNttRegistrationBindingFromTextVector).
 func nttRegistrationBindingFromText(operatorText, adminText string, nonce uint64) [32]byte {
 	pre := []byte(nttRegistrationBindingTag)
 	pre = append(pre, lenPrefix4([]byte(operatorText))...)
@@ -189,13 +171,9 @@ func nttRegistrationBindingFromText(operatorText, adminText string, nonce uint64
 	return out
 }
 
-// TestNttRegistrationBindingFromTextPinned proves nttRegistrationBindingFromText
-// matches Wormhole.Ntt.Manager.nttRegistrationBindingFromText byte-for-byte,
-// against the SAME fixed strings Test.TestNtt:testNttRegistrationBindingFromTextVector
-// pins. Plain `go test` (no build tag), so this pin holds BEFORE
-// ntt_register_by_vaa_integration_test.go ever relies on this function against
-// real, live-allocated party ids. If this ever fails, the encoder here has
-// drifted from the Daml side -- fix this file, not the Daml constant.
+// TestNttRegistrationBindingFromTextPinned pins nttRegistrationBindingFromText
+// against Test.TestNtt's fixed vector. If it fails, this encoder has drifted
+// from the Daml side -- fix here, not the Daml constant.
 func TestNttRegistrationBindingFromTextPinned(t *testing.T) {
 	a0 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220cafebabe", 0)
 	a1 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220cafebabe", 1)
@@ -212,10 +190,8 @@ func TestNttRegistrationBindingFromTextPinned(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestReproduceAcceptAdminHappyVAA regenerates Test.TestNtt's
-// acceptAdminHappyVAA (chain 72, managerAddress 0x00..aa, factoryEpoch 0,
-// sequence 1) from this file's encoder + signer alone. If this ever fails, the
-// encoder here has drifted from the wire format the Daml side actually
-// expects -- fix this file, not the Daml constant.
+// acceptAdminHappyVAA byte-for-byte. If it fails, this encoder has drifted
+// from the wire format -- fix here, not the Daml constant.
 func TestReproduceAcceptAdminHappyVAA(t *testing.T) {
 	payload := encodeAcceptAdminPayload(72, b32Tail(0xaa), 0)
 	body := buildGovernanceVAABody(govEmitterChain, govEmitterAddress(), 1, payload)
@@ -225,9 +201,7 @@ func TestReproduceAcceptAdminHappyVAA(t *testing.T) {
 }
 
 // TestPinnedRegisterBurnMintManagerPayload pins the action-2 payload encoding
-// (chain 72, registrationBinding 0x00..aa, tokenDecimals 8) -- ground truth for
-// Test.TestNtt's codec round-trip test and the inner payload of
-// registerHappyVAA below.
+// -- ground truth for Test.TestNtt's codec round-trip and registerHappyVAA below.
 func TestPinnedRegisterBurnMintManagerPayload(t *testing.T) {
 	payload := encodeRegisterBurnMintManagerPayload(72, b32Tail(0xaa), 8)
 	require.Equal(t,
@@ -236,9 +210,7 @@ func TestPinnedRegisterBurnMintManagerPayload(t *testing.T) {
 }
 
 // TestPinnedRotateToCanonicalFactoryPayload pins the action-3 payload encoding
-// (chain 72, managerAddress 0x00..aa, factoryEpoch 0) -- ground truth for
-// Test.TestNtt's codec round-trip test and the inner payload of
-// rotateHappyVAA below.
+// -- ground truth for Test.TestNtt's codec round-trip and rotateHappyVAA below.
 func TestPinnedRotateToCanonicalFactoryPayload(t *testing.T) {
 	payload := encodeRotateToCanonicalFactoryPayload(72, b32Tail(0xaa), 0)
 	require.Equal(t,
@@ -259,9 +231,8 @@ type nttGovVector struct {
 
 // nttGovVectors is every RegisterManagerByVaa/SetFactoryByVaa Daml fixture
 // this package's tests need, keyed by the Daml constant name they back.
-// Sequence numbers only need to be distinct per fixture (VAA digests already
-// differ on payload/emitter content); they run 101+ for register, 201+ for
-// rotate, continuing the acceptAdmin* fixtures' 1-8 range in Test.TestNtt.
+// Sequence numbers only need to be distinct per fixture; 101+/201+ avoid the
+// acceptAdmin* range (1-8) in Test.TestNtt.
 func nttGovVectors(t *testing.T) []nttGovVector {
 	t.Helper()
 	std := govEmitterAddress()
@@ -319,9 +290,7 @@ func nttGovVectors(t *testing.T) []nttGovVector {
 }
 
 // TestNttGovVectorsPinned pins every fixture above against its known-good hex
-// -- ground truth for the identical constants pasted into Test.TestNtt. If
-// this file's encoder ever changes, this test (and the byte-identical Daml
-// constants) must be updated together.
+// -- ground truth for the identical constants in Test.TestNtt.
 func TestNttGovVectorsPinned(t *testing.T) {
 	want := map[string]string{
 		"registerHappyVAA":               "01000000000100a67474776130521854fa617c73ef5960cc49ba787dd9b7306945fec0c6563c8917cf1e7eb31cafa39609ee63f6036539c48c77ba973ebb7c5ec2c79bf9911ff1006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08",
@@ -342,11 +311,8 @@ func TestNttGovVectorsPinned(t *testing.T) {
 	}
 }
 
-// TestPrintNttGovVectors (re)generates every fixture's `name = "hex"` line for
-// pasting into Test.TestNtt, mirroring the acceptAdmin* provenance comment
-// convention. Skipped unless NTTGOV_PRINT=1 (mirrors the plan's
-// guardian_test.go generator convention) so it never runs as part of the
-// normal suite.
+// TestPrintNttGovVectors (re)generates every fixture's `name = "hex"` line
+// for pasting into Test.TestNtt. Skipped unless NTTGOV_PRINT=1.
 func TestPrintNttGovVectors(t *testing.T) {
 	if os.Getenv("NTTGOV_PRINT") != "1" {
 		t.Skip("set NTTGOV_PRINT=1 to print the fixture hex")

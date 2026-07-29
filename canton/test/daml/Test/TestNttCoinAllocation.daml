@@ -4,8 +4,8 @@
 -- flow.
 --
 -- v1 only -- 'AllocationV2'/'AllocationInstructionV2'/'SettlementFactory'
--- (multi-leg net settlement, iterated/committed allocations) get their own
--- dedicated design pass; see the approved plan.
+-- (multi-leg net settlement, iterated/committed allocations) have their own
+-- dedicated test module, 'Test.TestNttCoinAllocationV2'.
 module Test.TestNttCoinAllocation where
 
 import Daml.Script
@@ -200,11 +200,8 @@ testNttCoinAllocateRejectsMismatchedAdminInstrument = do
   res <- tryAllocate factoryCid gg (mkAllocationSpec t0 carol alice bob 0.006 instrumentId) []
   expectAbort "only serves instruments administered by guardianGovernance" res
 
--- | Exploit path: with a NEGATIVE @leg.amount@ and EMPTY inputs, the old
--- @total >= leg.amount@ coverage check (@0.0 >= -0.01@) would pass and
--- @change = total - leg.amount@ (@0.01@) would mint a positive change coin
--- from nothing. Confirms the fix rejects it before any coverage/change
--- logic runs.
+-- | With a NEGATIVE amount and EMPTY inputs, the coverage check would pass
+-- and @change = total - leg.amount@ would mint a positive coin from nothing.
 testNttCoinAllocateV1RejectsNegativeAmount : Script ()
 testNttCoinAllocateV1RejectsNegativeAmount = do
   gg <- allocateParty "AllocNegGg"
@@ -221,9 +218,8 @@ testNttCoinAllocateV1RejectsNegativeAmount = do
 -- Deadline enforcement -- allocateBefore / settleBefore
 ----------------------------------------------------------------------
 
--- | 'AllocationV1.Allocation_ExecuteTransfer's own doc says it "SHOULD
--- succeed provided the settlement.settleBefore deadline has not yet passed";
--- Phase 1 promotes that SHOULD to a checked assertion.
+-- | 'AllocationV1.Allocation_ExecuteTransfer' documents its deadline check as
+-- a SHOULD; this suite promotes it to a checked assertion.
 testNttCoinAllocateRejectsPastAllocateBefore : Script ()
 testNttCoinAllocateRejectsPastAllocateBefore = do
   gg <- allocateParty "AllocPastAllocateBeforeGg"
@@ -269,8 +265,7 @@ testNttCoinExecuteTransferRejectsPastSettleBefore = do
     other -> abort ("expected one returned coin, got: " <> show other)
 
 ----------------------------------------------------------------------
--- Replay and deadline-boundary properties audited independently -- ported
--- unchanged, since they pass against both the pre- and post-fix code.
+-- Replay and deadline-boundary properties
 ----------------------------------------------------------------------
 
 -- | Total genuine 'NttCoin' balance of one party for one instrument, as seen
@@ -280,9 +275,8 @@ v1CoinBalance gg owner instrumentId = do
   coins <- query @NttCoin gg
   pure (sum [c.amount | (_, c) <- coins, c.owner == owner, c.instrumentId == instrumentId])
 
--- | 'allocation_withdrawImpl' mints a coin and never archives the allocation
--- explicitly -- if 'Allocation_Withdraw' were nonconsuming this would be an
--- unbounded mint.
+-- | 'Allocation_Withdraw' must be consuming -- it never explicitly archives
+-- the allocation, so a nonconsuming choice here would allow unbounded mint.
 testV1WithdrawIsNotReplayable : Script ()
 testV1WithdrawIsNotReplayable = do
   gg <- allocateParty "AuthV1WdrGg"
@@ -391,10 +385,8 @@ testV1AllocateAtExactAllocateBefore = do
     Left _ -> pure ()
     Right _ -> abort "allocate succeeded at exactly allocateBefore (expected strict <)"
 
--- | Withdraw carries NO deadline check at all, so the sender can unilaterally
--- pull funds out DURING the settlement window, before @settleBefore@, leaving
--- the executor/receiver with a worthless allocation. Documents the actual
--- semantics (v2 gates this behind @allocation.committed@; v1 has no such flag).
+-- | v1 'Allocation_Withdraw' has no deadline check -- the sender can pull
+-- funds mid-settlement, leaving the executor/receiver with nothing.
 testV1WithdrawDuringSettlementWindow : Script ()
 testV1WithdrawDuringSettlementWindow = do
   gg <- allocateParty "AuthV1WindowGg"

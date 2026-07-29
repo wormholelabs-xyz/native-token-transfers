@@ -7,12 +7,8 @@ import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Wormhole.Ntt.Coin
 
--- | A single-contract allocation: value + the allocation record folded
--- together (spec-sanctioned -- 'AllocationView.holdingCids' MAY be empty for
--- registries that don't represent locked value as a separate on-ledger
--- holding). No separate locked-holding indirection, for the same reason as
--- 'NttTransferInstruction' -- nothing else here needs to reuse a "locked
--- coin" concept.
+-- | A single-contract allocation: value and the allocation record folded
+-- together; 'holdingCids' is empty since there's no separate locked holding.
 template NttCoinAllocation
   with
     instrumentId : InstrumentId
@@ -40,8 +36,7 @@ template NttCoinAllocation
         cid <- returnAllocationToSender instrumentId allocation
         pure Allocation_WithdrawResult with senderHoldingCids = [cid], meta = emptyMetadata
 
--- | v1 allocations are party-based, not account-based -- basic by
--- construction.
+-- | v1 allocations are party-based, not account-based; returned via a basic account.
 returnAllocationToSender : InstrumentId -> AllocationSpecification -> Update (ContractId Holding)
 returnAllocationToSender instrumentId allocation =
   toInterfaceContractId @Holding <$>

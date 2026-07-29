@@ -1,12 +1,7 @@
--- | The genesis 'NttCoinFactory' (a 'BurnMintFactory' plus, for
--- CIP-0056/CIP-0112 compliance, 'TransferFactory'/'AllocationFactory' v1+v2
--- and 'AV2.SettlementFactory'), and the templates those factories produce.
--- 'NttCoinFactory' is @signatory guardianGovernance@ alone, created once at
--- genesis, never replaced, and generic over its @instrumentId@, whose
--- @admin@ must always be @guardianGovernance@. See 'Wormhole.Ntt.Coin',
--- 'Wormhole.Ntt.CoinTransfer', 'Wormhole.Ntt.CoinAllocation', and
--- 'Wormhole.Ntt.CoinAllocationV2' for the sibling modules whose templates
--- this factory produces.
+-- | The genesis 'NttCoinFactory': a 'BurnMintFactory' plus
+-- 'TransferFactory'/'AllocationFactory' v1+v2 and 'AV2.SettlementFactory'.
+-- Signatory guardianGovernance alone, created once and never replaced;
+-- instrumentId.admin must always equal guardianGovernance.
 module Wormhole.Ntt.CoinFactory where
 
 import DA.Foldable (forA_)
@@ -64,8 +59,7 @@ template NttCoinFactory
               assertMsg "ntt: burn input's instrument does not match the requested instrumentId"
                 (coin.instrumentId == arg.instrumentId)
           archive cid
-        -- BurnMintFactory is party-based, not account-based -- mint/burn stays
-        -- basic-account-only by construction.
+        -- BurnMintFactory is party-based; mint/burn stays basic-account-only.
         outputCids <- forA arg.outputs \o ->
           toInterfaceContractId @Holding <$> createCoinIn arg.instrumentId (basicAccountV2 o.owner) o.amount
         pure BurnMintFactory_BurnMintResult with outputCids
@@ -83,9 +77,8 @@ template NttCoinFactory
           (arg.expectedAdmin == guardianGovernance)
         let t = arg.transfer
         assertTransferWindow t.requestedAt t.executeBefore
-        -- v1 is inherently basic (a bare party, no account model) -- lift
-        -- the sender/receiver parties into basic accounts for the shared,
-        -- account-based core (Phase 2).
+        -- v1 is inherently basic (bare party, no account model); lift
+        -- sender/receiver into basic accounts for the shared account-based core.
         let senderAccount = basicAccountV2 t.sender
             receiverAccount = basicAccountV2 t.receiver
         outcome <- nttTransferCore guardianGovernance (t.sender == t.receiver)
@@ -119,9 +112,8 @@ template NttCoinFactory
       transferFactory_transferImpl _self arg = do
         let t = arg.transfer
         assertTransferWindow t.requestedAt t.executeBefore
-        -- Only the null-owner account is rejected -- sub-accounts and
-        -- provider-delegated accounts are genuine, composable accounts on
-        -- both sides.
+        -- Only the null-owner account is rejected; sub-accounts and
+        -- provider-delegated accounts are valid on both sides.
         _ <- requireAccountOwner t.sender
         _ <- requireAccountOwner t.receiver
         assertMsg "ntt: TransferFactory_Transfer requires the sender account's owner and provider authority"
@@ -164,8 +156,7 @@ template NttCoinFactory
         assertMsg "ntt: allocation amount must be positive" (leg.amount > 0.0)
         now <- getTime
         assertMsg "ntt: allocation window (allocateBefore) has passed" (now < spec.settlement.allocateBefore)
-        -- v1 allocations are party-based, not account-based -- basic by
-        -- construction.
+        -- v1 allocations are party-based, not account-based; basic by construction.
         senderChangeCids <-
           debitInputs "allocation" leg.instrumentId (basicAccountV2 leg.sender) leg.amount arg.inputHoldingCids
         allocationCid <- toInterfaceContractId @Allocation <$> create NttCoinAllocation with
@@ -189,9 +180,8 @@ template NttCoinFactory
         let spec = arg.allocation
         assertMsg "ntt: allocation's admin does not match this factory's admin"
           (spec.admin == guardianGovernance)
-        -- Only the null-owner account is rejected -- a provider-delegated or
-        -- sub-account authorizer is genuine and composable (Phase 2, module
-        -- header); its owner AND provider must both authorize the allocate.
+        -- Only the null-owner account is rejected; the authorizer's owner
+        -- AND provider must both authorize the allocate.
         _ <- requireAccountOwner spec.authorizer
         assertMsg "ntt: AllocationFactory_Allocate requires the authorizer account's owner and provider authority"
           (all (`elem` arg.actors) (accountControlParties spec.authorizer))
@@ -263,7 +253,7 @@ template NttCoinFactory
         assertMsg "ntt: duplicate transferLegId in transferLegs"
           (length (dedup (map (.transferLegId) arg.transferLegs)) == length arg.transferLegs)
 
-        -- Pinned: the nested Allocation_Settle below makes gg a controller, so the target template must be ours.
+        -- The nested Allocation_Settle makes gg a controller, so the target must be our own NttCoinAllocationV2.
         allocViews <- forA arg.allocations \fa -> do
           r <- fetchFromInterface @NttCoinAllocationV2 fa.allocationCid
           case r of

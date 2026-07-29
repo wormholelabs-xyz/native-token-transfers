@@ -19,18 +19,10 @@ import Wormhole.Ntt.Coin
 sameGroup : [Party] -> [Party] -> Bool
 sameGroup xs ys = all (`elem` ys) xs && all (`elem` xs) ys
 
--- | The @extraArgs.context@ key 'settlementFactory_settleBatchImpl' stamps
--- onto every nested @Allocation_Settle@ it exercises, so
--- 'allocation_settleImpl' can tell it was reached via
--- 'AV2.SettlementFactory_SettleBatch' rather than a direct call. This is a
--- footgun guard against an *accidental* naked @Allocation_Settle@ (which has
--- no automatic counterparty and so cannot itself check conservation), NOT a
--- security boundary -- the sentinel is caller-forgeable by anyone who already
--- holds the @admin :: executors@ authority the choice requires, exactly the
--- same parties who could authorize a real 'SettlementFactory_SettleBatch'
--- anyway. The actual authorization is, and remains, that
--- @Allocation_Settle@ requires the admin (gg) among @actors@ (see module
--- header).
+-- | Context key stamped by 'settlementFactory_settleBatchImpl' onto nested
+-- @Allocation_Settle@ calls, letting 'allocation_settleImpl' detect it came
+-- via @SettlementFactory_SettleBatch@. Footgun guard only, not a security
+-- boundary: forgeable by anyone already holding the admin::executors authority.
 settleBatchContextKey : Text
 settleBatchContextKey = "ntt.viaSettleBatch"
 
@@ -52,12 +44,9 @@ textMapNegate m = TextMap.fromList [(k, negate v) | (k, v) <- TextMap.toList m]
 sumSide : AV2.TransferSide -> [AV2.TransferLegSide] -> TextMap.TextMap Decimal
 sumSide side sides = TextMap.fromListWithR (+) [(s.instrumentId, s.amount) | s <- sides, s.side == side]
 
--- | Otherside account control parties (owner, plus provider if present) of
--- the ORIGINAL transferLegSides, deduped. Gives counterparties -- and their
--- providers, who the standard requires have visibility on all asset
--- movements of their account -- standing ACS visibility of an allocation
--- naming them, generalizing v1's @observer allocation.transferLeg.receiver@
--- to multi-leg.
+-- | Otherside account control parties (owner + provider) of the ORIGINAL
+-- transferLegSides, deduped, so counterparties and their providers get
+-- standing ACS visibility of an allocation naming them.
 legSideOwners : [AV2.TransferLegSide] -> [Party]
 legSideOwners sides = dedup (concatMap (accountControlParties . (.otherside)) sides)
 
@@ -69,17 +58,11 @@ returnLockedFundsToAuthorizerV2 admin account amounts =
       createCoinIn (InstrumentId with admin, id = instr) account amt
     pure (instr, [cid])
 
--- | One authorizer's side of possibly many legs of a settlement. Because it
--- authorizes only its own side, 'Allocation_Settle' alone can never move
--- value between parties: soundness comes from
--- 'AV2.SettlementFactory_SettleBatch' checking both sides of every leg before
--- nested-exercising each allocation's settle in one transaction. A naked
--- settle stays reachable for interface conformance but is an unsafe escape
--- hatch with no counterparty -- a ReceiverSide-only allocation settled this
--- way mints unbacked supply. @lockedAmounts@ is bookkeeping
--- only (no separate escrow holding, same simplification as
--- 'NttCoinAllocation'/'NttTransferInstruction') -- the real value already
--- left circulation (archived) at 'AllocationFactory_Allocate' time.
+-- | One authorizer's side of a settlement's legs. 'Allocation_Settle' alone
+-- authorizes only its own side and can never move value between parties;
+-- soundness comes from 'AV2.SettlementFactory_SettleBatch' checking both
+-- sides of every leg atomically -- a naked settle is an unsafe escape hatch.
+-- @lockedAmounts@ is bookkeeping only; no separate escrow holding.
 template NttCoinAllocationV2
   with
     authorizerAccount     : HoldingV2.Account   -- ^ owner is always @Some@ -- null-owner rejected upstream
@@ -92,8 +75,7 @@ template NttCoinAllocationV2
   where
     signatory allocation.admin :: accountControlParties authorizerAccount
     observer settlement.executors, legSideOwners allocation.transferLegSides
-    -- The settle credit goes to @authorizerAccount@; leg matching reads
-    -- @allocation.authorizer@. They must be the same account.
+    -- Settle credits authorizerAccount; leg matching reads allocation.authorizer -- must match.
     ensure authorizerAccount == allocation.authorizer
 
     interface instance AV2.Allocation for NttCoinAllocationV2 where
@@ -123,9 +105,7 @@ template NttCoinAllocationV2
         assertMsg "ntt: extraTransferLegSides amounts must be positive"
           (all (> 0.0) (map (.amount) arg.extraTransferLegSides))
 
-        -- @allocation.transferLegSides@ is a standing authorization: it recurs
-        -- on every settlement iteration, and @arg.extraTransferLegSides@ is
-        -- additive for this round only -- it never replaces or disables it.
+        -- allocation.transferLegSides recurs every iteration; extraTransferLegSides is additive only.
         let allSides = allocation.transferLegSides ++ arg.extraTransferLegSides
             senderTotals = sumSide AV2.SenderSide allSides
             receiverTotals = sumSide AV2.ReceiverSide allSides
@@ -173,16 +153,9 @@ template NttCoinAllocationV2
           output = AV2.AllocationResult_Cancelled, authorizerHoldingCids = cids, meta = emptyMetadata
 
       allocation_withdrawImpl self arg = do
-        -- Unilateral by the authorizer account's owner alone (matching the
-        -- interface's own "account parties of the authorizer" language as a
-        -- permission grant, not a joint requirement) -- mirrors the pre-Phase-2
-        -- behavior for basic accounts exactly. This assertMsg is the real
-        -- authorization gate: 'self's own signatories (admin + owner +
-        -- provider, if any) are ambiently available inside this choice body
-        -- regardless of what 'arg.actors' contains, so without this check any
-        -- caller with self-authority as some actor could trigger a withdraw
-        -- (still benign -- funds only ever return to the rightful authorizer
-        -- account -- but not one this choice's own controller list prevents).
+        -- Real authorization gate: self's signatories (admin+owner+provider) are
+        -- ambiently available here regardless of arg.actors, so this check --
+        -- not the controller list -- restricts who can trigger a withdraw.
         assertMsg "ntt: Allocation_Withdraw requires the authorizer account owner's authority"
           (fromSome authorizerAccount.owner `elem` arg.actors)
         when allocation.committed $ case allocation.settlementDeadline of

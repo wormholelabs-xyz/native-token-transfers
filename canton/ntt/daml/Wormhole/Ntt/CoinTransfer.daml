@@ -14,11 +14,10 @@ import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
 import Wormhole.Ntt.Coin
 
--- | The @extraArgs.context@ key a caller uses to pass a receiver's standing
--- 'TransferPreapproval' cid through to 'transferFactory_transferImpl' -- the
--- interface's choice arguments are fixed, so there's no dedicated field for
--- it. Absent or undecodable falls back to the pending path (fail-safe: a
--- caller who doesn't know about this never gets a transfer mis-credited).
+-- | Context key for passing a receiver's standing 'TransferPreapproval' cid
+-- to 'transferFactory_transferImpl' (the interface's choice args are fixed,
+-- so there's no dedicated field). Absent/undecodable falls back to the
+-- pending path -- fail-safe against mis-credited transfers.
 transferPreapprovalContextKey : Text
 transferPreapprovalContextKey = "ntt.transferPreapprovalCid"
 
@@ -39,10 +38,9 @@ template TransferPreapproval
     signatory accountControlParties account
     observer instrumentId.admin
 
-    -- Standalone, this is a gg-only unbacked mint -- acceptable only because
-    -- gg is already the instrument's mint authority. It conserves value (is
-    -- debit-balanced) only when driven from 'nttTransferCore', which debits
-    -- the sender before reaching this choice in the same transaction.
+    -- Standalone this is a gg-only unbacked mint (acceptable since gg is
+    -- already mint authority); conserves value only when driven from
+    -- 'nttTransferCore', which debits the sender in the same transaction.
     nonconsuming choice TransferPreapproval_Receive : ContractId Holding
       with
         receiver             : HoldingV2.Account
@@ -55,13 +53,10 @@ template TransferPreapproval
           (expectedInstrumentId == instrumentId)
         toInterfaceContractId @Holding <$> createCoinIn instrumentId account amount
 
--- | The pending state of an in-flight transfer with no standing preapproval:
--- funds are already debited from the sender (archived + change returned) by
--- the time this is created; it holds the value directly rather than
--- referencing a separate locked holding, since nothing else here needs to
--- reuse a "locked coin" concept. Implements both v1 and v2 @TransferInstruction@
--- on one template (mirroring how real Canton Coin's own
--- @AmuletTransferInstruction@ implements both versions on a single contract).
+-- | Pending state of an in-flight transfer with no standing preapproval:
+-- funds are already debited from the sender by the time this is created, so
+-- it holds the value directly rather than a separate locked holding.
+-- Implements both v1 and v2 @TransferInstruction@ on one template.
 template NttTransferInstruction
   with
     instrumentId    : InstrumentId
@@ -118,34 +113,14 @@ template NttTransferInstruction
           ]
         meta = emptyMetadata
 
-      -- TransferInstructionV2's TransferInstruction_Accept is nonconsuming --
-      -- the interface MANDATES the instruction be archived on acceptance --
-      -- and its Accept doc additionally SHOULDs that implementations archive
-      -- by calling the corresponding v1 choice "where possible", so v1
-      -- transaction parsers still see a familiar v1 Accept exercise node.
-      -- Whether that's possible here depends on the receiver account:
-      --
-      --   * 'receiverAccount.provider == None' (a basic account, or a
-      --     sub-account distinguished only by a non-empty @id@): nest v1's
-      --     own (consuming) Accept -- no explicit archive needed, and v1's
-      --     impl already performs the executeBefore check and the receiver
-      --     coin's create, so nothing here duplicates it.
-      --   * 'receiverAccount.provider == Some _': keep the direct v2 body.
-      --     A Daml nested exercise body's authority is exactly the
-      --     signatories of the exercised contract plus the controllers of
-      --     THAT nested exercise -- the outer v2 `actors` never flow down.
-      --     v1's Accept controller is `transfer.receiver` (the owner alone);
-      --     the receiver's provider is only an observer of the instruction,
-      --     never a controller of v1 Accept, so there is no way for a
-      --     provider's signature to reach the nested body's `create
-      --     NttCoin`, which needs the provider as a signatory. v1 metadata
-      --     CAN carry account DATA (see 'accountToMeta'/'accountFromMeta' in
-      --     splice-token-standard-utils' Conversions.daml) but never account
-      --     AUTHORITY, so there is no metadata trick around this gap. Real
-      --     Amulet never faces this case at all: its
-      --     'ExternalPartyAmuletRules.ensureNoAccountMeta' rejects any
-      --     non-basic account outright ("Amulet only supports basic
-      --     accounts"), so it never needs a provider-authority path here.
+      -- TIV2's Accept is nonconsuming and SHOULDs delegating to v1's Accept
+      -- "where possible": basic accounts (provider == None) nest v1's own
+      -- Accept directly. Accounts with a provider keep the direct v2 body,
+      -- because a nested exercise's authority is exactly the exercised
+      -- contract's signatories plus that exercise's own controllers -- v1's
+      -- Accept controller is the owner alone, so a provider's signature can
+      -- never reach the nested @create NttCoin@, which needs the provider as
+      -- signatory.
       transferInstruction_acceptImpl self arg = do
         assertMsg "ntt: TransferInstruction_Accept requires the recipient account's authority"
           (all (`elem` arg.actors) (accountControlParties receiverAccount))
@@ -165,14 +140,9 @@ template NttTransferInstruction
               senderChangeCids = []
               meta = emptyMetadata
 
-      -- Reject/withdraw have no receiver-provider bottleneck: the sender-side
-      -- credit inside v1's 'returnToSenderV1' draws its authority from the
-      -- instruction's own signatories (@instrumentId.admin :: senderAccount@
-      -- control parties, provider included), all ambiently present in any
-      -- nested exercise regardless of controller. The actor assertions below
-      -- (kept verbatim) already guarantee the v1 controller -- receiver owner
-      -- for reject, sender owner for withdraw -- is present, so nesting is
-      -- safe for every account shape, not just basic ones.
+      -- Reject/withdraw have no provider bottleneck: v1's credit draws
+      -- authority from the instruction's own signatories (ambiently present
+      -- in any nested exercise), so nesting is safe for every account shape.
       transferInstruction_rejectImpl self arg = do
         assertMsg "ntt: TransferInstruction_Reject requires the recipient account's authority"
           (all (`elem` arg.actors) (accountControlParties receiverAccount))
@@ -191,23 +161,18 @@ template NttTransferInstruction
       transferInstruction_rejectExtraObservers _ = []
       transferInstruction_withdrawExtraObservers _ = []
 
--- | Both 'TIV1.TransferFactory_Transfer' and 'TIV2.TransferFactory_Transfer'
--- state that the choice MUST fail if @transfer.executeBefore@ is in the past;
--- v2's @Transfer.requestedAt@ additionally MUST be in the past when
--- instructing. Shared so both @transferFactory_transferImpl@s enforce the
--- exact same window (Phase 1 finding 1B).
+-- | Both TransferFactory_Transfer choices MUST fail if @executeBefore@ is in
+-- the past; v2's @requestedAt@ additionally must not be in the future.
+-- Shared so both @transferFactory_transferImpl@s enforce the same window.
 assertTransferWindow : Time -> Time -> Update ()
 assertTransferWindow requestedAt executeBefore = do
   now <- getTime
   assertMsg "ntt: transfer.requestedAt must not be in the future" (requestedAt <= now)
   assertMsg "ntt: transfer.executeBefore has passed" (now < executeBefore)
 
--- | Total conversion of a v1 'TIV1.TransferInstructionResult' into its v2
--- counterpart, for the nested-Accept path in 'NttTransferInstruction's v2
--- @TransferInstruction@ instance: coerces the interface-typed contract ids
--- (holdings, and the instruction cid in the 'Pending' case) from their v1 to
--- v2 interface types, and passes @meta@ through unchanged. Kept as a tiny
--- local helper rather than vendoring splice-token-standard-utils for it.
+-- | Converts a v1 'TIV1.TransferInstructionResult' into its v2 counterpart
+-- for the nested-Accept path: coerces interface-typed contract ids from v1
+-- to v2 types, passing @meta@ through unchanged.
 v1ResultToV2 : TIV1.TransferInstructionResult -> TIV2.TransferInstructionResult
 v1ResultToV2 r = TIV2.TransferInstructionResult with
   output = case r.output of
@@ -237,26 +202,21 @@ returnToSenderV2 instrumentId senderAccount amount = do
     senderChangeCids = [cid]
     meta = emptyMetadata
 
--- | The shared value-movement core for 'NttCoinFactory's @TransferFactory@
--- v1 and v2 @transferFactory_transferImpl@s: validates and archives the
--- sender's inputs, mints exact + change, then completes synchronously
--- (self-transfer, or receiver authority already present, or a standing
--- preapproval) or falls through to the pending case -- the caller
--- constructs the actual 'NttTransferInstruction' (it alone has the original,
--- version-specific 'TIV1.Transfer'/'TIV2.Transfer' fields to store). Takes
--- full 'HoldingV2.Account's rather than bare parties so it can move value on
--- behalf of provider-delegated/sub-accounts on either side (Phase 2) -- the
--- caller has already run 'requireAccountOwner' on both accounts, so
--- @senderAccount.owner@/@receiverAccount.owner@ are guaranteed @Some@ here.
+-- | Shared value-movement core for TransferFactory v1/v2
+-- @transferFactory_transferImpl@s: debits sender inputs, mints change,
+-- completes synchronously (self-transfer / receiver authority present /
+-- standing preapproval) or returns 'CorePendingNeeded' for the caller to
+-- wrap in an 'NttTransferInstruction'. Callers must run 'requireAccountOwner'
+-- on both accounts first -- @senderAccount.owner@/@receiverAccount.owner@
+-- are assumed @Some@.
 data CoreTransferOutcome
   = CoreCompleted with receiverCid : ContractId Holding, senderChangeCids : [ContractId Holding]
   | CorePendingNeeded with senderChangeCids : [ContractId Holding]
 
--- | The single-instrument debit: validate ownership + instrument on every
--- input, check coverage, archive all inputs, mint change back to the given
--- account. Conservation-critical -- the single audit site for this sequence.
--- Inputs are pinned to the 'NttCoin' template; an interface view alone is
--- caller-authored data.
+-- | Single-instrument debit: validates ownership + instrument per input,
+-- checks coverage, archives inputs, mints change back. Conservation-critical
+-- -- inputs are pinned to the 'NttCoin' template, since a caller-authored
+-- interface view alone cannot be trusted.
 debitInputs
   : Text                  -- ^ error noun: "transfer" / "allocation"
   -> InstrumentId
@@ -265,8 +225,7 @@ debitInputs
   -> [ContractId Holding]
   -> Update [ContractId Holding]  -- ^ change cids ([] or singleton)
 debitInputs noun instrumentId acc amount inputHoldingCids = do
-  -- Messages hoisted: Daml is strict, so building them inside the loop costs
-  -- on the happy path.
+  -- Hoisted: Daml is strict, so building these inside the loop costs even on the happy path.
   let notMine = "ntt: " <> noun <> " input not owned by sender"
       notForeign = "ntt: " <> noun <> " input is not an NttCoin issued by this registry"
       wrongInstrument = "ntt: " <> noun <> " input instrument mismatch"

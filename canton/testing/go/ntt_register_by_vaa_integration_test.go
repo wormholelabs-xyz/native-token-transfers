@@ -1,47 +1,14 @@
 //go:build integration
 
-// Integration test closing the RegisterManagerByVaa/SetFactoryByVaa happy-path
-// gap: Test.TestNtt's Daml Script suite can reach every negative around these
-// two choices (wrong emitter, stale guardian set, wrong constructor, replay,
-// out-of-range fields, non-canonical factory, wrong epoch -- see
-// TestNtt.daml's "RegisterManagerByVaa"/"SetFactoryByVaa" sections) but NOT
-// RegisterManagerByVaa's happy path itself: its registration binding commits
-// to the genuinely-allocated (operator, admin) Party fingerprints
-// (nttRegistrationBindingFor in Wormhole.Ntt.Manager), and a VAA signed ahead
-// of time, against a static fixture, can never predict those. Exercising the
-// happy path -- and, downstream of it, SetFactoryByVaa's happy path against
-// the resulting deployment's REAL managerAddress -- needs a live sandbox and a
+// Integration test for RegisterManagerByVaa/SetFactoryByVaa's happy path:
+// the registration binding commits to the genuinely-allocated (operator,
+// admin) Party fingerprints, so a VAA signed ahead of time against a static
+// fixture can never predict them -- exercising it needs a live sandbox and a
 // VAA signed at runtime.
 //
-// Three-step, Go-orchestrated harness, mirroring
-// ntt_recipient_match_integration_test.go /
-// Test.TestNtt's integrationAcceptAdminSetup+integrationAcceptAdminByVaa:
+//	go test -tags integration -run TestCantonNttRegisterByVaaIntegration . -v
 //
-//  1. Test.TestNtt:integrationRegisterByVaaSetup allocates a fresh admin and
-//     stands up the genesis (operator, gg, NttGovernance root, core
-//     registries, canonical NttCoinFactory), returning their real party
-//     texts and every handle the next steps need.
-//  2. Here, compute nttRegistrationBindingFromText's preimage against the
-//     ACTUAL party texts (ground-truthed against the Daml pin by
-//     TestNttRegistrationBindingFromTextPinned in nttgov_vectors_test.go --
-//     BEFORE this file ever relies on it), sign a fresh action-2 VAA with the
-//     devnet guardian key, and relay it through
-//     Test.TestNtt:integrationRegisterByVaa, which asserts the derived
-//     instrument id/tokenConfig/minter/factoryEpoch/factory, then that the
-//     SAME VAA replayed against the recreated NttGovernance root aborts, and
-//     returns the deployment's REAL managerAddress.
-//  3. Sign a fresh action-3 VAA against that REAL managerAddress and relay it
-//     through Test.TestNtt:integrationSetFactoryByVaa, which asserts the
-//     factoryEpoch bump, then that the same VAA replayed aborts.
-//
-//     go test -tags integration -run TestCantonNttRegisterByVaaIntegration . -v
-//
-// Requires `dpm` (PATH or ~/.dpm/bin) + a JDK; skipped otherwise. Slow, so
-// excluded from the default build. findDpm/runCmd are in helpers_test.go;
-// nttRegistrationBindingFromText/encodeRegisterBurnMintManagerPayload/
-// encodeRotateToCanonicalFactoryPayload/buildGovernanceVAABody/signGovernanceVAA/
-// govEmitterChain/govEmitterAddress are in nttgov_vectors_test.go (untagged,
-// so this tagged file can reuse them without duplicating).
+// Requires `dpm` (PATH or ~/.dpm/bin) + a JDK; skipped otherwise.
 package canton
 
 import (
@@ -62,13 +29,11 @@ import (
 )
 
 // registerByVaaChainId is the placeholder Wormhole chain id this deployment
-// registers under -- matches Test.TestNtt's cantonChainId (72), the value
-// every other RegisterManagerByVaa/SetFactoryByVaa fixture in this package
-// targets.
+// registers under.
 const registerByVaaChainId = 72
 
-// registerByVaaTokenDecimals is the tokenDecimals this registration's action-2
-// VAA carries -- matches registerHappyVAA's fixture value.
+// registerByVaaTokenDecimals is the tokenDecimals this registration's
+// action-2 VAA carries.
 const registerByVaaTokenDecimals = 8
 
 // registerByVaaNonce is the instrumentNonce bound into the registration.
@@ -136,8 +101,8 @@ func TestCantonNttRegisterByVaaIntegration(t *testing.T) {
 	require.NoError(t, err)
 	_ = conn.Close()
 
-	// Step 1: allocate the admin (and everything else registration needs) and
-	// get its ACTUAL, on-ledger-allocated party texts.
+	// Step 1: allocate the admin and everything else registration needs,
+	// getting real on-ledger party texts.
 	setupFile := filepath.Join(sandboxDir, "register-setup.json")
 	out, err := exec.Command(dpm, "script", "--dar", dar, "--upload-dar", "yes",
 		"--script-name", "Test.TestNtt:integrationRegisterByVaaSetup",
@@ -153,10 +118,9 @@ func TestCantonNttRegisterByVaaIntegration(t *testing.T) {
 	require.Contains(t, setup.Admin, "::", "admin should be a full party id")
 	t.Logf("step 1: operator=%s admin=%s", setup.Operator, setup.Admin)
 
-	// Step 2: compute the registration binding against the REAL party texts,
-	// sign a fresh action-2 VAA against it, and relay it through
-	// RegisterManagerByVaa. No static VAA could ever do this -- the binding
-	// commits to exactly these nondeterministic fingerprints.
+	// Step 2: compute the registration binding against the real party texts
+	// and sign a fresh action-2 VAA -- a static VAA can't predict these
+	// fingerprints.
 	binding := nttRegistrationBindingFromText(setup.Operator, setup.Admin, registerByVaaNonce)
 	registerPayload := encodeRegisterBurnMintManagerPayload(registerByVaaChainId, binding, registerByVaaTokenDecimals)
 	registerBody := buildGovernanceVAABody(govEmitterChain, govEmitterAddress(), 301, registerPayload)

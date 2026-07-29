@@ -422,11 +422,8 @@ testAttackerCannotRegisterGgMintedManager = do
     (toInterfaceContractId @BurnMintFactory evilFactory)
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
--- | The same property, restated against a real, honestly-created
--- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' instead of 'EvilBurnMintFactory' — proving
--- the co-signature gate is what protects registration, not the factory's
--- trustworthiness. An honest canonical factory is exactly as unable to be
--- committed by an attacker lacking gg's signature as a malicious one.
+-- | Same property against a real 'Wormhole.Ntt.CoinFactory.NttCoinFactory':
+-- the co-signature gate protects registration, not the factory's trustworthiness.
 testAttackerCannotRegisterGgMintedManagerWithRealFactory : Script ()
 testAttackerCannotRegisterGgMintedManagerWithRealFactory = do
   (operator, gg, _) <- nttSetup

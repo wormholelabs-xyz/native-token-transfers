@@ -11,7 +11,7 @@ import Splice.Api.Token.HoldingV1 (Holding, HoldingView (..), InstrumentId)
 import Splice.Api.Token.HoldingV2 qualified as HoldingV2
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 
--- This is a token "holding" – named in line with Amulet's convention. Amulet == amulet holding.
+-- A token holding, named per Amulet's holding convention.
 template NttCoin
   with
     instrumentId : InstrumentId
@@ -23,10 +23,8 @@ template NttCoin
     signatory instrumentId.admin :: owner :: optionalToList provider
     ensure amount > 0.0
 
-    -- v1 has no provider/sub-account concept, so the v1 view is always the
-    -- bare owner -- callers reaching a provider-managed or sub-account coin
-    -- through v1 still see it (visibility is unaffected), they just can't
-    -- move it without the provider's authority.
+    -- v1 has no provider/sub-account concept: the view is always the bare
+    -- owner, and callers can't move the coin without the provider's authority.
     interface instance Holding for NttCoin where
       view = HoldingView with
         owner
@@ -48,33 +46,25 @@ coinAccount : Party -> Optional Party -> Text -> HoldingV2.Account
 coinAccount owner provider accountId = HoldingV2.Account with owner = Some owner, provider, id = accountId
 
 -- | A basic account: a plain party, no sub-account, no provider delegation.
--- Used by every v1 (and 'BurnMintFactory_BurnMint') path, which has no
--- account concept of its own.
+-- Used by every v1 path and 'BurnMintFactory_BurnMint'.
 basicAccountV2 : Party -> HoldingV2.Account
 basicAccountV2 p = HoldingV2.Account with owner = Some p, provider = None, id = ""
 
--- | Create a coin held in the given account. Encodes the account-fields ->
--- coin-fields mirror in one place. Callers upcast the cid as needed.
---
+-- | Create a coin held in the given account.
 -- Precondition: @acc.owner@ is @Some@ -- callers sit behind
--- 'requireAccountOwner' or hold template fields with the same guarantee.
+-- 'requireAccountOwner' or an equivalent guarantee.
 createCoinIn : InstrumentId -> HoldingV2.Account -> Decimal -> Update (ContractId NttCoin)
 createCoinIn instrumentId acc amount = create NttCoin with
   instrumentId, owner = fromSome acc.owner
   provider = acc.provider, accountId = acc.id, amount
 
--- | The parties whose authority is required to move or archive a holding
--- held in this account: the owner (always, once past the null-owner check
--- below) plus the provider, if any. Mirrors 'NttCoin's own @signatory@
--- clause.
+-- | Parties whose authority is required to move or archive a holding in
+-- this account: the owner, plus the provider if any.
 accountControlParties : HoldingV2.Account -> [Party]
 accountControlParties acc = catOptionals [acc.owner, acc.provider]
 
--- | 'NttCoinFactory's @TransferFactory@/@AllocationFactory@ v2 accept any
--- account except the null-owner one the standard reserves for mint/burn.
--- Sub-accounts
--- (@id /= ""@) and provider-delegated accounts are genuine, composable
--- accounts, not rejected.
+-- | Rejects only the null-owner account (reserved for mint/burn); sub-accounts
+-- and provider-delegated accounts are valid.
 requireAccountOwner : HoldingV2.Account -> Update Party
 requireAccountOwner acc = case acc.owner of
   Some p -> pure p

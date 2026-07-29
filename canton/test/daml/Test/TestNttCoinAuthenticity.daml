@@ -1,9 +1,7 @@
--- | Proving tests for the template-pinning security fix: every caller-supplied
--- interface contract id ('Holding'/'HoldingV2.Holding'/'AV2.Allocation') that
--- feeds 'Wormhole.Ntt.CoinFactory' or 'Wormhole.Ntt.CoinTransfer' must now
--- resolve to a genuine 'NttCoin'/'NttCoinAllocationV2' via 'fetchFromInterface',
--- not merely satisfy the interface's caller-authored view. Ported and inverted
--- from five independent audit worktrees; see .claude/tasks/ntt-audit-fixes.md.
+-- | Confirms every caller-supplied interface contract id
+-- ('Holding'/'HoldingV2.Holding'/'AV2.Allocation') feeding 'Wormhole.Ntt.CoinFactory'
+-- or 'Wormhole.Ntt.CoinTransfer' resolves to a genuine 'NttCoin'/'NttCoinAllocationV2'
+-- via 'fetchFromInterface', not merely the interface's caller-authored view.
 module Test.TestNttCoinAuthenticity where
 
 import Daml.Script
@@ -36,8 +34,8 @@ import Test.TestNttCoinAllocationV2
   )
 
 ----------------------------------------------------------------------
--- Forgery templates: any third party can deploy these, self-signed, and
--- claim any instrument/admin in the interface view alone.
+-- Forgery templates: attacker-deployed, self-signed, claiming any
+-- instrument/admin in the interface view alone.
 ----------------------------------------------------------------------
 
 -- | Implements both v1 and v2 'Holding', signed by its own owner alone.
@@ -116,9 +114,8 @@ template ForgedAllocationV2
       allocation_withdrawExtraObservers _ = []
 
 -- | A counterfeit 'AV2.Allocation' whose settle body directly mints a real
--- 'NttCoin' -- proves gg's ambient authority leaks into attacker code inside
--- 'SettlementFactory_SettleBatch's nested @Allocation_Settle@, not merely that
--- the burn half of a leg is skippable.
+-- 'NttCoin', proving gg's ambient authority leaks into attacker code inside
+-- 'SettlementFactory_SettleBatch', not merely that a burn is skippable.
 template EvilAllocation
   with
     attacker       : Party
@@ -163,8 +160,7 @@ template EvilAllocation
 
 ----------------------------------------------------------------------
 -- Local v1-allocate harness (mirrors Test.TestNttCoinAllocation's, kept
--- local so this module doesn't need to disambiguate its `allocate`/
--- `tryAllocate` from the v2 versions already imported above).
+-- local to avoid clashing with the v2 `allocate`/`tryAllocate` imports).
 ----------------------------------------------------------------------
 
 v1AllocSpec : Time -> Party -> Party -> Party -> Decimal -> InstrumentId -> AllocationSpecification
@@ -195,7 +191,7 @@ tryV1Allocate factoryCid gg actor spec inputHoldingCids = do
       extraArgs = emptyExtraArgs
 
 ----------------------------------------------------------------------
--- F1: forged Holding rejected on every input-holding surface
+-- Forged Holding rejected on every input-holding surface
 ----------------------------------------------------------------------
 
 testForgedHoldingRejectedByTransferV1 : Script ()
@@ -282,9 +278,8 @@ testForgedHoldingRejectedByAllocateV2 = do
     (mkSpec gg mallory []) [toInterfaceContractId @HoldingV2.Holding forgedCid]
   expectAbort "is not an NttCoin" res
 
--- | No proving-test agent wrote this one: 'burnMintFactory_burnMintImpl' is
--- gg-gated (not attacker-reachable directly), but Step 4 pins it too, for
--- consistency and because it is the leg that closes the Manager burn path.
+-- | 'burnMintFactory_burnMintImpl' is gg-gated (not attacker-reachable
+-- directly), but pinned here too since it closes the Manager burn path.
 testForgedHoldingRejectedByBurnMint : Script ()
 testForgedHoldingRejectedByBurnMint = do
   gg <- allocateParty "AuthBurnMintGg"
@@ -306,7 +301,7 @@ testForgedHoldingRejectedByBurnMint = do
   expectAbort "burn input is not an NttCoin" res
 
 ----------------------------------------------------------------------
--- F2: forged Allocation rejected by SettleBatch
+-- Forged Allocation rejected by SettleBatch
 ----------------------------------------------------------------------
 
 testForgedAllocationRejectedBySettleBatch : Script ()
@@ -355,9 +350,9 @@ testForgedAllocationRejectedBySettleBatch = do
   supply <- query @NttCoin gg
   sum [c.amount | (_, c) <- supply, c.instrumentId.id == instr] === 0.0
 
--- | Ported from A's proof that gg's ambient authority leaks into the
--- attacker's own choice body (not merely that a burn is skippable): the
--- attacker's template directly calls @create NttCoin@ inside its settle.
+-- | The attacker's template calls @create NttCoin@ directly inside its own
+-- settle body, proving gg's ambient authority leaks into attacker code (not
+-- merely that a burn step is skippable).
 testSettleBatchDoesNotLeakGgAuthority : Script ()
 testSettleBatchDoesNotLeakGgAuthority = do
   gg <- allocateParty "AuthLeakGg"
@@ -405,7 +400,7 @@ testSettleBatchDoesNotLeakGgAuthority = do
   sum [c.amount | (_, c) <- after, c.instrumentId == victimInstrument] === 0.0
 
 ----------------------------------------------------------------------
--- F3: v2 Accept requires the receiver account's actors
+-- v2 Accept requires the receiver account's actors
 ----------------------------------------------------------------------
 
 testV2AcceptRequiresReceiverActors : Script ()
@@ -447,8 +442,8 @@ testV2AcceptRequiresReceiverActors = do
   stillThere <- queryContractId gg instrCid
   assert (stillThere /= None)
 
--- | Control: the identical outsider submission against Reject IS blocked
--- (added in 5ce278fc). Ported as-is -- pins the symmetry Accept now shares.
+-- | Control: the identical outsider submission against Reject is blocked,
+-- pinning the symmetry Accept now shares.
 testV2RejectRequiresReceiverActors : Script ()
 testV2RejectRequiresReceiverActors = do
   gg <- allocateParty "AuthRejectActorsGg"
@@ -482,7 +477,7 @@ testV2RejectRequiresReceiverActors = do
   expectAbort "recipient account's authority" rejected
 
 ----------------------------------------------------------------------
--- F4: sub-account debits require the account they actually sit in
+-- Sub-account debits require the account they actually sit in
 ----------------------------------------------------------------------
 
 testV1TransferCannotSpendSubAccountCoin : Script ()
@@ -513,9 +508,8 @@ testV1TransferCannotSpendSubAccountCoin = do
     TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [c]} -> pure c
     other -> abort ("sub-account seeding failed: " <> show other)
 
-  -- Spend the vault coin through the account-blind v1 surface, declaring the
-  -- sender as the basic account: rejected, since v1 now lifts alice into
-  -- 'basicAccountV2', which no longer equals the vault account the coin sits in.
+  -- v1 lifts alice into her basic account, which no longer equals the vault
+  -- account the coin sits in; rejected.
   res <- trySubmit (actAs alice <> disclose factoryDisc) do
     exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
       expectedAdmin = gg
@@ -543,9 +537,7 @@ testV2TransferSenderAccountMustMatchInput = do
 
   factoryDisc <- discloseFactory gg factoryCid
   t0 <- getTime
-  -- alice declares "checking" as the sender account but funds the transfer
-  -- out of "savings": rejected, since the coin's real account no longer
-  -- equals the declared sender account.
+  -- alice declares "checking" as sender but funds from "savings"; rejected.
   res <- trySubmit (actAs alice <> actAs bob <> disclose factoryDisc) do
     exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
       transfer = TIV2.Transfer with
@@ -600,19 +592,18 @@ testV1AllocateCannotSpendSubAccountCoin = do
       pure (coerceContractId @HoldingV2.Holding @Holding rcid)
     other -> abort ("expected the sub-account transfer to complete, got: " <> show other)
 
-  -- Spend that sub-account coin through the v1 (account-blind) allocate,
-  -- which lifts alice into her basic account: rejected.
+  -- v1's account-blind allocate lifts alice into her basic account; rejected.
   res <- tryV1Allocate factoryCid gg alice
     (v1AllocSpec t0 carol alice bob 0.006 instrumentId) [subCoinCid]
   expectAbort "input not owned by sender" res
 
 ----------------------------------------------------------------------
--- Negative controls: bounding how far the account-blindness of v1 reaches
+-- Negative controls: bounding how far v1's account-blindness reaches
 ----------------------------------------------------------------------
 
--- | Provider-delegated holdings are NOT a theft vector even before F4: the
--- view check passes (owner-only), but the archive still needs the coin's
--- real signatory set, which includes the provider.
+-- | Provider-delegated holdings aren't a theft vector: the view check
+-- passes (owner-only), but archiving still needs the coin's real signatory
+-- set, which includes the provider.
 testProviderCoinNeedsProviderAuthority : Script ()
 testProviderCoinNeedsProviderAuthority = do
   gg <- allocateParty "AuthProvGg"
@@ -648,8 +639,8 @@ testProviderCoinNeedsProviderAuthority = do
       transfer = mkTransferV1 t0 alice alice 1.0 instrumentId [coerceContractId delegatedCid]
       extraArgs = emptyExtraArgs
 
--- | v2 variant of the same bound: the ledger, not any explicit check, stops
--- spending a provider-managed account's funds via a basic-account sender.
+-- | v2 variant: the ledger, not an explicit check, stops spending a
+-- provider-managed account's funds via a basic-account sender.
 testProviderAccountNotSpendableViaBasicSender : Script ()
 testProviderAccountNotSpendableViaBasicSender = do
   gg <- allocateParty "AuthProvAcctGg"
@@ -695,8 +686,7 @@ testProviderAccountNotSpendableViaBasicSender = do
     Right _ -> abort "EXPLOIT: provider-delegated funds spent without provider authority"
 
 ----------------------------------------------------------------------
--- Other invariants pinned during the audit (unaffected by this fix, but
--- undercovered by the pre-existing suites)
+-- Additional invariants not covered by the pre-existing suites
 ----------------------------------------------------------------------
 
 testDuplicateInputCidRejected : Script ()
@@ -708,8 +698,8 @@ testDuplicateInputCidRejected = do
   coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
   factoryDisc <- discloseFactory gg factoryCid
   t0 <- getTime
-  -- 0.01 + 0.01 "covers" 0.02 only if the duplicate is counted twice; the
-  -- second archive of the already-consumed cid aborts first.
+  -- 0.01 + 0.01 covers 0.02 only if the duplicate cid is counted twice; the
+  -- second archive of it aborts first.
   res <- trySubmit (actAs alice <> disclose factoryDisc) do
     exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
       expectedAdmin = gg
