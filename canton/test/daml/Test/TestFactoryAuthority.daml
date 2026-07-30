@@ -35,11 +35,11 @@ import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.BurnMintV1
 import Splice.Api.Token.TransferInstructionV1
 import Wormhole.Core.Fees (emptyExtraArgs)
-import Wormhole.Core.State (Emitter)
+import Wormhole.Core.State (Emitter, CoreState)
 import Wormhole.Ntt.Governance (NttGovernance, RegisterManager (..))
 import Wormhole.Ntt.Manager qualified as M
 import Wormhole.Ntt.Deposit (DepositPreapproval (..), Deposit (..))
-import Test.TestNtt (nttSetup, nttCoinFactorySetup, coreRegistries, cantonChainId, b32)
+import Test.TestNtt (nttSetup, nttCoinFactorySetup, coreRegistries, cantonChainId, b32, resolveEmitter)
 
 -- | A contract signed by @victim@. If an attacker-authored factory can create
 -- one of these, it wielded @victim@'s (gg's) authority.
@@ -385,12 +385,13 @@ testEvilBurnMintFactoryForgesGgContract = do
 -- and the command itself, so each test decides whether it must succeed or
 -- fail.
 registerBurnMint
-  : Party -> Party -> InstrumentId -> ContractId BurnMintFactory
+  : Party -> Party -> InstrumentId -> ContractId BurnMintFactory -> ContractId CoreState
   -> Script ([Disclosure], Commands (ContractId M.NttManager, ContractId Emitter))
-registerBurnMint operator admin inst factoryCid = do
+registerBurnMint operator admin inst factoryCid csId = do
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
   let register = exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
@@ -401,10 +402,12 @@ registerBurnMint operator admin inst factoryCid = do
         tokenConfig = M.BurnMint
         tokenDecimals = 8
         factory = M.BurnMintFactoryCid factoryCid
-        coreStateCid = None
+        coreStateCid = csId
+        consistencyLevel = 0
         emitterFeeAllocation = None
         claimFeeAllocation = None
-  pure ([govDisc, emRegDisc, rrRegDisc], (\(_, mgrCid, emitterCid, _) -> (mgrCid, emitterCid)) <$> register)
+        feeAllocation = None
+  pure ([govDisc, emRegDisc, rrRegDisc, csDisc], (\(_, mgrCid, emitterCid, _, _) -> (mgrCid, emitterCid)) <$> register)
 
 -- | Through the real registration: an attacker cannot permissionlessly stand
 -- up a gg-minted deployment (instrument admin = gg), because 'RegisterManager'
@@ -413,25 +416,25 @@ registerBurnMint operator admin inst factoryCid = do
 -- relied on.
 testAttackerCannotRegisterGgMintedManager : Script ()
 testAttackerCannotRegisterGgMintedManager = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   attacker <- allocateParty "AttackerGgMint"
   evilFactory <- submit attacker do
     createCmd EvilBurnMintFactory with thief = attacker, viewAdmin = gg, attemptForge = True
   let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
   (discs, register) <- registerBurnMint operator attacker inst
-    (toInterfaceContractId @BurnMintFactory evilFactory)
+    (toInterfaceContractId @BurnMintFactory evilFactory) csId
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
 -- | Same property against a real 'Token.CIP0056.CoinFactory.CoinFactory':
 -- the co-signature gate protects registration, not the factory's trustworthiness.
 testAttackerCannotRegisterGgMintedManagerWithRealFactory : Script ()
 testAttackerCannotRegisterGgMintedManagerWithRealFactory = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   factoryCid <- nttCoinFactorySetup gg
   attacker <- allocateParty "AttackerGgMintRealFactory"
   let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
   (discs, register) <- registerBurnMint operator attacker inst
-    (toInterfaceContractId @BurnMintFactory factoryCid)
+    (toInterfaceContractId @BurnMintFactory factoryCid) csId
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
 -- | A holding signed by its owner alone whose interface view lies about the
@@ -470,12 +473,23 @@ testExternalMinterMaliciousFactoryFirewallsGg = do
     createCmd EvilBurnMintFactory with thief = minter, viewAdmin = gg, attemptForge = True
   let inst = InstrumentId with admin = minter, id = M.nttInstrumentIdFor minter 0
   (discs, register) <- registerBurnMint operator minter inst
-    (toInterfaceContractId @BurnMintFactory evilFactory)
-  (mgrCid, emitterCid) <- submit (actAs minter <> mconcat (map disclose discs)) register
-  mgrCid <- submit minter do
+    (toInterfaceContractId @BurnMintFactory evilFactory) csId
+  (mgrCid, _) <- submit (actAs minter <> mconcat (map disclose discs)) register
+  Some mgr0 <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr0.transceiverEmitterId   -- RegisterManager's own init broadcast churned it
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
+  csDisc0 <- fromSome <$> queryDisclosure operator csId
+  (mgrCid, _) <- submit (actAs minter <> disclose emitterDisc <> disclose csDisc0) do
     exerciseCmd mgrCid M.SetPeer with
       chainId = 2
       peer = M.Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = minter
+      feeAllocation = None
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId   -- SetPeer's broadcast churned it
   fakeHolding <- submit minter do
     createCmd FakeHolding with owner = minter, instrument = inst, amount = 1.0
   csDisc <- fromSome <$> queryDisclosure operator csId

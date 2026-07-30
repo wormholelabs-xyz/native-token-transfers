@@ -159,16 +159,25 @@ scale byte, at most 8 decimals. Round-trips are covered by
 The same module also codes NTT's own governance packets — `module(32)
 "Ntt" ‖ action(1) ‖ chain(2) ‖ <action-specific>`, under the module id `"Ntt"`
 so an NTT governance VAA can never be confused with (or replayed as) a core
-one. `NttGovernanceAction` is a genuine sum type over the three actions
+one. `NttGovernanceAction` is a genuine sum type over the four actions
 guardians can sign: accept an admin handoff
 (`AcceptAdminToGovernance`, `NttManager.AcceptAdminTransferByVaa`), co-sign a
 gg-minted burn/mint registration (`RegisterBurnMintManager`,
-`NttGovernance.RegisterManagerByVaa`), and vet a factory rotation
-(`RotateToCanonicalFactory`, `NttManager.SetFactoryByVaa`). Every call site
-dispatches on the parsed constructor exhaustively and aborts on the wrong one,
-even where two actions share an identical byte layout (accept-admin and
-rotate both do) — a guardian-signed VAA for one purpose must never satisfy a
-different choice just because its bytes happen to parse.
+`NttGovernance.RegisterManagerByVaa`), vet a factory rotation
+(`RotateToCanonicalFactory`, `NttManager.SetFactoryByVaa`), and edit a
+gg-adminned deployment's peer table (`SetPeerByGovernance`,
+`NttManager.SetPeerByVaa`). Every call site dispatches on the parsed
+constructor exhaustively and aborts on the wrong one, even where two actions
+share an identical byte layout (accept-admin and rotate both do) — a
+guardian-signed VAA for one purpose must never satisfy a different choice
+just because its bytes happen to parse.
+
+Two further payloads are published bare (no `0x9945FF10` framing) at the core
+bridge and are consumed only by the off-chain NTT Global Accountant — no chain
+has a receive path for either: `TransceiverRegistration` (`0x18fc67c2`, 38
+bytes), published as part of every `SetPeer`, and `TransceiverInit`
+(`0x9c23bd3b`, 70 bytes), published once as part of `RegisterManager`. See
+"Accountant broadcasts" below.
 
 ## Send (`NttManager.Transfer`)
 
@@ -198,6 +207,111 @@ The user is not a stakeholder of the manager, the transceiver, the
 `CoreState`, the `LockedLedger`, the custody pot holding, or the registry
 factory, so a submission attaches them as explicit disclosures. This is a
 visibility requirement, not an authorization one.
+
+## Accountant broadcasts (bundled into `SetPeer` / `RegisterManager`)
+
+`TransceiverRegistration` and `TransceiverInit` are no longer published by
+dedicated choices; they publish as a bundled effect of the choices that
+already change the state each payload attests to. There is no standalone
+broadcast choice and no separate re-broadcast path.
+
+- `SetPeer` (`controller admin, payer`, consuming) publishes
+  `TransceiverRegistration` (prefix `0x18fc67c2`, 38 bytes: `prefix(4) ‖
+  peerChain(2) ‖ peerAddress(32)`) every time it runs — the first peer for a
+  chain and every replacement alike — at nonce 0. `payer` is an explicit
+  parameter, not hardcoded to `admin`: the direct admin path calls it with
+  `payer = admin` (self-funding, unchanged in effect from before `payer`
+  existed), while `SetPeerByVaa` (below) calls it with `payer = executor`, so
+  the relayer funds the governance path's fee instead of `gg`. `payer` must
+  co-control because Daml authorization does not carry a choice's controllers
+  past a nested exercise on the same contract; without it the nested
+  `PublishMessage` (`controller owner, payer`) would lose the caller's
+  authority the moment a wrapper choice like `SetPeerByVaa` calls in here. It
+  exercises the deployment's transceiver `Emitter` in the same transaction as
+  the peer-table update and returns the resulting `WormholeMessage` alongside
+  the new manager cid.
+- `RegisterManager` publishes `TransceiverInit` (prefix `0x9c23bd3b`, 70 bytes:
+  `prefix(4) ‖ managerAddress(32) ‖ mode(1) ‖ tokenAddress(32) ‖ decimals(1)`)
+  exactly once, at registration, also at nonce 0 and `admin`-paid — this
+  deployment's manager address, mode (`0` = lock/unlock, `1` = burn/mint),
+  token address, and decimals.
+
+Re-announcing a registration means re-exercising `SetPeer` with the same peer
+values (see the divergence note below); `RegisterManager`'s init broadcast has
+no re-play path at all, since registration itself runs only once per
+deployment. An accountant that needs an already-signed VAA again simply
+re-fetches it from the guardian API rather than asking the chain to re-emit
+it. Neither publish checks `paused` (pause blocks value movement, not
+administration), and neither touches the `LockedLedger`, factory, or any
+holding.
+
+**Divergence from EVM.** EVM's transceiver peer is immutable once set
+(`PeerAlreadySet`), specifically to keep the accountant's bookkeeping simple.
+Canton's peer stays replaceable: `SetPeer` always accepts a new value for
+`peers[chainId]` and always re-broadcasts. That divergence is not
+accounting-neutral. The accountant's peer entries are write-once per
+`(emitter, peer chain)`
+(`ntt-global-accountant/src/contract.rs` rejects a second registration with
+`"peer entry for this chain already exists"`) and `TRANSCEIVER_PEER` is read on
+every transfer observation, with a cross-registration check that bails
+`"peers are not cross-registered"` if the two sides disagree. So after a peer
+rotation W → X, the accountant keeps W forever: inbound transfers from the new
+peer X fail `MissingHubRegistration` (X was never recorded), while outbound
+transfers to X still resolve — and cross-check — against the stale W entry.
+The corridor's accounting for that chain is now permanently wrong, with no
+on-chain repair path, since `transceiverEmitterId` is immutable. This does not
+argue for reverting to write-once peers on Canton (that would neuter
+`SetPeerByVaa`, whose entire purpose is quorum-driven peer edits, and local
+routing correctness matters more than accountant bookkeeping) — the honest
+framing is that a peer rotation is a **deployment-level event**, exactly as it
+is on EVM, where the answer is "deploy a new transceiver": Canton's equivalent
+is a new deployment (new manager, new emitter), because the emitter identity
+never changes in place
+(`TestNtt:testSetPeerReplacementBroadcastsAgain` pins the local-routing half of
+this; the accountant-side consequence is operational, not tested here). Note
+also that the accountant only processes `TransceiverInit` from lock/unlock
+(hub) managers; burn/mint spokes are registered through the hub's own peer
+registrations.
+
+**Token address.** A CIP-0056 `InstrumentId` (`admin : Party, id : Text`) has
+no native 32-byte form, so `TransceiverInit.tokenAddress` uses
+`keccak256("wormhole:ntt-token:v1" ‖ lp(adminText) ‖ lp(id))`, the same
+length-prefixed-hash convention as the manager and transceiver address
+derivations above. It is computed once at `RegisterManager` and stored on the
+manager (`tokenAddress`), not recomputed, so it survives `TransferAdmin`
+exactly like `managerAddress`. Pinned by
+`TestNttVectors:testVectorTokenAddress`.
+
+**Shared sequence counter.** Both payloads publish through the same
+transceiver `Emitter` as `Transfer`, so registration/init messages interleave
+with transfer messages in the same sequence space. `RegisterManager`'s
+`TransceiverInit` claims sequence 0, so a fresh deployment's emitter sequence
+is already at 1 before its first `Transfer`, and every subsequent `SetPeer`
+bumps the counter again. Any consumer must discriminate by the 4-byte payload
+prefix (`0x9945FF10` transfer, `0x18fc67c2` peer registration, `0x9c23bd3b`
+init) and must never assume a sequence number implies a transfer.
+
+**Governance-gated peer edits (`SetPeerByVaa`).** A gg-adminned deployment
+(admin handed to `guardianGovernance`, see "Custody follows the admin" below)
+can have its peer table edited by guardian quorum vote instead of a live
+`admin` action. `SetPeerByVaa` (`controller executor`, nonconsuming; NTT
+governance action 4, a 142-byte packet: `module(32) ‖ action(1)=4 ‖ chain(2)
+‖ managerAddress(32) ‖ peerEpoch(8) ‖ peerChain(2) ‖ peerManagerAddress(32) ‖
+peerTransceiverAddress(32) ‖ peerDecimals(1)`) runs the same verification
+ladder as `AcceptAdminTransferByVaa`: the disclosed `CoreState` pinned to this
+deployment's own guardian trust anchor and operator; the VAA verified and its
+digest consumed into `gg`'s replay trie, sub-scoped by the deployment's
+`namespace` (governance and transfer VAAs share one trie, so a governance VAA
+can never be replayed as, or by, a transfer one); signed by the CURRENT
+guardian set only; and the standard emitter chain/address and target
+chain/managerAddress checks. `peerEpoch` mirrors action 1's `factoryEpoch`: it
+must equal the manager's current `peerEpoch` (bumped by every `SetPeer`), so a
+withheld or superseded peer VAA can never reinstate a since-replaced peer. It
+additionally requires `admin == guardianGovernance` before nesting a `SetPeer`
+exercise (`payer = executor`, so the relayer self-funds the broadcast fee, not
+gg) with the parsed peer values, so a governance-driven edit broadcasts
+exactly like an admin-driven one. Any `executor` (a relayer) can submit; the
+VAA is the only authority that matters.
 
 ## Receive (`NttManager.Release` / `NttManager.Mint`)
 
@@ -415,12 +529,17 @@ quorum takes on by accepting the role.
 
 ## Contention and contract churn
 
-The manager itself is consumed only by its config choices (`SetPeer`,
-`SetFactory`, and the rare `TransferAdmin`), so across transfer traffic its
-cid is stable and disclosures of it stay valid. What serializes is:
+The manager itself is consumed by its config choices (`SetPeer`, `SetFactory`,
+and the rare `TransferAdmin`), so a config edit still leaves the manager cid
+stable across ordinary `Transfer` traffic (which is nonconsuming). What
+serializes is:
 
-- Sends, on the transceiver `Emitter` (consumed by every publish). Inherent to
-  Wormhole sequence numbering.
+- Publishing, on the transceiver `Emitter` (consumed by every
+  `PublishMessage`). This is no longer sends-only: `SetPeer` bundles its
+  registration broadcast through the same emitter (see "Accountant
+  broadcasts"), so a peer edit now contends with `Transfer` traffic on the
+  identical contract, not a separate one. `RegisterManager`'s one-shot init
+  broadcast contends the same way, but only once, at registration.
 - Lock-mode value movement, on the `LockedLedger` and the custody pot holding
   (both `Transfer` and `Release` touch them, in the same transactions).
   Burn/mint deployments have no ledger, so their sends contend only on the
@@ -428,7 +547,16 @@ cid is stable and disclosures of it stay valid. What serializes is:
 - VAA consumption, on the covering replay-trie node.
 
 A submission that loses a race re-resolves the fresh cid and retries, the same
-fail-closed pattern the core publish path uses.
+fail-closed pattern the core publish path uses. This is a liveness cost, not a
+correctness one — but it is griefable: a dust-transfer spammer can keep the
+emitter churning fast enough that an urgent peer repoint (say, retiring a
+compromised peer) keeps losing the race, and the admin is not an `Emitter`
+stakeholder, so each retry needs a fresh off-ledger disclosure round-trip.
+The runbook for an urgent peer change is therefore **pause first, then
+`SetPeer`**: `SetPaused` (`admin`-controlled) takes no `CoreState`/`Emitter` at
+all, so it can never lose this race, and once paused `Transfer` aborts
+outright, which stops new contention on the emitter before the peer edit is
+retried.
 
 ## Follow-ups
 

@@ -482,10 +482,12 @@ template NttManager
     instrumentId         : InstrumentId    -- the bridged CIP-56 instrument
     tokenConfig          : NttTokenConfig
     tokenDecimals        : Int             -- the local token's decimals (0..10)
+    tokenAddress         : Bytes32         -- nttTokenAddressFor instrumentId; stored at registration so it survives TransferAdmin
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
     factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa': 'SetFactory' bumps this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
+    peerEpoch            : Int             -- freshness pin for 'SetPeerByVaa': every 'SetPeer' bumps this deployment-wide counter, so a withheld/superseded peer VAA can never reinstate a since-replaced peer
     minter               : Optional Party  -- external burn/mint minter (Some) — see 'effectiveMinter'; None when gg mints
   where
     -- See the module header for what each signature contributes. All three
@@ -503,13 +505,23 @@ template NttManager
     -- see 'effectiveMinter' and the de-escalation in the burn/'Mint' paths.
     signatory (operator :: admin :: guardianGovernance :: optionalToList minter)
 
-    -- | Register or replace a peer deployment. Consuming, but only admin
-    -- config changes it, so the manager cid is stable across transfer traffic.
-    choice SetPeer : ContractId NttManager
+    -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
+    -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
+    -- passes @executor@ so the relayer self-funds and gg's fee-free invariant holds. @payer@ must
+    -- co-control: Daml authorization does not carry a choice's controllers past a nested exercise
+    -- on the same contract, so without this the nested 'PublishMessage' (@controller owner, payer@)
+    -- would lose @executor@'s authority the moment 'SetPeerByVaa' calls in here. When @payer == admin@
+    -- (the direct path) this adds nothing beyond @admin@'s own authority.
+    choice SetPeer : (ContractId NttManager, WormholeMessage)
       with
-        chainId : Int
-        peer    : Peer
-      controller admin
+        chainId               : Int
+        peer                  : Peer
+        transceiverEmitterCid : ContractId Emitter
+        coreStateCid          : ContractId CoreState
+        consistencyLevel      : Int
+        payer                 : Party
+        feeAllocation         : Optional (ContractId Allocation, ExtraArgs)
+      controller admin, payer
       do
         assertMsg "ntt: peer chain id must be a positive uint16"
           (chainId > 0 && chainId <= 65535)
@@ -517,11 +529,38 @@ template NttManager
           (chainId /= this.chainId)
         assertMsg "ntt: peer decimals must be a positive uint8"
           (peer.decimals > 0 && peer.decimals <= 255)
+        -- 'leftPadTo' is the identity above 32 bytes, so an unchecked oversized
+        -- address would publish a malformed registration. Pre-normalization,
+        -- so uppercase hex is rejected rather than lowercased.
+        assertMsg "ntt: peer manager address must be 32 bytes of lowercase hex"
+          (byteLength peer.managerAddress == 32 && isLowerHex peer.managerAddress)
+        assertMsg "ntt: peer transceiver address must be 32 bytes of lowercase hex"
+          (byteLength peer.transceiverAddress == 32 && isLowerHex peer.transceiverAddress)
         assertMsg "ntt: peer manager address must be non-zero"
           (not (isZeroAddress peer.managerAddress))
         assertMsg "ntt: peer transceiver address must be non-zero"
           (not (isZeroAddress peer.transceiverAddress))
-        create this with peers = Map.insert chainId (normalizePeer peer) peers
+        -- Uint8 on the wire; the watcher drops out-of-range messages.
+        assertMsg "ntt: consistency level must be a uint8"
+          (consistencyLevel >= 0 && consistencyLevel <= 255)
+        let peer' = normalizePeer peer
+        newMgrCid <- create this with peers = Map.insert chainId peer' peers, peerEpoch = peerEpoch + 1
+        transceiver <- fetch transceiverEmitterCid
+        assertMsg "ntt: transceiver emitter is not this deployment's"
+          (transceiver.owner == guardianGovernance
+            && transceiver.operator == operator
+            && transceiver.emitterId == transceiverEmitterId)
+        -- Publishes the registration for the accountant; write-once there, replacements are local-only.
+        msg <- exercise transceiverEmitterCid PublishMessage with
+          payload = encodeTransceiverRegistration TransceiverRegistration with
+            peerChain = chainId
+            peerAddress = peer'.transceiverAddress
+          nonce = 0
+          consistencyLevel
+          coreStateCid
+          payer
+          feeAllocation
+        pure (newMgrCid, msg)
 
     -- | Emergency halt. While @paused@, 'Transfer', 'Release', and 'Mint' all
     -- abort; config choices ('SetPeer', 'SetFactory', 'TransferAdmin') keep
@@ -679,8 +718,8 @@ template NttManager
         assertMsg "ntt governance: wrong emitter address"
           (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
 
-        -- Exhaustive constructor dispatch: a register or rotate VAA must
-        -- abort here, even though 'RotateToCanonicalFactory' shares this
+        -- Exhaustive constructor dispatch: a register, rotate, or set-peer VAA
+        -- must abort here, even though 'RotateToCanonicalFactory' shares this
         -- action's exact byte layout.
         case parseNttGovernance vaa.payload of
           AcceptAdminToGovernance chain targetManagerAddress targetFactoryEpoch -> do
@@ -688,6 +727,7 @@ template NttManager
             assertMsg "ntt governance: wrong manager address"
               (normalizeHex targetManagerAddress == managerAddress)
             assertMsg "ntt governance: wrong factory epoch" (targetFactoryEpoch == factoryEpoch)
+          SetPeerByGovernance {} -> abort "ntt governance: wrong action for AcceptAdminTransferByVaa"
           _ -> abort "ntt governance: not an accept-admin action"
 
         exercise proposalCid AcceptAdminTransfer with
@@ -695,6 +735,60 @@ template NttManager
           ledgerCid
           vettedFactory = factory
           extraArgs
+
+    -- | Quorum-driven peer edit for gg-adminned deployments; nests SetPeer, so it broadcasts.
+    nonconsuming choice SetPeerByVaa : (ContractId NttManager, WormholeMessage)
+      with
+        executor              : Party
+        coreStateCid          : ContractId CoreState
+        replayNodeCid         : ContractId ReplayNode
+        vaaBytes              : Bytes
+        pubKeys               : [(Int, Bytes)]
+        transceiverEmitterCid : ContractId Emitter
+        consistencyLevel      : Int
+        feeAllocation         : Optional (ContractId Allocation, ExtraArgs)
+      controller executor
+      do
+        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
+
+        (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
+          encodedVAA = vaaBytes
+          pubKeys
+          consumer = guardianGovernance
+          namespace
+          replayNodeCid
+
+        assertMsg "ntt governance: not signed by current guardian set"
+          (vaa.guardianSetIndex == cs.guardianSetIndex)
+        assertMsg "ntt governance: wrong emitter chain"
+          (vaa.emitterChain == cs.governanceChainId)
+        assertMsg "ntt governance: wrong emitter address"
+          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+
+        case parseNttGovernance vaa.payload of
+          SetPeerByGovernance
+            { chain, managerAddress = actionManagerAddress, peerEpoch = actionPeerEpoch
+            , peerChain, peerManagerAddress, peerTransceiverAddress, peerDecimals
+            } -> do
+            assertMsg "ntt governance: wrong target chain" (chain == chainId)
+            assertMsg "ntt governance: wrong manager address"
+              (normalizeHex actionManagerAddress == managerAddress)
+            assertMsg "ntt governance: wrong peer epoch" (actionPeerEpoch == peerEpoch)
+            assertMsg "ntt: manager is not governance-adminned" (admin == guardianGovernance)
+            exercise self SetPeer with
+              chainId = peerChain
+              peer = Peer with
+                managerAddress = peerManagerAddress
+                transceiverAddress = peerTransceiverAddress
+                decimals = peerDecimals
+              transceiverEmitterCid
+              coreStateCid
+              consistencyLevel
+              payer = executor
+              feeAllocation
+          AcceptAdminToGovernance {} -> abort "ntt governance: wrong action for SetPeerByVaa"
+          RegisterBurnMintManager {} -> abort "ntt governance: wrong action for SetPeerByVaa"
+          RotateToCanonicalFactory {} -> abort "ntt governance: wrong action for SetPeerByVaa"
 
     -- | Governance-VAA-gated factory rotation for gg-minted burn/mint
     -- deployments: the guardian quorum vets a specific (chain, managerAddress,

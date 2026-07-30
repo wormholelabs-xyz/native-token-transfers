@@ -13,6 +13,8 @@ module Test.TestNttVectors where
 import Daml.Script
 import DA.Assert ((===))
 
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+
 import Wormhole.Core.Bytes
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Payload
@@ -233,3 +235,104 @@ testAmountUint64Bound = do
   let maxInt = 9223372036854775807
   (trimAmount maxInt 0).amount === maxInt
   pure ()
+
+----------------------------------------------------------------------
+-- TransceiverRegistration vector (evm/test/payloads/transceiver_registration_1.txt,
+-- 38 bytes: prefix ‖ chainId=0x0017 ‖ address hex"BABABAFEFE").
+--
+-- The address is a Solidity bytes32 literal, so it is right-padded with
+-- zeros (TransceiverStructs.t.sol:48-56), same convention as vecSourceManager
+-- above: pin the full 32-byte right-padded value so 'leftPadTo' is a no-op.
+----------------------------------------------------------------------
+
+vecPeerAddress : Bytes32
+vecPeerAddress = "bababafefe000000000000000000000000000000000000000000000000000000"
+
+vecTransceiverRegistration : TransceiverRegistration
+vecTransceiverRegistration = TransceiverRegistration with
+    peerChain = 23
+    peerAddress = vecPeerAddress
+
+transceiverRegistration1 : Bytes
+transceiverRegistration1 = "18fc67c20017bababafefe000000000000000000000000000000000000000000000000000000"
+
+-- | Byte-exact encode against the fixture, plus decode round-trip.
+testVectorTransceiverRegistration : Script ()
+testVectorTransceiverRegistration = do
+  encodeTransceiverRegistration vecTransceiverRegistration === transceiverRegistration1
+  byteLength transceiverRegistration1 === 38
+  decodeTransceiverRegistration transceiverRegistration1 === vecTransceiverRegistration
+
+----------------------------------------------------------------------
+-- TransceiverInit vector (evm/test/payloads/transceiver_info_1.txt, 70 bytes:
+-- prefix ‖ manager hex"BABABABABABA" ‖ mode=LOCKING(0) ‖ token
+-- hex"DEDEDEDEDEDEDE" ‖ decimals=16). Same right-padding trap as above.
+----------------------------------------------------------------------
+
+vecTransceiverInitManager : Bytes32
+vecTransceiverInitManager = "babababababa0000000000000000000000000000000000000000000000000000"
+
+vecTransceiverInitToken : Bytes32
+vecTransceiverInitToken = "dedededededede00000000000000000000000000000000000000000000000000"
+
+vecTransceiverInit : TransceiverInit
+vecTransceiverInit = TransceiverInit with
+    nttManagerAddress = vecTransceiverInitManager
+    nttManagerMode = 0
+    tokenAddress = vecTransceiverInitToken
+    tokenDecimals = 16
+
+transceiverInit1 : Bytes
+transceiverInit1 = "9c23bd3bbabababababa000000000000000000000000000000000000000000000000000000dedededededede0000000000000000000000000000000000000000000000000010"
+
+-- | Byte-exact encode against the fixture, plus decode round-trip.
+testVectorTransceiverInit : Script ()
+testVectorTransceiverInit = do
+  encodeTransceiverInit vecTransceiverInit === transceiverInit1
+  byteLength transceiverInit1 === 70
+  decodeTransceiverInit transceiverInit1 === vecTransceiverInit
+
+----------------------------------------------------------------------
+-- NTT governance action 4 (SetPeerByGovernance) vector: module(32) ‖
+-- action(1)=04 ‖ chain(2) ‖ managerAddress(32) ‖ peerEpoch(8) ‖ peerChain(2) ‖
+-- peerManagerAddress(32) ‖ peerTransceiverAddress(32) ‖ peerDecimals(1),
+-- 142 bytes. No reference implementation (Canton-only action); pins the wire
+-- format byte-for-byte so a guardian-signed VAA and this decoder never drift.
+----------------------------------------------------------------------
+
+vecSetPeerAction : NttGovernanceAction
+vecSetPeerAction = SetPeerByGovernance with
+    chain = 72
+    managerAddress = leftPadTo 32 "aa"
+    peerEpoch = 5
+    peerChain = 2
+    peerManagerAddress = leftPadTo 32 "bb"
+    peerTransceiverAddress = leftPadTo 32 "cc"
+    peerDecimals = 8
+
+nttGovernanceSetPeer1 : Bytes
+nttGovernanceSetPeer1 = "00000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000005000200000000000000000000000000000000000000000000000000000000000000bb00000000000000000000000000000000000000000000000000000000000000cc08"
+
+-- | Byte-exact encode against the pinned hex, plus decode round-trip.
+testVectorNttGovernanceSetPeer : Script ()
+testVectorNttGovernanceSetPeer = do
+  encodeNttGovernance vecSetPeerAction === nttGovernanceSetPeer1
+  byteLength nttGovernanceSetPeer1 === 142
+  parseNttGovernance nttGovernanceSetPeer1 === vecSetPeerAction
+
+----------------------------------------------------------------------
+-- Token-address vector: Canton's InstrumentId -> Bytes32 stand-in for
+-- TransceiverInit.tokenAddress. No reference implementation to pin against,
+-- so this freezes Canton's own derivation instead.
+----------------------------------------------------------------------
+
+-- | Pins the token-address formula against fixed text, then confirms
+-- 'nttTokenAddressFor' agrees with the text form on a real 'InstrumentId'.
+testVectorTokenAddress : Script ()
+testVectorTokenAddress = do
+  nttTokenAddressFromText "vector-token-admin::1220deadbeef" "VECTOR-TOKEN"
+    -- frozen: observed value from a single run, no external reference
+    === "0eb25a08a7432d2f56bd449c5ca6e41c9c0b13d1af7e784f46d70572dff91efa"
+  admin <- allocateParty "TokenAddressVectorAdmin"
+  let inst = InstrumentId with admin, id = "VECTOR-TOKEN-2"
+  nttTokenAddressFor inst === nttTokenAddressFromText (partyToText admin) inst.id
