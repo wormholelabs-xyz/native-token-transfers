@@ -2881,6 +2881,70 @@ testRegisterManagerByVaaBindingMismatch = do
     registerManagerByVaaCmd admin fx csId 0 dummyFactory registerHappyVAA
   expectAbort "registration binding does not match" res
 
+-- | The guardian trust root is pinned to the deployment's committed
+-- @guardianGovernance@, not the operator. A compromised operator co-signing
+-- a forged 'CoreState' under a throwaway gg party fails at the pin, before
+-- any VAA verification runs. Mirrors 'testAcceptAdminByVaaPinsGuardianGovernance'.
+testRegisterManagerByVaaPinsGuardianGovernance : Script ()
+testRegisterManagerByVaaPinsGuardianGovernance = do
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "RegisterPinGovAdmin"
+  rogueGov <- allocateParty "RegisterPinRogueGovernance"
+  rogueObserver <- allocateParty "RegisterPinRogueObserver"
+  let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
+  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+    createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
+                 ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
+  fx <- registerByVaaFixture operator gg fakeCsId
+  let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unused; fails first
+  res <- trySubmitWithDiscs admin fx.discs do
+    registerManagerByVaaCmd admin fx fakeCsId 0 dummyFactory registerHappyVAA
+  expectAbort "committed guardian trust anchor" res
+
+-- | The other half of the same pin: a forged 'CoreState' co-signed by the
+-- deployment's real @guardianGovernance@ but a rogue operator fails on the
+-- operator mismatch, before any VAA verification runs.
+testRegisterManagerByVaaPinsOperator : Script ()
+testRegisterManagerByVaaPinsOperator = do
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "RegisterPinOpAdmin"
+  rogueOp <- allocateParty "RegisterPinRogueOperator"
+  rogueObserver <- allocateParty "RegisterPinOpRogueObserver"
+  let rogueInst = InstrumentId with admin = gg, id = "UNUSED"
+  fakeCsId <- submit (actAs rogueOp <> actAs gg) do
+    createCmd (mkInitialCoreState rogueOp gg solanaGovernanceChainId defaultGovernanceContract
+                 ["1111111111111111111111111111111111111111"] rogueObserver rogueInst gg)
+  -- The real operator is not a stakeholder of this forged CoreState (it is
+  -- co-signed by the rogue operator and the real gg instead), so the
+  -- CoreState disclosure must be resolved via gg, unlike 'registerByVaaFixture'.
+  [(govCid, _)] <- query @NttGovernance operator
+  govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure gg fakeCsId
+  let fx = RegisterByVaaFixture with govCid, emReg, rrReg, discs = [govDisc, emRegDisc, rrRegDisc, csDisc]
+      dummyFactory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; fails first
+  res <- trySubmitWithDiscs admin fx.discs do
+    registerManagerByVaaCmd admin fx fakeCsId 0 dummyFactory registerHappyVAA
+  expectAbort "core state operator mismatch" res
+
+-- | A look-alike 'MockBurnMintFactory' fed to 'RegisterManagerByVaa' is
+-- rejected the same as any other factory argument: the registration-binding
+-- gate (step 7) runs before the factory template-pin (step 8) and rejects
+-- every static VAA fixture first (see 'testRegisterManagerByVaaBindingMismatch'),
+-- so the factory-pin's own message is unreachable here in Daml Script — this
+-- test only confirms the non-canonical factory never slips past the deeper
+-- gate either.
+testRegisterManagerByVaaRejectsNonCanonicalFactory : Script ()
+testRegisterManagerByVaaRejectsNonCanonicalFactory = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "RegisterNonCanonicalAdmin"
+  fx <- registerByVaaFixture operator gg csId
+  mockFc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = bridgedInstrument gg
+  let nonCanonicalFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory mockFc)
+  res <- trySubmitWithDiscs admin fx.discs do
+    registerManagerByVaaCmd admin fx csId 0 nonCanonicalFactory registerHappyVAA
+  expectAbort "registration binding does not match" res
+
 ----------------------------------------------------------------------
 -- SetFactoryByVaa
 ----------------------------------------------------------------------
@@ -2923,6 +2987,30 @@ testSetFactoryByVaaHappyPath = do
   res <- trySubmitWithDiscs admin [csDisc, factoryDisc, dFreshNode] do
     rotateByVaaCmd mgrCid' newFactory csId freshNode rotateHappyVAA
   expectAbort "digest already consumed" res
+
+-- | The guardian trust root is pinned to the deployment's committed
+-- @guardianGovernance@, not the operator, mirroring
+-- 'testRegisterManagerByVaaPinsGuardianGovernance': a forged 'CoreState'
+-- co-signed by the real operator under a throwaway gg party fails at the
+-- pin, before any VAA verification runs.
+testSetFactoryByVaaPinsGuardianGovernance : Script ()
+testSetFactoryByVaaPinsGuardianGovernance = do
+  (operator, gg, _) <- nttSetup
+  admin <- allocateParty "RotatePinGovAdmin"
+  rogueGov <- allocateParty "RotatePinRogueGovernance"
+  rogueObserver <- allocateParty "RotatePinRogueObserver"
+  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint
+  realFactoryCid <- nttCoinFactorySetup gg
+  let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
+      rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
+  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+    createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
+                 ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
+  csDisc <- fromSome <$> queryDisclosure operator fakeCsId
+  factoryDisc <- fromSome <$> queryDisclosure gg realFactoryCid
+  res <- trySubmitWithDiscs admin [csDisc, factoryDisc] do
+    rotateByVaaCmd mgrCid newFactory fakeCsId (coerceContractId mgrCid) rotateHappyVAA
+  expectAbort "committed guardian trust anchor" res
 
 -- | A rotation VAA signed for a different epoch than the deployment currently
 -- carries is rejected — the TOCTOU pin, mirroring

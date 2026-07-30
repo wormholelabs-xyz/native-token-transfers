@@ -154,9 +154,9 @@ template NttGovernance
         -- 1. Pin CoreState before trusting any of its fields.
         cs <- fetch coreStateCid
         assertMsg "ntt governance: core state is not the committed guardian trust anchor"
-          (cs.guardianGovernance == guardianGovernance)
+          (cs.guardianGovernance == guardianGovernance && guardianGovernance `elem` signatory cs)
         assertMsg "ntt governance: core state operator mismatch"
-          (cs.operator == operator)
+          (cs.operator == operator && operator `elem` signatory cs)
 
         -- 2. Read-only VAA signature verification; nothing consumed yet.
         vaa <- exercise coreStateCid ParseAndVerifyVAA with
@@ -164,7 +164,7 @@ template NttGovernance
           encodedVAA = vaaBytes
           pubKeys
 
-        -- 3. Governance hardening.
+        -- 3. VAA origin checks.
         assertMsg "ntt governance: not signed by current guardian set"
           (vaa.guardianSetIndex == cs.guardianSetIndex)
         assertMsg "ntt governance: wrong emitter chain"

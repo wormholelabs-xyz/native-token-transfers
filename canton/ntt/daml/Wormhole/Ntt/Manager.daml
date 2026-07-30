@@ -160,7 +160,7 @@ requireCanonicalFactory guardianGovernance factory = do
   case r of
     None -> abort "ntt governance: factory is not the canonical NttCoinFactory"
     Some (_, ncf) -> assertMsg "ntt governance: factory's guardianGovernance does not match this deployment's"
-      (ncf.guardianGovernance == guardianGovernance)
+      (ncf.guardianGovernance == guardianGovernance && guardianGovernance `elem` signatory ncf)
 
 -- | The party that administers this deployment's burn/mint instrument and
 -- therefore authorizes minting/burning: the external @minter@ when present,
@@ -708,9 +708,9 @@ template NttManager
 
         cs <- fetch coreStateCid
         assertMsg "ntt: core state is not the committed guardian trust anchor"
-          (cs.guardianGovernance == guardianGovernance)
+          (cs.guardianGovernance == guardianGovernance && guardianGovernance `elem` signatory cs)
         assertMsg "ntt: core state operator mismatch"
-          (cs.operator == operator)
+          (cs.operator == operator && operator `elem` signatory cs)
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
