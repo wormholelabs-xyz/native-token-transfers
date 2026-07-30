@@ -1,0 +1,270 @@
+-- | Read-only introspection: bridge-wide status (guardian set, fee, every deployment and its
+-- peers), token balances for the mock registry, and the on-ledger recipient-address
+-- cross-check for internal/wire.RecipientAddressFor in the Go CLI.
+module Playground.Query where
+
+import Daml.Script
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Wormhole.Core.Replay (ReplayNode)
+import Wormhole.Core.State (Emitter, ParseAndVerifyVAA (..))
+import Wormhole.Ntt.Manager (NttManager, recipientAddressFor)
+import Test.TestNtt (Cip56MockHolding)
+
+import Playground.Types
+
+----------------------------------------------------------------------
+-- listParties
+----------------------------------------------------------------------
+
+data PartyInfo = PartyInfo with
+    party   : Party
+    isLocal : Bool
+  deriving (Eq, Show)
+
+data ListPartiesOutput = ListPartiesOutput with
+    parties : [PartyInfo]
+  deriving (Eq, Show)
+
+-- | Every party the participant knows (daml-script's `listKnownParties`), flattened to a
+-- plain record. daml-script 3.5.1's PartyDetails carries only party + isLocal (no display
+-- name field); mapping party ids back to CLI hints is the Go side's job, by reverse-lookup
+-- of the state file. Takes '()' -- Daml's unit decodes from the JSON `{}` the CLI's uniform
+-- --input-file plumbing always writes, and there is genuinely nothing to parameterize.
+listParties : () -> Script ListPartiesOutput
+listParties _ = do
+  details <- listKnownParties
+  pure ListPartiesOutput with
+    parties = [ PartyInfo with party = d.party, isLocal = d.isLocal | d <- details ]
+
+----------------------------------------------------------------------
+-- listContracts
+----------------------------------------------------------------------
+
+data ListContractsInput = ListContractsInput with
+    operator : Party
+  deriving (Eq, Show)
+
+data EmitterInfo = EmitterInfo with
+    emitterId      : Int
+    emitterAddress : Text
+    owner          : Party
+  deriving (Eq, Show)
+
+data ManagerInfo = ManagerInfo with
+    managerId        : Int
+    managerAddress   : Text
+    mode             : Text
+    outboundSequence : Int
+  deriving (Eq, Show)
+
+data ListContractsOutput = ListContractsOutput with
+    guardianSetIndex : Int
+    messageFee       : Int
+    emitters         : [EmitterInfo]
+    managers         : [ManagerInfo]
+    replayNodes      : Int
+  deriving (Eq, Show)
+
+-- | The manager's outbound sequence is no longer its own field: the message id is the
+-- transceiver 'Emitter''s own sequence counter (see 'Wormhole.Ntt.Manager.Transfer'), so it
+-- is joined in here by @transceiverEmitterId@. '0' if the emitter can't be resolved (should
+-- not happen for a registered manager; defensive only).
+emitterSequenceFor : [(ContractId Emitter, Emitter)] -> NttManager -> Int
+emitterSequenceFor ems mgr =
+  case [ e.sequence | (_, e) <- ems, e.emitterId == mgr.transceiverEmitterId ] of
+    [s] -> s
+    _   -> 0
+
+-- | One flat snapshot of every live playground contract. Read as @operator@, who is a
+-- signatory on all of them (CoreState/Emitter/NttManager/ReplayNode) -- no disclosure
+-- gymnastics needed. ReplayNodes are only counted, not itemized: their prefix/consumed-set
+-- contents are trie internals with no stable CLI-facing identity.
+listContracts : ListContractsInput -> Script ListContractsOutput
+listContracts input = do
+  csCid <- resolveCoreState input.operator
+  Some cs <- queryContractId input.operator csCid
+  ems <- query @Emitter input.operator
+  mgrs <- allManagers input.operator
+  nodes <- query @ReplayNode input.operator
+  pure ListContractsOutput with
+    guardianSetIndex = cs.guardianSetIndex
+    messageFee = cs.messageFee
+    emitters =
+      [ EmitterInfo with emitterId = e.emitterId, emitterAddress = e.emitterAddress, owner = e.owner
+      | (_, e) <- ems ]
+    managers =
+      [ ManagerInfo with
+          managerId = m.managerId
+          managerAddress = m.managerAddress
+          mode = showTokenMode m.tokenConfig
+          outboundSequence = emitterSequenceFor ems m
+      | (_, m) <- mgrs ]
+    replayNodes = length nodes
+
+----------------------------------------------------------------------
+-- queryStatus
+----------------------------------------------------------------------
+
+data StatusInput = StatusInput with
+    operator : Party
+  deriving (Eq, Show)
+
+data DeploymentStatus = DeploymentStatus with
+    managerId          : Int
+    managerAddress     : Text
+    transceiverAddress : Text
+    admin              : Party
+    mode               : Text
+    chainId            : Int
+    tokenDecimals      : Int
+    outboundSequence   : Int
+    peers              : [PeerStatus]
+    paused             : Bool
+  deriving (Eq, Show)
+
+data StatusOutput = StatusOutput with
+    guardianSetIndex : Int
+    guardianKeys     : [Text]
+    messageFee       : Int
+    deployments      : [DeploymentStatus]
+  deriving (Eq, Show)
+
+queryStatus : StatusInput -> Script StatusOutput
+queryStatus input = do
+  csCid <- resolveCoreState input.operator
+  Some cs <- queryContractId input.operator csCid
+  let gs = fromSome (Map.lookup cs.guardianSetIndex cs.guardianSets)
+  mgrs <- allManagers input.operator
+  ems <- query @Emitter input.operator
+  deployments <- forA mgrs \(_, m) -> do
+    let transceiverAddress = case [ e.emitterAddress | (_, e) <- ems, e.emitterId == m.transceiverEmitterId ] of
+          [addr] -> addr
+          _ -> ""
+    pure DeploymentStatus with
+      managerId = m.managerId
+      managerAddress = m.managerAddress
+      transceiverAddress
+      admin = m.admin
+      mode = showTokenMode m.tokenConfig
+      chainId = m.chainId
+      tokenDecimals = m.tokenDecimals
+      outboundSequence = emitterSequenceFor ems m
+      peers = peersList m
+      paused = m.paused
+  pure StatusOutput with
+    guardianSetIndex = cs.guardianSetIndex
+    guardianKeys = gs.keys
+    messageFee = cs.messageFee
+    deployments
+
+----------------------------------------------------------------------
+-- balances
+----------------------------------------------------------------------
+
+data BalancesInput = BalancesInput with
+    -- gg: a 'Test.TestNtt.Cip56MockHolding' signatory, resolves them by ACS query.
+    reader          : Party
+    owner           : Party
+    instrumentAdmin : Party
+    instrumentId    : Text
+  deriving (Eq, Show)
+
+data BalancesOutput = BalancesOutput with
+    cip56HoldingTotal : Decimal  -- Test.TestNtt:Cip56MockHolding (CIP-56 decimal units)
+  deriving (Eq, Show)
+
+balances : BalancesInput -> Script BalancesOutput
+balances input = do
+  let instrument = InstrumentId with admin = input.instrumentAdmin, id = input.instrumentId
+  holdings <- query @Cip56MockHolding input.reader
+  pure BalancesOutput with
+    cip56HoldingTotal =
+      sum [ h.amount | (_, h) <- holdings, h.owner == input.owner, h.instrument == instrument ]
+
+----------------------------------------------------------------------
+-- amuletBalance (real Canton Coin holdings, "amulet" kind only)
+----------------------------------------------------------------------
+
+data AmuletBalanceInput = AmuletBalanceInput with
+    owner           : Party
+    instrumentAdmin : Party  -- the real DSO party (InstrumentId.admin for "Amulet")
+  deriving (Eq, Show)
+
+data AmuletBalanceOutput = AmuletBalanceOutput with
+    amuletHoldingTotal : Decimal
+  deriving (Eq, Show)
+
+-- | Sum of @owner@'s unlocked real Amulet holdings, read directly off the token-standard
+-- 'Holding' interface rather than over HTTP. Locked holdings (mid-transfer) are excluded;
+-- only 'owner' is summed even though 'queryInterface' may also surface holdings @owner@
+-- merely observes.
+amuletBalance : AmuletBalanceInput -> Script AmuletBalanceOutput
+amuletBalance input = do
+  let instrument = InstrumentId with admin = input.instrumentAdmin, id = "Amulet"
+  holdings <- queryInterface @Holding input.owner
+  let amounts =
+        [ v.amount
+        | (_, Some v) <- holdings
+        , v.instrumentId == instrument
+        , v.lock == None
+        , v.owner == input.owner
+        ]
+  pure AmuletBalanceOutput with amuletHoldingTotal = sum amounts
+
+----------------------------------------------------------------------
+-- verifyVaa (on-ledger signature-recovery cross-check of `guardian sign-*`)
+----------------------------------------------------------------------
+
+data VerifyVaaInput = VerifyVaaInput with
+    operator : Party
+    verifier : Party  -- any party; ParseAndVerifyVAA is permissionless given a disclosed CoreState
+    vaaBytes : Text
+    pubKeys  : [(Int, Text)]
+  deriving (Eq, Show)
+
+data VerifyVaaOutput = VerifyVaaOutput with
+    guardianSetIndex : Int
+    emitterChain     : Int
+    emitterAddress   : Text
+    sequence         : Int
+  deriving (Eq, Show)
+
+-- | Verify a CLI-signed VAA the same way an on-ledger consumer would (no replay-consume;
+-- pure verification), proving the guardian signature Go produced actually recovers against
+-- the live CoreState's guardian set -- not just that internal/guardian's own math is
+-- self-consistent. Mirrors Test.TestCore:testParseAndVerifyVAAByExternalVerifier.
+verifyVaa : VerifyVaaInput -> Script VerifyVaaOutput
+verifyVaa input = do
+  csCid <- resolveCoreState input.operator
+  csDisc <- fromSome <$> queryDisclosure input.operator csCid
+  vaa <- submit (actAs input.verifier <> disclose csDisc) do
+    exerciseCmd csCid ParseAndVerifyVAA with
+      verifier = input.verifier
+      encodedVAA = input.vaaBytes
+      pubKeys = input.pubKeys
+  pure VerifyVaaOutput with
+    guardianSetIndex = vaa.guardianSetIndex
+    emitterChain = vaa.emitterChain
+    emitterAddress = vaa.emitterAddress
+    sequence = vaa.sequence
+
+----------------------------------------------------------------------
+-- recipientAddress (on-ledger cross-check of the Go implementation)
+----------------------------------------------------------------------
+
+data RecipientAddressInput = RecipientAddressInput with
+    recipient : Party
+  deriving (Eq, Show)
+
+data RecipientAddressOutput = RecipientAddressOutput with
+    recipientAddress : Text
+  deriving (Eq, Show)
+
+-- | Pure computation (no ledger reads) -- still a 'Script' so the CLI can invoke it the same
+-- way as every other entrypoint, and so it runs against the SAME Daml runtime that computes
+-- 'Wormhole.Ntt.Manager.recipientAddressFor' inside `Receive`, catching any drift immediately.
+computeRecipientAddress : RecipientAddressInput -> Script RecipientAddressOutput
+computeRecipientAddress input = pure RecipientAddressOutput with
+  recipientAddress = recipientAddressFor input.recipient

@@ -1,0 +1,87 @@
+# ntt-playground test suite. Run from canton/testing/cli:  just <recipe>
+#
+# LocalNet recipes need Docker (>= 24 GB RAM). LOCALNET_DIR is optional: the CLI auto-discovers
+# an extracted splice-node/docker-compose/localnet at a standard path; set LOCALNET_DIR to
+# override. Everything else runs with no Docker.
+
+export PATH := env_var("HOME") + "/.dpm/bin:" + env_var("PATH")
+
+image_tag := env_var_or_default("IMAGE_TAG", "0.6.12")
+
+# Verbose test output. On by default; turn off per-run with
+#   just verbose=false e2e-localnet
+# Controls BOTH `go test -v` and the CLI's own "[v] " narration (via
+# NTT_PLAYGROUND_E2E_VERBOSE), so verbose=false fully quiets the run.
+verbose := "true"
+gotest_v := if verbose == "true" { "-v" } else { "" }
+
+# Default target: show help.
+default: help
+
+# Show a short usage overview, then list all recipes.
+help:
+    @echo "ntt-playground test suite -- run from canton/testing/cli (see TESTING.md)"
+    @echo ""
+    @echo "  no Docker:  just unit | just daml | just e2e-sandbox | just check"
+    @echo "  Docker:     just e2e-localnet   (>= 24 GB RAM; LOCALNET_DIR optional, auto-discovered)"
+    @echo "  interactive: just localnet-cli   (LocalNet up + init; then drive ./ntt-playground)"
+    @echo "  LocalNet:   just localnet-up | just localnet-status | just localnet-down"
+    @echo "  quiet:      verbose is on by default; turn off with  just verbose=false <recipe>"
+    @echo ""
+    @just --list
+
+# Go vet + unit tests (no Docker).
+unit:
+    go vet ./...
+    go test ./...
+
+# Daml Script tests (no Docker).
+daml:
+    cd ../../test && dpm test --all
+
+# Build all Daml packages (no Docker).
+build:
+    cd ../.. && dpm build --all
+
+# End-to-end suite on the in-process sandbox ledger (no Docker).
+e2e-sandbox:
+    NTT_PLAYGROUND_PROFILE=sandbox NTT_PLAYGROUND_E2E_VERBOSE={{verbose}} go test -tags e2e ./e2e -run TestPlaygroundE2E {{gotest_v}} -count=1 -timeout 20m
+
+# Non-Docker gate: unit + Daml + sandbox e2e.
+check: unit daml e2e-sandbox
+
+# LocalNet is auto-discovered (repo .localnet, ~/.cache/ntt-playground, ~/splice-node);
+# set LOCALNET_DIR to override or point at a non-standard location.
+
+# Full e2e on real Splice LocalNet (Docker; boots and tears down LocalNet itself).
+e2e-localnet:
+    NTT_PLAYGROUND_PROFILE=localnet IMAGE_TAG={{image_tag}} NTT_PLAYGROUND_E2E_VERBOSE={{verbose}} go test -tags e2e ./e2e -run TestPlaygroundE2E {{gotest_v}} -count=1 -timeout 40m
+
+# Leaves LocalNet and the initialized playground running (state ./playground.state.json);
+# drive it with ./ntt-playground and tear down with `just localnet-down` when done.
+
+# Bootstrap an interactive LocalNet session (build CLI, boot LocalNet, run init).
+localnet-cli:
+    @echo "Bringing up LocalNet and initializing the playground -- this takes a few minutes, hang tight..."
+    go build -o ntt-playground ./cmd/ntt-playground
+    IMAGE_TAG={{image_tag}} ./ntt-playground --profile localnet network up
+    ./ntt-playground --profile localnet init
+    @echo ""
+    @echo "Ready: LocalNet up, playground initialized (state ./playground.state.json)."
+    @echo "Explore with the built binary (see README 'Interactive use'), e.g.:"
+    @echo "  ./ntt-playground --profile localnet status"
+    @echo "  ./ntt-playground --profile localnet deploy --config testdata/deploy-burnmint.json"
+    @echo "  ./ntt-playground --profile localnet party list"
+    @echo "Tear down when done:  just localnet-down"
+
+# Boot LocalNet manually (for poking around outside a test run). LOCALNET_DIR optional, see above.
+localnet-up:
+    NTT_PLAYGROUND_PROFILE=localnet IMAGE_TAG={{image_tag}} go run ./cmd/ntt-playground --profile localnet network up
+
+# Report running LocalNet services.
+localnet-status:
+    go run ./cmd/ntt-playground --profile localnet network status
+
+# Tear down LocalNet (also cleans up after an interrupted run).
+localnet-down:
+    go run ./cmd/ntt-playground --profile localnet network down

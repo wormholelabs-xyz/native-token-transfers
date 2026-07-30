@@ -16,10 +16,17 @@ message, and verify-and-consume a VAA. The NTT "Wormhole transceiver" on
 Canton is simply a core `Emitter`.
 
 Like the core, NTT uses no contract keys: every contract is resolved
-off-ledger and passed as an explicit, disclosed contract id. Background for
-the core concepts referenced below (message publishing and fees, the replay
-trie, disclosed-cid submission, the trust model) is in the core
-`canton/README.md`.
+off-ledger and passed as an explicit, disclosed contract id, then validated
+on-ledger by its contents against manager-committed state. This is deliberate,
+not a platform gap. Contract keys exist from SDK 3.5 (Daml-LF 2.3), but they
+are non-unique on Canton 3.x — several live contracts may share a key, negative
+lookups are not validated, and key resolution prefers contracts created in the
+submitting transaction, so a submitter could shadow the intended contract with
+a same-key decoy minted in the same submission. Content validation against
+signatory-protected state is immune to that, and works identically for
+disclosed contracts. Background for the core concepts referenced below
+(message publishing and fees, the replay trie, disclosed-cid submission, the
+trust model) is in the core `canton/README.md`.
 
 ## Packages
 
@@ -59,7 +66,10 @@ Three parties sign every `NttManager`, and each signature has one job:
 - `admin` is the operational role: it maintains the peer table, rotates the
   committed factory, and owns the lock/unlock reserve. It is transferable
   (`TransferAdmin`, usually via the propose-accept `AdminTransferProposal`);
-  handing it to `gg` is the guardian quorum's custody opt-in.
+  handing it to `gg` is the guardian quorum's custody opt-in. In production
+  this handoff is completed by relaying a guardian-signed governance VAA
+  (`AcceptAdminTransferByVaa`), not by a live `gg` signature — see "Custody
+  follows the admin" below.
 - `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
   same party that anchors the core and receives message fees. It administers
   burn/mint instruments, owns the deployment's transceiver `Emitter`, is the
@@ -94,7 +104,11 @@ root — and the manager's choice bodies lend the manager's signatures to move
 tokens. Value can only move inside fixed template code, and every inbound
 movement first verifies and consumes a VAA, so no single signatory can move
 bridged value, and nobody has to co-sign at transfer time. That is what keeps
-both deployment and relaying permissionless.
+both deployment and relaying permissionless. The custody opt-in is no
+exception: `AcceptAdminTransferByVaa` composes `gg`'s side of the handoff from
+authority the manager's own signatories already carry (see the module header),
+so `gg` never signs live to accept a deployment — genesis remains its only
+live signature.
 
 A rogue movement of a `gg`-owned reserve would take either a native spend by
 the guardian quorum or a new `gg`-signed contract, which is also a quorum act.

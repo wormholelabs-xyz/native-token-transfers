@@ -1,0 +1,9 @@
+# CLI build output.
+/ntt-playground
+
+# Playground state holds a devnet guardian private key -- never commit it.
+playground.state.json
+
+# Network run-state (sandbox pid/log/port files; dpm's own log/canton.log lands here too).
+.ntt-playground-run/
+log/
