@@ -164,6 +164,18 @@ requireCanonicalFactory guardianGovernance factory = do
     Some (_, ncf) -> assertMsg "ntt governance: factory's guardianGovernance does not match this deployment's"
       (ncf.guardianGovernance == guardianGovernance)
 
+-- | Fetch and pin a caller-supplied 'CoreState' to the deployment's committed
+-- trust anchors. Both pinned members are CoreState signatories, so each
+-- equality also proves the party authorized the contract's creation.
+requireCommittedCoreState : Party -> Party -> ContractId CoreState -> Update CoreState
+requireCommittedCoreState operator guardianGovernance coreStateCid = do
+  cs <- fetch coreStateCid
+  assertMsg "ntt: core state is not the committed guardian trust anchor"
+    (cs.guardianGovernance == guardianGovernance)
+  assertMsg "ntt: core state operator mismatch"
+    (cs.operator == operator)
+  pure cs
+
 -- | The party that administers this deployment's burn/mint instrument and
 -- therefore authorizes minting/burning: the external @minter@ when present,
 -- otherwise gg (the gg-minted case). Equal to @instrumentId.admin@ by
@@ -651,11 +663,7 @@ template NttManager
         assertMsg "ntt: accept-admin-by-vaa proposal is not by the deployment's current admin"
           (proposal.admin == admin)
 
-        cs <- fetch coreStateCid
-        assertMsg "ntt: core state is not the committed guardian trust anchor"
-          (cs.guardianGovernance == guardianGovernance)
-        assertMsg "ntt: core state operator mismatch"
-          (cs.operator == operator)
+        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
@@ -708,13 +716,7 @@ template NttManager
         assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
           (tokenConfig == BurnMint && minter == None)
 
-        -- Both pinned members are CoreState signatories, so each equality
-        -- also proves the party authorized the contract's creation.
-        cs <- fetch coreStateCid
-        assertMsg "ntt: core state is not the committed guardian trust anchor"
-          (cs.guardianGovernance == guardianGovernance)
-        assertMsg "ntt: core state operator mismatch"
-          (cs.operator == operator)
+        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes

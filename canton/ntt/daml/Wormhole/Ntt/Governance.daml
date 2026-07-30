@@ -151,14 +151,8 @@ template NttGovernance
         extraArgs             : ExtraArgs
       controller admin
       do
-        -- 1. Pin CoreState before trusting any of its fields. Both pinned
-        -- members are CoreState signatories, so each equality also proves the
-        -- party authorized the contract's creation.
-        cs <- fetch coreStateCid
-        assertMsg "ntt governance: core state is not the committed guardian trust anchor"
-          (cs.guardianGovernance == guardianGovernance)
-        assertMsg "ntt governance: core state operator mismatch"
-          (cs.operator == operator)
+        -- 1. Pin CoreState before trusting any of its fields.
+        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
 
         -- 2. Read-only VAA signature verification; nothing consumed yet.
         vaa <- exercise coreStateCid ParseAndVerifyVAA with
