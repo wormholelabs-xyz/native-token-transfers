@@ -17,6 +17,7 @@
 -- ONCE for both roots, exactly as the pre-split single-shot genesis did.
 module Playground.Genesis where
 
+import DA.Set qualified as Set
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Wormhole.Core.Bytes (Bytes20, Bytes32)
 import Wormhole.Core.State (CoreState)
@@ -53,5 +54,5 @@ template CoreStateBootstrapProposal
         csCid <- create (mkInitialCoreState operator guardianGovernance governanceChainId
                   governanceContract initialGuardians guardianObserver feeInstrument
                   feeRecipient)
-        govCid <- create NttGovernance with operator, guardianGovernance, nextId = 0
+        govCid <- create NttGovernance with operator, guardianGovernance, nextId = 0, consumedGovernance = Set.empty
         pure (csCid, govCid)
