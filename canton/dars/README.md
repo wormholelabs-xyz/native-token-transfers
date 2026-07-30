@@ -59,6 +59,26 @@ Provenance: built from `wormholelabs-xyz/CantonExamples` branch `dev` at
 commit `b448589d8742ef5983ec8dc7c6ddd275ceccd1b7` — package `token-cip0056`
 version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
+## `splice-amulet` (real Canton Coin / Amulet templates, `ntt-test` only)
+
+`ntt-test`'s `Playground.Amulet` module needs concrete `TemplateTypeRep`s
+(`AmuletRules`, `TransferPreapproval`, `OpenMiningRound`,
+`ExternalPartyAmuletRules`, `ExternalPartyConfigState`) to construct `Disclosure`
+values for the registry's disclosed contracts when locking/unlocking real
+Amulet through a CIP-56 custody token (`Cip56CustodyToken`) on Splice LocalNet.
+This is the only reason it is vendored: the playground never mints or burns
+Amulet directly, and the production DAR (`ntt`) never depends on it.
+
+Provenance: `0.6.12_splice-node.tar.gz` (same release as the token-standard
+interfaces above), path `splice-node/dars/splice-amulet-0.1.22.dar`. Verified
+byte-identical to `splice-amulet-current.dar` in the same bundle. Its embedded
+interface DALF package-ids (`holding-v1`, `transfer-instruction-v1`,
+`metadata-v1`) match the ones already vendored above, so `damlc` dedupes them
+cleanly with no conflict.
+
+**Consumed by `ntt-test` only** (a `data-dependencies` entry in
+`canton/test/daml.yaml`) — never a dependency of `ntt`.
+
 ## sha256
 
 | DAR | consumed by | sha256 |
@@ -71,5 +91,6 @@ version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 | `splice-api-token-allocation-instruction-v1-1.0.0.dar` | `ntt`, `ntt-test` | `e2607ca3a1d735a82d3066b78132aa8f94b1886c99a5f14148742d252c7220a2` |
 | `splice-api-token-burn-mint-v1-1.0.0.dar` | `ntt`, `ntt-test` | `a18e85c4841a278bce000df8329c3f0e2fee3b30b55dd6a31492d10a72b4f9c1` |
 | `splice-api-token-transfer-instruction-v1-1.0.0.dar` | `ntt`, `ntt-test` | `e4c73aa7ae73fb2fc330b938ffb99f568792321640ba4b9472902aa8d742c994` |
+| `splice-amulet-0.1.22.dar` | `ntt-test` only | `bcfcd6a9250172a8384d1326a2990b374c66a367ca7d4120b243aecfd372761e` |
 
 Verify with `sha256sum <file>` against this table before trusting a copy.

@@ -1,0 +1,86 @@
+-- | Tests for the phase-4 genesis propose/accept redesign (see Playground/Genesis.daml and
+-- .claude/tasks/e2e-separate-participants.md §5.1), reconciled against the CIP-56/namespace-
+-- retirement rework (integration plan §8.1): 'AcceptGenesis' now creates BOTH the real
+-- 'Wormhole.Core.State:CoreState' via 'mkInitialCoreState' AND the NTT root
+-- 'Wormhole.Ntt.Governance:NttGovernance' in the same ceremony, so the propose+accept path is
+-- asserted to produce a CoreState field-identical to a direct 'mkInitialCoreState' create
+-- (this test does not additionally assert on the co-created NttGovernance's shape -- it is a
+-- trivial `NttGovernance with operator, guardianGovernance, nextId = 0`, already pinned by
+-- 'Playground.Init'/'Playground.Deploy''s own exercise of it).
+module Test.TestGenesis where
+
+import DA.Assert ((===))
+import Daml.Script
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Wormhole.Core.Setup (mkInitialCoreState, solanaGovernanceChainId, defaultGovernanceContract)
+import Playground.Genesis (CoreStateBootstrapProposal (..), AcceptGenesis (..))
+
+-- The well-known devnet guardian address (mirrors Test.TestCore.devnetGuardian; duplicated
+-- here rather than depending on Test.TestCore, to keep this module's genesis-only fixture
+-- self-contained).
+devnetGuardian : Text
+devnetGuardian = "befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
+
+mkProposalArgs : Party -> Party -> Party -> CoreStateBootstrapProposal
+mkProposalArgs operator guardianGovernance guardianObserver =
+  CoreStateBootstrapProposal with
+    operator
+    guardianGovernance
+    governanceChainId = solanaGovernanceChainId
+    governanceContract = defaultGovernanceContract
+    initialGuardians = [devnetGuardian]
+    guardianObserver
+    feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+    feeRecipient = guardianGovernance
+
+-- | The operator alone can create the proposal (signatory operator only) -- proving the
+-- propose half needs no guardianGovernance signature, unlike today's single co-signed
+-- 'Playground.Init:initPlayground' create. This assertion is NOT inverted: it already holds
+-- true in phase 1, and will keep holding after phase 4.
+testProposeNeedsOnlyOperatorAuthority : Script ()
+testProposeNeedsOnlyOperatorAuthority = do
+  operator <- allocateParty "Operator"
+  guardianGovernance <- allocateParty "GuardianGovernance"
+  guardianObserver <- allocateParty "GuardianObserver"
+
+  _ <- submit operator do
+    createCmd (mkProposalArgs operator guardianGovernance guardianObserver)
+  pure ()
+
+-- | Exercises AcceptGenesis as guardianGovernance and asserts the resulting CoreState is
+-- FIELD-IDENTICAL to a CoreState created directly via `mkInitialCoreState` with the same
+-- arguments -- proving the propose/accept path produces exactly the state the old
+-- single-submit genesis did.
+testProposeAccept_ProducesFieldIdenticalCoreState : Script ()
+testProposeAccept_ProducesFieldIdenticalCoreState = do
+  operator <- allocateParty "Operator"
+  guardianGovernance <- allocateParty "GuardianGovernance"
+  guardianObserver <- allocateParty "GuardianObserver"
+
+  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+
+  propId <- submit operator do
+    createCmd (mkProposalArgs operator guardianGovernance guardianObserver)
+
+  (csId, _govId) <- submit guardianGovernance do exerciseCmd propId AcceptGenesis
+  Some cs <- queryContractId guardianGovernance csId
+  let want = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+               defaultGovernanceContract [devnetGuardian] guardianObserver
+               feeInstrument guardianGovernance
+  cs === want
+
+-- | Not inverted: Daml authorization is checked before a choice body ever runs, so this holds
+-- true even against today's phase-1 stub body -- the operator alone lacks guardianGovernance's
+-- signature and can never satisfy a `controller guardianGovernance` choice, stub or not. This
+-- is the actual assertion the plan's §6(b) "accept fails without GG authority" describes, and
+-- it does not need to wait for phase 4.
+testAcceptFailsWithoutGuardianGovernanceAuthority : Script ()
+testAcceptFailsWithoutGuardianGovernanceAuthority = do
+  operator <- allocateParty "Operator"
+  guardianGovernance <- allocateParty "GuardianGovernance"
+  guardianObserver <- allocateParty "GuardianObserver"
+
+  propId <- submit operator do
+    createCmd (mkProposalArgs operator guardianGovernance guardianObserver)
+
+  submitMustFail operator do exerciseCmd propId AcceptGenesis
