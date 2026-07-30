@@ -1,0 +1,16 @@
+# Compose override applied on top of the Splice LocalNet bundle (see localnet.go).
+#
+# The bundle hardcodes `container_name: postgres` (Docker enforces name uniqueness
+# globally, so any other container named "postgres" -- even a stopped one -- breaks
+# `up`) and publishes the database on host port ${DB_PORT:-5432}, colliding with a
+# locally running PostgreSQL. Rename the container and move the host port; in-network
+# connectivity is unaffected because services resolve the database by its compose
+# service name ("postgres"), not its container name.
+#
+# `!override` replaces the bundle's ports list instead of merging with it (requires
+# docker compose >= 2.24).
+services:
+  postgres:
+    container_name: ${LOCALNET_POSTGRES_CONTAINER_NAME:-splice-localnet-postgres}
+    ports: !override
+      - "${LOCALNET_POSTGRES_HOST_PORT:-15432}:5432"

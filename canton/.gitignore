@@ -5,3 +5,7 @@
 
 # Test-vector / sandbox bootstrap artifacts (not sources).
 setup-result.json
+
+# Repo-local cache for an extracted Splice LocalNet bundle (splice-node/docker-compose/localnet),
+# one of the ntt-playground CLI's LOCALNET_DIR auto-discovery candidates -- not a source.
+testing/.localnet/

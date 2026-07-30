@@ -1,0 +1,71 @@
+# Compose override applied on top of the Splice LocalNet bundle (see localnet.go), additive
+# to wormhole-postgres-override.yaml. Adds three new Canton participants -- bob,
+# guardian-governance, guardian-observer -- hosted inside the bundle's existing `canton`/
+# `splice` containers (a fourth participant, app-user/Alice, is already running today under
+# the bundle's own default -- see the plan's §8.2 finding, recorded in localnet.go).
+#
+# Never edits the vendored bundle: this file, plus the per-participant conf files/health-check
+# scripts it references under wormhole-conf/, are all generated into ComposeDir (the resolved
+# LOCALNET_DIR) at runtime by ensureParticipantConfs, mirroring ensurePostgresOverride's
+# pattern exactly.
+#
+# Verified live via `docker compose ... config` (dry run) before relying on this:
+#   - `ports` lists concatenate across -f files (no `!override` needed) -- the bundle's
+#     original port list and this override's additions all appear in the merged config.
+#   - `volumes` lists merge by container target path: a later file's entry for the same
+#     target (e.g. /app/app.conf) replaces the earlier one; entries for new targets
+#     (/app/app-orig.conf, /app/wormhole, /app/health-check.sh) are additive.
+#   - `environment` mappings merge by key: this file's CREATE_DATABASE_2x keys are additive
+#     to postgres.env's CREATE_DATABASE_0x/1x keys; _JAVA_OPTIONS here replaces
+#     resource-constraints.yaml's value for canton/splice (last -f file wins per key).
+services:
+  postgres:
+    environment:
+      CREATE_DATABASE_20: participant-bob
+      CREATE_DATABASE_21: validator-bob
+      CREATE_DATABASE_22: participant-guardian-governance
+      CREATE_DATABASE_23: validator-guardian-governance
+      CREATE_DATABASE_24: participant-guardian-observer
+      CREATE_DATABASE_25: validator-guardian-observer
+
+  canton:
+    ports:
+      - "5901:5901"
+      - "5902:5902"
+      - "5975:5975"
+      - "6901:6901"
+      - "6902:6902"
+      - "6975:6975"
+      - "7901:7901"
+      - "7902:7902"
+      - "7975:7975"
+    volumes:
+      # Remount the bundle's own app.conf under a new path so our wrapper (below) can
+      # `include` it verbatim, instead of copying its 127 lines.
+      - ${LOCALNET_DIR}/conf/canton/app.conf:/app/app-orig.conf
+      # Replace /app/app.conf with our wrapper (same target as the bundle's own mount --
+      # last -f file wins for a given volume target).
+      - ${LOCALNET_DIR}/wormhole-conf/canton-app.conf:/app/app.conf
+      # The three new participants' conf pairs, one subdirectory each.
+      - ${LOCALNET_DIR}/wormhole-conf/canton:/app/wormhole
+      # Replace the health-check with one that also probes the three new gRPC health ports.
+      - ${LOCALNET_DIR}/wormhole-conf/health-check-canton.sh:/app/health-check.sh
+    # Three more participants sharing one JVM heap needs more room than the bundle's default
+    # (4g container / 2560m heap, sized for three participants) -- see the plan's §8 risk 7.
+    mem_limit: 10g
+    environment:
+      _JAVA_OPTIONS: "-XX:-UseCompressedOops -Xms1g -Xmx7g"
+
+  splice:
+    ports:
+      - "5903:5903"
+      - "6903:6903"
+      - "7903:7903"
+    volumes:
+      - ${LOCALNET_DIR}/conf/splice/app.conf:/app/app-orig.conf
+      - ${LOCALNET_DIR}/wormhole-conf/splice-app.conf:/app/app.conf
+      - ${LOCALNET_DIR}/wormhole-conf/splice:/app/wormhole
+      - ${LOCALNET_DIR}/wormhole-conf/health-check-splice.sh:/app/health-check.sh
+    mem_limit: 6g
+    environment:
+      _JAVA_OPTIONS: "-XX:-UseCompressedOops -Xms1g -Xmx4g"
