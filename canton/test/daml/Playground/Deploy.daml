@@ -203,9 +203,14 @@ deployNtt input =
           factory = case config of
             BurnMint -> BurnMintFactoryCid (coerceContractId factoryCid)
             LockUnlock -> TransferFactoryCid (coerceContractId factoryCid)
+          -- Burn/mint registration is co-signed by the instrument's minter (here gg);
+          -- lock/unlock is admin-only. Mirrors Test.TestNtt:deploy's minterActAs.
+          minterActAs = case config of
+            BurnMint -> actAs gg
+            LockUnlock -> mempty
 
       (_, mgrCid, emitterCid, _ledgerCid) <-
-        submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+        submit (actAs input.admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
           exerciseCmd govCid RegisterManager with
             admin = input.admin
             chainId = cantonChainId
