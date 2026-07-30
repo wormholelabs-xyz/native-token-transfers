@@ -151,7 +151,9 @@ template NttGovernance
         extraArgs             : ExtraArgs
       controller admin
       do
-        -- 1. Pin CoreState before trusting any of its fields.
+        -- 1. Pin CoreState before trusting any of its fields. Both pinned
+        -- members are CoreState signatories, so each equality also proves the
+        -- party authorized the contract's creation.
         cs <- fetch coreStateCid
         assertMsg "ntt governance: core state is not the committed guardian trust anchor"
           (cs.guardianGovernance == guardianGovernance)
@@ -164,7 +166,7 @@ template NttGovernance
           encodedVAA = vaaBytes
           pubKeys
 
-        -- 3. Governance hardening.
+        -- 3. VAA origin checks.
         assertMsg "ntt governance: not signed by current guardian set"
           (vaa.guardianSetIndex == cs.guardianSetIndex)
         assertMsg "ntt governance: wrong emitter chain"
@@ -264,6 +266,8 @@ registerManagerBody
       coreStateCid
       feeAllocation = emitterFeeAllocation
     emitter <- fetch emitterCid
+    -- operator is an Emitter signatory; guardianGovernance is a plain field,
+    -- vouched for instead by the nested 'RegisterEmitter' exercise above.
     assertMsg "ntt: emitter registry is not this bridge instance's"
       (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
 
@@ -280,6 +284,8 @@ registerManagerBody
       coreStateCid
       feeAllocation = claimFeeAllocation
     root <- fetch rootCid
+    -- operator is a ReplayNode signatory, so this equality also proves the
+    -- party co-signed the claimed root.
     assertMsg "ntt: replay root registry is not this bridge instance's"
       (root.operator == operator)
 

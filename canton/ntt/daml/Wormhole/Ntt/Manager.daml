@@ -159,6 +159,8 @@ requireCanonicalFactory guardianGovernance factory = do
   r <- fetchFromInterface @NttCoinFactory bmCid
   case r of
     None -> abort "ntt governance: factory is not the canonical NttCoinFactory"
+    -- guardianGovernance is the factory's sole signatory, so this equality
+    -- also proves gg authorized the factory's creation.
     Some (_, ncf) -> assertMsg "ntt governance: factory's guardianGovernance does not match this deployment's"
       (ncf.guardianGovernance == guardianGovernance)
 
@@ -706,6 +708,8 @@ template NttManager
         assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
           (tokenConfig == BurnMint && minter == None)
 
+        -- Both pinned members are CoreState signatories, so each equality
+        -- also proves the party authorized the contract's creation.
         cs <- fetch coreStateCid
         assertMsg "ntt: core state is not the committed guardian trust anchor"
           (cs.guardianGovernance == guardianGovernance)
