@@ -319,6 +319,57 @@ func TestCmd_ObserveStream_UnknownDeployment(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
+// observe credentials
+// ----------------------------------------------------------------------
+
+// TestCmd_ObserveCredentials_RegisteredWithFlags pins the wiring: `observe credentials` is
+// registered under the `observe` parent command with --json and --token-ttl flags.
+func TestCmd_ObserveCredentials_RegisteredWithFlags(t *testing.T) {
+	root := newRootCmd()
+	cmd, _, err := root.Find([]string{"observe", "credentials"})
+	if err != nil {
+		t.Fatalf("expected `observe credentials` to be registered: %v", err)
+	}
+	if cmd.Flags().Lookup("json") == nil {
+		t.Fatalf("expected a --json flag")
+	}
+	tokenTTL := cmd.Flags().Lookup("token-ttl")
+	if tokenTTL == nil {
+		t.Fatalf("expected a --token-ttl flag")
+	}
+	if tokenTTL.DefValue != "2h0m0s" {
+		t.Fatalf("expected --token-ttl to default to 2h, got %q", tokenTTL.DefValue)
+	}
+}
+
+func TestCmd_ObserveCredentials_RequiresLocalNetProfile(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	_, _, err := runPlayground(t, append(baseFlags(stateFile), "observe", "credentials")...)
+	if err == nil || !contains(err.Error(), "requires the localnet profile") {
+		t.Fatalf("expected a requires-localnet-profile error, got %v", err)
+	}
+}
+
+func TestCmd_ObserveCredentials_MissingState(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	_, _, err := runPlayground(t, append(append(baseFlags(stateFile), "--profile", "localnet"),
+		"observe", "credentials")...)
+	if err == nil || !contains(err.Error(), "run `init` first") {
+		t.Fatalf("expected a missing-state error, got %v", err)
+	}
+}
+
+func TestCmd_ObserveCredentials_NoGuardianObserverInState(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedStateFile(t, stateFile, state.New())
+	_, _, err := runPlayground(t, append(append(baseFlags(stateFile), "--profile", "localnet"),
+		"observe", "credentials")...)
+	if err == nil || !contains(err.Error(), "no guardianObserver party in state") {
+		t.Fatalf("expected a no-guardianObserver error, got %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------
 // balance: required flags + unknown deployment
 // ----------------------------------------------------------------------
 

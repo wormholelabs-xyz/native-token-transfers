@@ -126,7 +126,7 @@ func newObserveCmd(a *app) *cobra.Command {
 			return fmt.Errorf("observe: deployment %q (managerId %d) not found on ledger", deployment, local.ManagerID)
 		},
 	}
-	cmd.AddCommand(newObserveStreamCmd(a))
+	cmd.AddCommand(newObserveStreamCmd(a), newObserveCredentialsCmd(a))
 	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name")
 	_ = cmd.MarkFlagRequired("deployment")
 	return cmd
