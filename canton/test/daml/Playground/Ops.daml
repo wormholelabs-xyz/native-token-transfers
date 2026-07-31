@@ -39,6 +39,8 @@ import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Amount (trimAmountTo)
+import Wormhole.Ntt.Coin (NttCoin (..))
+import Wormhole.Ntt.CoinFactory (NttCoinFactory)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Deposit qualified as Deposit
 import Wormhole.Ntt.Manager hiding (resolveLedger)
@@ -48,7 +50,7 @@ import Test.TestNtt (Cip56MockHolding (..), MockBurnMintFactory (..), cantonChai
 import Test.TestReplay (coveringDisclosure)
 
 import Playground.Amulet (AmuletSeam (..), amuletHoldings, toDisclosure)
-import Playground.Disclose (RemoteSeam (..), toDisclosureByName, mkSeedDisclosure)
+import Playground.Disclose (RemoteSeam (..), toDisclosureByName, mkSeedDisclosure, resolveBurnMintFactoryDisclosure)
 import Playground.MockRegistry
 import Playground.MockRegistry qualified as MockRegistry
 import Playground.Types
@@ -149,13 +151,15 @@ data FundUserOutput = FundUserOutput with
     holdingCid : ContractId Holding
   deriving (Eq, Show)
 
--- | Mint a 'Test.TestNtt.Cip56MockHolding' of @amount@ (CIP-56 decimal units) owned by
--- @owner@, via the recipient's standing 'Wormhole.Ntt.Deposit.DepositPreapproval' and this
--- deployment's committed burn/mint factory (the funding faucet -- see
+-- | Mint an 'Wormhole.Ntt.Coin.NttCoin' of @amount@ (CIP-56 decimal units) owned by @owner@,
+-- via the recipient's standing 'Wormhole.Ntt.Deposit.DepositPreapproval' and the canonical
+-- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' (the funding faucet -- see
 -- 'Playground.Deploy.deployRegistry'; a lock/unlock deployment's users hold a
--- 'DepositPreapproval' purely for this). @owner@'s pre-approval must already exist; the CLI
--- ensures it (via 'preapprove') before calling this. The returned cid is only ever valid for
--- the immediately-following `transfer --sign`; the CLI must not cache it.
+-- 'DepositPreapproval' purely for this). 'NttCoinFactory' is instrument-agnostic (gated only
+-- on @guardianGovernance@), so any visible instance serves this call -- no per-instrument
+-- lookup needed. @owner@'s pre-approval must already exist; the CLI ensures it (via
+-- 'preapprove') before calling this. The returned cid is only ever valid for the
+-- immediately-following `transfer --sign`; the CLI must not cache it.
 fundUser : FundUserInput -> Script FundUserOutput
 fundUser input = do
   let gg = input.guardianGovernance
@@ -163,11 +167,10 @@ fundUser input = do
       -- calls with no instrumentNonce input, so (like 'Test.TestNtt.deploy') this playground
       -- phase only supports one bridged instrument per admin. See this file's header.
       instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor input.admin 0
-  facs <- query @MockBurnMintFactory gg
-  facCid <- case [ cid | (cid, f) <- facs, f.instrument == instrumentId ] of
-    [cid] -> pure cid
-    [] -> abort "playground: no MockBurnMintFactory for this deployment's instrument -- run `deploy` first"
-    _ -> abort "playground: more than one MockBurnMintFactory for this instrument"
+  facs <- query @NttCoinFactory gg
+  facCid <- case facs of
+    (cid, _) :: _ -> pure cid
+    [] -> abort "playground: no NttCoinFactory for gg -- run `deploy` first"
   -- Queried as gg (the observer), not owner: fundUser runs entirely on gg's OWN participant
   -- (routed there since the Deposit exercise below submits as gg), which cannot query as an
   -- arbitrary owner hosted elsewhere -- gg being DepositPreapproval's observer is exactly what
@@ -179,16 +182,16 @@ fundUser input = do
     [] -> abort "playground: owner has no DepositPreapproval for this instrument -- run `preapprove` first"
     _ -> abort "playground: more than one DepositPreapproval for this instrument"
 
-  before <- query @Cip56MockHolding gg
+  before <- query @NttCoin gg
   _ <- submit gg do
     exerciseCmd preCid Deposit with
       amount = input.amount
       factoryCid = toInterfaceContractId @BurnMintFactory facCid
       extraArgs = emptyExtraArgs
-  after <- query @Cip56MockHolding gg
+  after <- query @NttCoin gg
   let beforeCids = map fst before
   holdingCid <- case
-    [ cid | (cid, h) <- after, cid `notElem` beforeCids, h.owner == input.owner, h.instrument == instrumentId ] of
+    [ cid | (cid, h) <- after, cid `notElem` beforeCids, h.owner == input.owner, h.instrumentId == instrumentId ] of
     [cid] -> pure (toInterfaceContractId @Holding cid)
     _ -> abort "playground: fundUser could not uniquely resolve the freshly minted holding"
   pure FundUserOutput with holdingCid
@@ -281,7 +284,7 @@ transferOut input = do
         Mock -> do
           let gg = mgr0.guardianGovernance
           facDisc <- case mgr0.factory of
-            BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+            BurnMintFactoryCid cid -> snd <$> resolveBurnMintFactoryDisclosure gg cid
             TransferFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
           (ea, preDiscs) <- case mgr0.tokenConfig of
             BurnMint -> pure (emptyExtraArgs, [])
@@ -604,7 +607,7 @@ receiveVaa input =
               -- it directly, so it needs disclosing too -- same pattern as transferOut's Mock
               -- branch and the LockUnlock branch below's facDisc.
               facDisc <- case mgr.factory of
-                BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+                BurnMintFactoryCid cid -> snd <$> resolveBurnMintFactoryDisclosure gg cid
                 TransferFactoryCid _ -> abort "playground: burn/mint deployment has a lock/unlock factory -- inconsistent state"
               pure (preCid, submitOpts0 <> disclose preDisc <> disclose facDisc)
             Some seam ->

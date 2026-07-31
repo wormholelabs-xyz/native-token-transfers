@@ -322,7 +322,7 @@ default covering every template a `mock` deployment's `transfer`/`receive`
 path needs (`NttManager`, `NttGovernance`, `LockedLedger`, `CoreState`,
 `Emitter`, the covering `ReplayNode`, `DepositPreapproval`,
 `MockTransferPreapproval`, `MockPreapprovedTransferFactory`,
-`MockBurnMintFactory`, `Cip56MockHolding`) — otherwise the CLI's basic
+`NttCoinFactory`, `Cip56MockHolding`) — otherwise the CLI's basic
 `deploy`/`transfer`/`receive` flow would fail out of the box on LocalNet with
 no config file at all. The "everything fails closed" posture (no disclosures
 ever fetched, so any submit that needs to read a contract off another
@@ -349,7 +349,7 @@ Shape:
     { "template": "Wormhole.Ntt.Manager:NttManager", "fetchAs": "GuardianGovernance" },
     { "template": "Wormhole.Core.State:CoreState", "fetchAs": "GuardianGovernance" },
     { "template": "Wormhole.Core.State:Emitter", "fetchAs": "GuardianGovernance" },
-    { "template": "Test.TestNtt:MockBurnMintFactory", "fetchAs": "GuardianGovernance" }
+    { "template": "Wormhole.Ntt.CoinFactory:NttCoinFactory", "fetchAs": "GuardianGovernance" }
   ]
 }
 ```

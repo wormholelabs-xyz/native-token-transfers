@@ -477,6 +477,7 @@ func TestCmd_Deploy_CallsDeployRegistryAsGgThenDeployNttAsAdmin(t *testing.T) {
 	s := state.New()
 	s.Operator = "operator::abc"
 	s.GuardianGovernance = "gg::abc"
+	s.Guardian.PrivateKeyHex = "cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0"
 	seedStateFile(t, stateFile, s)
 
 	cfgPath := filepath.Join(t.TempDir(), "deploy.json")

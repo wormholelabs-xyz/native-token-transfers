@@ -213,6 +213,11 @@ const NttManagerAddressTag = "wormhole:ntt-manager:v1"
 // RecipientAddressTag is Wormhole.Ntt.Manager:recipientAddressTag.
 const RecipientAddressTag = "wormhole:ntt-recipient:v1"
 
+// RegistrationBindingTag is Wormhole.Ntt.Manager:nttRegistrationBindingTag. Its preimage
+// (tag || lp(operatorText) || lp(adminText) || be8(nonce)) is exactly DerivedAddress's shape,
+// with operator as registrar and admin as owner -- see nttRegistrationBindingFor's Daml side.
+const RegistrationBindingTag = "wormhole:ntt-registration:v1"
+
 // RecipientAddressFor mirrors Wormhole.Ntt.Manager:recipientAddressFor /
 // recipientAddressFromText: keccak256(tag || lp(utf8(recipientPartyText))). recipientPartyText
 // is the recipient's full party id, exactly as `partyToText` renders it on the Daml side.

@@ -125,3 +125,10 @@ type preparePublishInput struct {
 	EmitterID         int      `json:"emitterId"`
 	DiscloseTemplates []string `json:"discloseTemplates"`
 }
+
+// prepareDeployNttInput mirrors Playground.Prepare.daml's PrepareDeployNttInput.
+type prepareDeployNttInput struct {
+	GuardianGovernance string   `json:"guardianGovernance"`
+	FactoryCid         string   `json:"factoryCid"`
+	DiscloseTemplates  []string `json:"discloseTemplates"`
+}
