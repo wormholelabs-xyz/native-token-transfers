@@ -249,8 +249,13 @@ var NttGovernanceModule = func() [32]byte {
 }()
 
 // AcceptAdminAction is the NTT governance module's AcceptAdminTransferToGovernance
-// action code -- the only NTT governance action defined so far.
+// action code.
 const AcceptAdminAction = 1
+
+// RegisterBurnMintManagerAction is the NTT governance module's RegisterBurnMintManager
+// action code -- the guardian quorum co-signing a gg-minted burn/mint deployment's
+// registration alongside the registering admin.
+const RegisterBurnMintManagerAction = 2
 
 // SignAcceptAdmin builds and signs an NTT AcceptAdminTransferToGovernance
 // governance VAA targeting cantonChain (72 in production), authorizing the
@@ -267,6 +272,33 @@ func SignAcceptAdmin(key *Key, p GovernanceParams, cantonChain uint16, managerAd
 	payload = beAppend(payload, uint64(cantonChain), 2)
 	payload = append(payload, managerAddress[:]...)
 	payload = beAppend(payload, factoryEpoch, 8)
+
+	return Sign(key, VAAParams{
+		Timestamp:        p.Timestamp,
+		Nonce:            p.Nonce,
+		EmitterChain:     p.EmitterChain,
+		EmitterAddress:   p.EmitterAddress,
+		Sequence:         p.Sequence,
+		ConsistencyLevel: p.ConsistencyLevel,
+		Payload:          payload,
+	})
+}
+
+// SignRegisterBurnMintManager builds and signs an NTT RegisterBurnMintManager governance VAA,
+// co-signing a gg-minted burn/mint deployment's registration alongside the registering admin
+// (Wormhole.Ntt.Governance.RegisterManagerByVaa) -- payload = module(32="Ntt") ||
+// action(1=2) || chain(2) || registrationBinding(32) || tokenDecimals(1). registrationBinding
+// is the caller's wire.DerivedAddress(wire.RegistrationBindingTag, operatorText, adminText,
+// nonce) -- computed off this function since it needs the genuinely-allocated operator/admin
+// party ids, not just the deployment's config. Mirrors SignAcceptAdmin's shape.
+func SignRegisterBurnMintManager(key *Key, p GovernanceParams, cantonChain uint16, registrationBinding [32]byte, tokenDecimals uint8) ([]byte, error) {
+	p = p.withDefaults()
+	payload := make([]byte, 0, 32+1+2+32+1)
+	payload = append(payload, NttGovernanceModule[:]...)
+	payload = append(payload, RegisterBurnMintManagerAction)
+	payload = beAppend(payload, uint64(cantonChain), 2)
+	payload = append(payload, registrationBinding[:]...)
+	payload = append(payload, tokenDecimals)
 
 	return Sign(key, VAAParams{
 		Timestamp:        p.Timestamp,

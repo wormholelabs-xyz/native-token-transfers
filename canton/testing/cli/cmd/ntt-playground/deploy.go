@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,9 +10,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/amulet"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/guardian"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/profile"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
 
 // deployConfig is the shape of the user-written deployment config file:
@@ -111,6 +115,20 @@ type deployInput struct {
 	InstrumentAdmin    *string `json:"instrumentAdmin"`  // "amulet" only (the real DSO party); null otherwise
 	AmuletFactoryCid   *string `json:"amuletFactoryCid"` // "amulet" only (setupAmuletAdmin's resolved transfer-factory cid); null otherwise
 	FactoryCid         *string `json:"factoryCid"`       // "mock" only (deployRegistryOutput.FactoryCid, passed straight through); null otherwise
+
+	// "mock" burn-mint only: the guardian-signed RegisterBurnMintManager VAA that lets
+	// RegisterManagerByVaa co-sign the registration without gg live on the admin's
+	// participant (see the cross-participant note above newDeployCmd's registerBurnMintVaa
+	// call); null/empty for every other (mode, tokenKind) pair.
+	VaaBytes *string             `json:"vaaBytes"`
+	PubKeys  []ledger.PubKeyHint `json:"pubKeys"`
+
+	// Remote carries a pre-fetched Playground.Prepare:prepareDeployNtt RemoteSeam (the
+	// committed MockBurnMintFactory disclosed via gg -- see deployInput.VaaBytes's sibling
+	// doc above and DeployInput.daml's `remote` field), as raw JSON -- see
+	// transferOutInput.Remote's doc comment (transfer.go). nil (-> JSON null -> Daml None)
+	// on a single-participant profile or for every non-(mock, burn-mint) deployment.
+	Remote json.RawMessage `json:"remote"`
 }
 
 // amuletTapUSD is the belt-and-braces amount tapped to the validator's own wallet
@@ -234,6 +252,32 @@ func newDeployCmd(a *app) *cobra.Command {
 				return err
 			}
 
+			// "mock" burn-mint co-signs registration by guardian-signed VAA
+			// (RegisterManagerByVaa) instead of a live gg signature: gg and admin are
+			// necessarily on different participants in a real topology, and one submit
+			// cannot carry two parties' authority across participants (see
+			// canton/README.md's RegisterManagerByVaa section). Signing needs the
+			// genuinely-resolved admin party, so it can only happen here, not as a
+			// static fixture.
+			var vaaBytesPtr *string
+			// Initialized (not nil): every (mode, tokenKind) pair sends this field, and
+			// Daml.Deploy.DeployInput.pubKeys is a plain (non-Optional) list -- a nil slice
+			// marshals to JSON `null`, which Daml cannot read as `[]` (unlike vaaBytes,
+			// which IS Optional and handles null/None the same way).
+			vaaPubKeys := []ledger.PubKeyHint{}
+			if cfg.Mode == "burn-mint" && cfg.TokenKind == "mock" {
+				vaaHex, pubKeyHex, err := signRegisterBurnMintVaa(s, s.Operator, admin, 0, cfg.Decimals)
+				if err != nil {
+					return fmt.Errorf("deploy: sign registration VAA: %w", err)
+				}
+				if err := a.saveState(s); err != nil {
+					return err
+				}
+				vaaBytesPtr = &vaaHex
+				vaaPubKeys = []ledger.PubKeyHint{{Index: 0, Key: pubKeyHex}}
+				a.vlogf(cmd, "deploy %q: guardian-signed RegisterBurnMintManager VAA (sequence auto)", deploymentName)
+			}
+
 			// deployRegistry submits AS gg (it creates gg-signed mock factory contracts), so
 			// it routes to gg's OWN participant -- not the default one deployNtt/setPeerOnLedger
 			// use below (admin stays co-located with operator under this topology's "*"
@@ -257,6 +301,26 @@ func newDeployCmd(a *app) *cobra.Command {
 				return fmt.Errorf("deploy: deployRegistry: %w", err)
 			}
 
+			// "mock" burn-mint's RegisterManagerByVaa fetches the committed
+			// MockBurnMintFactory via requireCanonicalFactory (unlike plain RegisterManager,
+			// which only stores it as a field) -- gg's sole signatory, so admin's submit
+			// needs it disclosed whenever gg lives on a different participant (prepareRemoteSeam
+			// is a no-op, returning nil, on a single-participant profile).
+			var deployRemote json.RawMessage
+			if cfg.Mode == "burn-mint" && cfg.TokenKind == "mock" {
+				ownerRole := participantRoleForParty(s, s.GuardianGovernance)
+				deployRemote, err = prepareRemoteSeam(ctx, cmd, a, s, "", ownerRole, "Playground.Prepare:prepareDeployNtt", func(templates []string) any {
+					return prepareDeployNttInput{
+						GuardianGovernance: s.GuardianGovernance,
+						FactoryCid:         *regOut.FactoryCid,
+						DiscloseTemplates:  templates,
+					}
+				})
+				if err != nil {
+					return fmt.Errorf("deploy: prepare remote disclosure: %w", err)
+				}
+			}
+
 			a.vlogf(cmd, "deploy %q: deployNtt (admin) = resolve registries/factory → RegisterManager", deploymentName)
 			var out deployOutput
 			if err := runner.Run(ctx, "Playground.Deploy:deployNtt", deployInput{
@@ -270,6 +334,9 @@ func newDeployCmd(a *app) *cobra.Command {
 				InstrumentAdmin:    instrumentAdminPtr,
 				AmuletFactoryCid:   amuletFactoryCidPtr,
 				FactoryCid:         regOut.FactoryCid,
+				VaaBytes:           vaaBytesPtr,
+				PubKeys:            vaaPubKeys,
+				Remote:             deployRemote,
 			}, &out); err != nil {
 				return err
 			}
@@ -381,4 +448,27 @@ func setupAmuletAdmin(ctx context.Context, cmd *cobra.Command, a *app, adminHint
 	}
 
 	return adminParty, dsoParty, factory.FactoryID, nil
+}
+
+// signRegisterBurnMintVaa builds and signs the guardian-signed RegisterBurnMintManager VAA a
+// "mock" burn-mint deployment needs for Wormhole.Ntt.Governance.RegisterManagerByVaa --
+// registrationBinding = wire.DerivedAddress(wire.RegistrationBindingTag, operator, admin,
+// nonce), matching nttRegistrationBindingFor's Daml side exactly (same domain-separated
+// preimage shape as nttManagerAddressFor). Bumps and persists the guardian's governance
+// sequence counter into s; the caller must a.saveState(s) afterward.
+func signRegisterBurnMintVaa(s *state.State, operator, admin string, instrumentNonce, tokenDecimals int) (vaaHex, pubKeyHex string, err error) {
+	if s.Guardian.PrivateKeyHex == "" {
+		return "", "", fmt.Errorf("no guardian key in state -- run `init` first")
+	}
+	key, err := guardian.KeyFromHex(s.Guardian.PrivateKeyHex)
+	if err != nil {
+		return "", "", err
+	}
+	registrationBinding := wire.DerivedAddress(wire.RegistrationBindingTag, operator, admin, uint64(instrumentNonce)) //nolint:gosec // playground nonces are small
+	seq := s.NextGuardianSequence("governance", guardian.DefaultGovernanceChain)
+	vaa, err := guardian.SignRegisterBurnMintManager(key, guardian.GovernanceParams{Sequence: seq}, wire.CantonChainID, registrationBinding, uint8(tokenDecimals)) //nolint:gosec // playground decimals are small
+	if err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(vaa), hex.EncodeToString(key.PubKeyUncompressed()), nil
 }
