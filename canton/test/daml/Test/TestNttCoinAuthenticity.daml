@@ -1,44 +1,35 @@
--- | Confirms every caller-supplied interface contract id
--- ('Holding'/'HoldingV2.Holding'/'AV2.Allocation') feeding 'Wormhole.Ntt.CoinFactory'
--- or 'Wormhole.Ntt.CoinTransfer' resolves to a genuine 'NttCoin'/'NttCoinAllocationV2'
--- via 'fetchFromInterface', not merely the interface's caller-authored view.
+-- | Confirms every caller-supplied 'Holding' interface contract id feeding
+-- 'Wormhole.Ntt.CoinFactory' or 'Wormhole.Ntt.CoinTransfer' resolves to a
+-- genuine 'NttCoin' via 'fetchFromInterface', not merely the interface's
+-- caller-authored view.
 module Test.TestNttCoinAuthenticity where
 
 import Daml.Script
 import DA.Assert ((===))
-import DA.Map qualified as Map
 import DA.Optional (fromSome)
-import DA.TextMap qualified as TextMap
 import DA.Time (hours, addRelTime)
 
 import Splice.Api.Token.AllocationV1
 import Splice.Api.Token.AllocationInstructionV1
-import Splice.Api.Token.AllocationV2 qualified as AV2
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory, BurnMintFactory_BurnMint(..), BurnMintOutput(..))
 import Splice.Api.Token.HoldingV1 (Holding, HoldingView(..), InstrumentId(..))
-import Splice.Api.Token.HoldingV2 qualified as HoldingV2
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
-import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Coin
 import Wormhole.Ntt.CoinFactory
-import Wormhole.Ntt.CoinTransfer (NttTransferInstruction, TransferPreapproval(..))
+import Wormhole.Ntt.CoinTransfer (TransferPreapproval(..))
 import Test.TestNtt (nttCoinFactorySetup, expectAbort)
 import Test.TestNttCoin (mintCoin)
 import Test.TestNttCoinTransfer
-  (asTransferFactoryV1, asTransferFactoryV2, extraArgsWithPreapproval, mkTransferV1, subAccount)
-import Test.TestNttCoinAllocationV2
-  ( allocate, basicAccount, discloseFactory, finalized, mkLeg, mkSettlement, mkSpec
-  , theAllocationCidV2, tryAllocate, trySettleBatch
-  )
+  (asTransferFactoryV1, discloseFactory, extraArgsWithPreapproval, mkTransferV1)
 
 ----------------------------------------------------------------------
--- Forgery templates: attacker-deployed, self-signed, claiming any
+-- Forgery template: attacker-deployed, self-signed, claiming any
 -- instrument/admin in the interface view alone.
 ----------------------------------------------------------------------
 
--- | Implements both v1 and v2 'Holding', signed by its own owner alone.
+-- | Implements v1 'Holding', signed by its own owner alone.
 template ForgedHolding
   with
     attacker     : Party
@@ -55,112 +46,8 @@ template ForgedHolding
         lock = None
         meta = emptyMetadata
 
-    interface instance HoldingV2.Holding for ForgedHolding where
-      view = HoldingV2.HoldingView with
-        account = HoldingV2.Account with owner = Some attacker, provider = None, id = ""
-        instrumentId = HoldingV2.InstrumentId with admin = instrumentId.admin, id = instrumentId.id
-        amount
-        lock = None
-        meta = emptyMetadata
-
--- | A counterfeit 'AV2.Allocation': view claims @admin = guardianGovernance@,
--- signed by the attacker alone. Burns nothing on settle.
-template ForgedAllocationV2
-  with
-    attacker   : Party
-    settlement : AV2.SettlementInfo
-    allocation : AV2.AllocationSpecification
-    createdAt  : Time
-  where
-    signatory attacker
-    observer settlement.executors
-
-    interface instance AV2.Allocation for ForgedAllocationV2 where
-      view = AV2.AllocationView with
-        originalAllocationCid = None
-        settlement
-        allocation
-        holdingCids = []
-        createdAt
-        numIterations = 0
-        expiresAt = None
-        availableActions = Map.fromList
-          [ (AV2.AA_Settle, [allocation.admin :: settlement.executors]) ]
-        meta = emptyMetadata
-
-      allocation_settleImpl self _arg = do
-        archive (coerceContractId @AV2.Allocation @ForgedAllocationV2 self)
-        pure AV2.AllocationResult with
-          output = AV2.AllocationResult_Settled with nextIterationAllocationCid = None
-          authorizerHoldingCids = TextMap.empty
-          meta = emptyMetadata
-
-      allocation_cancelImpl self _arg = do
-        archive (coerceContractId @AV2.Allocation @ForgedAllocationV2 self)
-        pure AV2.AllocationResult with
-          output = AV2.AllocationResult_Cancelled
-          authorizerHoldingCids = TextMap.empty
-          meta = emptyMetadata
-
-      allocation_withdrawImpl self _arg = do
-        archive (coerceContractId @AV2.Allocation @ForgedAllocationV2 self)
-        pure AV2.AllocationResult with
-          output = AV2.AllocationResult_Withdrawn
-          authorizerHoldingCids = TextMap.empty
-          meta = emptyMetadata
-
-      allocation_settleExtraObservers _ = []
-      allocation_cancelExtraObservers _ = []
-      allocation_withdrawExtraObservers _ = []
-
--- | A counterfeit 'AV2.Allocation' whose settle body directly mints a real
--- 'NttCoin', proving gg's ambient authority leaks into attacker code inside
--- 'SettlementFactory_SettleBatch', not merely that a burn is skippable.
-template EvilAllocation
-  with
-    attacker       : Party
-    settlement     : AV2.SettlementInfo
-    spec           : AV2.AllocationSpecification
-    mintTo         : Party
-    mintAmount     : Decimal
-    mintInstrument : InstrumentId
-    createdAt      : Time
-  where
-    signatory attacker
-
-    interface instance AV2.Allocation for EvilAllocation where
-      view = AV2.AllocationView with
-        originalAllocationCid = None
-        settlement
-        allocation = spec
-        holdingCids = []
-        createdAt
-        numIterations = 0
-        expiresAt = None
-        availableActions = Map.empty
-        meta = emptyMetadata
-
-      allocation_settleImpl _self _arg = do
-        _ <- create NttCoin with
-          instrumentId = mintInstrument
-          owner = mintTo
-          provider = None
-          accountId = ""
-          amount = mintAmount
-        pure AV2.AllocationResult with
-          output = AV2.AllocationResult_Settled with nextIterationAllocationCid = None
-          authorizerHoldingCids = TextMap.empty
-          meta = emptyMetadata
-
-      allocation_cancelImpl _self _arg = abort "evil: n/a"
-      allocation_withdrawImpl _self _arg = abort "evil: n/a"
-      allocation_settleExtraObservers _ = []
-      allocation_cancelExtraObservers _ = []
-      allocation_withdrawExtraObservers _ = []
-
 ----------------------------------------------------------------------
--- Local v1-allocate harness (mirrors Test.TestNttCoinAllocation's, kept
--- local to avoid clashing with the v2 `allocate`/`tryAllocate` imports).
+-- Local v1-allocate harness (mirrors Test.TestNttCoinAllocation's harness).
 ----------------------------------------------------------------------
 
 v1AllocSpec : Time -> Party -> Party -> Party -> Decimal -> InstrumentId -> AllocationSpecification
@@ -216,36 +103,6 @@ testForgedHoldingRejectedByTransferV1 = do
   supply <- query @NttCoin gg
   supply === []
 
-testForgedHoldingRejectedByTransferV2 : Script ()
-testForgedHoldingRejectedByTransferV2 = do
-  gg <- allocateParty "AuthForgeV2Gg"
-  bob <- allocateParty "AuthForgeV2Bob"
-  mallory <- allocateParty "AuthForgeV2Mallory"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-FORGE-V2"
-      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
-
-  forgedCid <- submit mallory do
-    createCmd ForgedHolding with attacker = mallory, instrumentId, amount = 500.0
-
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-  res <- trySubmit (actAs mallory <> actAs bob <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = basicAccount mallory
-        receiver = basicAccount bob
-        amount = 500.0
-        instrumentId = instrumentIdV2
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids =
-          [coerceContractId @Holding @HoldingV2.Holding (toInterfaceContractId @Holding forgedCid)]
-        meta = emptyMetadata
-      actors = [mallory, bob]
-      extraArgs = emptyExtraArgs
-  expectAbort "is not an NttCoin" res
-
 testForgedHoldingRejectedByAllocateV1 : Script ()
 testForgedHoldingRejectedByAllocateV1 = do
   gg <- allocateParty "AuthAllocV1Gg"
@@ -261,21 +118,6 @@ testForgedHoldingRejectedByAllocateV1 = do
   res <- tryV1Allocate factoryCid gg mallory
     (v1AllocSpec t0 mallory mallory bob 0.0001 instrumentId)
     [toInterfaceContractId @Holding forgedCid]
-  expectAbort "is not an NttCoin" res
-
-testForgedHoldingRejectedByAllocateV2 : Script ()
-testForgedHoldingRejectedByAllocateV2 = do
-  gg <- allocateParty "AuthAllocV2Gg"
-  mallory <- allocateParty "AuthAllocV2Mallory"
-  factoryCid <- nttCoinFactorySetup gg
-  let instr = "NTT-AUTH-ALLOCV2"
-      instrumentId = InstrumentId with admin = gg, id = instr
-
-  forgedCid <- submit mallory do
-    createCmd ForgedHolding with attacker = mallory, instrumentId, amount = 750000.0
-
-  res <- tryAllocate factoryCid gg mallory (mkSettlement [mallory] "auth-fakechange")
-    (mkSpec gg mallory []) [toInterfaceContractId @HoldingV2.Holding forgedCid]
   expectAbort "is not an NttCoin" res
 
 -- | 'burnMintFactory_burnMintImpl' is gg-gated (not attacker-reachable
@@ -299,391 +141,6 @@ testForgedHoldingRejectedByBurnMint = do
       extraActors = [mallory]
       extraArgs = emptyExtraArgs
   expectAbort "burn input is not an NttCoin" res
-
-----------------------------------------------------------------------
--- Forged Allocation rejected by SettleBatch
-----------------------------------------------------------------------
-
-testForgedAllocationRejectedBySettleBatch : Script ()
-testForgedAllocationRejectedBySettleBatch = do
-  gg <- allocateParty "AuthForgeAllocGg"
-  mallory <- allocateParty "AuthForgeAllocMallory"
-  ghost <- allocateParty "AuthForgeAllocGhost"
-  factoryCid <- nttCoinFactorySetup gg
-  now <- getTime
-  let instr = "NTT-AUTH-FORGE-ALLOC"
-      settlement = mkSettlement [mallory] "auth-forge-alloc"
-      amount = 1000000.0
-
-  mallocRes <- allocate factoryCid gg mallory settlement
-    (mkSpec gg mallory [mkLeg "leg-0" AV2.ReceiverSide ghost amount instr]) []
-  let realAllocCid = theAllocationCidV2 mallocRes
-
-  forgedCid <- submit mallory do
-    createCmd ForgedAllocationV2 with
-      attacker = mallory
-      settlement
-      createdAt = now
-      allocation = AV2.AllocationSpecification with
-        admin = gg
-        authorizer = basicAccount ghost
-        transferLegSides = [mkLeg "leg-0" AV2.SenderSide mallory amount instr]
-        settlementDeadline = None
-        nextIterationFunding = None
-        committed = False
-        meta = emptyMetadata
-
-  let leg = AV2.TransferLeg with
-        transferLegId = "leg-0"
-        sender = basicAccount ghost
-        receiver = basicAccount mallory
-        amount
-        instrumentId = instr
-        meta = emptyMetadata
-
-  res <- trySettleBatch factoryCid gg settlement [leg]
-    [ finalized (toInterfaceContractId @AV2.Allocation forgedCid)
-    , finalized realAllocCid
-    ] [mallory]
-  expectAbort "is not an NttCoinAllocationV2" res
-
-  supply <- query @NttCoin gg
-  sum [c.amount | (_, c) <- supply, c.instrumentId.id == instr] === 0.0
-
--- | The attacker's template calls @create NttCoin@ directly inside its own
--- settle body, proving gg's ambient authority leaks into attacker code (not
--- merely that a burn step is skippable).
-testSettleBatchDoesNotLeakGgAuthority : Script ()
-testSettleBatchDoesNotLeakGgAuthority = do
-  gg <- allocateParty "AuthLeakGg"
-  mallory <- allocateParty "AuthLeakMallory"
-  factoryCid <- nttCoinFactorySetup gg
-  let victimInstrument = InstrumentId with admin = gg, id = "NTT-AUTH-LEAK"
-      acct = basicAccount mallory
-      settlement = AV2.SettlementInfo with
-        executors = [mallory], id = "auth-evil-batch", cid = None, meta = emptyMetadata
-      side s = AV2.TransferLegSide with
-        transferLegId = "L1", side = s, otherside = acct, amount = 1.0
-        instrumentId = victimInstrument.id, meta = emptyMetadata
-      spec = AV2.AllocationSpecification with
-        admin = gg                       -- pure assertion; nothing co-signs it
-        authorizer = acct
-        transferLegSides = [side AV2.SenderSide, side AV2.ReceiverSide]
-        settlementDeadline = None, nextIterationFunding = None
-        committed = False, meta = emptyMetadata
-      leg = AV2.TransferLeg with
-        transferLegId = "L1", sender = acct, receiver = acct, amount = 1.0
-        instrumentId = victimInstrument.id, meta = emptyMetadata
-
-  t0 <- getTime
-  evilCid <- submit mallory do
-    createCmd EvilAllocation with
-      attacker = mallory, settlement, spec
-      mintTo = mallory, mintAmount = 777777.0, mintInstrument = victimInstrument
-      createdAt = t0
-
-  factoryDisc <- discloseFactory gg factoryCid
-  res <- trySubmit (actAs mallory <> disclose factoryDisc) do
-    exerciseCmd (toInterfaceContractId @AV2.SettlementFactory factoryCid) AV2.SettlementFactory_SettleBatch with
-      settlement
-      transferLegs = [leg]
-      allocations =
-        [ AV2.FinalizedAllocation with
-            allocationCid = toInterfaceContractId @AV2.Allocation evilCid
-            extraTransferLegSides = [], nextIterationFunding = None
-        ]
-      actors = [mallory]
-      extraArgs = emptyExtraArgs
-  expectAbort "is not an NttCoinAllocationV2" res
-
-  after <- query @NttCoin gg
-  sum [c.amount | (_, c) <- after, c.instrumentId == victimInstrument] === 0.0
-
-----------------------------------------------------------------------
--- v2 Accept requires the receiver account's actors
-----------------------------------------------------------------------
-
-testV2AcceptRequiresReceiverActors : Script ()
-testV2AcceptRequiresReceiverActors = do
-  gg <- allocateParty "AuthAcceptActorsGg"
-  alice <- allocateParty "AuthAcceptActorsAlice"
-  mallory <- allocateParty "AuthAcceptActorsMallory"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-ACCEPT-ACTORS"
-      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
-
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-  res <- submit (actAs alice <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = basicAccount alice
-        receiver = basicAccount gg
-        amount = 0.006
-        instrumentId = instrumentIdV2
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [coerceContractId @Holding @HoldingV2.Holding coinCid]
-        meta = emptyMetadata
-      actors = [alice]
-      extraArgs = emptyExtraArgs
-  let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
-      instrCid = coerceContractId @TIV2.TransferInstruction @NttTransferInstruction transferInstructionCid
-
-  -- mallory is a complete outsider: not sender, not receiver, not admin.
-  instrDisc <- fromSome <$> queryDisclosure gg instrCid
-  acceptRes <- trySubmit (actAs mallory <> disclose instrDisc) do
-    exerciseCmd transferInstructionCid TIV2.TransferInstruction_Accept with
-      actors = [mallory], extraArgs = emptyExtraArgs
-  expectAbort "recipient account's authority" acceptRes
-
-  -- the instruction survives the rejected accept attempt.
-  stillThere <- queryContractId gg instrCid
-  assert (stillThere /= None)
-
--- | Control: the identical outsider submission against Reject is blocked,
--- pinning the symmetry Accept now shares.
-testV2RejectRequiresReceiverActors : Script ()
-testV2RejectRequiresReceiverActors = do
-  gg <- allocateParty "AuthRejectActorsGg"
-  alice <- allocateParty "AuthRejectActorsAlice"
-  mallory <- allocateParty "AuthRejectActorsMallory"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-REJECT-ACTORS"
-      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-  res <- submit (actAs alice <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = basicAccount alice
-        receiver = basicAccount gg
-        amount = 0.006
-        instrumentId = instrumentIdV2
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [coerceContractId @Holding @HoldingV2.Holding coinCid]
-        meta = emptyMetadata
-      actors = [alice]
-      extraArgs = emptyExtraArgs
-  let TIV2.TransferInstructionResult_Pending{transferInstructionCid} = res.output
-      instrCid = coerceContractId @TIV2.TransferInstruction @NttTransferInstruction transferInstructionCid
-  instrDisc <- fromSome <$> queryDisclosure gg instrCid
-  rejected <- trySubmit (actAs mallory <> disclose instrDisc) do
-    exerciseCmd transferInstructionCid TIV2.TransferInstruction_Reject with
-      actors = [mallory], extraArgs = emptyExtraArgs
-  expectAbort "recipient account's authority" rejected
-
-----------------------------------------------------------------------
--- Sub-account debits require the account they actually sit in
-----------------------------------------------------------------------
-
-testV1TransferCannotSpendSubAccountCoin : Script ()
-testV1TransferCannotSpendSubAccountCoin = do
-  gg <- allocateParty "AuthSubDrainGg"
-  alice <- allocateParty "AuthSubDrainAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-SUBDRAIN"
-      vault = subAccount alice "vault"
-
-  basicCid <- mintCoin factoryCid gg instrumentId alice 10.0
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-  seeded <- submit (actAs alice <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      actors = [alice]
-      transfer = TIV2.Transfer with
-        sender = basicAccount alice
-        receiver = vault
-        amount = 10.0
-        instrumentId = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [coerceContractId basicCid]
-        meta = emptyMetadata
-      extraArgs = emptyExtraArgs
-  vaultCid <- case seeded.output of
-    TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [c]} -> pure c
-    other -> abort ("sub-account seeding failed: " <> show other)
-
-  -- v1 lifts alice into her basic account, which no longer equals the vault
-  -- account the coin sits in; rejected.
-  res <- trySubmit (actAs alice <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
-      expectedAdmin = gg
-      transfer = mkTransferV1 t0 alice alice 4.0 instrumentId [coerceContractId vaultCid]
-      extraArgs = emptyExtraArgs
-  expectAbort "input not owned by sender" res
-
-  vaultCoins <- query @NttCoin gg
-  sum [c.amount | (_, c) <- vaultCoins, c.instrumentId == instrumentId, c.accountId == "vault"] === 10.0
-
-testV2TransferSenderAccountMustMatchInput : Script ()
-testV2TransferSenderAccountMustMatchInput = do
-  gg <- allocateParty "AuthSubAcctGg"
-  alice <- allocateParty "AuthSubAcctAlice"
-  bob <- allocateParty "AuthSubAcctBob"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-SUBACCT"
-      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
-      savings = subAccount alice "savings"
-      checking = subAccount alice "checking"
-
-  -- 0.01 sits in alice's "savings" sub-account. "checking" is empty.
-  savingsCid <- submit (actAs gg <> actAs alice) do
-    createCmd NttCoin with instrumentId, owner = alice, provider = None, accountId = "savings", amount = 0.01
-
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-  -- alice declares "checking" as sender but funds from "savings"; rejected.
-  res <- trySubmit (actAs alice <> actAs bob <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = checking
-        receiver = basicAccount bob
-        amount = 0.006
-        instrumentId = instrumentIdV2
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [toInterfaceContractId @HoldingV2.Holding savingsCid]
-        meta = emptyMetadata
-      actors = [alice, bob]
-      extraArgs = emptyExtraArgs
-  expectAbort "input not owned by sender" res
-
-  Some stillThere <- queryContractId gg savingsCid
-  stillThere.amount === 0.01
-  stillThere.accountId === "savings"
-
-testV1AllocateCannotSpendSubAccountCoin : Script ()
-testV1AllocateCannotSpendSubAccountCoin = do
-  gg <- allocateParty "AuthSubAllocGg"
-  alice <- allocateParty "AuthSubAllocAlice"
-  bob <- allocateParty "AuthSubAllocBob"
-  carol <- allocateParty "AuthSubAllocCarolExecutor"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-SUBALLOC"
-      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = "NTT-AUTH-SUBALLOC"
-      vault = HoldingV2.Account with owner = Some alice, provider = None, id = "vault"
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-
-  -- Move alice's basic-account coin into her own "vault" sub-account.
-  subRes <- submit (actAs alice <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = HoldingV2.Account with owner = Some alice, provider = None, id = ""
-        receiver = vault
-        amount = 0.01
-        instrumentId = instrumentIdV2
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [coerceContractId coinCid]
-        meta = emptyMetadata
-      actors = [alice]
-      extraArgs = emptyExtraArgs
-  subCoinCid <- case subRes.output of
-    TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [rcid]} -> do
-      Some c <- queryContractId gg (coerceContractId @HoldingV2.Holding @NttCoin rcid)
-      c.accountId === "vault"
-      pure (coerceContractId @HoldingV2.Holding @Holding rcid)
-    other -> abort ("expected the sub-account transfer to complete, got: " <> show other)
-
-  -- v1's account-blind allocate lifts alice into her basic account; rejected.
-  res <- tryV1Allocate factoryCid gg alice
-    (v1AllocSpec t0 carol alice bob 0.006 instrumentId) [subCoinCid]
-  expectAbort "input not owned by sender" res
-
-----------------------------------------------------------------------
--- Negative controls: bounding how far v1's account-blindness reaches
-----------------------------------------------------------------------
-
--- | Provider-delegated holdings aren't a theft vector: the view check
--- passes (owner-only), but archiving still needs the coin's real signatory
--- set, which includes the provider.
-testProviderCoinNeedsProviderAuthority : Script ()
-testProviderCoinNeedsProviderAuthority = do
-  gg <- allocateParty "AuthProvGg"
-  alice <- allocateParty "AuthProvAlice"
-  bob <- allocateParty "AuthProvBob"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-PROV"
-      delegated = HoldingV2.Account with owner = Some alice, provider = Some bob, id = ""
-
-  basicCid <- mintCoin factoryCid gg instrumentId alice 10.0
-  factoryDisc <- discloseFactory gg factoryCid
-  t0 <- getTime
-  seeded <- submit (actAs alice <> actAs bob <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      actors = [alice, bob]
-      transfer = TIV2.Transfer with
-        sender = basicAccount alice
-        receiver = delegated
-        amount = 10.0
-        instrumentId = HoldingV2.InstrumentId with admin = gg, id = instrumentId.id
-        requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [coerceContractId basicCid]
-        meta = emptyMetadata
-      extraArgs = emptyExtraArgs
-  delegatedCid <- case seeded.output of
-    TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [c]} -> pure c
-    other -> abort ("provider seeding failed: " <> show other)
-
-  submitMustFail (actAs alice <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV1 factoryCid) TIV1.TransferFactory_Transfer with
-      expectedAdmin = gg
-      transfer = mkTransferV1 t0 alice alice 1.0 instrumentId [coerceContractId delegatedCid]
-      extraArgs = emptyExtraArgs
-
--- | v2 variant: the ledger, not an explicit check, stops spending a
--- provider-managed account's funds via a basic-account sender.
-testProviderAccountNotSpendableViaBasicSender : Script ()
-testProviderAccountNotSpendableViaBasicSender = do
-  gg <- allocateParty "AuthProvAcctGg"
-  alice <- allocateParty "AuthProvAcctAlice"
-  bob <- allocateParty "AuthProvAcctBob"
-  pp <- allocateParty "AuthProvAcctProvider"
-  factoryCid <- nttCoinFactorySetup gg
-  factoryDisc <- discloseFactory gg factoryCid
-  let instr = "NTT-AUTH-PROVACCT"
-      instrumentId = InstrumentId with admin = gg, id = instr
-      instrumentIdV2 = HoldingV2.InstrumentId with admin = gg, id = instr
-      managed = HoldingV2.Account with owner = Some alice, provider = Some pp, id = ""
-  coinCid <- mintCoin factoryCid gg instrumentId alice 100.0
-
-  t0 <- getTime
-  managedRes <- submit (actAs alice <> actAs pp <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = basicAccount alice, receiver = managed, amount = 100.0
-        instrumentId = instrumentIdV2, requestedAt = t0
-        executeBefore = t0 `addRelTime` hours 24
-        inputHoldingCids = [coerceContractId @Holding @HoldingV2.Holding coinCid]
-        meta = emptyMetadata
-      actors = [alice, pp]
-      extraArgs = emptyExtraArgs
-  managedCid <- case managedRes.output of
-    TIV2.TransferInstructionResult_Completed{receiverHoldingCids = [c]} -> pure c
-    other -> abort ("expected completed transfer into managed account, got: " <> show other)
-
-  t1 <- getTime
-  res <- trySubmit (actAs alice <> actAs bob <> disclose factoryDisc) do
-    exerciseCmd (asTransferFactoryV2 factoryCid) TIV2.TransferFactory_Transfer with
-      transfer = TIV2.Transfer with
-        sender = basicAccount alice, receiver = basicAccount bob, amount = 100.0
-        instrumentId = instrumentIdV2, requestedAt = t1
-        executeBefore = t1 `addRelTime` hours 24
-        inputHoldingCids = [managedCid]
-        meta = emptyMetadata
-      actors = [alice, bob]
-      extraArgs = emptyExtraArgs
-  case res of
-    Left _ -> pure ()
-    Right _ -> abort "EXPLOIT: provider-delegated funds spent without provider authority"
 
 ----------------------------------------------------------------------
 -- Additional invariants not covered by the pre-existing suites
@@ -739,7 +196,7 @@ testPreapprovalInstrumentMismatch = do
       otherInstrumentId = InstrumentId with admin = gg, id = "NTT-AUTH-PRE-INSTR-OTHER"
   coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
   preCid <- submit bob do
-    createCmd TransferPreapproval with account = basicAccount bob, instrumentId = otherInstrumentId
+    createCmd TransferPreapproval with owner = bob, instrumentId = otherInstrumentId
   factoryDisc <- discloseFactory gg factoryCid
   preDisc <- fromSome <$> queryDisclosure bob preCid
   t0 <- getTime

@@ -1,14 +1,10 @@
--- | The guardian-governance-owned token registry: the 'NttCoin' holding, plus
--- the 'HoldingV2.Account' helpers shared by its sibling modules. See
--- 'Wormhole.Ntt.CoinTransfer', 'Wormhole.Ntt.CoinAllocation',
--- 'Wormhole.Ntt.CoinAllocationV2', and 'Wormhole.Ntt.CoinFactory' for the
+-- | The guardian-governance-owned token registry: the 'NttCoin' holding, a
+-- CIP-0056 token-standard asset. See 'Wormhole.Ntt.CoinTransfer',
+-- 'Wormhole.Ntt.CoinAllocation', and 'Wormhole.Ntt.CoinFactory' for the
 -- genesis factory and the templates it produces.
 module Wormhole.Ntt.Coin where
 
-import DA.Optional (catOptionals, fromSome, optionalToList)
-
 import Splice.Api.Token.HoldingV1 (Holding, HoldingView (..), InstrumentId)
-import Splice.Api.Token.HoldingV2 qualified as HoldingV2
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 
 -- A token holding, named per Amulet's holding convention.
@@ -16,15 +12,11 @@ template NttCoin
   with
     instrumentId : InstrumentId
     owner        : Party
-    provider     : Optional Party
-    accountId    : Text
     amount       : Decimal
   where
-    signatory instrumentId.admin :: owner :: optionalToList provider
+    signatory instrumentId.admin :: owner :: []
     ensure amount > 0.0
 
-    -- v1 has no provider/sub-account concept: the view is always the bare
-    -- owner, and callers can't move the coin without the provider's authority.
     interface instance Holding for NttCoin where
       view = HoldingView with
         owner
@@ -33,43 +25,6 @@ template NttCoin
         lock = None
         meta = emptyMetadata
 
-    interface instance HoldingV2.Holding for NttCoin where
-      view = HoldingV2.HoldingView with
-        account = coinAccount owner provider accountId
-        instrumentId = HoldingV2.InstrumentId with admin = instrumentId.admin, id = instrumentId.id
-        amount
-        lock = None
-        meta = emptyMetadata
-
--- | Build a full 'HoldingV2.Account' from its three constituent parts.
-coinAccount : Party -> Optional Party -> Text -> HoldingV2.Account
-coinAccount owner provider accountId = HoldingV2.Account with owner = Some owner, provider, id = accountId
-
--- | A basic account: a plain party, no sub-account, no provider delegation.
--- Used by every v1 path and 'BurnMintFactory_BurnMint'.
-basicAccountV2 : Party -> HoldingV2.Account
-basicAccountV2 p = HoldingV2.Account with owner = Some p, provider = None, id = ""
-
--- | Create a coin held in the given account.
--- Precondition: @acc.owner@ is @Some@ -- callers sit behind
--- 'requireAccountOwner' or an equivalent guarantee.
-createCoinIn : InstrumentId -> HoldingV2.Account -> Decimal -> Update (ContractId NttCoin)
-createCoinIn instrumentId acc amount = create NttCoin with
-  instrumentId, owner = fromSome acc.owner
-  provider = acc.provider, accountId = acc.id, amount
-
--- | Parties whose authority is required to move or archive a holding in
--- this account: the owner, plus the provider if any.
-accountControlParties : HoldingV2.Account -> [Party]
-accountControlParties acc = catOptionals [acc.owner, acc.provider]
-
--- | Rejects only the null-owner account (reserved for mint/burn); sub-accounts
--- and provider-delegated accounts are valid.
-requireAccountOwner : HoldingV2.Account -> Update Party
-requireAccountOwner acc = case acc.owner of
-  Some p -> pure p
-  None -> abort "ntt: null-owner accounts are for mint/burn only -- use BurnMintFactory"
-
--- | The account an 'NttCoin' is held in. Inverse of 'createCoinIn'.
-coinAccountOf : NttCoin -> HoldingV2.Account
-coinAccountOf c = coinAccount c.owner c.provider c.accountId
+-- | Create a coin owned by the given party.
+createCoin : InstrumentId -> Party -> Decimal -> Update (ContractId NttCoin)
+createCoin instrumentId owner amount = create NttCoin with instrumentId, owner, amount

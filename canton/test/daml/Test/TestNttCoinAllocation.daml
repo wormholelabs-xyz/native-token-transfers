@@ -1,11 +1,8 @@
 -- | Daml Script tests for the 'Wormhole.Ntt.CoinFactory' 'AllocationFactory'
--- v1 addition and 'NttCoinAllocation': DvP/atomic-settlement-style
--- reservation of 'NttCoin' funds, independent of NTT's own burn/mint bridge
--- flow.
+-- and 'NttCoinAllocation': DvP/atomic-settlement-style reservation of
+-- 'NttCoin' funds, independent of NTT's own burn/mint bridge flow.
 --
--- v1 only -- 'AllocationV2'/'AllocationInstructionV2'/'SettlementFactory'
--- (multi-leg net settlement, iterated/committed allocations) have their own
--- dedicated test module, 'Test.TestNttCoinAllocationV2'.
+-- Covers the v1 allocation flow (CIP-0056) only.
 module Test.TestNttCoinAllocation where
 
 import Daml.Script

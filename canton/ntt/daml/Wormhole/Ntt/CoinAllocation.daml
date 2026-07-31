@@ -24,7 +24,7 @@ template NttCoinAllocation
         now <- getTime
         assertMsg "ntt: settlement window (settleBefore) has passed" (now < allocation.settlement.settleBefore)
         rcid <- toInterfaceContractId @Holding <$>
-          createCoinIn instrumentId (basicAccountV2 allocation.transferLeg.receiver) allocation.transferLeg.amount
+          createCoin instrumentId allocation.transferLeg.receiver allocation.transferLeg.amount
         pure Allocation_ExecuteTransferResult with
           senderHoldingCids = [], receiverHoldingCids = [rcid], meta = emptyMetadata
 
@@ -36,8 +36,7 @@ template NttCoinAllocation
         cid <- returnAllocationToSender instrumentId allocation
         pure Allocation_WithdrawResult with senderHoldingCids = [cid], meta = emptyMetadata
 
--- | v1 allocations are party-based, not account-based; returned via a basic account.
 returnAllocationToSender : InstrumentId -> AllocationSpecification -> Update (ContractId Holding)
 returnAllocationToSender instrumentId allocation =
   toInterfaceContractId @Holding <$>
-    createCoinIn instrumentId (basicAccountV2 allocation.transferLeg.sender) allocation.transferLeg.amount
+    createCoin instrumentId allocation.transferLeg.sender allocation.transferLeg.amount

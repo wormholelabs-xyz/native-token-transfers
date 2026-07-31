@@ -1,5 +1,5 @@
 -- | The genesis 'NttCoinFactory': a 'BurnMintFactory' plus
--- 'TransferFactory'/'AllocationFactory' v1+v2 and 'AV2.SettlementFactory'.
+-- 'TransferFactory'/'AllocationFactory' v1.
 -- Signatory guardianGovernance alone, created once and never replaced;
 -- instrumentId.admin must always equal guardianGovernance.
 module Wormhole.Ntt.CoinFactory where
@@ -10,32 +10,17 @@ import DA.Optional (fromOptional)
 import DA.TextMap qualified as TextMap
 
 import Splice.Api.Token.AllocationInstructionV1
-import Splice.Api.Token.AllocationInstructionV2 qualified as AIV2
 import Splice.Api.Token.AllocationV1
-import Splice.Api.Token.AllocationV2 qualified as AV2
 import Splice.Api.Token.BurnMintV1
   ( BurnMintFactory, BurnMintFactoryView (..)
   , BurnMintFactory_BurnMintResult (..)
   )
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
-import Splice.Api.Token.HoldingV2 qualified as HoldingV2
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
-import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
 import Wormhole.Ntt.Coin
 import Wormhole.Ntt.CoinAllocation
-import Wormhole.Ntt.CoinAllocationV2
 import Wormhole.Ntt.CoinTransfer
-
--- | One authorized leg side, flattened across allocations, for SettleBatch's
--- per-leg matching.
-data LegSideEntry = LegSideEntry with
-  transferLegId : Text
-  side          : AV2.TransferSide
-  authorizer    : HoldingV2.Account
-  otherside     : HoldingV2.Account
-  amount        : Decimal
-  instrumentId  : Text
 
 template NttCoinFactory
   with
@@ -59,9 +44,8 @@ template NttCoinFactory
               assertMsg "ntt: burn input's instrument does not match the requested instrumentId"
                 (coin.instrumentId == arg.instrumentId)
           archive cid
-        -- BurnMintFactory is party-based; mint/burn stays basic-account-only.
         outputCids <- forA arg.outputs \o ->
-          toInterfaceContractId @Holding <$> createCoinIn arg.instrumentId (basicAccountV2 o.owner) o.amount
+          toInterfaceContractId @Holding <$> createCoin arg.instrumentId o.owner o.amount
         pure BurnMintFactory_BurnMintResult with outputCids
 
       burnMintFactory_publicFetchImpl _self arg = do
@@ -77,12 +61,8 @@ template NttCoinFactory
           (arg.expectedAdmin == guardianGovernance)
         let t = arg.transfer
         assertTransferWindow t.requestedAt t.executeBefore
-        -- v1 is inherently basic (bare party, no account model); lift
-        -- sender/receiver into basic accounts for the shared account-based core.
-        let senderAccount = basicAccountV2 t.sender
-            receiverAccount = basicAccountV2 t.receiver
         outcome <- nttTransferCore guardianGovernance (t.sender == t.receiver)
-          senderAccount receiverAccount t.amount t.instrumentId t.inputHoldingCids arg.extraArgs
+          t.sender t.receiver t.amount t.instrumentId t.inputHoldingCids arg.extraArgs
         case outcome of
           CoreCompleted{receiverCid, senderChangeCids} ->
             pure TIV1.TransferInstructionResult with
@@ -91,7 +71,7 @@ template NttCoinFactory
               meta = emptyMetadata
           CorePendingNeeded{senderChangeCids} -> do
             instructionCid <- create NttTransferInstruction with
-              instrumentId = t.instrumentId, senderAccount, receiverAccount, amount = t.amount
+              instrumentId = t.instrumentId, sender = t.sender, receiver = t.receiver, amount = t.amount
               requestedAt = t.requestedAt, executeBefore = t.executeBefore
             pure TIV1.TransferInstructionResult with
               output = TIV1.TransferInstructionResult_Pending with
@@ -103,45 +83,6 @@ template NttCoinFactory
         assertMsg "ntt: expectedAdmin does not match this factory's admin"
           (arg.expectedAdmin == guardianGovernance)
         pure TIV1.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
-
-    interface instance TIV2.TransferFactory for NttCoinFactory where
-      view = TIV2.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
-
-      transferFactory_transferExtraObservers _ = []
-
-      transferFactory_transferImpl _self arg = do
-        let t = arg.transfer
-        assertTransferWindow t.requestedAt t.executeBefore
-        -- Only the null-owner account is rejected; sub-accounts and
-        -- provider-delegated accounts are valid on both sides.
-        _ <- requireAccountOwner t.sender
-        _ <- requireAccountOwner t.receiver
-        assertMsg "ntt: TransferFactory_Transfer requires the sender account's owner and provider authority"
-          (all (`elem` arg.actors) (accountControlParties t.sender))
-        let instrumentId = InstrumentId with admin = t.instrumentId.admin, id = t.instrumentId.id
-            inputHoldingCids = map coerceContractId t.inputHoldingCids
-            receiverAuthorityPresent = all (`elem` arg.actors) (accountControlParties t.receiver)
-        outcome <- nttTransferCore guardianGovernance receiverAuthorityPresent
-          t.sender t.receiver t.amount instrumentId inputHoldingCids arg.extraArgs
-        case outcome of
-          CoreCompleted{receiverCid, senderChangeCids} ->
-            pure TIV2.TransferInstructionResult with
-              output = TIV2.TransferInstructionResult_Completed with
-                receiverHoldingCids = [coerceContractId receiverCid]
-              senderChangeCids = map coerceContractId senderChangeCids
-              meta = emptyMetadata
-          CorePendingNeeded{senderChangeCids} -> do
-            instructionCid <- create NttTransferInstruction with
-              instrumentId, senderAccount = t.sender, receiverAccount = t.receiver, amount = t.amount
-              requestedAt = t.requestedAt, executeBefore = t.executeBefore
-            pure TIV2.TransferInstructionResult with
-              output = TIV2.TransferInstructionResult_Pending with
-                transferInstructionCid = toInterfaceContractId instructionCid
-              senderChangeCids = map coerceContractId senderChangeCids
-              meta = emptyMetadata
-
-      transferFactory_publicFetchImpl _self _arg =
-        pure TIV2.TransferFactoryView with admin = guardianGovernance, meta = emptyMetadata
 
     interface instance AllocationFactory for NttCoinFactory where
       view = AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
@@ -156,9 +97,8 @@ template NttCoinFactory
         assertMsg "ntt: allocation amount must be positive" (leg.amount > 0.0)
         now <- getTime
         assertMsg "ntt: allocation window (allocateBefore) has passed" (now < spec.settlement.allocateBefore)
-        -- v1 allocations are party-based, not account-based; basic by construction.
         senderChangeCids <-
-          debitInputs "allocation" leg.instrumentId (basicAccountV2 leg.sender) leg.amount arg.inputHoldingCids
+          debitInputs "allocation" leg.instrumentId leg.sender leg.amount arg.inputHoldingCids
         allocationCid <- toInterfaceContractId @Allocation <$> create NttCoinAllocation with
           instrumentId = leg.instrumentId, allocation = spec
         pure AllocationInstructionResult with
@@ -170,135 +110,3 @@ template NttCoinFactory
         assertMsg "ntt: expectedAdmin does not match this factory's admin"
           (arg.expectedAdmin == guardianGovernance)
         pure AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
-
-    interface instance AIV2.AllocationFactory for NttCoinFactory where
-      view = AIV2.AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
-
-      allocationFactory_allocateExtraObservers _ = []
-
-      allocationFactory_allocateImpl _self arg = do
-        let spec = arg.allocation
-        assertMsg "ntt: allocation's admin does not match this factory's admin"
-          (spec.admin == guardianGovernance)
-        -- Only the null-owner account is rejected; the authorizer's owner
-        -- AND provider must both authorize the allocate.
-        _ <- requireAccountOwner spec.authorizer
-        assertMsg "ntt: AllocationFactory_Allocate requires the authorizer account's owner and provider authority"
-          (all (`elem` arg.actors) (accountControlParties spec.authorizer))
-        assertMsg "ntt: transferLegSides amounts must be positive"
-          (all (> 0.0) (map (.amount) spec.transferLegSides))
-        assertMsg "ntt: nextIterationFunding amounts must be positive"
-          (all ((> 0.0) . snd) (TextMap.toList (fromOptional TextMap.empty spec.nextIterationFunding)))
-
-        now <- getTime
-        let round1Totals = sumSide AV2.SenderSide spec.transferLegSides
-            reserveTotals = fromOptional TextMap.empty spec.nextIterationFunding
-            requiredTotals = textMapUnionWith (+) round1Totals reserveTotals
-
-        inputCoins <- forA arg.inputHoldingCids \cid -> do
-          r <- fetchFromInterface @NttCoin cid
-          case r of
-            None -> abort "ntt: allocation input is not an NttCoin issued by this registry"
-            Some (_, coin) -> do
-              assertMsg "ntt: allocation input not owned by the authorizer" (coinAccountOf coin == spec.authorizer)
-              assertMsg "ntt: allocation input's instrument admin does not match this factory's admin"
-                (coin.instrumentId.admin == guardianGovernance)
-              pure coin
-        forA_ arg.inputHoldingCids archive
-        let inputsByInstrument = TextMap.fromListWithR (+) [(c.instrumentId.id, c.amount) | c <- inputCoins]
-            instruments = dedup (map fst (TextMap.toList requiredTotals) ++ map fst (TextMap.toList inputsByInstrument))
-
-        results <- forA instruments \instr -> do
-          let have = fromOptional 0.0 (TextMap.lookup instr inputsByInstrument)
-              need = fromOptional 0.0 (TextMap.lookup instr requiredTotals)
-          assertMsg ("ntt: input holdings for " <> instr <> " do not cover the allocation's required funding")
-            (have >= need)
-          let change = have - need
-          changeCids <-
-            if change > 0.0
-              then do
-                cid <- toInterfaceContractId @HoldingV2.Holding <$>
-                  createCoinIn (InstrumentId with admin = guardianGovernance, id = instr) spec.authorizer change
-                pure [cid]
-              else pure []
-          pure (instr, need, changeCids)
-
-        allocationCid <- toInterfaceContractId @AV2.Allocation <$> create NttCoinAllocationV2 with
-          authorizerAccount = spec.authorizer
-          settlement = arg.settlement
-          allocation = spec
-          lockedAmounts = TextMap.filter (> 0.0) (TextMap.fromList [(i, n) | (i, n, _) <- results])
-          originalAllocationCid = None
-          createdAt = now
-          numIterations = 0
-
-        pure AIV2.AllocationInstructionResult with
-          output = AIV2.AllocationInstructionResult_Completed with allocationCid
-          authorizerChangeCids = TextMap.fromList [(i, cs) | (i, _, cs) <- results, not (null cs)]
-          meta = emptyMetadata
-
-      allocationFactory_publicFetchImpl _self _arg =
-        pure AIV2.AllocationFactoryView with admin = guardianGovernance, meta = emptyMetadata
-
-    interface instance AV2.SettlementFactory for NttCoinFactory where
-      view = AV2.SettlementFactoryView with admin = guardianGovernance, meta = emptyMetadata
-
-      settlementFactory_settleBatchExtraObservers _ = []
-
-      settlementFactory_settleBatchImpl _self arg = do
-        assertMsg "ntt: SettlementFactory_SettleBatch requires at least one transfer leg"
-          (not (null arg.transferLegs))
-        assertMsg "ntt: SettlementFactory_SettleBatch requires actors to be exactly settlement.executors"
-          (sameGroup arg.actors arg.settlement.executors)
-        assertMsg "ntt: duplicate transferLegId in transferLegs"
-          (length (dedup (map (.transferLegId) arg.transferLegs)) == length arg.transferLegs)
-
-        -- The nested Allocation_Settle makes gg a controller, so the target must be our own NttCoinAllocationV2.
-        allocViews <- forA arg.allocations \fa -> do
-          r <- fetchFromInterface @NttCoinAllocationV2 fa.allocationCid
-          case r of
-            None -> abort "ntt: allocation is not an NttCoinAllocationV2 issued by this registry"
-            Some (_, av) -> do
-              assertMsg "ntt: allocation's admin does not match this factory's admin"
-                (av.allocation.admin == guardianGovernance)
-              assertMsg "ntt: allocation was not created for this settlement" (av.settlement == arg.settlement)
-              pure (fa, av)
-
-        let entries =
-              [ LegSideEntry with
-                  transferLegId = s.transferLegId, side = s.side
-                  authorizer = av.allocation.authorizer, otherside = s.otherside
-                  amount = s.amount, instrumentId = s.instrumentId
-              | (fa, av) <- allocViews, s <- av.allocation.transferLegSides ++ fa.extraTransferLegSides
-              ]
-
-        forA_ arg.transferLegs \leg -> do
-          let mine = [e | e <- entries, e.transferLegId == leg.transferLegId]
-              senders = [e | e <- mine, e.side == AV2.SenderSide]
-              receivers = [e | e <- mine, e.side == AV2.ReceiverSide]
-              legErr what = "ntt: transferLeg " <> leg.transferLegId <> " " <> what
-          assertMsg (legErr "has no matching SenderSide allocation") (length senders == 1)
-          assertMsg (legErr "has no matching ReceiverSide allocation") (length receivers == 1)
-          let [s] = senders
-              [r] = receivers
-          assertMsg (legErr "SenderSide authorization mismatch")
-            (s.authorizer == leg.sender && s.otherside == leg.receiver
-              && s.amount == leg.amount && s.instrumentId == leg.instrumentId)
-          assertMsg (legErr "ReceiverSide authorization mismatch")
-            (r.authorizer == leg.receiver && r.otherside == leg.sender
-              && r.amount == leg.amount && r.instrumentId == leg.instrumentId)
-
-        assertMsg "ntt: allocations authorize transfer leg sides not covered by the given transferLegs"
-          (length entries == 2 * length arg.transferLegs)
-
-        allocationSettleResults <- forA allocViews \(fa, _) ->
-          exercise fa.allocationCid AV2.Allocation_Settle with
-            actors = guardianGovernance :: arg.settlement.executors
-            extraTransferLegSides = fa.extraTransferLegSides
-            nextIterationFunding = fa.nextIterationFunding
-            extraArgs = withSettleBatchContext arg.extraArgs
-
-        pure AV2.SettlementFactory_SettleBatchResult with allocationSettleResults, meta = emptyMetadata
-
-      settlementFactory_publicFetchImpl _self _arg =
-        pure AV2.SettlementFactoryView with admin = guardianGovernance, meta = emptyMetadata
