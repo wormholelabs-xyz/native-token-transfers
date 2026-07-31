@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/profile"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/state"
 )
 
@@ -857,7 +862,10 @@ func TestCmd_AdminProposeGg_UnknownDeployment(t *testing.T) {
 }
 
 // TestCmd_AdminProposeGg_CallsProposeAdminTransferToGg pins the script name + routing:
-// Playground.Ops:proposeAdminTransferToGg, called with the deployment's managerId.
+// Playground.Ops:proposeAdminTransferToGg, called with the deployment's managerId and (with
+// CurrentAdmin unset) the REGISTERING admin as the input's Admin field -- the pre-handoff case,
+// which must stay byte-identical to before this fix (default routing, registering admin
+// co-located with operator under the default topology).
 func TestCmd_AdminProposeGg_CallsProposeAdminTransferToGg(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
 	s := state.New()
@@ -883,11 +891,53 @@ func TestCmd_AdminProposeGg_CallsProposeAdminTransferToGg(t *testing.T) {
 	if !ok {
 		t.Fatalf("proposeAdminTransferToGg input type mismatch: %T", r.calls[0].Input)
 	}
-	if in.Operator != "operator::abc" || in.ManagerID != 3 {
+	if in.Admin != "ntt1-admin::abc" || in.ManagerID != 3 {
 		t.Fatalf("unexpected proposeAdminTransferToGg input: %+v", in)
 	}
 	if !contains(stdout, "factoryEpoch=0") {
 		t.Fatalf("expected factoryEpoch=0 in output, got %q", stdout)
+	}
+}
+
+// TestCmd_AdminProposeGg_PostHandoff_PassesCurrentAdmin pins the fix for the PERMISSION_DENIED
+// bug the e2e localnet run surfaced (the propose-gg follow-up to the accept-gg-vaa seam
+// fix): once a deployment's CurrentAdmin is guardianGovernance (a prior `accept-gg-vaa`
+// succeeded), a SECOND `admin propose-gg` call must pass THAT party -- not the registering
+// admin -- as proposeAdminTransferToGgInput.Admin, so the CLI routes the script run to gg's own
+// participant (participantRoleForParty) rather than the default one. A fakeRunner can't observe
+// which participant role was requested (newScriptRunnerFor is overridden uniformly in tests --
+// see runPlaygroundWithRunner), so this asserts on the routed value the input actually carries,
+// matching this file's existing conventions for routing tests.
+func TestCmd_AdminProposeGg_PostHandoff_PassesCurrentAdmin(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.UserParticipants["GuardianGovernance"] = "guardian-governance"
+	s.Deployments["ntt1"] = state.Deployment{
+		Name: "ntt1", ManagerID: 3, Admin: "ntt1-admin::abc", CurrentAdmin: "gg::abc",
+	}
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:proposeAdminTransferToGg"] = map[string]any{
+		"managerAddress": strings.Repeat("00", 31) + "aa", "factoryEpoch": 1,
+	}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"admin", "propose-gg", "--deployment", "ntt1")...)
+	if err != nil {
+		t.Fatalf("admin propose-gg: %v", err)
+	}
+	if len(r.calls) != 1 || r.calls[0].Script != "Playground.Ops:proposeAdminTransferToGg" {
+		t.Fatalf("expected exactly one Playground.Ops:proposeAdminTransferToGg call, got %v", r.scriptNames())
+	}
+	in, ok := r.calls[0].Input.(proposeAdminTransferToGgInput)
+	if !ok {
+		t.Fatalf("proposeAdminTransferToGg input type mismatch: %T", r.calls[0].Input)
+	}
+	if in.Admin != "gg::abc" {
+		t.Fatalf("expected the CURRENT admin (gg::abc) as Admin, got %+v", in)
 	}
 }
 
@@ -968,5 +1018,479 @@ func TestCmd_AdminAcceptGgVaa_UpdatesDeploymentAdminOnSuccess(t *testing.T) {
 	}
 	if reloaded.Deployments["ntt1"].Admin != "ntt1-admin::abc" {
 		t.Fatalf("expected Deployment.Admin (the registering admin) to stay untouched, got %+v", reloaded.Deployments["ntt1"])
+	}
+}
+
+// ----------------------------------------------------------------------
+// disclosure serve / --disclosure-service-url / --strict-participant-isolation
+//
+// These pin the disclosure-service design's step 3 CLI wiring (the design doc's §5.2/§5.3/§7
+// R8/§8 step 3): a new `disclosure serve` subcommand, a new persistent --disclosure-service-url
+// flag that reroutes prepareRemoteSeam's fetch through internal/disclosure.Client instead of a
+// local `dpm script` run, and a new --strict-participant-isolation flag that makes
+// newScriptRunnerFor refuse to target a participant other than the current invocation's actor.
+// As with the wiring tests above, these assert on the CLI's own plumbing (call sequence,
+// routing, HTTP requests made) with a fakeRunner double / httptest server, never on real Daml
+// behavior.
+// ----------------------------------------------------------------------
+
+// seedCrossParticipantTransferState builds a "localnet"-shaped seed state for a "mock"
+// burnmint deployment whose sender (hint "Alice") is routed to a DIFFERENT participant
+// ("app-user") than guardianGovernance ("guardian-governance") -- the split transfer.go's
+// fund/prepare steps need in order for --strict-participant-isolation /
+// --disclosure-service-url to have anything to bite on (a same-participant sender never
+// crosses a boundary at all, per prepareRemoteSeam's own actorRole==ownerRole fast path).
+func seedCrossParticipantTransferState(t *testing.T, stateFile string) *state.State {
+	t.Helper()
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.UserParticipants["GuardianGovernance"] = "guardian-governance"
+	s.Deployments["ntt1"] = state.Deployment{
+		Name: "ntt1", ManagerID: 0, Admin: "ntt1-admin::abc",
+		Mode: "burn-mint", TokenKind: "mock", TokenDecimals: 8,
+		Peers: map[int]state.Peer{2: {ManagerAddress: strings.Repeat("00", 31) + "bb", TransceiverAddress: strings.Repeat("00", 31) + "cc"}},
+	}
+	s.Users["Alice"] = "alice::abc" // cached, so resolveParty needs no ledger round-trip
+	s.UserParticipants["Alice"] = "app-user"
+	seedStateFile(t, stateFile, s)
+	return s
+}
+
+// canonicalTransferFakeOutputs seeds r with the same canned preapprove/fundUser/transferOut
+// outputs TestCmd_Transfer_MockKindRunsPreapproveFundThenTransferOut uses, so the transfer
+// wiring under test can run its full sequence (or fail partway through, for the isolation
+// negative control) without a live sandbox.
+func canonicalTransferFakeOutputs(r *fakeRunner) {
+	r.outputs["Playground.Ops:preapprove"] = map[string]any{"preapproved": true}
+	r.outputs["Playground.Ops:fundUser"] = map[string]any{"holdingCid": "holding-cid-1"}
+	r.outputs["Playground.Ops:transferOut"] = map[string]any{
+		"outboundSequence": 0, "emitterChain": 72, "emitterAddress": strings.Repeat("00", 31) + "dd",
+		"nonce": 0, "consistencyLevel": 0, "payload": "9945ff10",
+	}
+}
+
+// TestCmd_DisclosureServe_Wiring pins that `disclosure serve` is registered at all and exposes
+// its --listen/--participant flags -- --help never reaches RunE, so this needs no state file,
+// no runner, no listening socket.
+func TestCmd_DisclosureServe_Wiring(t *testing.T) {
+	stdout, _, err := runPlayground(t, "disclosure", "serve", "--help")
+	if err != nil {
+		t.Fatalf("disclosure serve --help: %v", err)
+	}
+	if !contains(stdout, "--listen") {
+		t.Fatalf("expected --listen in help output, got %q", stdout)
+	}
+	if !contains(stdout, "--participant") {
+		t.Fatalf("expected --participant in help output, got %q", stdout)
+	}
+}
+
+// TestCmd_Transfer_StrictIsolation_BlocksCrossParticipant pins the negative control the design
+// doc's §6.3 calls "the single most important new artifact in the test": with
+// --strict-participant-isolation set and no --disclosure-service-url, a transfer whose sender
+// lives on a different participant than guardianGovernance must fail fast, naming
+// "strict-participant-isolation" in the error, and must NEVER reach a gg-side script (neither
+// the faucet's Playground.Ops:fundUser nor the local Playground.Prepare:prepareTransferOut
+// disclosure fetch) -- proving the flow genuinely needs cross-participant data it cannot reach
+// on its own. Deliberately does NOT assert which step trips first (a later plan step moves
+// funding out of transfer entirely).
+func TestCmd_Transfer_StrictIsolation_BlocksCrossParticipant(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedCrossParticipantTransferState(t, stateFile)
+
+	r := newFakeRunner()
+	canonicalTransferFakeOutputs(r)
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(append(baseFlags(stateFile),
+		"--profile", "localnet", "--strict-participant-isolation"),
+		"transfer", "--deployment", "ntt1", "--user", "Alice", "--chain", "2",
+		"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "100")...)
+	if err == nil {
+		t.Fatalf("expected --strict-participant-isolation to block the cross-participant step")
+	}
+	if !contains(err.Error(), "strict-participant-isolation") {
+		t.Fatalf("expected the error to mention strict-participant-isolation, got %v", err)
+	}
+	names := r.scriptNames()
+	for _, bad := range []string{"Playground.Ops:fundUser", "Playground.Prepare:prepareTransferOut"} {
+		for _, n := range names {
+			if n == bad {
+				t.Fatalf("expected %q never to run under strict isolation, got call sequence %v", bad, names)
+			}
+		}
+	}
+}
+
+// TestCmd_Transfer_DisclosureServiceURL_FetchesSeamFromService pins that --disclosure-service-url
+// replaces the local Playground.Prepare:prepareTransferOut run with exactly one
+// POST /v1/seam/transferOut against the given service, that the request carries no
+// client-supplied discloseTemplates entries (the server's own allow-list is authoritative --
+// design doc §1.4(3)/§5.3), and that the service's raw response flows verbatim into
+// transferOut's Remote field.
+func TestCmd_Transfer_DisclosureServiceURL_FetchesSeamFromService(t *testing.T) {
+	var hits int
+	var postedBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/seam/transferOut", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read posted seam body: %v", err)
+		}
+		postedBody = body
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"seam":"canned"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedCrossParticipantTransferState(t, stateFile)
+
+	r := newFakeRunner()
+	canonicalTransferFakeOutputs(r)
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(append(baseFlags(stateFile),
+		"--profile", "localnet", "--disclosure-service-url", srv.URL),
+		"transfer", "--deployment", "ntt1", "--user", "Alice", "--chain", "2",
+		"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "100")...)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly one POST /v1/seam/transferOut, got %d", hits)
+	}
+
+	var decoded struct {
+		DiscloseTemplates []string `json:"discloseTemplates"`
+	}
+	if err := json.Unmarshal(postedBody, &decoded); err != nil {
+		t.Fatalf("decode posted seam body: %v (raw: %s)", err, postedBody)
+	}
+	if len(decoded.DiscloseTemplates) != 0 {
+		t.Fatalf("expected no client-supplied discloseTemplates entries, got %v", decoded.DiscloseTemplates)
+	}
+
+	names := r.scriptNames()
+	for _, n := range names {
+		if n == "Playground.Prepare:prepareTransferOut" {
+			t.Fatalf("expected no local prepareTransferOut script when --disclosure-service-url is set, got %v", names)
+		}
+	}
+
+	last := r.calls[len(r.calls)-1]
+	transferInput, ok := last.Input.(transferOutInput)
+	if !ok || last.Script != "Playground.Ops:transferOut" {
+		t.Fatalf("expected the last call to be transferOut, got script=%q input type %T", last.Script, last.Input)
+	}
+	if strings.TrimSpace(string(transferInput.Remote)) != `{"seam":"canned"}` {
+		t.Fatalf("expected transferOut's Remote to equal the disclosure service's raw response, got %s", transferInput.Remote)
+	}
+}
+
+// TestCmd_Receive_DisclosureServiceURL_UsesReceiveSeam mirrors the transfer test above for
+// `receive`: an --executor routed to a different participant than guardianGovernance, combined
+// with --disclosure-service-url, must fetch the RemoteSeam via exactly one
+// POST /v1/seam/receive and never run the local Playground.Prepare:prepareReceive script.
+func TestCmd_Receive_DisclosureServiceURL_UsesReceiveSeam(t *testing.T) {
+	var hits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/seam/receive", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"seam":"canned-receive"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.UserParticipants["GuardianGovernance"] = "guardian-governance"
+	s.Deployments["ntt1"] = state.Deployment{Name: "ntt1", ManagerID: 0, Admin: "ntt1-admin::abc", TokenKind: "mock"}
+	s.Users["Alice"] = "alice::abc"
+	s.Users["Bob"] = "bob::abc"
+	s.UserParticipants["Bob"] = "app-user" // executor routed to a different participant than gg
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:receiveVaa"] = map[string]any{"recipientChain": 2, "amount": 100, "decimals": 8}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(append(baseFlags(stateFile),
+		"--profile", "localnet", "--disclosure-service-url", srv.URL),
+		"receive", "--deployment", "ntt1", "--vaa", "aa", "--recipient", "Alice", "--executor", "Bob", "--pubkey", "bb")...)
+	if err != nil {
+		t.Fatalf("receive: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly one POST /v1/seam/receive, got %d", hits)
+	}
+	names := r.scriptNames()
+	for _, n := range names {
+		if n == "Playground.Prepare:prepareReceive" {
+			t.Fatalf("expected no local prepareReceive script when --disclosure-service-url is set, got %v", names)
+		}
+	}
+}
+
+// TestCmd_AdminAcceptGgVaa_DisclosureServiceURL_UsesAcceptAdminSeam mirrors the transfer/receive
+// tests above for `admin accept-gg-vaa`: an --executor routed to a different participant than
+// guardianGovernance, combined with --disclosure-service-url, must fetch the RemoteSeam via
+// exactly one POST /v1/seam/acceptAdminTransfer and never run the local
+// Playground.Prepare:prepareAcceptAdmin script -- pins the fourth seam admin.go's
+// prepareRemoteSeam call wires up (remote.go/service.go).
+func TestCmd_AdminAcceptGgVaa_DisclosureServiceURL_UsesAcceptAdminSeam(t *testing.T) {
+	var hits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/seam/acceptAdminTransfer", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"seam":"canned-accept-admin"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.UserParticipants["GuardianGovernance"] = "guardian-governance"
+	s.Deployments["ntt1"] = state.Deployment{Name: "ntt1", ManagerID: 0, Admin: "ntt1-admin::abc", CurrentAdmin: "ntt1-admin::abc"}
+	s.Users["Bob"] = "bob::abc"
+	s.UserParticipants["Bob"] = "app-user" // executor routed to a different participant than gg
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:acceptAdminTransferByVaa"] = map[string]any{
+		"managerAddress": strings.Repeat("00", 31) + "aa", "admin": "gg::abc",
+	}
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(append(baseFlags(stateFile),
+		"--profile", "localnet", "--disclosure-service-url", srv.URL),
+		"admin", "accept-gg-vaa", "--deployment", "ntt1", "--vaa", "aa", "--pubkey", "bb", "--executor", "Bob")...)
+	if err != nil {
+		t.Fatalf("admin accept-gg-vaa: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly one POST /v1/seam/acceptAdminTransfer, got %d", hits)
+	}
+	names := r.scriptNames()
+	for _, n := range names {
+		if n == "Playground.Prepare:prepareAcceptAdmin" {
+			t.Fatalf("expected no local prepareAcceptAdmin script when --disclosure-service-url is set, got %v", names)
+		}
+	}
+}
+
+// TestNewScriptRunnerFor_StrictIsolationGuard is a focused unit test of the guard itself
+// (normalizeRole comparison), bypassing any subcommand: strict isolation with a recorded
+// baseline that differs from the target role must error naming
+// "strict-participant-isolation"; an empty baseline (no actor-routing command in play, e.g.
+// init/deploy/fund/party -- design doc §7 R8) must never trip the guard, even against a
+// participant role that would otherwise differ from the profile's default.
+func TestNewScriptRunnerFor_StrictIsolationGuard(t *testing.T) {
+	r := newFakeRunner()
+
+	blocked := &app{
+		runnerOverride:             r,
+		profile:                    profile.LocalNet,
+		strictParticipantIsolation: true,
+		isolationBaselineRole:      "app-user",
+	}
+	if _, _, err := blocked.newScriptRunnerFor(context.Background(), "guardian-governance"); err == nil || !contains(err.Error(), "strict-participant-isolation") {
+		t.Fatalf("expected a strict-participant-isolation error for a cross-participant target, got %v", err)
+	}
+
+	noBaseline := &app{
+		runnerOverride:             r,
+		profile:                    profile.LocalNet,
+		strictParticipantIsolation: true,
+		isolationBaselineRole:      "",
+	}
+	if _, _, err := noBaseline.newScriptRunnerFor(context.Background(), ""); err != nil {
+		t.Fatalf("expected no error with an empty isolationBaselineRole (no actor-routing command in play), got %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------
+// fund (design doc §5.5: funding split out of transfer)
+// ----------------------------------------------------------------------
+
+// TestCmd_Fund_RunsPreapproveThenFundUser pins `fund`'s wiring: exactly
+// Playground.Ops:preapprove then Playground.Ops:fundUser, in that order, with fundUser's
+// Owner set to the resolved user party, and the minted holding cid surfaced on stdout.
+func TestCmd_Fund_RunsPreapproveThenFundUser(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.Deployments["ntt1"] = state.Deployment{
+		Name: "ntt1", ManagerID: 0, Admin: "ntt1-admin::abc",
+		Mode: "burn-mint", TokenKind: "mock", TokenDecimals: 8,
+	}
+	s.Users["Alice"] = "alice::abc" // cached, so resolveParty needs no ledger round-trip
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	r.outputs["Playground.Ops:preapprove"] = map[string]any{"preapproved": true}
+	r.outputs["Playground.Ops:fundUser"] = map[string]any{"holdingCid": "holding-cid-1"}
+
+	stdout, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"fund", "--deployment", "ntt1", "--user", "Alice", "--amount", "500000")...)
+	if err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	names := r.scriptNames()
+	want := []string{"Playground.Ops:preapprove", "Playground.Ops:fundUser"}
+	if len(names) != len(want) {
+		t.Fatalf("expected exactly %v, got %v", want, names)
+	}
+	for i, n := range want {
+		if names[i] != n {
+			t.Fatalf("expected call %d to be %q, got %q (full sequence %v)", i, n, names[i], names)
+		}
+	}
+
+	fundInput, ok := r.calls[1].Input.(fundUserInput)
+	if !ok {
+		t.Fatalf("fundUser input type mismatch: %T", r.calls[1].Input)
+	}
+	if fundInput.Owner != "alice::abc" {
+		t.Fatalf("expected fundUser's Owner to be the resolved user party, got %q", fundInput.Owner)
+	}
+	if !contains(stdout, "holdingCid=holding-cid-1") {
+		t.Fatalf("expected stdout to carry the minted holding cid, got %q", stdout)
+	}
+}
+
+// TestCmd_Fund_AmuletDeploymentRejected pins that `fund` rejects an "amulet" deployment
+// client-side, before any script runs at all -- amulet senders tap via `transfer --tap-usd`.
+func TestCmd_Fund_AmuletDeploymentRejected(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Deployments["ntt1"] = state.Deployment{Name: "ntt1", TokenKind: "amulet"}
+	s.Users["Alice"] = "alice::abc"
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"fund", "--deployment", "ntt1", "--user", "Alice", "--amount", "100")...)
+	if err == nil || !contains(err.Error(), "mock deployments only") {
+		t.Fatalf("expected a mock-deployments-only error, got %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("expected no script calls at all for a rejected amulet fund, got %v", r.scriptNames())
+	}
+}
+
+// ----------------------------------------------------------------------
+// transfer --no-fund / --strict-participant-isolation (design doc §5.5)
+// ----------------------------------------------------------------------
+
+// TestCmd_Transfer_NoFund_SkipsFundingAndLeavesHoldingsEmpty pins that `transfer --no-fund`
+// skips the preapprove+fundUser block entirely and leaves transferOut's InputHoldingCids
+// empty (non-nil) -- Playground.Ops:transferOut then enumerates the sender's own holdings
+// in-script (Playground.Ops:mockHoldings).
+func TestCmd_Transfer_NoFund_SkipsFundingAndLeavesHoldingsEmpty(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	s := state.New()
+	s.Operator = "operator::abc"
+	s.GuardianGovernance = "gg::abc"
+	s.Deployments["ntt1"] = state.Deployment{
+		Name: "ntt1", ManagerID: 0, Admin: "ntt1-admin::abc",
+		Mode: "burn-mint", TokenKind: "mock", TokenDecimals: 8,
+		Peers: map[int]state.Peer{2: {ManagerAddress: strings.Repeat("00", 31) + "bb", TransceiverAddress: strings.Repeat("00", 31) + "cc"}},
+	}
+	s.Users["Alice"] = "alice::abc"
+	seedStateFile(t, stateFile, s)
+
+	r := newFakeRunner()
+	canonicalTransferFakeOutputs(r)
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(baseFlags(stateFile),
+		"transfer", "--deployment", "ntt1", "--user", "Alice", "--chain", "2",
+		"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "100", "--no-fund")...)
+	if err != nil {
+		t.Fatalf("transfer --no-fund: %v", err)
+	}
+
+	names := r.scriptNames()
+	for _, bad := range []string{"Playground.Ops:preapprove", "Playground.Ops:fundUser"} {
+		for _, n := range names {
+			if n == bad {
+				t.Fatalf("expected %q never to run under --no-fund, got call sequence %v", bad, names)
+			}
+		}
+	}
+
+	last := r.calls[len(r.calls)-1]
+	transferInput, ok := last.Input.(transferOutInput)
+	if !ok || last.Script != "Playground.Ops:transferOut" {
+		t.Fatalf("expected the last call to be transferOut, got script=%q input type %T", last.Script, last.Input)
+	}
+	if transferInput.InputHoldingCids == nil {
+		t.Fatalf("expected InputHoldingCids to be non-nil (Daml needs [] not null)")
+	}
+	if len(transferInput.InputHoldingCids) != 0 {
+		t.Fatalf("expected InputHoldingCids to be empty under --no-fund, got %+v", transferInput.InputHoldingCids)
+	}
+}
+
+// TestCmd_Transfer_StrictIsolationImpliesNoFund pins that --strict-participant-isolation
+// combined with --disclosure-service-url lets a cross-participant transfer proceed WITHOUT
+// fundUser and WITHOUT tripping the isolation guard: strict isolation implies --no-fund
+// (design doc §5.5), and the disclosure service supplies the RemoteSeam the local
+// prepareTransferOut fetch would otherwise need gg's own credentials for.
+func TestCmd_Transfer_StrictIsolationImpliesNoFund(t *testing.T) {
+	mux := http.NewServeMux()
+	var hits int
+	mux.HandleFunc("/v1/seam/transferOut", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"seam":"canned"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	stateFile := filepath.Join(t.TempDir(), "playground.state.json")
+	seedCrossParticipantTransferState(t, stateFile)
+
+	r := newFakeRunner()
+	canonicalTransferFakeOutputs(r)
+
+	_, _, err := runPlaygroundWithRunner(t, r, append(append(baseFlags(stateFile),
+		"--profile", "localnet", "--strict-participant-isolation", "--disclosure-service-url", srv.URL),
+		"transfer", "--deployment", "ntt1", "--user", "Alice", "--chain", "2",
+		"--recipient-address", strings.Repeat("00", 31)+"ee", "--amount", "100")...)
+	if err != nil {
+		t.Fatalf("expected the transfer to succeed via the disclosure service, got %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly one POST /v1/seam/transferOut, got %d", hits)
+	}
+
+	names := r.scriptNames()
+	for _, bad := range []string{"Playground.Ops:fundUser", "Playground.Ops:preapprove", "Playground.Prepare:prepareTransferOut"} {
+		for _, n := range names {
+			if n == bad {
+				t.Fatalf("expected %q never to run when strict isolation implies --no-fund, got call sequence %v", bad, names)
+			}
+		}
+	}
+
+	last := r.calls[len(r.calls)-1]
+	transferInput, ok := last.Input.(transferOutInput)
+	if !ok || last.Script != "Playground.Ops:transferOut" {
+		t.Fatalf("expected the last call to be transferOut, got script=%q input type %T", last.Script, last.Input)
+	}
+	if len(transferInput.InputHoldingCids) != 0 {
+		t.Fatalf("expected InputHoldingCids to be empty under strict isolation, got %+v", transferInput.InputHoldingCids)
 	}
 }

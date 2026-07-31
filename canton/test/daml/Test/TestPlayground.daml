@@ -12,10 +12,13 @@ module Test.TestPlayground where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import DA.Text (isInfixOf)
 import DA.Time (hours, addRelTime)
 import DA.TextMap qualified as TextMap
+
+import DA.Text (isInfixOf)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1
@@ -24,19 +27,25 @@ import Splice.Api.Token.TransferInstructionV1
   ( TransferFactory, TransferFactory_Transfer (..), Transfer (..)
   , TransferInstructionResult_Output (..) )
 import Wormhole.Core.Bytes (leftPadTo, normalizeHex)
+import Wormhole.Core.Replay (defaultSplitThreshold)
 import Wormhole.Ntt.Amount (trimAmount, trimAmountTo)
 import Token.CIP0056.Coin (Coin (..))
 import Token.CIP0056.CoinFactory (CoinFactory (..))
-import Wormhole.Ntt.Manager (NttTokenConfig (..))
+import Wormhole.Ntt.Ledger
+import Wormhole.Ntt.Manager (NttManager (..), NttTokenConfig (..), NttFactory (..), nttInstrumentIdFor, nttNamespaceFor)
 import Wormhole.Ntt.Payload
   ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer )
 
 import Test.TestCore (devnetGuardianPubKey)
-import Test.TestNtt (mkHolding, expectAbort, sendScaffold, nttSetup, registerHappyVAA)
+import Test.TestNtt
+  ( mkHolding, expectAbort, sendScaffold, nttSetup, registerHappyVAA, Cip56MockHolding
+  , setupFixedManager, acceptAdminHappyVAA, cantonChainId, bridgedInstrument, cip56HoldingsOwnedBy )
+import Test.TestReplay (registerReplayRoot)
 
 import Playground.Deploy
 import Playground.MockRegistry
 import Playground.Ops
+import Playground.Prepare (PrepareAcceptAdminInput (..), prepareAcceptAdmin)
 import Playground.Types
 
 ----------------------------------------------------------------------
@@ -253,6 +262,77 @@ testPlaygroundFundUserDeposits = do
   v.amount === 0.5
   v.owner === recipient
 
+----------------------------------------------------------------------
+-- Playground.Ops.mockHoldings: transferOut's in-script enumeration when the CLI leaves
+-- inputHoldingCids empty (plan §5.5 -- funding moved out to `fund`, and under
+-- --strict-participant-isolation the CLI cannot ask gg for the freshly minted holding's cid
+-- either way).
+----------------------------------------------------------------------
+
+-- | A sender who already holds a 'Test.TestNtt.Cip56MockHolding' for the deployment's
+-- instrument transfers successfully with an EMPTY 'TransferOutInput.inputHoldingCids' --
+-- 'Playground.Ops:mockHoldings' enumerates it in-script, read as the sender itself (owner is
+-- a signatory), with no disclosure at all.
+testPlaygroundTransferOutEnumeratesMockHoldingsWhenEmpty : Script ()
+testPlaygroundTransferOutEnumeratesMockHoldingsWhenEmpty = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundMockHoldingsAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  _holdingCid <- mkHolding gg admin d.instrumentId 1.0
+  Some mgr <- queryContractId operator d.mgrCid
+
+  out <- transferOut TransferOutInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    tokenKind = "mock"
+    user = admin
+    recipientChain = 2
+    recipientAddress = leftPadTo 32 "ee"
+    sourceToken = leftPadTo 32 "dd"
+    rawAmount = 1000000
+    nonce = 0
+    consistencyLevel = 0
+    inputHoldingCids = [] -- the sender's own holding is enumerated in-script, not passed in
+    amulet = None
+    remote = None
+
+  out.emitterChain === 72
+
+-- | A sender with NO 'Cip56MockHolding' at all and an empty 'inputHoldingCids' aborts with a
+-- clear, actionable message rather than falling through to 'Transfer''s own generic
+-- insufficient-inputs failure -- catchable via 'tryFailureStatus' since 'transferOut' calls
+-- plain 'abort' directly in the Script do-block (not inside a submitted choice, so
+-- 'trySubmit'/'expectAbort' do not apply here; see 'Test.TestDisclose' for the same idiom).
+testPlaygroundTransferOutEmptyHoldingsAbortsWithoutFunding : Script ()
+testPlaygroundTransferOutEmptyHoldingsAbortsWithoutFunding = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "PlaygroundMockHoldingsNoneAdmin"
+  (d, _discs) <- sendScaffold operator gg admin BurnMint csId
+  Some mgr <- queryContractId operator d.mgrCid
+
+  res <- tryFailureStatus $ transferOut TransferOutInput with
+    operator
+    managerId = mgr.managerId
+    admin
+    tokenKind = "mock"
+    user = admin
+    recipientChain = 2
+    recipientAddress = leftPadTo 32 "ee"
+    sourceToken = leftPadTo 32 "dd"
+    rawAmount = 1000000
+    nonce = 0
+    consistencyLevel = 0
+    inputHoldingCids = []
+    amulet = None
+    remote = None
+
+  case res of
+    Left fs -> assertMsg
+      ("expected 'run `fund` first', got: " <> fs.message)
+      ("run `fund` first" `isInfixOf` fs.message)
+    Right _ -> abort "expected transferOut to abort with no holdings for the sender"
+
 -- | The recomputed outbound payload matches what 'Wormhole.Ntt.Manager.Transfer' actually
 -- publishes, and the recomputed sequence matches the pre-exercise 'Emitter.sequence' --
 -- 'transferOut''s whole reason for existing (there is no event stream to read the
@@ -412,3 +492,174 @@ testPlaygroundSetPausedRoundTrip = do
     remote = None
 
   pure ()
+
+----------------------------------------------------------------------
+-- Playground.Ops.acceptAdminTransferByVaa: the 'remote = Some seam' round trip
+-- ('Playground.Prepare:prepareAcceptAdmin'), the RemoteSeam extension accept-gg-vaa previously
+-- lacked -- both BurnMint (no ledger at all) and LockUnlock with a
+-- NON-EMPTY custody pot (the harder path the e2e suite's own "gg custody opt-in via governance
+-- VAA (lock-unlock)" subtest exercises live: the nested TransferAdmin pot move's receiver is gg
+-- itself, so prepareAcceptAdmin additionally resolves the pot holding, the committed factory,
+-- and gg's OWN standing MockTransferPreapproval). The 'remote = None' fast path is untouched by
+-- this change (Ops.daml's 'None' branch is byte-identical to before it) and stays pinned by
+-- Test.TestNtt's own 'testAcceptAdminByVaaHappyPath'/'testAcceptAdminByVaaLockUnlock' (the
+-- Wormhole.Ntt.Manager choice itself) and the CLI's e2e suite (the Playground.Ops wrapper, same
+-- deployment/executor shape 'admin accept-gg-vaa' drives in production).
+----------------------------------------------------------------------
+
+-- | The templates 'prepareAcceptAdmin' can disclose -- the full allow-list, mirroring how a
+-- real --topology-config would name every template the CLI's disclosure service ever fetches
+-- (internal/disclosure.DefaultDisclose, canton/testing/cli), not just the subset a given
+-- deployment happens to need.
+acceptAdminDiscloseTemplates : [Text]
+acceptAdminDiscloseTemplates =
+  [ "Wormhole.Ntt.Manager:NttManager"
+  , "Wormhole.Ntt.Manager:AdminTransferProposal"
+  , "Wormhole.Ntt.Governance:NttGovernance"
+  , "Wormhole.Ntt.Ledger:LockedLedger"
+  , "Wormhole.Core.State:CoreState"
+  , "Wormhole.Core.State:Emitter"
+  , "Wormhole.Core.Replay:ReplayNode"
+  , "Wormhole.Ntt.Deposit:DepositPreapproval"
+  , "Playground.MockRegistry:MockTransferPreapproval"
+  , "Playground.MockRegistry:MockPreapprovedTransferFactory"
+  , "Test.TestNtt:MockBurnMintFactory"
+  , "Test.TestNtt:Cip56MockHolding"
+  ]
+
+-- | BurnMint: 'prepareAcceptAdmin' resolves only the manager/core-state/replay-node/proposal --
+-- no ledger at all, mirroring 'acceptAdminTransferByVaa's own BurnMint branch, which needs
+-- neither. Reuses 'Test.TestNtt.setupFixedManager' (the fixed managerAddress 0x00..aa, chainId
+-- 72, factoryEpoch 0 that 'Test.TestNtt.acceptAdminHappyVAA' targets) and that same pinned VAA
+-- fixture -- a Daml Script test cannot itself produce a guardian-signed VAA, so every
+-- accept-admin test in this repo (Test.TestNtt's own included) reuses this one static fixture
+-- rather than signing one live.
+testPlaygroundAcceptAdminByVaaRemoteSeamBurnMint : Script ()
+testPlaygroundAcceptAdminByVaaRemoteSeamBurnMint = do
+  (operator, gg, _csId) <- nttSetup
+  admin <- allocateParty "AcceptSeamBurnMintAdmin"
+  executor <- allocateParty "AcceptSeamBurnMintExecutor"
+  (mgrCid, _factory, _ledgerCid) <- setupFixedManager operator gg admin BurnMint
+  Some mgr <- queryContractId operator mgrCid
+
+  _ <- proposeAdminTransferToGg ProposeAdminTransferToGgInput with
+    admin
+    managerId = mgr.managerId
+
+  seam <- prepareAcceptAdmin PrepareAcceptAdminInput with
+    guardianGovernance = gg
+    managerId = mgr.managerId
+    vaaBytes = acceptAdminHappyVAA
+    discloseTemplates = acceptAdminDiscloseTemplates
+
+  out <- acceptAdminTransferByVaa AcceptAdminTransferByVaaInput with
+    operator
+    managerId = mgr.managerId
+    executor
+    vaaBytes = acceptAdminHappyVAA
+    pubKeys = [(0, devnetGuardianPubKey)]
+    remote = Some seam
+
+  out.admin === gg
+  (_, mgrAfter) <- resolveManager operator mgr.managerId
+  mgrAfter.admin === gg
+
+-- | LockUnlock with a NON-EMPTY custody pot -- the harder path. Built directly rather than via
+-- 'Test.TestNtt.setupFixedManager', which backs its own LockUnlock fixture with
+-- 'Test.TestNtt.MockTransferFactory' -- a template distinct from this package's own
+-- 'Playground.MockRegistry.MockPreapprovedTransferFactory', the one the nested pot move
+-- actually needs (only the latter understands the 'mockTransferPreapprovalContextKey'
+-- extra-args convention 'Playground.MockRegistry's factory relies on -- see that module's
+-- header). Otherwise mirrors 'setupFixedManager's own recipe exactly: the fixed
+-- managerAddress 0x00..aa / chainId 72 / factoryEpoch 0 'acceptAdminHappyVAA' targets and a
+-- claimed replay-trie root, plus a pre-funded admin-owned custody pot seeded directly via the
+-- ledger's own 'Credit' choice (mirrors the accounting 'Test.TestNtt.testTransferAdminToGg's
+-- own fixture ends up in, minus the full lock/transfer round trip needed to get there for
+-- real) and gg's own standing 'MockTransferPreapproval' (the pot move's receiver).
+testPlaygroundAcceptAdminByVaaRemoteSeamLockUnlockNonEmptyPot : Script ()
+testPlaygroundAcceptAdminByVaaRemoteSeamLockUnlockNonEmptyPot = do
+  (operator, gg, _csId) <- nttSetup
+  admin <- allocateParty "AcceptSeamLockUnlockAdmin"
+  executor <- allocateParty "AcceptSeamLockUnlockExecutor"
+
+  let instrumentId = bridgedInstrument gg
+      managerAddress = leftPadTo 32 "aa"
+      managerId = 999
+      namespace = nttNamespaceFor instrumentId admin managerId
+
+  facCid <- submit gg do createCmd MockPreapprovedTransferFactory with admin = gg
+  let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory facCid)
+
+  _ <- submit (actAs operator <> actAs admin <> actAs gg) do
+    createCmd NttManager with
+      operator
+      namespace
+      admin
+      guardianGovernance = gg
+      chainId = cantonChainId
+      managerId
+      managerAddress
+      transceiverEmitterId = 999
+      instrumentId
+      tokenConfig = LockUnlock
+      tokenDecimals = 8
+      peers = Map.empty
+      factory
+      paused = False
+      factoryEpoch = 0
+  _ <- registerReplayRoot operator gg namespace defaultSplitThreshold
+
+  -- A pre-funded admin-owned custody pot: the ledger's own 'Credit' choice (controller
+  -- operator, guardianGovernance) alone seeds a non-empty balance without a full lock/transfer
+  -- round trip.
+  potCid <- mkHolding gg admin instrumentId 0.5
+  lcid <- submit (actAs operator <> actAs gg) do
+    createCmd LockedLedger with
+      operator
+      guardianGovernance = gg
+      admin
+      managerAddress
+      balance = 0.0
+      custodyHoldingCid = None
+  _ <- submit (actAs operator <> actAs gg) do
+    exerciseCmd lcid Credit with amount = 0.5, newCustodyHint = Some potCid
+
+  -- gg's own standing pre-approval: the nested pot move's receiver is gg, and the mock
+  -- registry's factory requires the RECEIVER's standing pre-approval unless sender == receiver
+  -- (which doesn't apply here -- the sender is the deployment's admin).
+  _ <- submit gg do
+    createCmd MockTransferPreapproval with owner = gg, registryAdmin = gg, instrument = instrumentId
+
+  _ <- proposeAdminTransferToGg ProposeAdminTransferToGgInput with
+    admin
+    managerId
+
+  seam <- prepareAcceptAdmin PrepareAcceptAdminInput with
+    guardianGovernance = gg
+    managerId
+    vaaBytes = acceptAdminHappyVAA
+    discloseTemplates = acceptAdminDiscloseTemplates
+
+  out <- acceptAdminTransferByVaa AcceptAdminTransferByVaaInput with
+    operator
+    managerId
+    executor
+    vaaBytes = acceptAdminHappyVAA
+    pubKeys = [(0, devnetGuardianPubKey)]
+    remote = Some seam
+
+  out.admin === gg
+  (_, mgrAfter) <- resolveManager operator managerId
+  mgrAfter.admin === gg
+  (_, ledgerAfter) <- resolveLedger operator managerAddress
+  ledgerAfter.balance === 0.5
+
+  -- The reserve moved to gg INTACT: gg now holds exactly what the admin held before the
+  -- handoff, and the old admin holds none of it any more (mirrors the e2e suite's own
+  -- balance-conservation assertion for this same handoff).
+  ggCustody <- cip56HoldingsOwnedBy gg gg
+  case ggCustody of
+    [(_, h)] -> h.amount === 0.5
+    _ -> abort ("expected exactly one gg-owned custody holding, got: " <> show ggCustody)
+  adminCustody <- cip56HoldingsOwnedBy gg admin
+  adminCustody === []

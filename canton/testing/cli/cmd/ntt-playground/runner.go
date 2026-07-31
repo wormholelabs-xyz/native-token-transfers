@@ -9,7 +9,25 @@ import (
 
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/ledger"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
+	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/profile"
 )
+
+// normalizeRole resolves role to a concrete profile.Profile.Participants key, mirroring
+// profile.Profile.Endpoint's own fallback: "" means "the profile's default participant", and an
+// unrecognized role (not a key in prof.Participants) also falls back to the default rather than
+// being treated as some other, distinct participant. This mirrors remote.go's
+// prepareRemoteSeam, which normalizes actorRole/ownerRole the same way before comparing them --
+// comparing a raw "" against a resolved concrete role would wrongly treat every default-routed
+// actor as cross-participant.
+func normalizeRole(prof profile.Profile, role string) string {
+	if role == "" {
+		return prof.DefaultParticipant
+	}
+	if _, ok := prof.Participants[role]; ok {
+		return role
+	}
+	return prof.DefaultParticipant
+}
 
 // scriptRunner is the subset of *ledger.Runner every RunE/helper in this package actually
 // calls -- narrow on purpose so wiring tests (cmd_wiring_test.go) can substitute a fake that
@@ -36,7 +54,29 @@ func (a *app) newScriptRunner(ctx context.Context) (scriptRunner, func(), error)
 // token file when required. The returned cleanup func removes the per-invocation script I/O
 // directory. If a.runnerOverride is set (tests only), it is used instead of constructing a
 // real runner -- see cmd_wiring_test.go's fakeRunner.
+//
+// The --strict-participant-isolation guard (below) runs BEFORE the a.runnerOverride
+// short-circuit, deliberately: it must fire identically whether the underlying runner is a real
+// ledger.Runner or a wiring test's fakeRunner, so cmd_wiring_test.go can pin the guard's
+// behavior (which participant a call would have targeted) without a live sandbox/LocalNet.
+// Placing it after the short-circuit would make every fakeRunner-based wiring test blind to it.
 func (a *app) newScriptRunnerFor(ctx context.Context, role string) (scriptRunner, func(), error) {
+	// a.isolationBaselineRole is set once per invocation by the three actor-routing commands
+	// (transfer/receive/publish -- see their RunE), immediately after the actor's own role is
+	// known. An empty baseline means no actor-routing command is in play for this invocation
+	// (init, deploy, fund, party, ... -- design doc §7 R8), so the guard can never fire for
+	// them, regardless of --strict-participant-isolation.
+	if a.strictParticipantIsolation && a.isolationBaselineRole != "" {
+		prof, err := a.resolvedProfile()
+		if err != nil {
+			return nil, nil, err
+		}
+		if normalizeRole(prof, role) != normalizeRole(prof, a.isolationBaselineRole) {
+			return nil, nil, fmt.Errorf("--strict-participant-isolation: this step targets participant %q but the actor is on %q -- pass --disclosure-service-url to fetch cross-participant data without holding the data owner's credentials",
+				normalizeRole(prof, role), normalizeRole(prof, a.isolationBaselineRole))
+		}
+	}
+
 	if a.runnerOverride != nil {
 		return a.runnerOverride, func() {}, nil
 	}

@@ -102,7 +102,8 @@ instead of per-service compose state.
 | `emitter register --name NAME --owner HINT` | Register a standalone core-bridge `Emitter` (not tied to an NTT deployment), keyed under a CLI-local name in state. |
 | `publish --emitter NAME --payload HEX [--nonce N] [--consistency-level N] [--sign]` | Publish an arbitrary message from a registered emitter via `Emitter.PublishMessage`; `--sign` also signs the resulting VAA with the playground's guardian key. |
 | `peer set --deployment NAME --chain N --manager HEX --transceiver HEX --decimals N` | Configure (or replace) a peer for a remote chain. `--decimals` (required, 1-255) is the peer chain token's decimals: outbound transfers to that peer trim to `min(8, tokenDecimals, peerDecimals)` and reject any amount that doesn't round-trip exactly at that precision ("dust the peer cannot represent"). |
-| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD]` | Outbound `NttManager.Transfer`. For `mock`, ensures the sender has a standing pre-approval (`preapprove`) and funds it (`fundUser`) before transferring. Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `amulet` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved; the receiver is the deployment's admin (custody is admin-owned). Rejected while the deployment is paused ("deployment is paused"), and rejected if `--amount` doesn't round-trip exactly at the destination peer's configured decimals (dust). |
+| `transfer --deployment NAME --user HINT --chain N --recipient-address HEX --amount N [--sign] [--tap-usd USD] [--no-fund]` | Outbound `NttManager.Transfer`. For `mock`, ensures the sender has a standing pre-approval (`preapprove`) and funds it (`fundUser`) before transferring, unless `--no-fund` (always implied by `--strict-participant-isolation`) is set, in which case the sender's own holdings are enumerated in-script instead — see [Disclosure service](#disclosure-service). Prints the recomputed published message (bit-exact — same encoders the manager used internally); `--sign` also signs the resulting VAA with the playground's guardian key. For `amulet` the sender is onboarded as a real validator wallet user and tapped (`--tap-usd`, default `"100"`, `"0"` skips) before the real transfer-factory is resolved; the receiver is the deployment's admin (custody is admin-owned). Rejected while the deployment is paused ("deployment is paused"), and rejected if `--amount` doesn't round-trip exactly at the destination peer's configured decimals (dust). |
+| `fund --deployment NAME --user HINT --amount N` | Mock-kind-only faucet: ensure the recipient's standing pre-approval, then mint via `Playground.Ops:fundUser` (`guardian-governance`-submitted — gg is the mint's sole signatory). The `preapprove`+`fundUser` block that used to be welded into `transfer`, split out as its own operator-side command — see [Disclosure service](#disclosure-service). |
 | `receive --deployment NAME --vaa HEX --recipient HINT --pubkey HEX [--executor HINT]` | Relay a signed VAA through `NttManager.Mint`/`Release`, executor-only. A replayed VAA exits non-zero. The recipient must have run `preapprove` first — for both burn-mint and lock-unlock `mock` deployments — else the delivery is rejected and the VAA stays deliverable. Rejected outright for `amulet` (receiving against real Amulet is out of scope), and rejected while the deployment is paused. |
 | `preapprove --deployment NAME --user HINT` | Opt a recipient in to inbound deliveries: a standing `DepositPreapproval` (burn-mint `mock`) or `MockTransferPreapproval` (lock-unlock `mock`), created self-signed by the recipient. Idempotent. For `amulet` this is a ledger-surfaced no-op (`preapproved=false`); real Amulet's own `TransferPreapproval` is out of scope here. |
 | `preapprove revoke --deployment NAME --user HINT` | Tear down a recipient's standing pre-approval (owner-only `Revoke`, either template). |
@@ -120,6 +121,7 @@ instead of per-service compose state.
 | `observe --deployment NAME` | Print one deployment's current outbound sequence, `chainId`, peers (with `decimals`), and `paused` state. |
 | `observe stream --deployment NAME [--from-offset N] [--count N] [--timeout DUR] [--print-offset] [--any-emitter]` | LocalNet only. Read the REAL Ledger API v2 update stream as a dedicated `guardian-watcher` reader user (granted only `CanReadAs(guardianObserver)`, never `actAs`) and print every observed `WormholeMessage` as JSON. `--print-offset` prints the current ledger end (`ledgerEnd=<n>`) and exits, for recording a starting point before a transfer. Filters by the deployment's derived transceiver address unless `--any-emitter`. |
 | `balance --party HINT --deployment NAME` | Print a party's mock/CIP-56 holdings for a deployment, or (for `amulet`) its real Amulet holdings (`amuletHoldingTotal=...`). Custody is admin-owned, so a deployment's own admin hint (the config's `adminHint`, or `<name>-admin` by default) resolves the custodian's own balance — it's a wallet user's real party for `amulet`, an ordinary CLI-allocated party otherwise. |
+| `disclosure serve [--listen ADDR] [--participant ROLE]` | Serve the read-only disclosure service (`GET /v1/healthz`, `GET /v1/disclosures?template=...`, `POST /v1/seam/{transferOut,receive,publish,acceptAdminTransfer}`) fronting one participant (default `--participant guardian-governance`). Only meaningful on `localnet` (the sandbox profile has a single participant, so there is never a cross-participant fetch to serve, and its generic `/v1/disclosures` endpoint 503s there for lack of a JSON Ledger API). Binds `127.0.0.1:7599` by default; a non-loopback `--listen` prints a startup warning rather than silently exposing allow-listed contract payloads — see [Disclosure service](#disclosure-service). |
 
 Every command accepts `--verbose`: each sub-step — network bring-up details,
 party allocation/actAs grants, every `dpm script` invocation with its input and
@@ -229,14 +231,22 @@ the same VAA fails as a replay (the digest was already consumed in `gg`'s
 replay trie), and `receive` against the deployment continues to work
 unchanged — the handoff repoints custody only, nothing on the wire.
 
-Both `admin` subcommands run the sandbox-first `remote = None` path
-`Playground.Ops:acceptAdminTransferByVaa` supports today: this works
-unmodified on the single-participant `sandbox` profile. On a multi-participant
-`localnet` topology, `admin accept-gg-vaa` needs the executing participant to
-see operator/admin/`gg`'s contracts directly, so pass an `--executor` hint
-already co-located with them (the default, no `--executor`, stays on the
-operator's own participant). A `RemoteSeam` extension mirroring `receive`'s
-(see [Topology](#topology)) is follow-up work.
+`admin propose-gg` is single-party (it reads and submits as the deployment's
+CURRENT admin alone), so it never needs a `RemoteSeam` — instead the CLI routes
+the whole call to that admin's own participant, which is operator's under the
+default topology pre-handoff, and `gg`'s own once a prior `accept-gg-vaa` has
+completed. `admin accept-gg-vaa` gets the same `RemoteSeam` treatment `transfer`/`receive`
+already have (see [Topology](#topology)): on the single-participant `sandbox`
+profile it takes the unmodified `remote = None` fast path
+`Playground.Ops:acceptAdminTransferByVaa` has always supported; on a
+multi-participant `localnet` topology, whenever the relaying `--executor`'s
+participant differs from `gg`'s (unconditionally the case there, since gg is
+its own participant), the CLI fetches a `RemoteSeam` via
+`Playground.Prepare:prepareAcceptAdmin` first — either by running that script
+directly against `gg`'s own participant, or, with `--disclosure-service-url`
+set, over HTTP against the disclosure service (see
+[Disclosure service](#disclosure-service)) — exactly like `transfer`/`receive`
+do.
 
 ### Real Amulet (`amulet`)
 
@@ -277,7 +287,7 @@ Canton Coin locks/unlocks, not a mock registry. Requires `--profile localnet`
 
 ## Topology
 
-On the `localnet` profile the playground runs across **five participants**,
+On the `localnet` profile the playground runs across **six participants**,
 not one — this is what makes Daml's privacy model observable: a party only
 sees the contracts it is a stakeholder or disclosure-recipient on, and only
 its own home participant can act as it.
@@ -289,15 +299,19 @@ its own home participant can act as it.
 | `bob` | Bob | 5901 | 5975 | 5903 |
 | `guardian-governance` | GuardianGovernance | 6901 | 6975 | 6903 |
 | `guardian-observer` | GuardianObserver | 7901 | 7975 | 7903 |
+| `alice-solo` | whichever hint a `--topology-config` explicitly routes there (e.g. `Zoe` in `testdata/topology-alice-solo.json`) — not part of the built-in `partyHosting` default, so no hint lands here unless a config says so | 8901 | 8975 | 8903 |
 
 `app-provider` and `app-user` are participants the Splice LocalNet bundle
-already runs; `bob`, `guardian-governance`, and `guardian-observer` are added
-by a compose override the CLI writes into the LocalNet directory (alongside
-the existing Postgres-container override) — the vendored bundle itself is
-never edited. Every participant runs the same unsafe shared-secret HS256
-auth as `app-provider` and is reachable through the same `ledger-api-user`
-admin user, so `party list`, `balance --party`, and every other per-party
-command transparently target the right participant.
+already runs; `bob`, `guardian-governance`, `guardian-observer`, and
+`alice-solo` are added by a compose override the CLI writes into the
+LocalNet directory (alongside the existing Postgres-container override) —
+the vendored bundle itself is never edited. Every participant runs the same
+unsafe shared-secret HS256 auth as `app-provider` and is reachable through
+the same `ledger-api-user` admin user, so `party list`, `balance --party`,
+and every other per-party command transparently target the right
+participant. `alice-solo` exists to prove a fresh participant hosting no
+playground party but the one the test allocates can still transact — see
+[Disclosure service](#disclosure-service).
 
 `--topology-config` (see below) controls which party hint lands on which
 participant; the table above is the built-in default when no config file
@@ -318,11 +332,12 @@ explicit disclosure for before a cross-participant submit (`disclose`).
 Default path when the flag is omitted: `playground.topology.json` next to
 the state file. A missing file is not an error — it resolves to the
 built-in `partyHosting` default (the table above) and a built-in `disclose`
-default covering every template a `mock` deployment's `transfer`/`receive`
-path needs (`NttManager`, `NttGovernance`, `LockedLedger`, `CoreState`,
-`Emitter`, the covering `ReplayNode`, `DepositPreapproval`,
-`MockTransferPreapproval`, `MockPreapprovedTransferFactory`,
-`CoinFactory`, `Cip56MockHolding`) — otherwise the CLI's basic
+default covering every template a `mock` deployment's `transfer`/`receive`/
+`admin accept-gg-vaa` path needs (`NttManager`, `NttGovernance`,
+`LockedLedger`, `CoreState`, `Emitter`, the covering `ReplayNode`,
+`DepositPreapproval`, `MockTransferPreapproval`,
+`MockPreapprovedTransferFactory`, `CoinFactory`, `Cip56MockHolding`,
+`AdminTransferProposal`) — otherwise the CLI's basic
 `deploy`/`transfer`/`receive` flow would fail out of the box on LocalNet with
 no config file at all. The "everything fails closed" posture (no disclosures
 ever fetched, so any submit that needs to read a contract off another
@@ -398,6 +413,92 @@ topology split delivers: an operator acting alone cannot produce a
 `CoreState` GuardianGovernance never saw and never authorized, and vice
 versa.
 
+## Disclosure service
+
+`ntt-playground disclosure serve` runs a small, stateless, read-only HTTP
+service that fronts one participant (default `guardian-governance`) and owns
+the disclosure allow-list on the server side, rather than trusting whichever
+CLI happens to be asking. It exposes:
+
+- `GET /v1/healthz` — `{"participant":"...","templates":[...],"ledgerEnd":<offset>}`.
+- `GET /v1/disclosures?template=<Module:Entity>[&template=...]` — a generic
+  ACS export over the JSON Ledger API v2 (`includeCreatedEventBlob: true`),
+  returning each allow-listed contract's id, hex-encoded blob, and decoded
+  create argument at the offset the read was pinned to. A template not on
+  the service's own allow-list is refused with 403, naming the offender,
+  rather than silently served.
+- `POST /v1/seam/{transferOut|receive|publish|acceptAdminTransfer}` — runs the
+  same `Playground.Prepare:prepare*` script `transfer`/`receive`/`publish`/
+  `admin accept-gg-vaa` already run locally, and returns the resulting
+  `RemoteSeam` JSON verbatim. The service injects its own `discloseTemplates`
+  allow-list into the script input server-side, ignoring whatever the client
+  sent — the server, not the caller, decides what gets disclosed.
+
+**Why.** Before this service existed, a consumer's CLI had to hold the data
+owner's participant credentials (an admin JWT for `guardian-governance`) to
+fetch a `RemoteSeam` — it could read gg's entire ACS and submit as gg. With
+the service, a consumer holds only its own participant's credentials and can
+obtain nothing beyond the allow-listed templates, read-only. This is a
+privilege reduction, not new functionality: the same `RemoteSeam`/
+`Disclosure` mechanism ([Topology](#topology) above) is retained end to end;
+only who holds which credentials to fetch it changes.
+
+**Client side.** Two root persistent flags:
+
+- `--disclosure-service-url URL` — when set, any command that would
+  otherwise run a `prepare*` script directly against the data owner's own
+  participant instead fetches the `RemoteSeam` over HTTP from the disclosure
+  service at `URL`. Empty (the default) is byte-identical to pre-service
+  behavior.
+- `--strict-participant-isolation` — an opt-in guard: any step that would
+  target a participant other than the actor's own fails immediately, naming
+  both roles, instead of silently succeeding because the CLI happens to hold
+  every participant's credentials. It is the negative control that proves a
+  flow genuinely needs `--disclosure-service-url` rather than admin access it
+  should not have. Commands that legitimately span participants by design —
+  `init`, `deploy`, `fund`, `party` — never set an isolation baseline, so the
+  guard can never fire for them regardless of this flag; they are simply
+  incompatible with the isolation model, not broken by it.
+
+**`fund`.** `fund --deployment NAME --user HINT --amount N` is the mock
+faucet (`preapprove` + `Playground.Ops:fundUser`) split out of `transfer`,
+because minting is a `guardian-governance`-side submit — gg is the mint's
+sole signatory — that no disclosure service can stand in for (a
+`DisclosedContract` grants visibility, never authority). It is correctly an
+operator/faucet action, run by whoever legitimately holds gg's credentials.
+`transfer --no-fund` (implied automatically by
+`--strict-participant-isolation`) skips that block and leaves the transfer's
+input holdings empty; `Playground.Ops:transferOut`'s Mock branch then
+enumerates the sender's own holdings in-script, which needs no
+cross-participant disclosure at all.
+
+**Security posture — stated plainly.** This is a harness-grade
+implementation, not a production one: no authentication, no TLS. It binds
+`127.0.0.1` by default; passing `--listen` with a non-loopback address prints
+a warning at startup instead of silently exposing allow-listed contract
+payloads to anything that can reach it. It is still a strict improvement over
+today's baseline (the CLI holding the fronted participant's admin JWT
+outright), but a production deployment needs, at minimum: mTLS or OAuth
+client-credentials auth, per-consumer (not global) allow-lists, rate
+limiting, and an audit log of `(consumer, template, contract id, offset)`.
+Do not point `--listen` at anything but loopback outside a test/harness
+context.
+
+```sh
+# operator side, holding guardian-governance's own credentials:
+./ntt-playground --profile localnet disclosure serve
+# disclosure serve: fronting participant=guardian-governance templates=11
+# disclosure serve: unauthenticated harness-grade service; keep it loopback-bound unless you know why
+# disclosure serve: listening on http://127.0.0.1:7599
+
+# consumer side, holding only its own participant's credentials:
+./ntt-playground --profile localnet \
+  --disclosure-service-url http://127.0.0.1:7599 \
+  --strict-participant-isolation \
+  transfer --deployment burnmint --user Zoe --chain 2 \
+  --recipient-address 00..ee --amount 500000 --sign
+```
+
 ## Profiles
 
 ### sandbox (default)
@@ -450,7 +551,7 @@ instead; set `LOCALNET_POSTGRES_CONTAINER_NAME` / `LOCALNET_POSTGRES_HOST_PORT`
 to change either. In-network connectivity is unaffected — services resolve the
 database by compose service name. Requires docker compose >= 2.24 (`!override`).
 
-See [Topology](#topology) above for the five-participant layout this profile
+See [Topology](#topology) above for the six-participant layout this profile
 runs. Auth is LocalNet's documented "unsafe" shared-secret HS256 mode (never
 valid against a real participant); the CLI mints tokens for
 `ledger-api-user` automatically, on every participant.
@@ -553,8 +654,12 @@ Documented, not implemented — this CLI is devnet-only throughout.
   Amulet directly (it has no `BurnMintFactory`).
 - **Disclosures.** The `queryDisclosure`/`coveringDisclosure` pattern this CLI
   uses (reading as guardianGovernance or operator, whichever party owns the
-  data) is replaced by an off-ledger disclosure service over an ACS index, as
-  described in the core bridge's README.
+  data) is fronted, in this CLI, by a harness-grade disclosure service
+  (`ntt-playground disclosure serve` — see
+  [Disclosure service](#disclosure-service)). A production deployment needs
+  the hardening that service deliberately skips: mTLS or OAuth
+  client-credentials auth, per-consumer (not global) allow-lists, rate
+  limiting, and an audit log, as described in the core bridge's README.
 
 ## Follow-ups
 
@@ -566,5 +671,3 @@ Out of scope for this CLI, listed here rather than silently dropped:
 - Demoting `gg` by governance VAA (`admin accept-gg-vaa` only covers an
   ordinary admin handing the role TO `gg`; `gg` handing it back still needs
   the direct `TransferAdmin` path — see the core NTT README's follow-ups).
-- A `RemoteSeam` extension for `admin accept-gg-vaa` on the multi-participant
-  `localnet` topology (see [Guardian custody opt-in](#guardian-custody-opt-in)).

@@ -31,6 +31,33 @@ type app struct {
 	// path next to the state file" (see resolvedTopologyConfigPath).
 	topologyConfigPath string
 
+	// disclosureServiceURL is the --disclosure-service-url flag's value. Empty (the default)
+	// means "unchanged behavior": prepareRemoteSeam (remote.go) runs the local
+	// `Playground.Prepare:prepare*` script directly against the data owner's own participant,
+	// exactly as before this flag existed. When set, prepareRemoteSeam instead issues a
+	// POST /v1/seam/{name} against this base URL (internal/disclosure.Client) -- the property
+	// that lets a consumer fetch a cross-participant RemoteSeam without holding the data
+	// owner's own credentials (design doc §5.3).
+	disclosureServiceURL string
+
+	// strictParticipantIsolation is the --strict-participant-isolation flag's value. When set,
+	// newScriptRunnerFor (runner.go) refuses to build a runner targeting any participant other
+	// than isolationBaselineRole below -- the negative control that proves a flow genuinely
+	// needs --disclosure-service-url rather than silently working because the harness happens
+	// to hold every participant's credentials (design doc §7 R8).
+	strictParticipantIsolation bool
+
+	// isolationBaselineRole is the current invocation's actor participant role -- the baseline
+	// strictParticipantIsolation compares every newScriptRunnerFor call's target against. This
+	// is NOT a cobra flag: it is set once per invocation by the three actor-routing commands
+	// (transfer.go, receive.go, publish.go), immediately after the actor's own role is resolved
+	// and before any call that might cross a participant boundary. Commands that legitimately
+	// span participants by design -- init, deploy, fund, party -- never set it, so it stays ""
+	// for them, which the guard treats as "no actor-routing command is in play" and therefore
+	// never fires (design doc §7 R8: the guard must not break those commands even when
+	// --strict-participant-isolation is passed globally).
+	isolationBaselineRole string
+
 	// stderr is the invoked command's error stream, captured once in PersistentPreRun so
 	// helpers constructed without a *cobra.Command in scope (the script runner and network
 	// managers' Logf closures) narrate to the same stream vlogf writes to.
@@ -68,6 +95,8 @@ func newRootCmdForApp(a *app) *cobra.Command {
 	root.PersistentFlags().StringVar((*string)(&a.profile), "profile", string(profile.Sandbox), "network profile: sandbox|localnet")
 	root.PersistentFlags().BoolVar(&a.verbose, "verbose", false, "narrate every sub-step (network bring-up, party allocation, each dpm script run) on stderr")
 	root.PersistentFlags().StringVar(&a.topologyConfigPath, "topology-config", "", "path to the topology/disclosure config file (default: playground.topology.json next to the state file)")
+	root.PersistentFlags().StringVar(&a.disclosureServiceURL, "disclosure-service-url", "", "base URL of a disclosure service to fetch cross-participant RemoteSeams from (default: run the prepare script directly against the data owner's participant)")
+	root.PersistentFlags().BoolVar(&a.strictParticipantIsolation, "strict-participant-isolation", false, "fail any step that would target a participant other than the actor's own (see --disclosure-service-url)")
 
 	root.AddCommand(
 		newNetworkCmd(a),
@@ -79,6 +108,7 @@ func newRootCmdForApp(a *app) *cobra.Command {
 		newPartyCmd(a),
 		newEmitterCmd(a),
 		newPublishCmd(a),
+		newFundCmd(a),
 		newTransferCmd(a),
 		newReceiveCmd(a),
 		newPreapproveCmd(a),
@@ -88,6 +118,7 @@ func newRootCmdForApp(a *app) *cobra.Command {
 		newContractsCmd(a),
 		newBalanceCmd(a),
 		newObserveCmd(a),
+		newDisclosureCmd(a),
 	)
 	return root
 }

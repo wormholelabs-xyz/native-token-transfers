@@ -55,8 +55,14 @@ func newPublishCmd(a *app) *cobra.Command {
 			// transferOut/receiveVaa, whose data owner is guardianGovernance -- see
 			// remote.go's doc comment).
 			actorRole := participantRoleForParty(s, em.Owner)
+
+			// Record the actor's participant role as the --strict-participant-isolation
+			// baseline (runner.go), immediately after it is known and before prepareRemoteSeam
+			// below (which may need to cross a participant boundary).
+			a.isolationBaselineRole = actorRole
+
 			dataOwnerRole := participantRoleForParty(s, s.Operator)
-			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, dataOwnerRole, "Playground.Prepare:preparePublish", func(templates []string) any {
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, dataOwnerRole, "Playground.Prepare:preparePublish", "publish", func(templates []string) any {
 				return preparePublishInput{
 					Operator:          s.Operator,
 					EmitterID:         em.EmitterID,

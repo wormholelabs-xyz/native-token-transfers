@@ -196,6 +196,27 @@ fundUser input = do
     _ -> abort "playground: fundUser could not uniquely resolve the freshly minted holding"
   pure FundUserOutput with holdingCid
 
+-- | Enumerate @owner@'s own 'Test.TestNtt.Cip56MockHolding's for @instrument@, read AS OWNER
+-- -- owner is a signatory of the template ('Test.TestNtt.Cip56MockHolding''s @signatory admin,
+-- owner@), so this query succeeds on the sender's own participant with NO disclosure at all.
+-- Mirrors 'Playground.Amulet.amuletHoldings''s reasoning for the "amulet" kind exactly (that
+-- helper reads the sender's real Amulet 'Holding's the same way, off the token-standard
+-- interface rather than over HTTP).
+--
+-- Used by 'transferOut''s Mock branch when the CLI leaves 'TransferOutInput.inputHoldingCids'
+-- empty (plan §5.5: funding was split out into `fund`, so `transfer` no longer necessarily
+-- knows the freshly minted holding's cid -- and under strict participant isolation cannot ask
+-- gg for it either).
+mockHoldings : Party -> InstrumentId -> Script [ContractId Holding]
+mockHoldings owner instrument = do
+  hs <- query @Cip56MockHolding owner
+  pure
+    [ toInterfaceContractId @Holding cid
+    | (cid, h) <- hs
+    , h.owner == owner
+    , h.instrument == instrument
+    ]
+
 ----------------------------------------------------------------------
 -- transferOut
 ----------------------------------------------------------------------
@@ -365,7 +386,20 @@ transferOut input = do
     Mock -> do
       when (isSome input.amulet) $
         abort "playground: the amulet seam must be None for a non-amulet deployment"
-      pure (mgrCid, mgr, mockExtraArgs, input.inputHoldingCids, submitOpts0)
+      -- Non-empty 'inputHoldingCids' passes through unchanged (byte-identical to before this
+      -- change: the CLI's own `fund`-then-`transfer` sequence still hands the freshly minted
+      -- holding's cid straight through). Empty means the CLI ran `transfer --no-fund` (plan
+      -- §5.5) -- enumerate the sender's own holdings in-script via 'mockHoldings' rather than
+      -- aborting; a sender with nothing to send gets a clear, actionable error instead of the
+      -- underlying 'Transfer' choice's generic input-holdings failure.
+      holdingCids <- if null input.inputHoldingCids
+        then do
+          hcids <- mockHoldings input.user mgr.instrumentId
+          if null hcids
+            then abort "playground: mock transferOut found no holdings for the sender -- run `fund` first"
+            else pure hcids
+        else pure input.inputHoldingCids
+      pure (mgrCid, mgr, mockExtraArgs, holdingCids, submitOpts0)
 
   -- Recompute the exact published payload from the emitter's PRE-exercise sequence -- see
   -- the module header; this is what `guardian sign-vaa` needs.
@@ -812,15 +846,22 @@ revoke input =
 -- The gg custody opt-in (Wormhole.Ntt.Manager's header) is now VAA-gated: the CURRENT admin
 -- self-signs a standing 'AdminTransferProposal' naming guardianGovernance (propose), and a
 -- guardian-signed 'Wormhole.Ntt.Payload.AcceptAdminToGovernance' VAA lets ANY executor
--- permissionlessly complete the handoff (accept) -- gg never signs live. Sandbox-first: both
--- scripts below only support the 'remote = None' fast path (everything resolved/queried as
--- operator/gg, exactly like receiveVaa's 'None' branch). A 'RemoteSeam' extension (routing the
--- accept step's disclosure gathering through 'Playground.Prepare' when the executor's
--- participant differs from gg's, mirroring receiveVaa/transferOut) is follow-up work, not
--- implemented here.
+-- permissionlessly complete the handoff (accept) -- gg never signs live. 'proposeAdminTransferToGg'
+-- is single-party -- it reads AND submits as the CURRENT admin alone (no operator read at all) --
+-- which is what lets the CLI route the whole call to the current admin's own participant. This
+-- matters because "current admin" is not fixed: before any handoff it is the registering admin
+-- (co-located with operator under the default topology), but after a successful
+-- 'acceptAdminTransferByVaa' it is guardianGovernance, hosted on its OWN participant -- routing
+-- this call to operator's participant regardless (the pre-fix bug) fails PERMISSION_DENIED the
+-- moment a second propose/accept cycle runs post-handoff. 'acceptAdminTransferByVaa' gets the
+-- standard 'RemoteSeam' None/Some split mirroring 'receiveVaa'/'transferOut' (see
+-- 'Playground.Prepare:prepareAcceptAdmin'): 'None' resolves/queries everything as operator/gg in
+-- one script execution, which only works when one participant hosts both -- unconditionally
+-- false on multi-participant LocalNet once guardianGovernance became its own participant;
+-- 'Some seam' takes a pre-fetched seam instead.
 
 data ProposeAdminTransferToGgInput = ProposeAdminTransferToGgInput with
-    operator  : Party
+    admin     : Party  -- the deployment's CURRENT admin, as the CLI's state file records it
     managerId : Int
   deriving (Eq, Show)
 
@@ -833,12 +874,24 @@ data ProposeAdminTransferToGgOutput = ProposeAdminTransferToGgOutput with
 -- ('Wormhole.Ntt.Manager.AdminTransferProposal') naming @guardianGovernance@ as the new
 -- admin -- the propose half of the VAA-gated custody opt-in (see
 -- 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa's doc comment and 'acceptAdminTransferByVaa'
--- below). Returns the deployment's stable @managerAddress@ and its CURRENT @factoryEpoch@,
--- exactly the two fields a guardian quorum's governance VAA must bind to (`guardian
--- sign-governance accept-admin`).
+-- below). Single-party by design (see the module header note above): @input.admin@ is both the
+-- reader that resolves the manager ('resolveManager's first argument is purely the reader,
+-- Playground.Types' own doc comment -- any manager signatory works, and admin always is one)
+-- and the submitter, so this runs entirely on @input.admin@'s own participant, no disclosure
+-- needed either way. Asserts @mgr.admin == input.admin@ first: the CLI's cached "current admin"
+-- can go stale (e.g. a handoff completed by another process), and submitting as a party that no
+-- longer holds the role would otherwise fail with a much less legible authorization error deeper
+-- in 'AdminTransferProposal's own create. Returns the deployment's stable @managerAddress@ and
+-- its CURRENT @factoryEpoch@, exactly the two fields a guardian quorum's governance VAA must
+-- bind to (`guardian sign-governance accept-admin`).
 proposeAdminTransferToGg : ProposeAdminTransferToGgInput -> Script ProposeAdminTransferToGgOutput
 proposeAdminTransferToGg input = do
-  (_mgrCid, mgr) <- resolveManager input.operator input.managerId
+  (_mgrCid, mgr) <- resolveManager input.admin input.managerId
+  assertMsg
+    ("playground: the CLI's recorded current admin (" <> partyToText input.admin <>
+     ") does not match the deployment's actual current admin (" <> partyToText mgr.admin <>
+     ") -- the CLI's recorded current admin is stale -- re-run `status` / check the deployment")
+    (mgr.admin == input.admin)
   _ <- submit mgr.admin do
     createCmd AdminTransferProposal with
       admin = mgr.admin
@@ -854,6 +907,12 @@ data AcceptAdminTransferByVaaInput = AcceptAdminTransferByVaaInput with
     executor  : Party
     vaaBytes  : Text
     pubKeys   : [(Int, Text)]
+    -- 'None' on the same-participant fast path (today's default, everything resolved/queried as
+    -- operator/gg); 'Some' when the CLI ran 'Playground.Prepare:prepareAcceptAdmin' on gg's OWN
+    -- participant first (mirrors receiveVaa/transferOut's own split) -- needed whenever the
+    -- executor's participant differs from gg's, which is unconditionally the case on
+    -- multi-participant LocalNet (no participant hosts both operator and gg there).
+    remote    : Optional RemoteSeam
   deriving (Eq, Show)
 
 data AcceptAdminTransferByVaaOutput = AcceptAdminTransferByVaaOutput with
@@ -864,69 +923,101 @@ data AcceptAdminTransferByVaaOutput = AcceptAdminTransferByVaaOutput with
 -- | Permissionlessly relay a guardian-signed accept-admin governance VAA against the
 -- deployment's standing 'AdminTransferProposal', completing the gg custody opt-in with no
 -- live gg signature (see 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa'). Mirrors
--- 'receiveVaa''s disclosure-gathering pattern: manager, core state, and the covering replay
--- node (@consumer = gg@, @namespace = mgr.namespace@, keyed off the VAA's own digest, exactly
--- as 'receiveVaa' resolves it). The proposal is queried as gg (its observer, since
--- @newAdmin = gg@ here) and disclosed to the executor. For LockUnlock, the nested
--- 'Wormhole.Ntt.Manager.TransferAdmin' pot move additionally needs the ledger, and -- only
--- when the pot is non-empty -- the pot holding, the committed factory, and gg's OWN
--- 'Playground.MockRegistry.MockTransferPreapproval' (the move's receiver is gg, and the mock
--- registry's factory requires the RECEIVER's standing pre-approval unless sender == receiver
--- -- see 'Playground.MockRegistry.MockPreapprovedTransferFactory' and transferOut/receiveVaa's
--- identical pattern for the admin/recipient side). gg must have run `preapprove` for its own
--- party first; a zero-balance ledger needs none of this (mirrors 'TransferAdmin' itself).
+-- 'receiveVaa''s 'RemoteSeam' split (see the module header): 'None' resolves/queries manager,
+-- core state, and the covering replay node (@consumer = gg@, @namespace = mgr.namespace@, keyed
+-- off the VAA's own digest) as operator/gg in one script execution, exactly as before; the
+-- proposal is queried as gg (its observer, since @newAdmin = gg@ here) and disclosed to the
+-- executor. For LockUnlock, the nested 'Wormhole.Ntt.Manager.TransferAdmin' pot move
+-- additionally needs the ledger, and -- only when the pot is non-empty -- the pot holding, the
+-- committed factory, and gg's OWN 'Playground.MockRegistry.MockTransferPreapproval' (the
+-- move's receiver is gg, and the mock registry's factory requires the RECEIVER's standing
+-- pre-approval unless sender == receiver -- see 'Playground.MockRegistry.MockPreapprovedTransferFactory'
+-- and transferOut/receiveVaa's identical pattern for the admin/recipient side). gg must have
+-- run `preapprove` for its own party first; a zero-balance ledger needs none of this (mirrors
+-- 'TransferAdmin' itself). 'Some seam' (produced by 'Playground.Prepare:prepareAcceptAdmin', run
+-- as gg on gg's OWN participant) takes the identical material pre-fetched instead of querying
+-- locally -- the executor's participant may not be able to see operator/admin/gg at all.
 acceptAdminTransferByVaa : AcceptAdminTransferByVaaInput -> Script AcceptAdminTransferByVaaOutput
 acceptAdminTransferByVaa input = do
-  (mgrCid, mgr) <- resolveManager input.operator input.managerId
-  csCid <- resolveCoreState input.operator
-  csDisc <- fromSome <$> queryDisclosure input.operator csCid
-  mgrDisc <- fromSome <$> queryDisclosure input.operator mgrCid
+  (mgrCid, mgr, csCid, nodeCid, proposalCid, ledgerCid, extraArgs, submitOpts) <- case input.remote of
+    None -> do
+      (mgrCid, mgr) <- resolveManager input.operator input.managerId
+      csCid <- resolveCoreState input.operator
+      csDisc <- fromSome <$> queryDisclosure input.operator csCid
+      mgrDisc <- fromSome <$> queryDisclosure input.operator mgrCid
 
-  let gg = mgr.guardianGovernance
-      digest = (parseVAA input.vaaBytes).hash
-  (nodeCid, nodeDisc) <- coveringDisclosure input.operator gg mgr.namespace digest
+      let gg = mgr.guardianGovernance
+          digest = (parseVAA input.vaaBytes).hash
+      (nodeCid, nodeDisc) <- coveringDisclosure input.operator gg mgr.namespace digest
 
-  -- The standing proposal: gg is its OBSERVER (newAdmin = gg), so it is queryable as gg;
-  -- disclose it to the executor, who (in the permissionless-relay case) is neither admin nor
-  -- gg. Filtering by managerAddress AND the deployment's CURRENT admin picks out the live
-  -- proposal even if a stale one (from a since-replaced admin) is also visible -- the choice
-  -- itself re-checks this, this is just so the script resolves a sensible candidate to
-  -- disclose.
-  proposals <- query @AdminTransferProposal gg
-  proposalCid <- case
-    [ cid | (cid, p) <- proposals, p.managerAddress == mgr.managerAddress, p.admin == mgr.admin ] of
-    [cid] -> pure cid
-    [] -> abort "playground: no standing AdminTransferProposal for this deployment's current admin -- run `admin propose-gg` first"
-    _ -> abort "playground: more than one AdminTransferProposal for this deployment's current admin"
-  proposalDisc <- fromSome <$> queryDisclosure gg proposalCid
+      -- The standing proposal: gg is its OBSERVER (newAdmin = gg), so it is queryable as gg;
+      -- disclose it to the executor, who (in the permissionless-relay case) is neither admin
+      -- nor gg. Filtering by managerAddress AND the deployment's CURRENT admin picks out the
+      -- live proposal even if a stale one (from a since-replaced admin) is also visible -- the
+      -- choice itself re-checks this, this is just so the script resolves a sensible candidate
+      -- to disclose.
+      proposals <- query @AdminTransferProposal gg
+      proposalCid <- case
+        [ cid | (cid, p) <- proposals, p.managerAddress == mgr.managerAddress, p.admin == mgr.admin ] of
+        [cid] -> pure cid
+        [] -> abort "playground: no standing AdminTransferProposal for this deployment's current admin -- run `admin propose-gg` first"
+        _ -> abort "playground: more than one AdminTransferProposal for this deployment's current admin"
+      proposalDisc <- fromSome <$> queryDisclosure gg proposalCid
 
-  (ledgerCid, ledgerDiscs, extraArgs) <- case mgr.tokenConfig of
-    BurnMint -> pure (None, [], emptyExtraArgs)
-    LockUnlock -> do
-      (lcid, ledger) <- resolveLedger input.operator mgr.managerAddress
-      ld <- fromSome <$> queryDisclosure input.operator lcid
-      case ledger.custodyHoldingCid of
-        None -> pure (Some lcid, [ld], emptyExtraArgs)
-        Some potCid -> do
-          potDisc <- fromSome <$> queryDisclosure gg (coerceContractId potCid : ContractId Cip56MockHolding)
-          facDisc <- case mgr.factory of
-            TransferFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
-            BurnMintFactoryCid _ -> abort "playground: lock/unlock deployment has a burn/mint factory -- inconsistent state"
-          pres <- query @MockTransferPreapproval gg
-          preCid <- case [ cid | (cid, p) <- pres, p.owner == gg, p.instrument == mgr.instrumentId ] of
-            [cid] -> pure cid
-            [] -> abort "playground: guardianGovernance has no standing transfer pre-approval -- run `preapprove --user GuardianGovernance` first"
-            _ -> abort "playground: more than one MockTransferPreapproval for guardianGovernance"
-          preDisc <- fromSome <$> queryDisclosure gg preCid
-          let ea = ExtraArgs with
-                context = ChoiceContext with
-                  values = TextMap.fromList
-                    [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
-                meta = emptyMetadata
-          pure (Some lcid, [ld, potDisc, facDisc, preDisc], ea)
+      (ledgerCid, ledgerDiscs, extraArgs) <- case mgr.tokenConfig of
+        BurnMint -> pure (None, [], emptyExtraArgs)
+        LockUnlock -> do
+          (lcid, ledger) <- resolveLedger input.operator mgr.managerAddress
+          ld <- fromSome <$> queryDisclosure input.operator lcid
+          case ledger.custodyHoldingCid of
+            None -> pure (Some lcid, [ld], emptyExtraArgs)
+            Some potCid -> do
+              potDisc <- fromSome <$> queryDisclosure gg (coerceContractId potCid : ContractId Cip56MockHolding)
+              facDisc <- case mgr.factory of
+                TransferFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
+                BurnMintFactoryCid _ -> abort "playground: lock/unlock deployment has a burn/mint factory -- inconsistent state"
+              pres <- query @MockTransferPreapproval gg
+              preCid <- case [ cid | (cid, p) <- pres, p.owner == gg, p.instrument == mgr.instrumentId ] of
+                [cid] -> pure cid
+                [] -> abort "playground: guardianGovernance has no standing transfer pre-approval -- run `preapprove --user GuardianGovernance` first"
+                _ -> abort "playground: more than one MockTransferPreapproval for guardianGovernance"
+              preDisc <- fromSome <$> queryDisclosure gg preCid
+              let ea = ExtraArgs with
+                    context = ChoiceContext with
+                      values = TextMap.fromList
+                        [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+                    meta = emptyMetadata
+              pure (Some lcid, [ld, potDisc, facDisc, preDisc], ea)
 
-  let submitOpts = foldl (\opts d -> opts <> disclose d) (actAs input.executor)
-        ([csDisc, mgrDisc, nodeDisc, proposalDisc] ++ ledgerDiscs)
+      let submitOpts = foldl (\opts d -> opts <> disclose d) (actAs input.executor)
+            ([csDisc, mgrDisc, nodeDisc, proposalDisc] ++ ledgerDiscs)
+      pure (mgrCid, mgr, csCid, nodeCid, proposalCid, ledgerCid, extraArgs, submitOpts)
+
+    Some seam -> do
+      let mgrCid      = fromSomeNote "playground: remote seam missing mgrCid" seam.mgrCid
+          mgr         = fromSomeNote "playground: remote seam missing mgr" seam.mgr
+          csCid       = fromSomeNote "playground: remote seam missing csCid" seam.csCid
+          nodeCid     = fromSomeNote "playground: remote seam missing replayNodeCid" seam.replayNodeCid
+          proposalCid = fromSomeNote "playground: remote seam missing proposalCid" seam.proposalCid
+          ledgerCid   = seam.ledgerCid
+      -- No existing contract of @executor@'s own to queryDisclosure a seed FROM on this
+      -- participant -- create+fetch a throwaway one (Playground.Disclose.mkSeedDisclosure).
+      seed <- mkSeedDisclosure input.executor
+      let toDisc = map (toDisclosureByName seed) seam.disclosed
+          submitOpts = foldl (\opts d -> opts <> disclose d) (actAs input.executor) toDisc
+          -- The preapproval cid itself needs no query -- prepareAcceptAdmin already resolved it
+          -- (as gg, on gg's own participant); this just builds the same ExtraArgs.context shape
+          -- 'Playground.MockRegistry.MockPreapprovedTransferFactory' expects. 'None' both for
+          -- BurnMint and for a LockUnlock deployment whose pot was empty (prepareAcceptAdmin
+          -- resolves no preapproval in that case either -- see that script's own doc comment).
+          extraArgs = case seam.mockPreapprovalCid of
+            None -> emptyExtraArgs
+            Some preCid -> ExtraArgs with
+              context = ChoiceContext with
+                values = TextMap.fromList
+                  [(mockTransferPreapprovalContextKey, AV_ContractId (coerceContractId preCid))]
+              meta = emptyMetadata
+      pure (mgrCid, mgr, csCid, nodeCid, proposalCid, ledgerCid, extraArgs, submitOpts)
 
   (mgrCid', _ledgerCid') <- submit submitOpts do
     exerciseCmd mgrCid AcceptAdminTransferByVaa with
@@ -939,7 +1030,20 @@ acceptAdminTransferByVaa input = do
       ledgerCid
       extraArgs
 
-  Some mgr' <- queryContractId input.operator mgrCid'
+  -- The successor admin: the 'None' branch reads it back from the successor manager, exactly
+  -- as before -- fine there, since operator's own participant is what ran the whole script. The
+  -- 'Some seam' branch must NOT do this: 'queryContractId input.operator mgrCid'' reads as
+  -- OPERATOR, which fails on any participant that does not host operator -- the whole reason
+  -- the remote branch exists. The
+  -- successor is proposal-determined instead: 'AcceptAdminTransferByVaa' asserts
+  -- @proposal.newAdmin == guardianGovernance@ before ever consuming the proposal, so a
+  -- successful submit already proves the deployment's new admin is gg.
+  admin <- case input.remote of
+    None -> do
+      Some mgr' <- queryContractId input.operator mgrCid'
+      pure mgr'.admin
+    Some _ -> pure mgr.guardianGovernance
+
   pure AcceptAdminTransferByVaaOutput with
     managerAddress = normalizeHex mgr.managerAddress
-    admin = mgr'.admin
+    admin

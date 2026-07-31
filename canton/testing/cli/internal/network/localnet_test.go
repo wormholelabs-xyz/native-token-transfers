@@ -238,18 +238,21 @@ func TestEnsureParticipantsOverride_StaleContentIsRewritten(t *testing.T) {
 func TestParticipantsOverride_Content(t *testing.T) {
 	content := string(participantsOverride)
 	for _, want := range []string{
-		// bob / guardian-governance / guardian-observer ledger, admin, JSON-API ports.
+		// bob / guardian-governance / guardian-observer / alice-solo ledger, admin, JSON-API
+		// ports.
 		"5901:5901", "5902:5902", "5975:5975",
 		"6901:6901", "6902:6902", "6975:6975",
 		"7901:7901", "7902:7902", "7975:7975",
+		"8901:8901", "8902:8902", "8975:8975",
 		// validator API ports.
-		"5903:5903", "6903:6903", "7903:7903",
+		"5903:5903", "6903:6903", "7903:7903", "8903:8903",
 		// the wrapper-include mechanism: original conf remounted, wrapper replaces app.conf.
 		"/app/app-orig.conf", "/app/app.conf", "/app/wormhole", "/app/health-check.sh",
 		// new postgres databases.
 		"participant-bob", "validator-bob",
 		"participant-guardian-governance", "validator-guardian-governance",
 		"participant-guardian-observer", "validator-guardian-observer",
+		"participant-alice-solo", "validator-alice-solo",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("participantsOverride missing %q", want)
@@ -280,6 +283,10 @@ func TestEnsureParticipantConfs_WritesAll(t *testing.T) {
 		filepath.Join("splice", "guardian-governance", "app-auth.conf"),
 		filepath.Join("splice", "guardian-observer", "app.conf"),
 		filepath.Join("splice", "guardian-observer", "app-auth.conf"),
+		filepath.Join("canton", "alice-solo", "app.conf"),
+		filepath.Join("canton", "alice-solo", "app-auth.conf"),
+		filepath.Join("splice", "alice-solo", "app.conf"),
+		filepath.Join("splice", "alice-solo", "app-auth.conf"),
 		filepath.Join("splice", "sv-onboarding-overlay.conf"),
 	} {
 		path := filepath.Join(dir, "wormhole-conf", rel)
@@ -312,6 +319,7 @@ func TestEnsureParticipantConfs_WritesAll(t *testing.T) {
 		"bob-validator-onboarding-secret",
 		"guardian-governance-validator-onboarding-secret",
 		"guardian-observer-validator-onboarding-secret",
+		"alice-solo-validator-onboarding-secret",
 	} {
 		if !strings.Contains(string(overlay), secret) {
 			t.Fatalf("sv onboarding overlay missing %q: %s", secret, overlay)
@@ -367,13 +375,13 @@ func TestEnsureParticipantConfs_StaleRewritten(t *testing.T) {
 	}
 }
 
-func TestAllParticipantProbes_FiveParticipants(t *testing.T) {
+func TestAllParticipantProbes_SixParticipants(t *testing.T) {
 	m := LocalNetManager{}
 	probes := m.allParticipantProbes()
-	if len(probes) != 5 {
-		t.Fatalf("expected 5 participant probes, got %d: %+v", len(probes), probes)
+	if len(probes) != 6 {
+		t.Fatalf("expected 6 participant probes, got %d: %+v", len(probes), probes)
 	}
-	wantRoles := map[string]bool{"app-provider": true, "app-user": true, "bob": true, "guardian-governance": true, "guardian-observer": true}
+	wantRoles := map[string]bool{"app-provider": true, "app-user": true, "bob": true, "guardian-governance": true, "guardian-observer": true, "alice-solo": true}
 	for _, p := range probes {
 		if !wantRoles[p.role] {
 			t.Fatalf("unexpected participant role %q", p.role)
@@ -385,7 +393,26 @@ func TestAllParticipantProbes_FiveParticipants(t *testing.T) {
 	}
 }
 
-func TestAllParticipantJSONAPIBaseURLs_FiveParticipants(t *testing.T) {
+// TestAllParticipantProbes_AliceSolo pins alice-solo's own probe targets (the disclosure
+// service e2e's dedicated participant, added in §6.1): ledger port 8901, validator API 8903.
+func TestAllParticipantProbes_AliceSolo(t *testing.T) {
+	m := LocalNetManager{}
+	probes := m.allParticipantProbes()
+	for _, p := range probes {
+		if p.role == "alice-solo" {
+			if p.ledgerAddr != "localhost:8901" {
+				t.Fatalf("alice-solo ledgerAddr: got %q, want localhost:8901", p.ledgerAddr)
+			}
+			if p.validatorURL != "http://localhost:8903" {
+				t.Fatalf("alice-solo validatorURL: got %q, want http://localhost:8903", p.validatorURL)
+			}
+			return
+		}
+	}
+	t.Fatalf("alice-solo probe not found: %+v", probes)
+}
+
+func TestAllParticipantJSONAPIBaseURLs_SixParticipants(t *testing.T) {
 	m := LocalNetManager{}
 	urls := m.allParticipantJSONAPIBaseURLs()
 	want := map[string]string{
@@ -394,6 +421,7 @@ func TestAllParticipantJSONAPIBaseURLs_FiveParticipants(t *testing.T) {
 		"bob":                 "http://localhost:5975",
 		"guardian-governance": "http://localhost:6975",
 		"guardian-observer":   "http://localhost:7975",
+		"alice-solo":          "http://localhost:8975",
 	}
 	for role, url := range want {
 		if urls[role] != url {

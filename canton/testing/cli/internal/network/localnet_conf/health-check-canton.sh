@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wormhole replacement for docker/canton/health-check.sh: the original three profile-gated
-# probes, plus unconditional probes of the three new participants' gRPC health ports (they
+# probes, plus unconditional probes of the four new participants' gRPC health ports (they
 # are not profile-gated -- see localnet.go's comment on APP_USER_PROFILE, they are always
 # mounted/included once the canton container starts under any profile).
 set -eou pipefail
@@ -24,3 +24,5 @@ echo "Checking 6961 (guardian-governance)"
 grpc-health-probe -addr="localhost:6961"
 echo "Checking 7961 (guardian-observer)"
 grpc-health-probe -addr="localhost:7961"
+echo "Checking 8961 (alice-solo)"
+grpc-health-probe -addr="localhost:8961"

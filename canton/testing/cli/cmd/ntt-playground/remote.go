@@ -28,12 +28,24 @@ func discloseTemplateAllowList(cfg disclosure.Config) []string {
 
 // prepareRemoteSeam decides whether a submit needs a RemoteSeam (the actor's participant
 // differs from ownerRole, the participant the data this op needs actually lives on) and, if so,
-// runs prepareScript against ownerRole's participant to obtain one -- returned as raw JSON,
-// since the CLI never needs to parse or construct a RemoteSeam itself: it flows verbatim from
-// the prepare script's stdout into the submit script's stdin (see
-// Playground.Disclose:RemoteSeam's doc comment). Returns (nil, nil) when actorRole already
-// matches ownerRole -- the existing local fast path, byte-identical to pre-phase-5 behavior (a
-// nil json.RawMessage marshals to JSON `null`, i.e. Daml's `None`).
+// obtains one -- returned as raw JSON, since the CLI never needs to parse or construct a
+// RemoteSeam itself: it flows verbatim from wherever it was fetched into the submit script's
+// stdin (see Playground.Disclose:RemoteSeam's doc comment). Returns (nil, nil) when actorRole
+// already matches ownerRole -- the existing local fast path, byte-identical to pre-phase-5
+// behavior (a nil json.RawMessage marshals to JSON `null`, i.e. Daml's `None`).
+//
+// Two ways to obtain a seam once the fast path above doesn't apply (design doc §5.3):
+//   - a.disclosureServiceURL set: POST /v1/seam/{seamName} against a disclosure service
+//     (internal/disclosure.Client/Service) fronting ownerRole's participant. The service
+//     injects its OWN discloseTemplates allow-list server-side (design doc §1.4(3)), so
+//     buildInput is called with a nil allow-list here -- passing a client-supplied one would be
+//     silently overwritten by the service anyway (internal/disclosure/service.go's handleSeam).
+//     This is the path that lets an actor submit a cross-participant op WITHOUT holding
+//     ownerRole's own credentials, which is what --strict-participant-isolation (runner.go)
+//     exists to prove is otherwise required.
+//   - unset (default, byte-identical to pre-disclosure-service behavior): run prepareScript
+//     directly against ownerRole's participant via a.newScriptRunnerFor(ctx, ownerRole), passing
+//     the LOCAL discloseTemplateAllowList (the existing client-side allow-list, unchanged).
 //
 // ownerRole is caller-supplied rather than derived from a single global helper: which
 // participant actually owns the needed data differs per entrypoint post-rework --
@@ -43,9 +55,15 @@ func discloseTemplateAllowList(cfg disclosure.Config) []string {
 // emitter's owner is not necessarily gg, but operator co-signs every Emitter/CoreState
 // regardless of who registered it) -- see each call site.
 //
-// buildInput receives the config-derived discloseTemplates allow-list and returns the fully
-// populated input value for prepareScript.
-func prepareRemoteSeam(ctx context.Context, cmd *cobra.Command, a *app, s *state.State, actorRole, ownerRole, prepareScript string, buildInput func(discloseTemplates []string) any) (json.RawMessage, error) {
+// seamName is the POST /v1/seam/{name} path segment for this entrypoint ("transferOut",
+// "receive", or "publish" -- see internal/disclosure/service.go's seamScripts map), used only on
+// the disclosure-service path; the local path keeps using prepareScript's Daml script name as
+// before.
+//
+// buildInput receives the config-derived discloseTemplates allow-list (nil on the
+// disclosure-service path) and returns the fully populated input value for prepareScript / the
+// seam POST body.
+func prepareRemoteSeam(ctx context.Context, cmd *cobra.Command, a *app, s *state.State, actorRole, ownerRole, prepareScript, seamName string, buildInput func(discloseTemplates []string) any) (json.RawMessage, error) {
 	prof, err := a.resolvedProfile()
 	if err != nil {
 		return nil, err
@@ -79,6 +97,21 @@ func prepareRemoteSeam(ctx context.Context, cmd *cobra.Command, a *app, s *state
 	}
 	if actorRole == ownerRole {
 		return nil, nil
+	}
+
+	// disclosure-service path (design doc §5.3): fetch the RemoteSeam over HTTP instead of
+	// running prepareScript locally against ownerRole's own participant. buildInput(nil) is
+	// deliberate -- the service is authoritative over which templates get disclosed (its own
+	// Config.Disclose, injected server-side), so there is no client-side allow-list to pass;
+	// see internal/disclosure/service.go's handleSeam, which overwrites discloseTemplates
+	// unconditionally. This is what lets the actor obtain a seam without ever holding
+	// ownerRole's participant's own credentials -- the property
+	// --strict-participant-isolation's guard (runner.go) otherwise requires.
+	if a.disclosureServiceURL != "" {
+		cl := &disclosure.Client{BaseURL: a.disclosureServiceURL, Logf: a.verboseLogf()}
+		a.vlogf(cmd, "disclosure: fetching a RemoteSeam from the disclosure service at %s (seam=%s)",
+			a.disclosureServiceURL, seamName)
+		return cl.Seam(ctx, seamName, buildInput(nil))
 	}
 
 	cfg, err := a.topologyConfig()
@@ -130,5 +163,13 @@ type preparePublishInput struct {
 type prepareDeployNttInput struct {
 	GuardianGovernance string   `json:"guardianGovernance"`
 	FactoryCid         string   `json:"factoryCid"`
+	DiscloseTemplates  []string `json:"discloseTemplates"`
+}
+
+// prepareAcceptAdminInput mirrors Playground.Prepare.daml's PrepareAcceptAdminInput.
+type prepareAcceptAdminInput struct {
+	GuardianGovernance string   `json:"guardianGovernance"`
+	ManagerID          int      `json:"managerId"`
+	VaaBytes           string   `json:"vaaBytes"`
 	DiscloseTemplates  []string `json:"discloseTemplates"`
 }

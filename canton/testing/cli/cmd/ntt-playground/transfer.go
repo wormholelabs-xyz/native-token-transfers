@@ -102,7 +102,7 @@ func newTransferCmd(a *app) *cobra.Command {
 	var chain int
 	var amount int64
 	var nonce, consistencyLevel int
-	var sign bool
+	var sign, noFund bool
 
 	cmd := &cobra.Command{
 		Use:   "transfer",
@@ -168,10 +168,28 @@ func newTransferCmd(a *app) *cobra.Command {
 			}
 			a.vlogf(cmd, "transfer: user %q → %s, deployment %q (managerId=%d)", userHint, userParty, deployment, d.ManagerID)
 
+			// Record the actor's participant role as the --strict-participant-isolation
+			// baseline (runner.go), immediately after it is known and before any call that
+			// might cross a participant boundary (the preapprove/fundUser/prepareRemoteSeam
+			// calls below). s.UserParticipants[userHint] is "" for an "amulet" sender (never
+			// routed through resolveParty), matching how prepareRemoteSeam's own actorRole
+			// normalization treats it -- "" means the profile's default participant, not a
+			// distinct, unrouted one.
+			a.isolationBaselineRole = s.UserParticipants[userHint]
+
 			// Daml's `[ContractId Holding]` needs a JSON array, never `null` -- must start
 			// non-nil (a nil Go slice marshals to `null`).
 			holdingCids := []string{}
-			if d.TokenKind == "mock" {
+			// --strict-participant-isolation implies --no-fund: fundUser is a gg-side submit
+			// (gg is the mint's sole signatory, see Playground.Ops:fundUser) that no disclosure
+			// service can stand in for -- a DisclosedContract grants visibility, never
+			// authority. So a participant-isolated sender skips this block entirely and leaves
+			// holdingCids empty; Playground.Ops:transferOut's Mock branch then enumerates the
+			// sender's own holdings in-script (Playground.Ops:mockHoldings, design doc §5.5),
+			// which needs no cross-participant disclosure at all. Use `fund` (fund.go) first,
+			// on the operator's own CLI, to mint them.
+			skipFund := noFund || a.strictParticipantIsolation
+			if d.TokenKind == "mock" && !skipFund {
 				// fundUser mints via the sender's own standing DepositPreapproval (the
 				// preapproval-based faucet Deposit -- see Playground.Ops:fundUser), so the CLI
 				// ensures it exists first; idempotent if the sender already opted in. This is
@@ -276,7 +294,7 @@ func newTransferCmd(a *app) *cobra.Command {
 			actorRole := s.UserParticipants[userHint]
 			if d.TokenKind != "amulet" {
 				ownerRole := participantRoleForParty(s, s.GuardianGovernance)
-				remoteSeam, err = prepareRemoteSeam(ctx, cmd, a, s, actorRole, ownerRole, "Playground.Prepare:prepareTransferOut", func(templates []string) any {
+				remoteSeam, err = prepareRemoteSeam(ctx, cmd, a, s, actorRole, ownerRole, "Playground.Prepare:prepareTransferOut", "transferOut", func(templates []string) any {
 					return prepareTransferOutInput{
 						GuardianGovernance: s.GuardianGovernance,
 						ManagerID:          d.ManagerID,
@@ -339,6 +357,7 @@ func newTransferCmd(a *app) *cobra.Command {
 	cmd.Flags().IntVar(&nonce, "nonce", 0, "transceiver nonce")
 	cmd.Flags().IntVar(&consistencyLevel, "consistency-level", 0, "transceiver consistency level")
 	cmd.Flags().BoolVar(&sign, "sign", false, "also sign the resulting VAA with the playground's guardian key")
+	cmd.Flags().BoolVar(&noFund, "no-fund", false, "skip the mock-kind ensure-preapproval+fundUser step (implied by --strict-participant-isolation); transferOut enumerates the sender's own holdings in-script instead -- fund the sender separately with `fund`")
 	cmd.Flags().StringVar(&tapUSD, "tap-usd", defaultTapUSD, "amulet only: USD amount to tap for the sender before transferring (\"0\" skips)")
 	_ = cmd.MarkFlagRequired("deployment")
 	_ = cmd.MarkFlagRequired("user")

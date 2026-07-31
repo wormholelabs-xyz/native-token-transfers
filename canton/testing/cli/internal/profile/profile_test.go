@@ -105,16 +105,17 @@ func TestGet_UnknownProfile(t *testing.T) {
 // Multi-participant topology (.claude/tasks/e2e-separate-participants.md §2/§3)
 // ----------------------------------------------------------------------
 
-// TestGet_LocalNet_Participants pins the exact five-participant port table from the plan's
-// §2: app-provider is unchanged (3901/3975/3903); app-user/bob/guardian-governance/
-// guardian-observer are the new participants at 2*/5*/6*/7* respectively.
+// TestGet_LocalNet_Participants pins the exact six-participant port table from the plan's §2
+// (extended in §6.1 with alice-solo): app-provider is unchanged (3901/3975/3903); app-user/
+// bob/guardian-governance/guardian-observer/alice-solo are the new participants at
+// 2*/5*/6*/7*/8* respectively.
 func TestGet_LocalNet_Participants(t *testing.T) {
 	for _, k := range []string{"LOCALNET_LEDGER_HOST", "LOCALNET_LEDGER_PORT", "LOCALNET_JSON_API_URL", "LOCALNET_VALIDATOR_URL"} {
 		t.Setenv(k, "")
 	}
 	p, err := Get(LocalNet)
 	require.NoError(t, err)
-	require.Len(t, p.Participants, 5)
+	require.Len(t, p.Participants, 6)
 	require.Equal(t, "app-provider", p.DefaultParticipant)
 
 	cases := []struct {
@@ -126,6 +127,7 @@ func TestGet_LocalNet_Participants(t *testing.T) {
 		{"bob", 5901, 5975, 5903},
 		{"guardian-governance", 6901, 6975, 6903},
 		{"guardian-observer", 7901, 7975, 7903},
+		{"alice-solo", 8901, 8975, 8903},
 	}
 	for _, c := range cases {
 		ep, ok := p.Participants[c.role]
@@ -185,8 +187,8 @@ func TestGet_Sandbox_SingleEndpoint(t *testing.T) {
 
 // TestGet_LocalNet_EnvOverrides_HitDefaultOnly proves the existing LOCALNET_LEDGER_HOST/PORT/
 // JSON_API_URL/VALIDATOR_URL overrides only affect the default (app-provider) endpoint, never
-// the other four participants -- those are still bundle-fixed ports (phase 2's job to make
-// configurable, if ever needed).
+// the other five participants (including alice-solo, added in §6.1) -- those are still
+// bundle-fixed ports (phase 2's job to make configurable, if ever needed).
 func TestGet_LocalNet_EnvOverrides_HitDefaultOnly(t *testing.T) {
 	t.Setenv("LOCALNET_LEDGER_HOST", "canton.example")
 	t.Setenv("LOCALNET_LEDGER_PORT", "4001")
@@ -202,7 +204,7 @@ func TestGet_LocalNet_EnvOverrides_HitDefaultOnly(t *testing.T) {
 	require.Equal(t, "http://json.example", appProvider.JSONAPIBaseURL)
 	require.Equal(t, "http://validator.example", appProvider.ValidatorBaseURL)
 
-	for _, role := range []string{"app-user", "bob", "guardian-governance", "guardian-observer"} {
+	for _, role := range []string{"app-user", "bob", "guardian-governance", "guardian-observer", "alice-solo"} {
 		ep := p.Participants[role]
 		require.Equal(t, "localhost", ep.LedgerHost, "role %q must not pick up LOCALNET_LEDGER_HOST", role)
 		require.NotEqual(t, "http://json.example", ep.JSONAPIBaseURL, "role %q must not pick up LOCALNET_JSON_API_URL", role)
