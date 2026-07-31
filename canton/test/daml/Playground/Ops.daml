@@ -196,12 +196,13 @@ fundUser input = do
     _ -> abort "playground: fundUser could not uniquely resolve the freshly minted holding"
   pure FundUserOutput with holdingCid
 
--- | Enumerate @owner@'s own 'Test.TestNtt.Cip56MockHolding's for @instrument@, read AS OWNER
--- -- owner is a signatory of the template ('Test.TestNtt.Cip56MockHolding''s @signatory admin,
--- owner@), so this query succeeds on the sender's own participant with NO disclosure at all.
--- Mirrors 'Playground.Amulet.amuletHoldings''s reasoning for the "amulet" kind exactly (that
--- helper reads the sender's real Amulet 'Holding's the same way, off the token-standard
--- interface rather than over HTTP).
+-- | Enumerate @owner@'s own mock holdings for @instrument@, read AS OWNER: both
+-- 'Wormhole.Ntt.Coin.NttCoin' (what 'fundUser' mints for burn/mint via the canonical
+-- 'NttCoinFactory') and 'Test.TestNtt.Cip56MockHolding' (the lock/unlock mock instrument).
+-- Owner is a signatory of both templates, so these queries succeed on the sender's own
+-- participant with NO disclosure at all. Mirrors 'Playground.Amulet.amuletHoldings''s
+-- reasoning for the "amulet" kind exactly (that helper reads the sender's real Amulet
+-- 'Holding's the same way, off the token-standard interface rather than over HTTP).
 --
 -- Used by 'transferOut''s Mock branch when the CLI leaves 'TransferOutInput.inputHoldingCids'
 -- empty (plan §5.5: funding was split out into `fund`, so `transfer` no longer necessarily
@@ -210,11 +211,18 @@ fundUser input = do
 mockHoldings : Party -> InstrumentId -> Script [ContractId Holding]
 mockHoldings owner instrument = do
   hs <- query @Cip56MockHolding owner
-  pure
+  coins <- query @NttCoin owner
+  pure $
     [ toInterfaceContractId @Holding cid
     | (cid, h) <- hs
     , h.owner == owner
     , h.instrument == instrument
+    ]
+    <>
+    [ toInterfaceContractId @Holding cid
+    | (cid, c) <- coins
+    , c.owner == owner
+    , c.instrumentId == instrument
     ]
 
 ----------------------------------------------------------------------
