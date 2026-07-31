@@ -14,7 +14,7 @@ template NttCoin
     owner        : Party
     amount       : Decimal
   where
-    signatory instrumentId.admin :: owner :: []
+    signatory instrumentId.admin, owner
     ensure amount > 0.0
 
     interface instance Holding for NttCoin where
