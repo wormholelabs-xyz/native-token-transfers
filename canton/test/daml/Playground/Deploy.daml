@@ -5,24 +5,38 @@
 --      contract(s) -- nothing for "amulet" (the real Splice registry's factory already
 --      exists).
 --   2. 'deployNtt' (admin-submitted): resolve the core registries and the committed
---      factory, then a single 'Wormhole.Ntt.Governance.RegisterManager' call that
---      atomically mints the deployment's gg-owned transceiver 'Emitter', claims its
---      gg-scoped replay-trie root, and creates the 'NttManager' (plus, for lock/unlock, its
---      zero-balance 'LockedLedger'). No more separate `registerEmitter`/`registerReplayRoot`
---      steps -- see 'Wormhole.Ntt.Governance.RegisterManager'.
+--      factory, then a single registration call that atomically mints the deployment's
+--      gg-owned transceiver 'Emitter', claims its gg-scoped replay-trie root, and creates the
+--      'NttManager' (plus, for lock/unlock, its zero-balance 'LockedLedger'). No more separate
+--      `registerEmitter`/`registerReplayRoot` steps.
+--
+--      "mock" lock/unlock and "amulet" use 'Wormhole.Ntt.Governance.RegisterManager' directly
+--      (admin-only controller there). "mock" burn/mint uses
+--      'Wormhole.Ntt.Governance.RegisterManagerByVaa' instead: plain 'RegisterManager' makes
+--      gg (the mock instrument's admin) a co-controller for burn/mint, and gg lives on its own
+--      participant in a real topology -- one submit cannot carry both admin's and gg's
+--      authority across participants. 'RegisterManagerByVaa' is admin-only and instead takes a
+--      guardian-signed 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA, so gg never signs
+--      live (see that module's doc comment). Its 'requireCanonicalFactory' guard also only
+--      ever accepts the genuine 'Wormhole.Ntt.CoinFactory.NttCoinFactory' template (a VAA
+--      cannot name a contract id, so it cannot vet an arbitrary factory) -- "mock" burn/mint's
+--      committed factory is that canonical template, not a look-alike mock.
 module Playground.Deploy where
 
 import Daml.Script
 import DA.Optional (fromSome, fromSomeNote)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (EmitterRegistry, ReplayRootRegistry)
-import Wormhole.Ntt.Governance (RegisterManager (..))
+import Wormhole.Ntt.CoinFactory (NttCoinFactory (..))
+import Wormhole.Ntt.Governance (RegisterManager (..), RegisterManagerByVaa (..))
 import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..), nttInstrumentIdFor)
 
+import Playground.Disclose (RemoteSeam (..), toDisclosureByName, mkSeedDisclosure)
 import Playground.MockRegistry (MockPreapprovedTransferFactory (..), MockTransferPreapproval (..))
 import Playground.Types
-import Test.TestNtt (MockBurnMintFactory (..), cantonChainId)
+import Test.TestNtt (cantonChainId)
 
 ----------------------------------------------------------------------
 -- deployRegistry (gg-submitted)
@@ -53,12 +67,14 @@ data DeployRegistryOutput = DeployRegistryOutput with
   deriving (Eq, Show)
 
 -- | Stand up this deployment's mock registry factory contract(s), gg-submitted (per plan
--- §4.2/§5): for "mock" burn-mint, a 'Test.TestNtt.MockBurnMintFactory' bound to
--- @InstrumentId gg (nttInstrumentIdFor admin instrumentNonce)@; for "mock" lock-unlock, a
--- 'Playground.MockRegistry.MockPreapprovedTransferFactory' PLUS a
--- 'Test.TestNtt.MockBurnMintFactory' (the funding faucet 'Playground.Ops.fundUser' mints
--- from, per the deposit-preapproval-based funding design); no-op ("amulet") for the real
--- registry.
+-- §4.2/§5): for "mock" burn-mint, the canonical 'Wormhole.Ntt.CoinFactory.NttCoinFactory' --
+-- the only factory 'Wormhole.Ntt.Governance.RegisterManagerByVaa' may ever commit (see this
+-- module's header); for "mock" lock-unlock, a
+-- 'Playground.MockRegistry.MockPreapprovedTransferFactory' PLUS the same 'NttCoinFactory' (the
+-- funding faucet 'Playground.Ops.fundUser' mints from, per the deposit-preapproval-based
+-- funding design -- 'NttCoinFactory' is instrument-agnostic, gated only on
+-- @guardianGovernance@, so any instance serves any instrument gg administers); no-op
+-- ("amulet") for the real registry.
 deployRegistry : DeployRegistryInput -> Script DeployRegistryOutput
 deployRegistry input =
   case parseTokenKind input.tokenKind of
@@ -66,13 +82,10 @@ deployRegistry input =
     Amulet -> pure DeployRegistryOutput with registered = False, factoryCid = None
     Mock -> do
       let gg = input.guardianGovernance
-          instrumentId = InstrumentId with
-            admin = gg
-            id = nttInstrumentIdFor input.admin input.instrumentNonce
-      -- The burn/mint mock factory: the deployment's own bridged factory for "burn-mint", or
-      -- the funding faucet 'Playground.Ops.fundUser' mints from for "lock-unlock" (both bound
-      -- to the same instrument the deployment ends up using -- see 'deployNtt').
-      bmCid <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
+      -- The canonical burn/mint factory: the deployment's own committed factory for
+      -- "burn-mint", or the funding faucet 'Playground.Ops.fundUser' mints from for
+      -- "lock-unlock".
+      bmCid <- submit gg do createCmd NttCoinFactory with guardianGovernance = gg
       committedCid <- case parseTokenMode input.mode of
         BurnMint -> pure (coerceContractId bmCid)
         LockUnlock -> do
@@ -105,11 +118,23 @@ data DeployInput = DeployInput with
     -- "mock" only: the deployment's committed factory cid, as returned by THIS SAME CLI
     -- invocation's earlier 'deployRegistry' call ('DeployRegistryOutput.factoryCid') -- 'None'
     -- for "amulet" (uses amuletFactoryCid instead). Threaded through Go rather than re-resolved
-    -- via a fresh 'query @MockBurnMintFactory gg'/'query @MockPreapprovedTransferFactory gg'
+    -- via a fresh 'query @NttCoinFactory gg'/'query @MockPreapprovedTransferFactory gg'
     -- here: gg (the factory's sole signatory) lives on its own participant in the
     -- multi-participant topology, which this admin-hosted script cannot query as gg from (see
     -- 'DeployRegistryOutput.factoryCid''s doc comment).
     factoryCid         : Optional (ContractId ())
+    -- "mock" burn-mint only: the guardian-signed 'Wormhole.Ntt.Payload.RegisterBurnMintManager'
+    -- VAA authorizing 'Wormhole.Ntt.Governance.RegisterManagerByVaa' (see this module's header
+    -- for why burn/mint alone needs this). 'None'/empty for every other (mode, tokenKind) pair.
+    vaaBytes           : Optional Text
+    pubKeys            : [(Int, Text)]
+    -- "mock" burn-mint only: a pre-fetched 'Playground.Prepare:prepareDeployNtt' RemoteSeam
+    -- disclosing the committed 'Wormhole.Ntt.CoinFactory:NttCoinFactory' to @admin@ --
+    -- 'RegisterManagerByVaa' (unlike plain 'RegisterManager') fetches this factory via
+    -- 'requireCanonicalFactory', and gg is its sole signatory, so admin (co-located with
+    -- operator, never with gg) needs it explicitly disclosed. 'None' on a single-participant
+    -- profile (sandbox) or for every other (mode, tokenKind) pair.
+    remote             : Optional RemoteSeam
   deriving (Eq, Show)
 
 data DeployOutput = DeployOutput with
@@ -203,27 +228,69 @@ deployNtt input =
           factory = case config of
             BurnMint -> BurnMintFactoryCid (coerceContractId factoryCid)
             LockUnlock -> TransferFactoryCid (coerceContractId factoryCid)
-          -- Burn/mint registration is co-signed by the instrument's minter (here gg);
-          -- lock/unlock is admin-only. Mirrors Test.TestNtt:deploy's minterActAs.
-          minterActAs = case config of
-            BurnMint -> actAs gg
-            LockUnlock -> mempty
 
-      (_, mgrCid, emitterCid, _ledgerCid) <-
-        submit (actAs input.admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
-          exerciseCmd govCid RegisterManager with
-            admin = input.admin
-            chainId = cantonChainId
-            emitterRegistryCid = emReg
-            replayRootRegistryCid = rrReg
-            instrumentId
-            instrumentNonce = input.instrumentNonce
-            tokenConfig = config
-            tokenDecimals = input.tokenDecimals
-            factory
-            coreStateCid = None
-            emitterFeeAllocation = None
-            claimFeeAllocation = None
+      (_, mgrCid, emitterCid, _ledgerCid) <- case config of
+        -- Guardian-VAA-gated: co-signed by the guardian quorum's off-chain signature instead
+        -- of a live gg signature -- see this module's header. CoreState/its disclosure are
+        -- needed here (unlike the LockUnlock RegisterManager call below) because
+        -- RegisterManagerByVaa's VAA verification is mandatory regardless of fees.
+        BurnMint -> do
+          csCid <- resolveCoreState input.operator
+          csDisc <- fromSome <$> queryDisclosure input.operator csCid
+          let vaaBytes = fromSomeNote
+                "playground: mock burn-mint deployNtt needs a guardian-signed registration VAA"
+                input.vaaBytes
+          -- The committed NttCoinFactory: gg's sole signatory, invisible to admin/operator's
+          -- participant -- requireCanonicalFactory fetches it via interface, so a
+          -- multi-participant profile must disclose it (see DeployInput.remote's doc
+          -- comment); a single-participant profile needs no seam at all.
+          facDiscs <- case input.remote of
+            None -> pure []
+            Some seam -> do
+              seed <- mkSeedDisclosure input.admin
+              pure (map (toDisclosureByName seed) seam.disclosed)
+          let submitOpts = foldl (\opts d -> opts <> disclose d)
+                (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc)
+                facDiscs
+          -- trySubmit, not a bare submit: a bare submit's MustSucceed failure is a hard,
+          -- uncatchable script stop (handled out-of-band, never a Daml exception), so no
+          -- caller could ever observe it gracefully. Converting a Left into 'abort' below
+          -- raises a genuine Daml exception instead, catchable via 'tryFailureStatus' --
+          -- exactly what 'Test.TestPlayground.testPlaygroundDeployMockBurnMint' needs to
+          -- pin this wiring without a live guardian signature (its VAA can never match, see
+          -- this module's header). The real CLI path is unaffected: a genuinely
+          -- guardian-signed VAA still succeeds identically.
+          res <- trySubmit submitOpts do
+            exerciseCmd govCid RegisterManagerByVaa with
+              admin = input.admin
+              emitterRegistryCid = emReg
+              replayRootRegistryCid = rrReg
+              instrumentNonce = input.instrumentNonce
+              factory
+              coreStateCid = csCid
+              emitterFeeAllocation = None
+              claimFeeAllocation = None
+              vaaBytes
+              pubKeys = input.pubKeys
+              extraArgs = emptyExtraArgs
+          case res of
+            Right r -> pure r
+            Left err -> abort (show err)
+        LockUnlock ->
+          submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+            exerciseCmd govCid RegisterManager with
+              admin = input.admin
+              chainId = cantonChainId
+              emitterRegistryCid = emReg
+              replayRootRegistryCid = rrReg
+              instrumentId
+              instrumentNonce = input.instrumentNonce
+              tokenConfig = config
+              tokenDecimals = input.tokenDecimals
+              factory
+              coreStateCid = None
+              emitterFeeAllocation = None
+              claimFeeAllocation = None
 
       -- Lock/unlock: the admin is the lock's custodian/receiver (Manager.daml's admin-owned
       -- custody), so it self-creates its own standing preapproval here -- this is what makes

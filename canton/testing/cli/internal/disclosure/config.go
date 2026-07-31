@@ -77,7 +77,7 @@ func DefaultDisclose() []Entry {
 		{Template: "Wormhole.Ntt.Deposit:DepositPreapproval", FetchAs: "GuardianGovernance"},
 		{Template: "Playground.MockRegistry:MockTransferPreapproval", FetchAs: "GuardianGovernance"},
 		{Template: "Playground.MockRegistry:MockPreapprovedTransferFactory", FetchAs: "GuardianGovernance"},
-		{Template: "Test.TestNtt:MockBurnMintFactory", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Ntt.CoinFactory:NttCoinFactory", FetchAs: "GuardianGovernance"},
 		{Template: "Test.TestNtt:Cip56MockHolding", FetchAs: "GuardianGovernance"},
 	}
 }

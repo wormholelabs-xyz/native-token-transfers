@@ -13,6 +13,7 @@ module Test.TestPlayground where
 import Daml.Script
 import DA.Assert ((===))
 import DA.Optional (fromSome)
+import DA.Text (isInfixOf)
 import DA.Time (hours, addRelTime)
 import DA.TextMap qualified as TextMap
 
@@ -24,11 +25,14 @@ import Splice.Api.Token.TransferInstructionV1
   , TransferInstructionResult_Output (..) )
 import Wormhole.Core.Bytes (leftPadTo, normalizeHex)
 import Wormhole.Ntt.Amount (trimAmount, trimAmountTo)
-import Wormhole.Ntt.Manager (NttTokenConfig (..), nttInstrumentIdFor)
+import Wormhole.Ntt.Coin (NttCoin (..))
+import Wormhole.Ntt.CoinFactory (NttCoinFactory (..))
+import Wormhole.Ntt.Manager (NttTokenConfig (..))
 import Wormhole.Ntt.Payload
   ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer )
 
-import Test.TestNtt (mkHolding, expectAbort, sendScaffold, nttSetup, Cip56MockHolding)
+import Test.TestCore (devnetGuardianPubKey)
+import Test.TestNtt (mkHolding, expectAbort, sendScaffold, nttSetup, registerHappyVAA)
 
 import Playground.Deploy
 import Playground.MockRegistry
@@ -120,10 +124,18 @@ testMockRegistryRequiresPreapproval = do
 -- Playground.Deploy: the gg-submitted deployRegistry -> admin-submitted deployNtt sequence
 ----------------------------------------------------------------------
 
--- | A "mock" burn-mint deployment: 'deployRegistry' (gg) creates the burn/mint mock
--- factory, then 'deployNtt' (admin) resolves it and drives one
--- 'Wormhole.Ntt.Governance.RegisterManager' call -- one manager + gg-owned emitter, burn/mint
--- instrument bound to the registering admin, no ledger (burn/mint has none).
+-- | A "mock" burn-mint deployment: 'deployRegistry' (gg) creates the canonical
+-- 'Wormhole.Ntt.CoinFactory.NttCoinFactory'; 'deployNtt' (admin) then routes registration
+-- through 'Wormhole.Ntt.Governance.RegisterManagerByVaa', which needs a genuine guardian
+-- signature over the freshly-allocated (operator, admin) pair -- something no static
+-- Daml Script fixture can ever produce (registrationBinding commits to their real,
+-- nondeterministic party fingerprints; see 'Test.TestNtt.testRegisterManagerByVaaBindingMismatch',
+-- which accepts the identical limit). The true happy path is exercised only by the Go
+-- LocalNet e2e suite, which signs against real allocated party ids. This test calls
+-- 'deployNtt' itself -- so a wiring break upstream of the VAA check still fails it -- and
+-- checks it fails at exactly the binding-mismatch gate, not earlier. 'deployNtt' uses
+-- 'trySubmit' (not a bare 'submit') for this exercise precisely so the failure is a genuine
+-- Daml exception here, catchable via 'tryFailureStatus'.
 testPlaygroundDeployMockBurnMint : Script ()
 testPlaygroundDeployMockBurnMint = do
   (operator, gg, _csId) <- nttSetup
@@ -136,7 +148,7 @@ testPlaygroundDeployMockBurnMint = do
     tokenKind = "mock"
     instrumentNonce = 0
 
-  deployOut <- deployNtt DeployInput with
+  outcome <- tryFailureStatus $ deployNtt DeployInput with
     operator
     guardianGovernance = gg
     admin
@@ -147,10 +159,15 @@ testPlaygroundDeployMockBurnMint = do
     instrumentAdmin = None
     amuletFactoryCid = None
     factoryCid = regOut.factoryCid
+    vaaBytes = Some registerHappyVAA
+    pubKeys = [(0, devnetGuardianPubKey)]
+    remote = None
 
-  (_, mgr) <- resolveManager operator deployOut.managerId
-  mgr.tokenConfig === BurnMint
-  mgr.instrumentId === InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
+  case outcome of
+    Left fs -> assertMsg
+      ("expected failure containing 'registration binding does not match', got: " <> fs.message)
+      ("registration binding does not match" `isInfixOf` fs.message)
+    Right _ -> abort "deployNtt succeeded; expected a registration-binding mismatch"
 
 -- | A "mock" lock-unlock deployment: 'deployRegistry' additionally creates a
 -- 'Playground.MockRegistry.MockPreapprovedTransferFactory' (the lock/unlock committed
@@ -180,6 +197,9 @@ testPlaygroundDeployMockLockUnlock = do
     instrumentAdmin = None
     amuletFactoryCid = None
     factoryCid = regOut.factoryCid
+    vaaBytes = None
+    pubKeys = []
+    remote = None
 
   (_, mgr) <- resolveManager operator deployOut.managerId
   mgr.tokenConfig === LockUnlock
@@ -211,6 +231,11 @@ testPlaygroundFundUserDeposits = do
   (d, _discs) <- sendScaffold operator gg admin BurnMint csId
   recipient <- allocateParty "PlaygroundFundRecipient"
 
+  -- fundUser mints via the canonical NttCoinFactory (Playground.Deploy.deployRegistry stands
+  -- this up in the real flow); sendScaffold isolates Ops.daml from Deploy.daml (this module's
+  -- header), so this test stands one up itself.
+  _ <- submit gg do createCmd NttCoinFactory with guardianGovernance = gg
+
   _ <- preapprove PreapproveInput with
     admin
     guardianGovernance = gg
@@ -224,7 +249,7 @@ testPlaygroundFundUserDeposits = do
     owner = recipient
     amount = 0.5
 
-  Some v <- queryContractId recipient (fromInterfaceContractId @Cip56MockHolding out.holdingCid)
+  Some v <- queryContractId recipient (fromInterfaceContractId @NttCoin out.holdingCid)
   v.amount === 0.5
   v.owner === recipient
 

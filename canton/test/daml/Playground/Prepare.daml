@@ -33,12 +33,13 @@ module Playground.Prepare where
 import Daml.Script
 import DA.Optional (fromSome)
 import Wormhole.Core.VAA (parseVAA)
+import Wormhole.Ntt.CoinFactory (NttCoinFactory)
 import Wormhole.Ntt.Deposit (DepositPreapproval)
 import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..))
 import Test.TestNtt (Cip56MockHolding, MockBurnMintFactory)
 import Test.TestReplay (coveringDisclosure)
 
-import Playground.Disclose (RemoteSeam (..), DisclosedContractIn (..))
+import Playground.Disclose (RemoteSeam (..), DisclosedContractIn (..), resolveBurnMintFactoryDisclosure)
 import Playground.MockRegistry (MockPreapprovedTransferFactory, MockTransferPreapproval)
 import Playground.Types
 
@@ -111,8 +112,8 @@ prepareTransferOut input = do
 
   facDisclosed <- case mgr.factory of
     BurnMintFactoryCid cid -> do
-      d <- fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
-      pure (gated allowed "Test.TestNtt:MockBurnMintFactory" d)
+      (tid, d) <- resolveBurnMintFactoryDisclosure gg cid
+      pure (gated allowed tid d)
     TransferFactoryCid cid -> do
       d <- fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockPreapprovedTransferFactory)
       pure (gated allowed "Playground.MockRegistry:MockPreapprovedTransferFactory" d)
@@ -183,8 +184,8 @@ prepareReceive input = do
         [] -> abort "playground: recipient has no DepositPreapproval -- run `preapprove` first"
         _ -> abort "playground: more than one DepositPreapproval for the recipient"
       preDisc <- fromSome <$> queryDisclosure gg preCid
-      facDisc <- case mgr.factory of
-        BurnMintFactoryCid cid -> fromSome <$> queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
+      (facTid, facDisc) <- case mgr.factory of
+        BurnMintFactoryCid cid -> resolveBurnMintFactoryDisclosure gg cid
         TransferFactoryCid _ -> abort "playground: burn/mint deployment has a lock/unlock factory -- inconsistent state"
       pure emptyRemoteSeam with
         mgrCid = Some mgrCid
@@ -196,7 +197,7 @@ prepareReceive input = do
           gated allowed "Wormhole.Ntt.Manager:NttManager" dMgr
           <> gated allowed "Wormhole.Core.State:CoreState" dCs
           <> gated allowed "Wormhole.Core.Replay:ReplayNode" nodeDisc
-          <> gated allowed "Test.TestNtt:MockBurnMintFactory" facDisc
+          <> gated allowed facTid facDisc
           <> gated allowed "Wormhole.Ntt.Deposit:DepositPreapproval" preDisc
 
     LockUnlock -> do
@@ -236,6 +237,33 @@ prepareReceive input = do
           <> potDisclosed
           <> facDisclosed
           <> gated allowed "Playground.MockRegistry:MockTransferPreapproval" preDisc
+
+----------------------------------------------------------------------
+-- prepareDeployNtt (Playground.Deploy:deployNtt's Mock-burn-mint resolver half)
+----------------------------------------------------------------------
+
+data PrepareDeployNttInput = PrepareDeployNttInput with
+    guardianGovernance : Party
+    factoryCid         : ContractId ()  -- Playground.Deploy:DeployRegistryOutput.factoryCid
+    discloseTemplates  : [Text]
+  deriving (Eq, Show)
+
+-- | Resolves the ONE thing 'Playground.Deploy:deployNtt''s Mock burn-mint branch needs from
+-- gg's own participant: a disclosure of the committed canonical
+-- 'Wormhole.Ntt.CoinFactory:NttCoinFactory' 'deployRegistry' already created (gg's sole
+-- signatory) -- 'Wormhole.Ntt.Governance.RegisterManagerByVaa' fetches it via
+-- 'requireCanonicalFactory', unlike plain 'RegisterManager', which only ever stores 'factory'
+-- as a field. Everything else deployNtt needs
+-- (NttGovernance/EmitterRegistry/ReplayRootRegistry/CoreState) it already resolves locally as
+-- operator, which stays co-located with admin (see 'Playground.Disclose''s doc comment) --
+-- only gg's factory crosses participants here.
+prepareDeployNtt : PrepareDeployNttInput -> Script RemoteSeam
+prepareDeployNtt input = do
+  let gg = input.guardianGovernance
+      allowed = input.discloseTemplates
+  d <- fromSome <$> queryDisclosure gg (coerceContractId input.factoryCid : ContractId NttCoinFactory)
+  pure emptyRemoteSeam with
+    disclosed = gated allowed "Wormhole.Ntt.CoinFactory:NttCoinFactory" d
 
 ----------------------------------------------------------------------
 -- preparePublish (Playground.Ops:publishMessage's resolver half)

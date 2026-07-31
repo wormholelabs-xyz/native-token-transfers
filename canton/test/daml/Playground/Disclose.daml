@@ -22,8 +22,9 @@
 module Playground.Disclose where
 
 import Daml.Script
+import DA.Optional (fromSome, fromSomeNote)
 import DA.Text (isSuffixOf)
-import DA.Optional (fromSomeNote)
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.AmuletRules qualified as AmuletRules
 import Splice.Round qualified as Round
 import Splice.ExternalPartyAmuletRules qualified as ExternalPartyAmuletRules
@@ -31,6 +32,7 @@ import Splice.ExternalPartyConfigState qualified as ExternalPartyConfigState
 
 import Wormhole.Core.State (CoreState, Emitter, EmitterRegistry, ReplayRootRegistry)
 import Wormhole.Core.Replay (ReplayNode)
+import Wormhole.Ntt.CoinFactory (NttCoinFactory)
 import Wormhole.Ntt.Deposit (DepositPreapproval)
 import Wormhole.Ntt.Governance (NttGovernance)
 import Wormhole.Ntt.Ledger (LockedLedger)
@@ -72,6 +74,22 @@ mkSeedDisclosure owner = do
   cid <- submit owner do createCmd DisclosureSeed with owner
   fromSomeNote "mkSeedDisclosure: queryDisclosure returned None for a contract just created"
     <$> queryDisclosure owner cid
+
+-- | Disclose a deployment's committed burn/mint factory, identifying which concrete template
+-- backs it: the canonical 'Wormhole.Ntt.CoinFactory.NttCoinFactory' (every real deployment,
+-- via 'Playground.Deploy.deployRegistry') or 'Test.TestNtt.MockBurnMintFactory' (a
+-- 'Test.TestNtt.deploy'-built scaffold used only to test 'Playground.Ops' in isolation from
+-- 'Playground.Deploy' -- see 'Test.TestPlayground''s header). 'queryDisclosure' hard-crashes
+-- (rather than returning 'None') on a genuine template mismatch, so this disambiguates first
+-- by checking whether @cid@ is among @gg@'s currently-visible 'NttCoinFactory' instances.
+resolveBurnMintFactoryDisclosure : Party -> ContractId BurnMintFactory -> Script (Text, Disclosure)
+resolveBurnMintFactoryDisclosure gg cid = do
+  ncfs <- query @NttCoinFactory gg
+  if coerceContractId cid `elem` map fst ncfs
+    then (,) "Wormhole.Ntt.CoinFactory:NttCoinFactory" . fromSome <$>
+      queryDisclosure gg (coerceContractId cid : ContractId NttCoinFactory)
+    else (,) "Test.TestNtt:MockBurnMintFactory" . fromSome <$>
+      queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
 
 -- | Map a registry/prepare-script @templateId@'s "<Module>:<Entity>" suffix to the matching
 -- type's 'templateTypeRep', producing a 'Disclosure' for @d@ by record-updating @seed@ (see
@@ -122,6 +140,8 @@ toDisclosureByName seed d
       mkDisclosure @MockTransferPreapproval
   | "Playground.MockRegistry:MockPreapprovedTransferFactory" `isSuffixOf` d.templateId =
       mkDisclosure @MockPreapprovedTransferFactory
+  | "Wormhole.Ntt.CoinFactory:NttCoinFactory" `isSuffixOf` d.templateId =
+      mkDisclosure @NttCoinFactory
   | "Test.TestNtt:MockBurnMintFactory" `isSuffixOf` d.templateId =
       mkDisclosure @MockBurnMintFactory
   | "Test.TestNtt:Cip56MockHolding" `isSuffixOf` d.templateId =

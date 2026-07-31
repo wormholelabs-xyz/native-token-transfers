@@ -3,6 +3,6 @@
     { "template": "Wormhole.Ntt.Manager:NttManager", "fetchAs": "GuardianGovernance" },
     { "template": "Wormhole.Core.State:CoreState", "fetchAs": "GuardianGovernance" },
     { "template": "Wormhole.Core.State:Emitter", "fetchAs": "GuardianGovernance" },
-    { "template": "Test.TestNtt:MockBurnMintFactory", "fetchAs": "GuardianGovernance" }
+    { "template": "Wormhole.Ntt.CoinFactory:NttCoinFactory", "fetchAs": "GuardianGovernance" }
   ]
 }
