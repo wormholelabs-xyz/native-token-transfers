@@ -131,9 +131,9 @@ data DeployInput = DeployInput with
     -- "mock" burn-mint only: a pre-fetched 'Playground.Prepare:prepareDeployNtt' RemoteSeam
     -- disclosing the committed 'Token.CIP0056.CoinFactory:CoinFactory' to @admin@ --
     -- 'RegisterManagerByVaa' (unlike plain 'RegisterManager') fetches this factory via
-    -- 'requireCanonicalFactory', and gg is its sole signatory, so admin (co-located with
-    -- operator, never with gg) needs it explicitly disclosed. 'None' on a single-participant
-    -- profile (sandbox) or for every other (mode, tokenKind) pair.
+    -- 'requireCanonicalFactory', and gg is its sole signatory, so admin needs it explicitly
+    -- disclosed. 'None' on a single-participant profile (sandbox), where 'deployNtt' resolves
+    -- the disclosure locally as gg instead, or for every other (mode, tokenKind) pair.
     remote             : Optional RemoteSeam
   deriving (Eq, Show)
 
@@ -240,12 +240,17 @@ deployNtt input =
           let vaaBytes = fromSomeNote
                 "playground: mock burn-mint deployNtt needs a guardian-signed registration VAA"
                 input.vaaBytes
-          -- The committed CoinFactory: gg's sole signatory, invisible to admin/operator's
-          -- participant -- requireCanonicalFactory fetches it via interface, so a
-          -- multi-participant profile must disclose it (see DeployInput.remote's doc
-          -- comment); a single-participant profile needs no seam at all.
+          -- The committed CoinFactory: gg's sole signatory, and requireCanonicalFactory
+          -- fetches it, so admin's submit needs it disclosed on EVERY profile -- visibility
+          -- is party-scoped, not participant-scoped, so co-location with gg does not help.
+          -- Single-participant profiles resolve the disclosure locally as gg (the same
+          -- fast path as Ops.daml's None branches); multi-participant profiles attach the
+          -- prepareDeployNtt seam (see DeployInput.remote's doc comment).
           facDiscs <- case input.remote of
-            None -> pure []
+            None -> do
+              d <- fromSome <$> queryDisclosure input.guardianGovernance
+                (coerceContractId factoryCid : ContractId CoinFactory)
+              pure [d]
             Some seam -> do
               seed <- mkSeedDisclosure input.admin
               pure (map (toDisclosureByName seed) seam.disclosed)
