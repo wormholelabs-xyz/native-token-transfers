@@ -39,7 +39,7 @@ import Wormhole.Core.State (Emitter)
 import Wormhole.Ntt.Governance (NttGovernance, RegisterManager (..))
 import Wormhole.Ntt.Manager qualified as M
 import Wormhole.Ntt.Deposit (DepositPreapproval (..), Deposit (..))
-import Test.TestNtt (nttSetup, coreRegistries, cantonChainId, b32)
+import Test.TestNtt (nttSetup, nttCoinFactorySetup, coreRegistries, cantonChainId, b32)
 
 -- | A contract signed by @victim@. If an attacker-authored factory can create
 -- one of these, it wielded @victim@'s (gg's) authority.
@@ -420,6 +420,18 @@ testAttackerCannotRegisterGgMintedManager = do
   let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
   (discs, register) <- registerBurnMint operator attacker inst
     (toInterfaceContractId @BurnMintFactory evilFactory)
+  submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
+
+-- | Same property against a real 'Token.CIP0056.CoinFactory.CoinFactory':
+-- the co-signature gate protects registration, not the factory's trustworthiness.
+testAttackerCannotRegisterGgMintedManagerWithRealFactory : Script ()
+testAttackerCannotRegisterGgMintedManagerWithRealFactory = do
+  (operator, gg, _) <- nttSetup
+  factoryCid <- nttCoinFactorySetup gg
+  attacker <- allocateParty "AttackerGgMintRealFactory"
+  let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
+  (discs, register) <- registerBurnMint operator attacker inst
+    (toInterfaceContractId @BurnMintFactory factoryCid)
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
 -- | A holding signed by its owner alone whose interface view lies about the

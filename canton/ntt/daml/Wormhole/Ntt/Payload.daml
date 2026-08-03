@@ -145,8 +145,8 @@ decodeWormholeTransceiverMessage b =
 -- >  module(32) ‖ action(1) ‖ chain(2) ‖ <action-specific>
 --
 -- mirroring the core's own packet layout (@Wormhole.Core.Governance@) but under
--- NTT's own module id, so an NTT governance VAA can never be confused with (or
--- replayed as) a core one even before replay-trie scoping is considered.
+-- NTT's own module id, so an NTT governance VAA can never be confused with a
+-- core one.
 ----------------------------------------------------------------------
 
 -- | The NTT governance module identifier: ASCII "Ntt" (0x4e7474) left-padded to
@@ -155,54 +155,74 @@ decodeWormholeTransceiverMessage b =
 nttGovernanceModule : Bytes32
 nttGovernanceModule = "00000000000000000000000000000000000000000000000000000000004e7474"
 
--- | 'AcceptAdminToGovernance' — the only NTT governance action defined so far:
--- the guardian quorum accepts the admin role of the manager identified by
--- @(managerAddress, factoryEpoch)@ into @guardianGovernance@.
+-- | The guardian quorum accepts the admin role of the manager identified by
+-- @(managerAddress, factoryEpoch)@ into @guardianGovernance@. See
+-- 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa'.
 nttGovernanceAcceptAdminAction : Int
 nttGovernanceAcceptAdminAction = 1
 
--- | A parsed NTT governance action: the guardian quorum accepts the admin role
--- of the manager identified by @(managerAddress, factoryEpoch)@ into
--- @guardianGovernance@. @chain@ must match the target manager's own
--- @Wormhole.Ntt.Manager.NttManager.chainId@ (72 on Canton) — the same field
--- 'Wormhole.Ntt.Manager.verifyInboundTransfer' checks an inbound transfer's
--- @recipientChain@ against, kept consistent here; @managerAddress@ and
--- @factoryEpoch@ must match the target 'Wormhole.Ntt.Manager.NttManager' —
--- see 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa' for how each field is
--- checked.
---
--- This is the only NTT governance action defined so far, so it is its own
--- type rather than one constructor of a sum type: Daml only allows record
--- (@with@) syntax on a single-constructor 'data' type when the constructor's
--- name equals the type's (contrast 'Wormhole.Core.Governance.GovernanceAction',
--- a genuine sum type with 4 constructors, which is why ITS constructors can be
--- named for their actions instead of repeating the type name). A second NTT
--- governance action would turn this into a proper
--- @data NttGovernanceAction = AcceptAdminToGovernance with .. | ..@ sum type.
-data AcceptAdminToGovernance = AcceptAdminToGovernance with
-    chain          : Int      -- uint16: Wormhole chain id
-    managerAddress : Bytes32
-    factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
+-- | The guardian quorum co-signs a gg-minted burn/mint registration alongside
+-- the registering admin. See 'Wormhole.Ntt.Governance.RegisterManagerByVaa'.
+nttGovernanceRegisterBurnMintManagerAction : Int
+nttGovernanceRegisterBurnMintManagerAction = 2
+
+-- | The guardian quorum vets a factory rotation for a gg-minted deployment. See
+-- 'Wormhole.Ntt.Manager.SetFactoryByVaa'.
+nttGovernanceRotateToCanonicalFactoryAction : Int
+nttGovernanceRotateToCanonicalFactoryAction = 3
+
+-- | A parsed NTT governance action. Every call site does an exhaustive
+-- constructor match and aborts on the wrong one, even where fields overlap
+-- positionally ('AcceptAdminToGovernance' vs 'RotateToCanonicalFactory') --
+-- a guardian-signed VAA for one action must never satisfy another just
+-- because the bytes happen to parse.
+data NttGovernanceAction
+  = AcceptAdminToGovernance with
+      chain          : Int      -- uint16: Wormhole chain id
+      managerAddress : Bytes32
+      factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
+  | RegisterBurnMintManager with
+      chain               : Int      -- uint16: Wormhole chain id
+      registrationBinding : Bytes32  -- nttRegistrationBindingFor operator admin instrumentNonce
+      tokenDecimals       : Int      -- uint8: 0..10
+  | RotateToCanonicalFactory with
+      chain          : Int      -- uint16: Wormhole chain id
+      managerAddress : Bytes32
+      factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
   deriving (Eq, Show)
 
--- | Encode an 'AcceptAdminToGovernance': module(32) ‖ action(1) ‖ chain(2) ‖
--- managerAddress(32) ‖ factoryEpoch(8) — 75 bytes total. The inverse of
--- 'parseNttGovernance'.
-encodeNttGovernance : AcceptAdminToGovernance -> Bytes
-encodeNttGovernance action =
-  nttGovernanceModule
-    <> intToHexByte nttGovernanceAcceptAdminAction
-    <> intToBytesN action.chain 2
-    <> leftPadTo 32 action.managerAddress
-    <> intToBytesN action.factoryEpoch 8
+-- | Encode an 'NttGovernanceAction'. The inverse of 'parseNttGovernance'.
+-- @AcceptAdminToGovernance@/@RotateToCanonicalFactory@ are 75 bytes
+-- (module(32) ‖ action(1) ‖ chain(2) ‖ managerAddress(32) ‖ factoryEpoch(8));
+-- @RegisterBurnMintManager@ is 68 (module(32) ‖ action(1) ‖ chain(2) ‖
+-- registrationBinding(32) ‖ tokenDecimals(1)).
+encodeNttGovernance : NttGovernanceAction -> Bytes
+encodeNttGovernance = \case
+  AcceptAdminToGovernance chain managerAddress factoryEpoch ->
+    nttGovernanceModule
+      <> intToHexByte nttGovernanceAcceptAdminAction
+      <> intToBytesN chain 2
+      <> leftPadTo 32 managerAddress
+      <> intToBytesN factoryEpoch 8
+  RegisterBurnMintManager chain registrationBinding tokenDecimals ->
+    nttGovernanceModule
+      <> intToHexByte nttGovernanceRegisterBurnMintManagerAction
+      <> intToBytesN chain 2
+      <> leftPadTo 32 registrationBinding
+      <> intToHexByte tokenDecimals
+  RotateToCanonicalFactory chain managerAddress factoryEpoch ->
+    nttGovernanceModule
+      <> intToHexByte nttGovernanceRotateToCanonicalFactoryAction
+      <> intToBytesN chain 2
+      <> leftPadTo 32 managerAddress
+      <> intToBytesN factoryEpoch 8
 
--- | Parse an NTT governance packet. Verifies the module is "Ntt" and dispatches
--- on the action id. Aborts (via 'error', matching 'Wormhole.Core.Governance.parseGovernance')
--- on the wrong module, an unknown action, or malformed input — the caller
--- ('Wormhole.Ntt.Manager.AcceptAdminTransferByVaa') runs this only after VAA
--- signature verification, so a parse failure here means a genuinely
--- guardian-signed VAA for the wrong purpose, not a forgery.
-parseNttGovernance : Bytes -> AcceptAdminToGovernance
+-- | Parse an NTT governance packet: verify module = "Ntt", dispatch on action
+-- id, abort (via 'error') on wrong module/unknown action/malformed input.
+-- Callers only reach this after VAA signature verification, so a parse
+-- failure here means a genuinely guardian-signed VAA for the wrong purpose,
+-- not a forgery.
+parseNttGovernance : Bytes -> NttGovernanceAction
 parseNttGovernance payload =
   let
     moduleId = normalizeHex (sliceBytes 0 32 payload)
@@ -212,8 +232,16 @@ parseNttGovernance payload =
     if moduleId /= nttGovernanceModule
       then error "ntt governance: not the Ntt module"
       else case action of
-        1 -> AcceptAdminToGovernance with
+        1 -> AcceptAdminToGovernance
                chain
-               managerAddress = normalizeHex (sliceBytes 35 32 payload)
-               factoryEpoch = bytesToInt (sliceBytes 67 8 payload)
+               (normalizeHex (sliceBytes 35 32 payload))
+               (bytesToInt (sliceBytes 67 8 payload))
+        2 -> RegisterBurnMintManager
+               chain
+               (normalizeHex (sliceBytes 35 32 payload))
+               (bytesToInt (sliceBytes 67 1 payload))
+        3 -> RotateToCanonicalFactory
+               chain
+               (normalizeHex (sliceBytes 35 32 payload))
+               (bytesToInt (sliceBytes 67 8 payload))
         _ -> error ("ntt governance: unsupported action " <> show action)

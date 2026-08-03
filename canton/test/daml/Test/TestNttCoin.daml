@@ -1,0 +1,128 @@
+-- | Manager-integration Daml Script tests against the real, gg-owned
+-- 'Token.CIP0056.CoinFactory.CoinFactory' and its paired 'Coin' holding.
+-- Token-mechanics coverage (mint/burn, multi-tenancy, defensive checks) lives
+-- upstream in 'wormholelabs-xyz/CantonExamples' (tokens/cip0056-test); these
+-- two scripts drive the factory through 'Wormhole.Ntt.Manager' registration
+-- and transfer/deposit paths, which upstream cannot exercise.
+module Test.TestNttCoin where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding)
+import Splice.Api.Token.BurnMintV1
+  ( BurnMintFactory, BurnMintFactory_BurnMint(..)
+  , BurnMintOutput(..)
+  )
+import Token.CIP0056.Coin
+import Token.CIP0056.CoinFactory
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Ntt.Deposit (DepositPreapproval(..), Deposit(..))
+import Wormhole.Ntt.Manager
+import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32)
+import Test.TestFactoryAuthority (registerBurnMint)
+
+-- | The interface-typed handle tests exercise choices on.
+asBurnMintFactory : ContractId CoinFactory -> ContractId BurnMintFactory
+asBurnMintFactory = toInterfaceContractId @BurnMintFactory
+
+-- | Mint one coin directly against the factory — the only way to seed an
+-- initial balance on a burn/mint chain outside of a real inbound transfer.
+mintCoin : ContractId CoinFactory -> Party -> InstrumentId -> Party -> Decimal -> Script (ContractId Holding)
+mintCoin factoryCid gg instrumentId owner amount = do
+  res <- submit (actAs gg <> actAs owner) do
+    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
+      expectedAdmin = gg
+      instrumentId
+      inputHoldingCids = []
+      outputs = [BurnMintOutput with owner, amount, context = emptyExtraArgs.context]
+      extraActors = [owner]
+      extraArgs = emptyExtraArgs
+  case res.outputCids of
+    [cid] -> pure cid
+    _ -> abort ("expected exactly one minted coin, got: " <> show res.outputCids)
+
+----------------------------------------------------------------------
+-- Canonical sharing across unrelated deployments
+----------------------------------------------------------------------
+
+-- | One 'CoinFactory' cid served to two different admins' deployments —
+-- proving genuine sharing, not per-deployment duplication.
+testNttCoinFactoryServesTwoDistinctAdmins : Script ()
+testNttCoinFactoryServesTwoDistinctAdmins = do
+  (operator, gg, _) <- nttSetup
+  factoryCid <- nttCoinFactorySetup gg
+  alice <- allocateParty "CoinSharedAlice"
+  bob <- allocateParty "CoinSharedBob"
+  let instA = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
+      instB = InstrumentId with admin = gg, id = nttInstrumentIdFor bob 0
+
+  (discsA, registerA) <- registerBurnMint operator alice instA (asBurnMintFactory factoryCid)
+  (mgrA, _) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsA)) registerA
+  (discsB, registerB) <- registerBurnMint operator bob instB (asBurnMintFactory factoryCid)
+  (mgrB, _) <- submit (actAs bob <> actAs gg <> mconcat (map disclose discsB)) registerB
+
+  Some ma <- queryContractId operator mgrA
+  Some mb <- queryContractId operator mgrB
+  ma.factory === BurnMintFactoryCid (asBurnMintFactory factoryCid)
+  mb.factory === BurnMintFactoryCid (asBurnMintFactory factoryCid)
+  assert (ma.instrumentId /= mb.instrumentId)
+
+----------------------------------------------------------------------
+-- End-to-end round trip against the real factory
+----------------------------------------------------------------------
+
+-- | End-to-end round trip against the real factory: mint, burn via outbound
+-- 'Transfer' (checking change), then re-mint via 'Deposit' -- not a
+-- VAA-driven 'Mint', since a static VAA fixture can't name a fresh Party.
+testNttCoinEndToEndRoundTrip : Script ()
+testNttCoinEndToEndRoundTrip = do
+  (operator, gg, csId) <- nttSetup
+  factoryCid <- nttCoinFactorySetup gg
+  alice <- allocateParty "CoinRoundTripAlice"
+  let instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
+
+  (discsReg, register) <- registerBurnMint operator alice instrumentId (asBurnMintFactory factoryCid)
+  (mgrCid, emitterCid) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsReg)) register
+  mgrCid' <- submit alice do
+    exerciseCmd mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+
+  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
+  factoryDisc <- fromSome <$> queryDisclosure gg factoryCid
+  _ <- submit (actAs alice <> disclose csDisc <> disclose emitterDisc <> disclose factoryDisc) do
+    exerciseCmd mgrCid' Transfer with
+      user = alice
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      ledgerCid = None
+      recipientChain = 2
+      recipientAddress = b32 "ee"
+      sourceToken = b32 "dd"
+      rawAmount = 1000000
+      nonce = 0
+      consistencyLevel = 0
+      inputHoldingCids = [coinCid]
+      feeAllocation = None
+      extraArgs = emptyExtraArgs
+
+  remaining <- query @Coin gg
+  [ cid | (cid, c) <- remaining, c.owner == alice ] === []
+
+  preCid <- submit alice do
+    createCmd DepositPreapproval with owner = alice, instrumentId
+  _ <- submit gg do
+    exerciseCmd preCid Deposit with
+      amount = 0.02
+      factoryCid = asBurnMintFactory factoryCid
+      extraArgs = emptyExtraArgs
+
+  minted <- query @Coin gg
+  case [ c | (_, c) <- minted, c.owner == alice ] of
+    [c] -> c.amount === 0.02
+    other -> abort ("expected exactly one minted coin owned by alice, got: " <> show other)

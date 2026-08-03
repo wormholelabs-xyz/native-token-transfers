@@ -20,21 +20,29 @@
 module Wormhole.Ntt.Governance where
 
 import DA.Map qualified as Map
+import DA.Set (Set)
+import DA.Set qualified as Set
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Wormhole.Core.Bytes (Bytes, Bytes32, normalizeHex)
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
-  , RegisterEmitter (..), ClaimReplayRoot (..) )
+  , RegisterEmitter (..), ClaimReplayRoot (..), ParseAndVerifyVAA (..) )
+import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
+import Wormhole.Ntt.Payload (NttGovernanceAction (..), parseNttGovernance)
 
 template NttGovernance
   with
     operator           : Party
     guardianGovernance : Party
     nextId             : Int
+    consumedGovernance : Set Bytes32  -- Replay protection for RegisterManagerByVaa
+                                      -- (by VAA digest); mirrors CoreState.consumedGovernance,
+                                      -- untouched by plain RegisterManager.
   where
     signatory guardianGovernance, operator
 
@@ -104,82 +112,206 @@ template NttGovernance
       -- @admin@-only.
       controller admin :: (if tokenConfig == BurnMint then [instrumentId.admin] else [])
       do
-        -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
-        -- fractional digits a Daml Decimal carries.
+        (mgr, emitterCid, ledger) <- registerManagerBody
+          operator guardianGovernance nextId admin chainId
+          emitterRegistryCid replayRootRegistryCid
+          instrumentId instrumentNonce tokenConfig tokenDecimals factory
+          coreStateCid emitterFeeAllocation claimFeeAllocation
+        reg' <- create this with nextId = nextId + 1
+        pure (reg', mgr, emitterCid, ledger)
+
+    -- | Governance-VAA-gated registration of a gg-minted burn/mint deployment:
+    -- the guardian quorum co-signs off-chain, alongside the registering
+    -- @admin@, in a 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA, so no
+    -- live gg signature is needed. @chainId@, @tokenDecimals@, @tokenConfig@
+    -- and @instrumentId@ are derived from the VAA, not caller-supplied.
+    --
+    -- Guardians should sign at most one 'NttGovernance' root per operator;
+    -- a duplicate root under a different gg key would let a second party
+    -- mint gg-administered instruments.
+    --
+    -- Guardians should sign this VAA in the same ceremony as a later
+    -- 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa' handoff for the same
+    -- deployment, if custody is meant to be quorum-owned from genesis;
+    -- until that handoff runs, @admin@ still controls
+    -- 'Wormhole.Ntt.Manager.SetPeer'.
+    choice RegisterManagerByVaa
+      : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
+      with
+        admin                 : Party
+        emitterRegistryCid    : ContractId EmitterRegistry
+        replayRootRegistryCid : ContractId ReplayRootRegistry
+        instrumentNonce       : Int
+        factory               : NttFactory
+        coreStateCid          : ContractId CoreState  -- mandatory: needed for VAA verification even at zero fees
+        emitterFeeAllocation  : Optional (ContractId Allocation, ExtraArgs)
+        claimFeeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+        vaaBytes              : Bytes
+        pubKeys               : [(Int, Bytes)]
+        extraArgs             : ExtraArgs
+      controller admin
+      do
+        -- 1. Pin CoreState before trusting any of its fields.
+        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
+
+        -- 2. Read-only VAA signature verification; nothing consumed yet.
+        vaa <- exercise coreStateCid ParseAndVerifyVAA with
+          verifier = admin
+          encodedVAA = vaaBytes
+          pubKeys
+
+        -- 3. VAA origin checks.
+        assertMsg "ntt governance: not signed by current guardian set"
+          (vaa.guardianSetIndex == cs.guardianSetIndex)
+        assertMsg "ntt governance: wrong emitter chain"
+          (vaa.emitterChain == cs.governanceChainId)
+        assertMsg "ntt governance: wrong emitter address"
+          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+
+        -- 4. Exhaustive constructor dispatch: reject any non-registration action.
+        (chainId, registrationBinding, tokenDecimals) <- case parseNttGovernance vaa.payload of
+          RegisterBurnMintManager chain binding decimals -> pure (chain, binding, decimals)
+          _ -> abort "ntt governance: not a register-burn-mint-manager action"
+
+        -- 5. Replay, checked before the binding check below.
+        assertMsg "ntt governance: registration VAA already consumed"
+          (not (Set.member vaa.hash consumedGovernance))
+
+        -- 6. Derived-value range asserts, reachable ahead of the binding
+        -- check (also re-asserted inside 'registerManagerBody').
         assertMsg "ntt: tokenDecimals must be between 0 and 10"
           (tokenDecimals >= 0 && tokenDecimals <= 10)
         assertMsg "ntt: chainId must be a positive uint16"
           (chainId > 0 && chainId <= 65535)
-        case tokenConfig of
-          BurnMint ->
-            -- The instrument's admin — gg or an external minter — co-signs via
-            -- the controller, so no on-ledger check of its consent is needed
-            -- here. The id binding keeps the instrument exclusive to one
-            -- deployment (see 'nttInstrumentIdFor').
-            assertMsg "ntt: burn/mint instrument id is not bound to the registering admin"
-              (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
-          LockUnlock -> pure ()
-        assertMsg "ntt: factory type does not match the token config"
-          (factoryMatchesConfig tokenConfig factory)
 
-        -- Mint the deployment's transceiver: gg's requester authority is
-        -- inherited from this contract's own signatories; @admin@ pays.
-        (_, emitterCid) <- exercise emitterRegistryCid RegisterEmitter with
-          requester = guardianGovernance
-          payer = admin
-          coreStateCid
-          feeAllocation = emitterFeeAllocation
-        emitter <- fetch emitterCid
-        assertMsg "ntt: emitter registry is not this bridge instance's"
-          (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
+        -- 7. Binding: no static VAA can pass this, since party fingerprints
+        -- are nondeterministic and only known once parties are allocated.
+        assertMsg "ntt governance: registration binding does not match"
+          (normalizeHex registrationBinding == nttRegistrationBindingFor operator admin instrumentNonce)
 
-        let managerAddress = nttManagerAddressFor operator admin nextId
-            namespace = nttNamespaceFor instrumentId admin nextId
+        -- 8. Factory template-pin.
+        requireCanonicalFactory guardianGovernance factory
 
-        -- Claim the deployment's replay-trie root, sub-scoped under gg by the
-        -- derived namespace.
-        rootCid <- exercise replayRootRegistryCid ClaimReplayRoot with
-          consumer = guardianGovernance
-          namespace
-          splitThreshold = defaultSplitThreshold
-          payer = admin
-          coreStateCid
-          feeAllocation = claimFeeAllocation
-        root <- fetch rootCid
-        assertMsg "ntt: replay root registry is not this bridge instance's"
-          (root.operator == operator)
+        let instrumentId = InstrumentId with
+              admin = guardianGovernance
+              id = nttInstrumentIdFor admin instrumentNonce
 
-        reg' <- create this with nextId = nextId + 1
-        mgr <- create NttManager with
-          operator
-          namespace
-          admin
-          guardianGovernance
-          chainId
-          managerId = nextId
-          managerAddress
-          transceiverEmitterId = emitter.emitterId
-          instrumentId
-          tokenConfig
-          tokenDecimals
-          peers = Map.empty
-          factory
-          paused = False
-          factoryEpoch = 0
-          -- An external minter (instrument admin ≠ gg) becomes a manager
-          -- signatory so the burn/mint paths run on its authority, not gg's;
-          -- gg-minted deployments carry None and mint on gg's inherited
-          -- signature.
-          minter = case tokenConfig of
-            BurnMint | instrumentId.admin /= guardianGovernance -> Some instrumentId.admin
-            _ -> None
-        ledger <- case tokenConfig of
-          LockUnlock -> Some <$> create LockedLedger with
-            operator
-            guardianGovernance
-            admin
-            managerAddress
-            balance = 0.0
-            custodyHoldingCid = None
-          BurnMint -> pure None
+        -- 9. Run the shared registration body; recreate the root once.
+        (mgr, emitterCid, ledger) <- registerManagerBody
+          operator guardianGovernance nextId admin chainId
+          emitterRegistryCid replayRootRegistryCid
+          instrumentId instrumentNonce BurnMint tokenDecimals factory
+          (Some coreStateCid) emitterFeeAllocation claimFeeAllocation
+        reg' <- create this with
+          nextId = nextId + 1
+          consumedGovernance = Set.insert vaa.hash consumedGovernance
         pure (reg', mgr, emitterCid, ledger)
+
+-- | Registration body shared by 'RegisterManager' and
+-- 'RegisterManagerByVaa': mints the transceiver 'Emitter', claims the
+-- replay-trie root, and creates the 'NttManager' (plus 'LockedLedger' for
+-- lock/unlock). Module-level, not a choice, so 'RegisterManagerByVaa' can
+-- call it after consuming @self@, without nest-exercising 'RegisterManager'.
+-- Callers create the successor 'NttGovernance' root themselves.
+registerManagerBody
+  : Party                          -- operator
+  -> Party                          -- guardianGovernance
+  -> Int                            -- nextId (this deployment's managerId)
+  -> Party                          -- admin (the registering admin)
+  -> Int                            -- chainId
+  -> ContractId EmitterRegistry
+  -> ContractId ReplayRootRegistry
+  -> InstrumentId
+  -> Int                            -- instrumentNonce
+  -> NttTokenConfig
+  -> Int                            -- tokenDecimals
+  -> NttFactory
+  -> Optional (ContractId CoreState)
+  -> Optional (ContractId Allocation, ExtraArgs)  -- emitterFeeAllocation
+  -> Optional (ContractId Allocation, ExtraArgs)  -- claimFeeAllocation
+  -> Update (ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
+registerManagerBody
+  operator guardianGovernance nextId admin chainId
+  emitterRegistryCid replayRootRegistryCid
+  instrumentId instrumentNonce tokenConfig tokenDecimals factory
+  coreStateCid emitterFeeAllocation claimFeeAllocation = do
+    -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
+    -- fractional digits a Daml Decimal carries.
+    assertMsg "ntt: tokenDecimals must be between 0 and 10"
+      (tokenDecimals >= 0 && tokenDecimals <= 10)
+    assertMsg "ntt: chainId must be a positive uint16"
+      (chainId > 0 && chainId <= 65535)
+    case tokenConfig of
+      BurnMint ->
+        -- The instrument's admin co-signs via the controller, so no on-ledger
+        -- consent check is needed; the id binding keeps the instrument
+        -- exclusive to one deployment (see 'nttInstrumentIdFor').
+        assertMsg "ntt: burn/mint instrument id is not bound to the registering admin"
+          (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
+      LockUnlock -> pure ()
+    assertMsg "ntt: factory type does not match the token config"
+      (factoryMatchesConfig tokenConfig factory)
+
+    -- Mint the deployment's transceiver: gg's requester authority is
+    -- inherited from the calling choice's own signatories; @admin@ pays.
+    (_, emitterCid) <- exercise emitterRegistryCid RegisterEmitter with
+      requester = guardianGovernance
+      payer = admin
+      coreStateCid
+      feeAllocation = emitterFeeAllocation
+    emitter <- fetch emitterCid
+    -- operator is an Emitter signatory; guardianGovernance is a plain field,
+    -- vouched for instead by the nested 'RegisterEmitter' exercise above.
+    assertMsg "ntt: emitter registry is not this bridge instance's"
+      (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
+
+    let managerAddress = nttManagerAddressFor operator admin nextId
+        namespace = nttNamespaceFor instrumentId admin nextId
+
+    -- Claim the deployment's replay-trie root, sub-scoped under gg by the
+    -- derived namespace.
+    rootCid <- exercise replayRootRegistryCid ClaimReplayRoot with
+      consumer = guardianGovernance
+      namespace
+      splitThreshold = defaultSplitThreshold
+      payer = admin
+      coreStateCid
+      feeAllocation = claimFeeAllocation
+    root <- fetch rootCid
+    -- operator is a ReplayNode signatory, so this equality also proves the
+    -- party co-signed the claimed root.
+    assertMsg "ntt: replay root registry is not this bridge instance's"
+      (root.operator == operator)
+
+    mgr <- create NttManager with
+      operator
+      namespace
+      admin
+      guardianGovernance
+      chainId
+      managerId = nextId
+      managerAddress
+      transceiverEmitterId = emitter.emitterId
+      instrumentId
+      tokenConfig
+      tokenDecimals
+      peers = Map.empty
+      factory
+      paused = False
+      factoryEpoch = 0
+      -- An external minter (instrument admin ≠ gg) becomes a manager
+      -- signatory so burn/mint runs on its authority; gg-minted
+      -- deployments carry None and mint on gg's inherited signature.
+      minter = case tokenConfig of
+        BurnMint | instrumentId.admin /= guardianGovernance -> Some instrumentId.admin
+        _ -> None
+    ledger <- case tokenConfig of
+      LockUnlock -> Some <$> create LockedLedger with
+        operator
+        guardianGovernance
+        admin
+        managerAddress
+        balance = 0.0
+        custodyHoldingCid = None
+      BurnMint -> pure None
+    pure (mgr, emitterCid, ledger)

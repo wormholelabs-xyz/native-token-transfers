@@ -156,6 +156,20 @@ prefix `0x994E5454`; `NttManagerMessage`; `WormholeTransceiverMessage`, prefix
 scale byte, at most 8 decimals. Round-trips are covered by
 `TestNtt:testNttCodec`.
 
+The same module also codes NTT's own governance packets — `module(32)
+"Ntt" ‖ action(1) ‖ chain(2) ‖ <action-specific>`, under the module id `"Ntt"`
+so an NTT governance VAA can never be confused with (or replayed as) a core
+one. `NttGovernanceAction` is a genuine sum type over the three actions
+guardians can sign: accept an admin handoff
+(`AcceptAdminToGovernance`, `NttManager.AcceptAdminTransferByVaa`), co-sign a
+gg-minted burn/mint registration (`RegisterBurnMintManager`,
+`NttGovernance.RegisterManagerByVaa`), and vet a factory rotation
+(`RotateToCanonicalFactory`, `NttManager.SetFactoryByVaa`). Every call site
+dispatches on the parsed constructor exhaustively and aborts on the wrong one,
+even where two actions share an identical byte layout (accept-admin and
+rotate both do) — a guardian-signed VAA for one purpose must never satisfy a
+different choice just because its bytes happen to parse.
+
 ## Send (`NttManager.Transfer`)
 
 `Transfer` is controlled by `user`, the token owner, alone; no admin or
@@ -295,6 +309,29 @@ round-trip), so the handoff recreates it once to move that observership to the
 incoming admin. The same choice serves plain admin succession between ordinary
 parties, and lets `gg` hand the role back.
 
+**Governance runs by VAA, not live signature.** The admin handoff above needs
+no live `gg` signature: any permissionless relayer submits a guardian-signed
+`AcceptAdminToGovernance` VAA against the current admin's standing
+`AdminTransferProposal` (`NttManager.AcceptAdminTransferByVaa`), and `gg`'s
+authority is inherited from the manager's own signatories rather than
+supplied live. The same pattern extends to the two other points where a
+gg-minted deployment would otherwise need `gg`'s live signature: standing up
+the deployment at all (`NttGovernance.RegisterManagerByVaa`, where the
+guardians co-sign the registration alongside the admin instead of `gg`
+appearing in the controller list) and rotating the committed factory
+(`NttManager.SetFactoryByVaa`). Both are VAA-gated the same way as the admin
+handoff — current-guardian-set-only verification, the deployment's own replay
+trie, and a factory template-pin to the canonical, gg-administered
+`NttCoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
+ever commit the one factory `gg` deployed at genesis) — so a gg-minted
+deployment needs no live `gg` signature at any point after the genesis
+`NttGovernance` ceremony: register, set peers, and hand admin to `gg` all flow
+through signed VAAs. Before that admin handoff runs, the deployment is still
+admin-trust — the registering admin controls `SetPeer` regardless of who
+authorized the registration — so guardians intending a fully quorum-owned
+deployment from genesis should sign the registration and handoff VAAs in the
+same ceremony.
+
 **Why the partition is by owner.** Isolation between deployments follows from
 ownership, not from accounting or holding topology. Reserves of distinct
 admins cannot mix, no matter what any factory reports: a deployment that
@@ -405,11 +442,15 @@ fail-closed pattern the core publish path uses.
   A real lock/unlock deployment bridges a token whose admin is not `gg` and
   relies on that registry's `TransferPreapproval`; exercising that end to end
   is future work.
-- Accepting an admin handoff by governance VAA: `gg` accepts an
-  `AdminTransferProposal` by acting on it, which today means a quorum action
-  per acceptance. A guardian-signed acceptance VAA, verified on-ledger like
-  other governance actions, would let anyone submit the quorum's standing
-  approval.
+- Driving the VAA-gated governance actions (`AcceptAdminTransferByVaa`,
+  `RegisterManagerByVaa`, `SetFactoryByVaa`) from the playground CLI
+  (`vaagen`, `ntt-playground` deploy/accept commands) — playground-only
+  tooling, tracked separately there.
+- A LocalNet integration test driving `RegisterManagerByVaa`/
+  `SetFactoryByVaa` end to end against real, freshly allocated Party ids
+  (`canton/testing/go`): the registration binding is committed to Party text,
+  so the happy path and the non-canonical-factory template-pin are reachable
+  only there, not in Daml Script (see `TestNtt:testRegisterManagerByVaaBindingMismatch`).
 - Inbound rate limits (EVM NTT parity): a governance-set cap on inbound
   release/mint rate would bound the damage from a compromised peer beyond the
   `LockedLedger` cap. Not required for isolation, so deferred.
