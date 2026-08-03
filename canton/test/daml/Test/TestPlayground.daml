@@ -25,8 +25,8 @@ import Splice.Api.Token.TransferInstructionV1
   , TransferInstructionResult_Output (..) )
 import Wormhole.Core.Bytes (leftPadTo, normalizeHex)
 import Wormhole.Ntt.Amount (trimAmount, trimAmountTo)
-import Wormhole.Ntt.Coin (NttCoin (..))
-import Wormhole.Ntt.CoinFactory (NttCoinFactory (..))
+import Token.CIP0056.Coin (Coin (..))
+import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Ntt.Manager (NttTokenConfig (..))
 import Wormhole.Ntt.Payload
   ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer )
@@ -125,7 +125,7 @@ testMockRegistryRequiresPreapproval = do
 ----------------------------------------------------------------------
 
 -- | A "mock" burn-mint deployment: 'deployRegistry' (gg) creates the canonical
--- 'Wormhole.Ntt.CoinFactory.NttCoinFactory'; 'deployNtt' (admin) then routes registration
+-- 'Token.CIP0056.CoinFactory.CoinFactory'; 'deployNtt' (admin) then routes registration
 -- through 'Wormhole.Ntt.Governance.RegisterManagerByVaa', which needs a genuine guardian
 -- signature over the freshly-allocated (operator, admin) pair -- something no static
 -- Daml Script fixture can ever produce (registrationBinding commits to their real,
@@ -231,10 +231,10 @@ testPlaygroundFundUserDeposits = do
   (d, _discs) <- sendScaffold operator gg admin BurnMint csId
   recipient <- allocateParty "PlaygroundFundRecipient"
 
-  -- fundUser mints via the canonical NttCoinFactory (Playground.Deploy.deployRegistry stands
+  -- fundUser mints via the canonical CoinFactory (Playground.Deploy.deployRegistry stands
   -- this up in the real flow); sendScaffold isolates Ops.daml from Deploy.daml (this module's
   -- header), so this test stands one up itself.
-  _ <- submit gg do createCmd NttCoinFactory with guardianGovernance = gg
+  _ <- submit gg do createCmd CoinFactory with admin = gg
 
   _ <- preapprove PreapproveInput with
     admin
@@ -249,7 +249,7 @@ testPlaygroundFundUserDeposits = do
     owner = recipient
     amount = 0.5
 
-  Some v <- queryContractId recipient (fromInterfaceContractId @NttCoin out.holdingCid)
+  Some v <- queryContractId recipient (fromInterfaceContractId @Coin out.holdingCid)
   v.amount === 0.5
   v.owner === recipient
 

@@ -32,7 +32,7 @@ import Splice.ExternalPartyConfigState qualified as ExternalPartyConfigState
 
 import Wormhole.Core.State (CoreState, Emitter, EmitterRegistry, ReplayRootRegistry)
 import Wormhole.Core.Replay (ReplayNode)
-import Wormhole.Ntt.CoinFactory (NttCoinFactory)
+import Token.CIP0056.CoinFactory (CoinFactory)
 import Wormhole.Ntt.Deposit (DepositPreapproval)
 import Wormhole.Ntt.Governance (NttGovernance)
 import Wormhole.Ntt.Ledger (LockedLedger)
@@ -76,18 +76,18 @@ mkSeedDisclosure owner = do
     <$> queryDisclosure owner cid
 
 -- | Disclose a deployment's committed burn/mint factory, identifying which concrete template
--- backs it: the canonical 'Wormhole.Ntt.CoinFactory.NttCoinFactory' (every real deployment,
+-- backs it: the canonical 'Token.CIP0056.CoinFactory.CoinFactory' (every real deployment,
 -- via 'Playground.Deploy.deployRegistry') or 'Test.TestNtt.MockBurnMintFactory' (a
 -- 'Test.TestNtt.deploy'-built scaffold used only to test 'Playground.Ops' in isolation from
 -- 'Playground.Deploy' -- see 'Test.TestPlayground''s header). 'queryDisclosure' hard-crashes
 -- (rather than returning 'None') on a genuine template mismatch, so this disambiguates first
--- by checking whether @cid@ is among @gg@'s currently-visible 'NttCoinFactory' instances.
+-- by checking whether @cid@ is among @gg@'s currently-visible 'CoinFactory' instances.
 resolveBurnMintFactoryDisclosure : Party -> ContractId BurnMintFactory -> Script (Text, Disclosure)
 resolveBurnMintFactoryDisclosure gg cid = do
-  ncfs <- query @NttCoinFactory gg
+  ncfs <- query @CoinFactory gg
   if coerceContractId cid `elem` map fst ncfs
-    then (,) "Wormhole.Ntt.CoinFactory:NttCoinFactory" . fromSome <$>
-      queryDisclosure gg (coerceContractId cid : ContractId NttCoinFactory)
+    then (,) "Token.CIP0056.CoinFactory:CoinFactory" . fromSome <$>
+      queryDisclosure gg (coerceContractId cid : ContractId CoinFactory)
     else (,) "Test.TestNtt:MockBurnMintFactory" . fromSome <$>
       queryDisclosure gg (coerceContractId cid : ContractId MockBurnMintFactory)
 
@@ -140,8 +140,8 @@ toDisclosureByName seed d
       mkDisclosure @MockTransferPreapproval
   | "Playground.MockRegistry:MockPreapprovedTransferFactory" `isSuffixOf` d.templateId =
       mkDisclosure @MockPreapprovedTransferFactory
-  | "Wormhole.Ntt.CoinFactory:NttCoinFactory" `isSuffixOf` d.templateId =
-      mkDisclosure @NttCoinFactory
+  | "Token.CIP0056.CoinFactory:CoinFactory" `isSuffixOf` d.templateId =
+      mkDisclosure @CoinFactory
   | "Test.TestNtt:MockBurnMintFactory" `isSuffixOf` d.templateId =
       mkDisclosure @MockBurnMintFactory
   | "Test.TestNtt:Cip56MockHolding" `isSuffixOf` d.templateId =

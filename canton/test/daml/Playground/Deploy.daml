@@ -18,7 +18,7 @@
 --      authority across participants. 'RegisterManagerByVaa' is admin-only and instead takes a
 --      guardian-signed 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA, so gg never signs
 --      live (see that module's doc comment). Its 'requireCanonicalFactory' guard also only
---      ever accepts the genuine 'Wormhole.Ntt.CoinFactory.NttCoinFactory' template (a VAA
+--      ever accepts the genuine 'Token.CIP0056.CoinFactory.CoinFactory' template (a VAA
 --      cannot name a contract id, so it cannot vet an arbitrary factory) -- "mock" burn/mint's
 --      committed factory is that canonical template, not a look-alike mock.
 module Playground.Deploy where
@@ -29,7 +29,7 @@ import DA.Optional (fromSome, fromSomeNote)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (EmitterRegistry, ReplayRootRegistry)
-import Wormhole.Ntt.CoinFactory (NttCoinFactory (..))
+import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Ntt.Governance (RegisterManager (..), RegisterManagerByVaa (..))
 import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..), nttInstrumentIdFor)
 
@@ -67,12 +67,12 @@ data DeployRegistryOutput = DeployRegistryOutput with
   deriving (Eq, Show)
 
 -- | Stand up this deployment's mock registry factory contract(s), gg-submitted (per plan
--- §4.2/§5): for "mock" burn-mint, the canonical 'Wormhole.Ntt.CoinFactory.NttCoinFactory' --
+-- §4.2/§5): for "mock" burn-mint, the canonical 'Token.CIP0056.CoinFactory.CoinFactory' --
 -- the only factory 'Wormhole.Ntt.Governance.RegisterManagerByVaa' may ever commit (see this
 -- module's header); for "mock" lock-unlock, a
--- 'Playground.MockRegistry.MockPreapprovedTransferFactory' PLUS the same 'NttCoinFactory' (the
+-- 'Playground.MockRegistry.MockPreapprovedTransferFactory' PLUS the same 'CoinFactory' (the
 -- funding faucet 'Playground.Ops.fundUser' mints from, per the deposit-preapproval-based
--- funding design -- 'NttCoinFactory' is instrument-agnostic, gated only on
+-- funding design -- 'CoinFactory' is instrument-agnostic, gated only on
 -- @guardianGovernance@, so any instance serves any instrument gg administers); no-op
 -- ("amulet") for the real registry.
 deployRegistry : DeployRegistryInput -> Script DeployRegistryOutput
@@ -85,7 +85,7 @@ deployRegistry input =
       -- The canonical burn/mint factory: the deployment's own committed factory for
       -- "burn-mint", or the funding faucet 'Playground.Ops.fundUser' mints from for
       -- "lock-unlock".
-      bmCid <- submit gg do createCmd NttCoinFactory with guardianGovernance = gg
+      bmCid <- submit gg do createCmd CoinFactory with admin = gg
       committedCid <- case parseTokenMode input.mode of
         BurnMint -> pure (coerceContractId bmCid)
         LockUnlock -> do
@@ -118,7 +118,7 @@ data DeployInput = DeployInput with
     -- "mock" only: the deployment's committed factory cid, as returned by THIS SAME CLI
     -- invocation's earlier 'deployRegistry' call ('DeployRegistryOutput.factoryCid') -- 'None'
     -- for "amulet" (uses amuletFactoryCid instead). Threaded through Go rather than re-resolved
-    -- via a fresh 'query @NttCoinFactory gg'/'query @MockPreapprovedTransferFactory gg'
+    -- via a fresh 'query @CoinFactory gg'/'query @MockPreapprovedTransferFactory gg'
     -- here: gg (the factory's sole signatory) lives on its own participant in the
     -- multi-participant topology, which this admin-hosted script cannot query as gg from (see
     -- 'DeployRegistryOutput.factoryCid''s doc comment).
@@ -129,7 +129,7 @@ data DeployInput = DeployInput with
     vaaBytes           : Optional Text
     pubKeys            : [(Int, Text)]
     -- "mock" burn-mint only: a pre-fetched 'Playground.Prepare:prepareDeployNtt' RemoteSeam
-    -- disclosing the committed 'Wormhole.Ntt.CoinFactory:NttCoinFactory' to @admin@ --
+    -- disclosing the committed 'Token.CIP0056.CoinFactory:CoinFactory' to @admin@ --
     -- 'RegisterManagerByVaa' (unlike plain 'RegisterManager') fetches this factory via
     -- 'requireCanonicalFactory', and gg is its sole signatory, so admin (co-located with
     -- operator, never with gg) needs it explicitly disclosed. 'None' on a single-participant
@@ -240,7 +240,7 @@ deployNtt input =
           let vaaBytes = fromSomeNote
                 "playground: mock burn-mint deployNtt needs a guardian-signed registration VAA"
                 input.vaaBytes
-          -- The committed NttCoinFactory: gg's sole signatory, invisible to admin/operator's
+          -- The committed CoinFactory: gg's sole signatory, invisible to admin/operator's
           -- participant -- requireCanonicalFactory fetches it via interface, so a
           -- multi-participant profile must disclose it (see DeployInput.remote's doc
           -- comment); a single-participant profile needs no seam at all.

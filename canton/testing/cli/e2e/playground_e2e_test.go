@@ -384,7 +384,7 @@ func TestPlaygroundE2E(t *testing.T) {
 
 	t.Run("outbound transfer recomputes the message and signs it", func(t *testing.T) {
 		// Bob lives on his own participant (plan §2/§3); transferOut's prepare step needs the
-		// NttManager/CoreState/Emitter/NttCoinFactory disclosures from
+		// NttManager/CoreState/Emitter/CoinFactory disclosures from
 		// topology-localnet.json to fetch and attach the gg-owned contracts across
 		// participants (integration plan §8; gg, not operator, is the data owner post-rework).
 		out := h.mustRun(t, "transfer", "--deployment", "burnmint",
@@ -1381,7 +1381,7 @@ func TestPlaygroundE2E(t *testing.T) {
 			t.Skip("participant routing is a localnet-only concept (sandbox has a single participant)")
 		}
 		// The SAME command as above, but with testdata/topology-localnet.json (NttManager,
-		// CoreState, Emitter, NttCoinFactory -- everything burnmint's transferOut needs,
+		// CoreState, Emitter, CoinFactory -- everything burnmint's transferOut needs,
 		// per the integration plan's §8) succeeds.
 		out := h.mustRun(t, "--topology-config", testdataPath("topology-localnet.json"),
 			"transfer", "--deployment", "burnmint", "--user", "Bob", "--chain", "2",

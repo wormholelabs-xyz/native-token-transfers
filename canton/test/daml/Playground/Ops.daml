@@ -39,8 +39,8 @@ import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.State (SubmitGovernanceVAA (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Amount (trimAmountTo)
-import Wormhole.Ntt.Coin (NttCoin (..))
-import Wormhole.Ntt.CoinFactory (NttCoinFactory)
+import Token.CIP0056.Coin (Coin (..))
+import Token.CIP0056.CoinFactory (CoinFactory)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Deposit qualified as Deposit
 import Wormhole.Ntt.Manager hiding (resolveLedger)
@@ -151,11 +151,11 @@ data FundUserOutput = FundUserOutput with
     holdingCid : ContractId Holding
   deriving (Eq, Show)
 
--- | Mint an 'Wormhole.Ntt.Coin.NttCoin' of @amount@ (CIP-56 decimal units) owned by @owner@,
+-- | Mint an 'Token.CIP0056.Coin.Coin' of @amount@ (CIP-56 decimal units) owned by @owner@,
 -- via the recipient's standing 'Wormhole.Ntt.Deposit.DepositPreapproval' and the canonical
--- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' (the funding faucet -- see
+-- 'Token.CIP0056.CoinFactory.CoinFactory' (the funding faucet -- see
 -- 'Playground.Deploy.deployRegistry'; a lock/unlock deployment's users hold a
--- 'DepositPreapproval' purely for this). 'NttCoinFactory' is instrument-agnostic (gated only
+-- 'DepositPreapproval' purely for this). 'CoinFactory' is instrument-agnostic (gated only
 -- on @guardianGovernance@), so any visible instance serves this call -- no per-instrument
 -- lookup needed. @owner@'s pre-approval must already exist; the CLI ensures it (via
 -- 'preapprove') before calling this. The returned cid is only ever valid for the
@@ -167,10 +167,10 @@ fundUser input = do
       -- calls with no instrumentNonce input, so (like 'Test.TestNtt.deploy') this playground
       -- phase only supports one bridged instrument per admin. See this file's header.
       instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor input.admin 0
-  facs <- query @NttCoinFactory gg
+  facs <- query @CoinFactory gg
   facCid <- case facs of
     (cid, _) :: _ -> pure cid
-    [] -> abort "playground: no NttCoinFactory for gg -- run `deploy` first"
+    [] -> abort "playground: no CoinFactory for gg -- run `deploy` first"
   -- Queried as gg (the observer), not owner: fundUser runs entirely on gg's OWN participant
   -- (routed there since the Deposit exercise below submits as gg), which cannot query as an
   -- arbitrary owner hosted elsewhere -- gg being DepositPreapproval's observer is exactly what
@@ -182,13 +182,13 @@ fundUser input = do
     [] -> abort "playground: owner has no DepositPreapproval for this instrument -- run `preapprove` first"
     _ -> abort "playground: more than one DepositPreapproval for this instrument"
 
-  before <- query @NttCoin gg
+  before <- query @Coin gg
   _ <- submit gg do
     exerciseCmd preCid Deposit with
       amount = input.amount
       factoryCid = toInterfaceContractId @BurnMintFactory facCid
       extraArgs = emptyExtraArgs
-  after <- query @NttCoin gg
+  after <- query @Coin gg
   let beforeCids = map fst before
   holdingCid <- case
     [ cid | (cid, h) <- after, cid `notElem` beforeCids, h.owner == input.owner, h.instrumentId == instrumentId ] of

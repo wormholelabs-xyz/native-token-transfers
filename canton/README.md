@@ -336,7 +336,7 @@ appearing in the controller list) and rotating the committed factory
 (`NttManager.SetFactoryByVaa`). Both are VAA-gated the same way as the admin
 handoff — current-guardian-set-only verification, the deployment's own replay
 trie, and a factory template-pin to the canonical, gg-administered
-`NttCoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
+`CoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
 ever commit the one factory `gg` deployed at genesis) — so a gg-minted
 deployment needs no live `gg` signature at any point after the genesis
 `NttGovernance` ceremony: register, set peers, and hand admin to `gg` all flow

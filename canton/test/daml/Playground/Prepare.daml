@@ -33,7 +33,7 @@ module Playground.Prepare where
 import Daml.Script
 import DA.Optional (fromSome)
 import Wormhole.Core.VAA (parseVAA)
-import Wormhole.Ntt.CoinFactory (NttCoinFactory)
+import Token.CIP0056.CoinFactory (CoinFactory)
 import Wormhole.Ntt.Deposit (DepositPreapproval)
 import Wormhole.Ntt.Manager (NttFactory (..), NttTokenConfig (..))
 import Test.TestNtt (Cip56MockHolding, MockBurnMintFactory)
@@ -250,7 +250,7 @@ data PrepareDeployNttInput = PrepareDeployNttInput with
 
 -- | Resolves the ONE thing 'Playground.Deploy:deployNtt''s Mock burn-mint branch needs from
 -- gg's own participant: a disclosure of the committed canonical
--- 'Wormhole.Ntt.CoinFactory:NttCoinFactory' 'deployRegistry' already created (gg's sole
+-- 'Token.CIP0056.CoinFactory:CoinFactory' 'deployRegistry' already created (gg's sole
 -- signatory) -- 'Wormhole.Ntt.Governance.RegisterManagerByVaa' fetches it via
 -- 'requireCanonicalFactory', unlike plain 'RegisterManager', which only ever stores 'factory'
 -- as a field. Everything else deployNtt needs
@@ -261,9 +261,9 @@ prepareDeployNtt : PrepareDeployNttInput -> Script RemoteSeam
 prepareDeployNtt input = do
   let gg = input.guardianGovernance
       allowed = input.discloseTemplates
-  d <- fromSome <$> queryDisclosure gg (coerceContractId input.factoryCid : ContractId NttCoinFactory)
+  d <- fromSome <$> queryDisclosure gg (coerceContractId input.factoryCid : ContractId CoinFactory)
   pure emptyRemoteSeam with
-    disclosed = gated allowed "Wormhole.Ntt.CoinFactory:NttCoinFactory" d
+    disclosed = gated allowed "Token.CIP0056.CoinFactory:CoinFactory" d
 
 ----------------------------------------------------------------------
 -- preparePublish (Playground.Ops:publishMessage's resolver half)
