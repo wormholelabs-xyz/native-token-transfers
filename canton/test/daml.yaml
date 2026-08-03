@@ -25,6 +25,7 @@ build-options:
   - -Wno-template-interface-depends-on-daml-script
 data-dependencies:
   - ../dars/wormhole-core-0.3.0.dar
+  - ../dars/token-cip0056-0.2.0.dar
   - ../ntt/.daml/dist/ntt-0.1.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar

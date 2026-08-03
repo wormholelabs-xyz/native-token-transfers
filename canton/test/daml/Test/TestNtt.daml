@@ -51,8 +51,8 @@ import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
 import Wormhole.Core.VAA (parseVAA)
+import Token.CIP0056.CoinFactory
 import Wormhole.Ntt.Amount
-import Wormhole.Ntt.CoinFactory
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger
@@ -338,10 +338,10 @@ nttSetup = do
     createCmd NttGovernance with operator, guardianGovernance = gg, nextId = 0, consumedGovernance = Set.empty
   pure (operator, gg, csId)
 
--- | Bootstrap the genesis gg-owned canonical 'NttCoinFactory', separate from
+-- | Bootstrap the genesis gg-owned canonical 'CoinFactory', separate from
 -- 'nttSetup' since most lock/unlock and mock-burn/mint tests never need it.
-nttCoinFactorySetup : Party -> Script (ContractId NttCoinFactory)
-nttCoinFactorySetup gg = submit gg do createCmd NttCoinFactory with guardianGovernance = gg
+nttCoinFactorySetup : Party -> Script (ContractId CoinFactory)
+nttCoinFactorySetup gg = submit gg do createCmd CoinFactory with admin = gg
 
 -- | 'nttSetup' with a mock fee instrument, for the fee tests.
 nttSetupFee : Script (Party, Party, ContractId CoreState, Party, InstrumentId, Party)
@@ -2899,7 +2899,7 @@ rotateByVaaCmd mgrCid newFactory csId nodeCid vaaBytes =
     extraArgs = emptyExtraArgs
 
 -- | Happy path: the committed factory is repointed at a real
--- 'NttCoinFactory', the epoch bumps to 1, and the same VAA replayed against
+-- 'CoinFactory', the epoch bumps to 1, and the same VAA replayed against
 -- a freshly resolved covering node is rejected on digest membership alone.
 testSetFactoryByVaaHappyPath : Script ()
 testSetFactoryByVaaHappyPath = do
@@ -2942,7 +2942,7 @@ testSetFactoryByVaaWrongEpoch = do
   expectAbort "wrong factory epoch" res
 
 -- | A VAA cannot name a contract id: 'newFactory' must template-pin to the
--- canonical 'NttCoinFactory', so a look-alike 'MockBurnMintFactory' is
+-- canonical 'CoinFactory', so a look-alike 'MockBurnMintFactory' is
 -- rejected even though every VAA field matches.
 testSetFactoryByVaaRejectsNonCanonicalFactory : Script ()
 testSetFactoryByVaaRejectsNonCanonicalFactory = do
@@ -2957,7 +2957,7 @@ testSetFactoryByVaaRejectsNonCanonicalFactory = do
   (nodeCid, dNode) <- coveringDisclosure operator gg mgr.namespace (parseVAA rotateHappyVAA).hash
   res <- trySubmitWithDiscs admin [csDisc, factoryDisc, dNode] do
     rotateByVaaCmd mgrCid newFactory csId nodeCid rotateHappyVAA
-  expectAbort "factory is not the canonical NttCoinFactory" res
+  expectAbort "factory is not the canonical CoinFactory" res
 
 -- | 'SetFactoryByVaa' is restricted to gg-minted burn/mint deployments: a
 -- lock/unlock deployment is rejected before any VAA work runs (the
@@ -3049,7 +3049,7 @@ data RegisterByVaaSetup = RegisterByVaaSetup with
     emReg        : ContractId EmitterRegistry
     rrReg        : ContractId ReplayRootRegistry
     coreStateCid : ContractId CoreState
-    factoryCid   : ContractId NttCoinFactory
+    factoryCid   : ContractId CoinFactory
   deriving (Eq, Show)
 
 integrationRegisterByVaaSetup : Script RegisterByVaaSetup
@@ -3070,7 +3070,7 @@ data RegisterByVaaInput = RegisterByVaaInput with
     emReg        : ContractId EmitterRegistry
     rrReg        : ContractId ReplayRootRegistry
     coreStateCid : ContractId CoreState
-    factoryCid   : ContractId NttCoinFactory
+    factoryCid   : ContractId CoinFactory
     nonce        : Int
     vaaBytes     : Bytes
   deriving (Eq, Show)
@@ -3142,7 +3142,7 @@ data SetFactoryByVaaInput = SetFactoryByVaaInput with
     gg           : Party
     mgrCid       : ContractId NttManager
     coreStateCid : ContractId CoreState
-    factoryCid   : ContractId NttCoinFactory
+    factoryCid   : ContractId CoinFactory
     vaaBytes     : Bytes
   deriving (Eq, Show)
 

@@ -422,7 +422,7 @@ testAttackerCannotRegisterGgMintedManager = do
     (toInterfaceContractId @BurnMintFactory evilFactory)
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
--- | Same property against a real 'Wormhole.Ntt.CoinFactory.NttCoinFactory':
+-- | Same property against a real 'Token.CIP0056.CoinFactory.CoinFactory':
 -- the co-signature gate protects registration, not the factory's trustworthiness.
 testAttackerCannotRegisterGgMintedManagerWithRealFactory : Script ()
 testAttackerCannotRegisterGgMintedManagerWithRealFactory = do
