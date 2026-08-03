@@ -3,18 +3,24 @@
 module Wormhole.Ntt.CoinAllocation where
 
 import Splice.Api.Token.AllocationV1
-import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
+import Splice.Api.Token.HoldingV1 (Holding)
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Wormhole.Ntt.Coin
 
 -- | A single-contract allocation: value and the allocation record folded
 -- together; 'holdingCids' is empty since there's no separate locked holding.
+--
+-- The instrument is read from @allocation.transferLeg@ and nowhere else. It is
+-- deliberately not a separate field: the signatory admin and the instrument
+-- published in 'AllocationView' must be the same instrument, or a party could
+-- self-sign an allocation naming its own admin while advertising someone
+-- else's instrument in the view -- authentic-looking to any consumer that
+-- trusts the view, since a genuine allocation also reports @holdingCids = []@.
 template NttCoinAllocation
   with
-    instrumentId : InstrumentId
-    allocation   : AllocationSpecification
+    allocation : AllocationSpecification
   where
-    signatory instrumentId.admin, allocation.transferLeg.sender
+    signatory allocation.transferLeg.instrumentId.admin, allocation.transferLeg.sender
     observer allocation.transferLeg.receiver, allocation.settlement.executor
 
     interface instance Allocation for NttCoinAllocation where
@@ -24,20 +30,22 @@ template NttCoinAllocation
         now <- getTime
         assertMsg "ntt: settlement window (settleBefore) has passed" (now < allocation.settlement.settleBefore)
         rcid <- toInterfaceContractId @Holding <$>
-          createCoinIn instrumentId (basicAccountV2 allocation.transferLeg.receiver) allocation.transferLeg.amount
+          createCoinIn allocation.transferLeg.instrumentId
+            (basicAccountV2 allocation.transferLeg.receiver) allocation.transferLeg.amount
         pure Allocation_ExecuteTransferResult with
           senderHoldingCids = [], receiverHoldingCids = [rcid], meta = emptyMetadata
 
       allocation_cancelImpl _self _arg = do
-        cid <- returnAllocationToSender instrumentId allocation
+        cid <- returnAllocationToSender allocation
         pure Allocation_CancelResult with senderHoldingCids = [cid], meta = emptyMetadata
 
       allocation_withdrawImpl _self _arg = do
-        cid <- returnAllocationToSender instrumentId allocation
+        cid <- returnAllocationToSender allocation
         pure Allocation_WithdrawResult with senderHoldingCids = [cid], meta = emptyMetadata
 
 -- | v1 allocations are party-based, not account-based; returned via a basic account.
-returnAllocationToSender : InstrumentId -> AllocationSpecification -> Update (ContractId Holding)
-returnAllocationToSender instrumentId allocation =
+returnAllocationToSender : AllocationSpecification -> Update (ContractId Holding)
+returnAllocationToSender allocation =
   toInterfaceContractId @Holding <$>
-    createCoinIn instrumentId (basicAccountV2 allocation.transferLeg.sender) allocation.transferLeg.amount
+    createCoinIn allocation.transferLeg.instrumentId
+      (basicAccountV2 allocation.transferLeg.sender) allocation.transferLeg.amount

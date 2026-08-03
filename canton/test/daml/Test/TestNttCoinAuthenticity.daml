@@ -22,6 +22,7 @@ import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Splice.Api.Token.TransferInstructionV2 qualified as TIV2
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Coin
+import Wormhole.Ntt.CoinAllocation (NttCoinAllocation(..))
 import Wormhole.Ntt.CoinFactory
 import Wormhole.Ntt.CoinTransfer (NttTransferInstruction, TransferPreapproval(..))
 import Test.TestNtt (nttCoinFactorySetup, expectAbort)
@@ -770,3 +771,47 @@ testV1UpdateAborts = do
     exerciseCmd transferInstructionCid TIV1.TransferInstruction_Update with
       extraActors = [], extraArgs = emptyExtraArgs
   expectAbort "does not support registry-internal Update steps" updated
+
+----------------------------------------------------------------------
+-- Forged v1 allocation: the advertised instrument must be a signatory
+----------------------------------------------------------------------
+
+-- | 'NttCoinAllocation' reads its instrument from @allocation.transferLeg@
+-- alone, so the instrument published in 'AllocationView' is always the one
+-- whose admin signed. Advertising gg's instrument therefore needs gg's
+-- authority to create. Were the template to carry a second, independent
+-- instrument field driving @signatory@, an attacker could self-sign an
+-- unfunded allocation whose view names gg's instrument -- indistinguishable
+-- from a genuine one to any consumer that trusts the view, since a real
+-- allocation also reports @holdingCids = []@.
+testForgedV1AllocationRequiresInstrumentAdmin : Script ()
+testForgedV1AllocationRequiresInstrumentAdmin = do
+  gg <- allocateParty "AuthAllocForgeGg"
+  mallory <- allocateParty "AuthAllocForgeMallory"
+  victim <- allocateParty "AuthAllocForgeVictim"
+  executor <- allocateParty "AuthAllocForgeExecutor"
+  t0 <- getTime
+  let ggInstrument = InstrumentId with admin = gg, id = "NTT-AUTH-ALLOC-FORGE"
+
+  -- Unfunded allocation advertising gg's instrument: gg must sign, mallory cannot.
+  forged <- trySubmit (actAs mallory) do
+    createCmd NttCoinAllocation with
+      allocation = v1AllocSpec t0 executor mallory victim 1000000.0 ggInstrument
+  case forged of
+    Right _ -> abort "ntt: mallory forged an allocation advertising gg's instrument"
+    Left _ -> pure ()
+
+  -- Nor can any gg-instrument coin be conjured along the way.
+  supply <- query @NttCoin gg
+  supply === []
+
+  -- A self-admin allocation stays creatable: its view honestly advertises
+  -- mallory's own instrument, so no consumer is misled.
+  let ownInstrument = InstrumentId with admin = mallory, id = "MALLORY-OWN"
+  ownCid <- submit mallory do
+    createCmd NttCoinAllocation with
+      allocation = v1AllocSpec t0 executor mallory victim 1000000.0 ownInstrument
+  seen <- queryContractId victim ownCid
+  case seen of
+    Some c -> c.allocation.transferLeg.instrumentId.admin === mallory
+    None -> abort "ntt: expected the self-admin allocation to be visible to the receiver"

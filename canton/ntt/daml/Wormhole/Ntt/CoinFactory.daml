@@ -160,7 +160,7 @@ template NttCoinFactory
         senderChangeCids <-
           debitInputs "allocation" leg.instrumentId (basicAccountV2 leg.sender) leg.amount arg.inputHoldingCids
         allocationCid <- toInterfaceContractId @Allocation <$> create NttCoinAllocation with
-          instrumentId = leg.instrumentId, allocation = spec
+          allocation = spec
         pure AllocationInstructionResult with
           output = AllocationInstructionResult_Completed with allocationCid
           senderChangeCids
