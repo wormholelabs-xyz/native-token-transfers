@@ -1,10 +1,9 @@
--- | Daml Script tests for 'Wormhole.Ntt.Coin': the genesis, gg-owned
--- 'NttCoinFactory' and its paired 'NttCoin' holding.
---
--- Unlike 'Test.TestNtt's single-instrument 'MockBurnMintFactory', the real
--- 'NttCoinFactory' is a multi-tenant singleton, so these tests pin down
--- @expectedAdmin@ validation, cross-instrument burn isolation, and sharing
--- across independent admins' deployments.
+-- | Manager-integration Daml Script tests against the real, gg-owned
+-- 'Token.CIP0056.CoinFactory.CoinFactory' and its paired 'Coin' holding.
+-- Token-mechanics coverage (mint/burn, multi-tenancy, defensive checks) lives
+-- upstream in 'wormholelabs-xyz/CantonExamples' (tokens/cip0056-test); these
+-- two scripts drive the factory through 'Wormhole.Ntt.Manager' registration
+-- and transfer/deposit paths, which upstream cannot exercise.
 module Test.TestNttCoin where
 
 import Daml.Script
@@ -13,24 +12,24 @@ import DA.Optional (fromSome)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding)
 import Splice.Api.Token.BurnMintV1
-  ( BurnMintFactory, BurnMintFactory_BurnMint(..), BurnMintFactory_PublicFetch(..)
+  ( BurnMintFactory, BurnMintFactory_BurnMint(..)
   , BurnMintOutput(..)
   )
+import Token.CIP0056.Coin
+import Token.CIP0056.CoinFactory
 import Wormhole.Core.Fees (emptyExtraArgs)
-import Wormhole.Ntt.Coin
-import Wormhole.Ntt.CoinFactory
 import Wormhole.Ntt.Deposit (DepositPreapproval(..), Deposit(..))
 import Wormhole.Ntt.Manager
-import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32, expectAbort)
+import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32)
 import Test.TestFactoryAuthority (registerBurnMint)
 
 -- | The interface-typed handle tests exercise choices on.
-asBurnMintFactory : ContractId NttCoinFactory -> ContractId BurnMintFactory
+asBurnMintFactory : ContractId CoinFactory -> ContractId BurnMintFactory
 asBurnMintFactory = toInterfaceContractId @BurnMintFactory
 
 -- | Mint one coin directly against the factory — the only way to seed an
 -- initial balance on a burn/mint chain outside of a real inbound transfer.
-mintCoin : ContractId NttCoinFactory -> Party -> InstrumentId -> Party -> Decimal -> Script (ContractId Holding)
+mintCoin : ContractId CoinFactory -> Party -> InstrumentId -> Party -> Decimal -> Script (ContractId Holding)
 mintCoin factoryCid gg instrumentId owner amount = do
   res <- submit (actAs gg <> actAs owner) do
     exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
@@ -45,157 +44,10 @@ mintCoin factoryCid gg instrumentId owner amount = do
     _ -> abort ("expected exactly one minted coin, got: " <> show res.outputCids)
 
 ----------------------------------------------------------------------
--- Genesis
-----------------------------------------------------------------------
-
-testNttCoinFactoryGenesis : Script ()
-testNttCoinFactoryGenesis = do
-  gg <- allocateParty "CoinGenesisGg"
-  factoryCid <- nttCoinFactorySetup gg
-  Some factory <- queryContractId gg factoryCid
-  factory.guardianGovernance === gg
-
-testNttCoinFactoryPublicFetch : Script ()
-testNttCoinFactoryPublicFetch = do
-  gg <- allocateParty "CoinFetchGg"
-  rogue <- allocateParty "CoinFetchRogue"
-  factoryCid <- nttCoinFactorySetup gg
-  view <- submit gg do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_PublicFetch with
-      expectedAdmin = gg
-      actor = gg
-  view.admin === gg
-
-  submitMustFail gg do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_PublicFetch with
-      expectedAdmin = rogue
-      actor = gg
-
-----------------------------------------------------------------------
--- Mint / burn mechanics
-----------------------------------------------------------------------
-
-testNttCoinMintEmptyInputsOneOutput : Script ()
-testNttCoinMintEmptyInputsOneOutput = do
-  gg <- allocateParty "CoinMintGg"
-  alice <- allocateParty "CoinMintAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-MINT"
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
-  Some coin <- queryContractId gg (coerceContractId @Holding @NttCoin coinCid)
-  coin.owner === alice
-  coin.instrumentId === instrumentId
-  coin.amount === 0.01
-
-testNttCoinBurnOneInputWithChange : Script ()
-testNttCoinBurnOneInputWithChange = do
-  gg <- allocateParty "CoinBurnChangeGg"
-  alice <- allocateParty "CoinBurnChangeAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-BURN-CHANGE"
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
-
-  res <- submit (actAs gg <> actAs alice) do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
-      expectedAdmin = gg
-      instrumentId
-      inputHoldingCids = [coinCid]
-      outputs = [BurnMintOutput with owner = alice, amount = 0.004, context = emptyExtraArgs.context]
-      extraActors = [alice]
-      extraArgs = emptyExtraArgs
-
-  archived <- queryContractId gg (coerceContractId @Holding @NttCoin coinCid)
-  archived === None
-  case res.outputCids of
-    [changeCid] -> do
-      Some change <- queryContractId gg (coerceContractId @Holding @NttCoin changeCid)
-      change.amount === 0.004
-    _ -> abort ("expected exactly one change coin, got: " <> show res.outputCids)
-
-testNttCoinBurnOneInputZeroChange : Script ()
-testNttCoinBurnOneInputZeroChange = do
-  gg <- allocateParty "CoinBurnExactGg"
-  alice <- allocateParty "CoinBurnExactAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-BURN-EXACT"
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
-
-  res <- submit (actAs gg <> actAs alice) do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
-      expectedAdmin = gg
-      instrumentId
-      inputHoldingCids = [coinCid]
-      outputs = []
-      extraActors = [alice]
-      extraArgs = emptyExtraArgs
-
-  res.outputCids === []
-  archived <- queryContractId gg (coerceContractId @Holding @NttCoin coinCid)
-  archived === None
-
-testBurnMintRejectsZeroAmountOutput : Script ()
-testBurnMintRejectsZeroAmountOutput = do
-  gg <- allocateParty "CoinZeroOutputGg"
-  alice <- allocateParty "CoinZeroOutputAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = gg, id = "NTT-COIN-ZERO-OUTPUT"
-
-  res <- trySubmit (actAs gg <> actAs alice) do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
-      expectedAdmin = gg
-      instrumentId
-      inputHoldingCids = []
-      outputs = [BurnMintOutput with owner = alice, amount = 0.0, context = emptyExtraArgs.context]
-      extraActors = [alice]
-      extraArgs = emptyExtraArgs
-  expectAbort "NttCoin" res
-
-----------------------------------------------------------------------
--- Defensive checks specific to a multi-tenant factory
-----------------------------------------------------------------------
-
-testNttCoinRejectsMismatchedAdminInstrument : Script ()
-testNttCoinRejectsMismatchedAdminInstrument = do
-  gg <- allocateParty "CoinMismatchGg"
-  notGg <- allocateParty "CoinMismatchNotGg"
-  alice <- allocateParty "CoinMismatchAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentId = InstrumentId with admin = notGg, id = "NTT-COIN-MISMATCH"
-
-  res <- trySubmit (actAs gg <> actAs notGg <> actAs alice) do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
-      expectedAdmin = gg
-      instrumentId
-      inputHoldingCids = []
-      outputs = [BurnMintOutput with owner = alice, amount = 0.01, context = emptyExtraArgs.context]
-      extraActors = [alice]
-      extraArgs = emptyExtraArgs
-  expectAbort "only serves instruments administered by guardianGovernance" res
-
-testNttCoinRejectsCrossInstrumentBurn : Script ()
-testNttCoinRejectsCrossInstrumentBurn = do
-  gg <- allocateParty "CoinCrossGg"
-  alice <- allocateParty "CoinCrossAlice"
-  factoryCid <- nttCoinFactorySetup gg
-  let instrumentA = InstrumentId with admin = gg, id = "NTT-COIN-CROSS-A"
-      instrumentB = InstrumentId with admin = gg, id = "NTT-COIN-CROSS-B"
-  coinCid <- mintCoin factoryCid gg instrumentA alice 0.01
-
-  res <- trySubmit (actAs gg <> actAs alice) do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
-      expectedAdmin = gg
-      instrumentId = instrumentB
-      inputHoldingCids = [coinCid]
-      outputs = []
-      extraActors = [alice]
-      extraArgs = emptyExtraArgs
-  expectAbort "burn input's instrument does not match the requested instrumentId" res
-
-----------------------------------------------------------------------
 -- Canonical sharing across unrelated deployments
 ----------------------------------------------------------------------
 
--- | One 'NttCoinFactory' cid served to two different admins' deployments —
+-- | One 'CoinFactory' cid served to two different admins' deployments —
 -- proving genuine sharing, not per-deployment duplication.
 testNttCoinFactoryServesTwoDistinctAdmins : Script ()
 testNttCoinFactoryServesTwoDistinctAdmins = do
@@ -259,7 +111,7 @@ testNttCoinEndToEndRoundTrip = do
       feeAllocation = None
       extraArgs = emptyExtraArgs
 
-  remaining <- query @NttCoin gg
+  remaining <- query @Coin gg
   [ cid | (cid, c) <- remaining, c.owner == alice ] === []
 
   preCid <- submit alice do
@@ -270,7 +122,7 @@ testNttCoinEndToEndRoundTrip = do
       factoryCid = asBurnMintFactory factoryCid
       extraArgs = emptyExtraArgs
 
-  minted <- query @NttCoin gg
+  minted <- query @Coin gg
   case [ c | (_, c) <- minted, c.owner == alice ] of
     [c] -> c.amount === 0.02
     other -> abort ("expected exactly one minted coin owned by alice, got: " <> show other)

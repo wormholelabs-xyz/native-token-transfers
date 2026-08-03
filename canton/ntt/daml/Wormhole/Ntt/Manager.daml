@@ -95,6 +95,7 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs (..))
 import Splice.Api.Token.BurnMintV1
   (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+import Token.CIP0056.CoinFactory (CoinFactory)
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State
@@ -103,7 +104,6 @@ import Wormhole.Core.State
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Cip56
-import Wormhole.Ntt.CoinFactory (NttCoinFactory)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Payload
@@ -148,21 +148,21 @@ requireBurnMintFactory = \case
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
 -- | Pin a caller-supplied 'NttFactory' to the canonical, gg-administered
--- 'Wormhole.Ntt.CoinFactory.NttCoinFactory' — the only factory a VAA-gated
+-- 'Token.CIP0056.CoinFactory.CoinFactory' — the only factory a VAA-gated
 -- choice may ever commit, since a VAA cannot name a contract id and so cannot
 -- vet an arbitrary factory. Checks the cid is genuinely backed by the
--- 'NttCoinFactory' template (not merely an interface implementer) and that
--- its @guardianGovernance@ matches this deployment's.
+-- 'CoinFactory' template (not merely an interface implementer) and that its
+-- @admin@ matches this deployment's guardianGovernance.
 requireCanonicalFactory : Party -> NttFactory -> Update ()
 requireCanonicalFactory guardianGovernance factory = do
   bmCid <- requireBurnMintFactory factory
-  r <- fetchFromInterface @NttCoinFactory bmCid
+  r <- fetchFromInterface @CoinFactory bmCid
   case r of
-    None -> abort "ntt governance: factory is not the canonical NttCoinFactory"
-    -- guardianGovernance is the factory's sole signatory, so this equality
-    -- also proves gg authorized the factory's creation.
-    Some (_, ncf) -> assertMsg "ntt governance: factory's guardianGovernance does not match this deployment's"
-      (ncf.guardianGovernance == guardianGovernance)
+    None -> abort "ntt governance: factory is not the canonical CoinFactory"
+    -- admin is the factory's sole signatory, so this equality also proves gg
+    -- authorized the factory's creation.
+    Some (_, cf) -> assertMsg "ntt governance: factory's admin does not match this deployment's guardianGovernance"
+      (cf.admin == guardianGovernance)
 
 -- | Fetch and pin a caller-supplied 'CoreState' to the deployment's committed
 -- trust anchors. Both pinned members are CoreState signatories, so each

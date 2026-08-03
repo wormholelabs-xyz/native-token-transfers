@@ -42,11 +42,29 @@ immutable and distributed identically across releases (verified byte-for-byte
 by sha256 against the copies shipped in cn-quickstart). Built `--target=2.1`;
 our packages target LF 2.3, which may data-depend on lower LF 2.x versions.
 
+## `token-cip0056` (the CIP-0056 coin template and factory)
+
+`ntt` data-depends on `token-cip0056` for the `Coin`/`CoinFactory`/
+`CoinAllocation`/`CoinTransferInstruction` templates that back the manager's
+burn/mint deployments. `requireCanonicalFactory` in `Wormhole.Ntt.Manager`
+pins the caller-supplied factory to the `Token.CIP0056.CoinFactory` template
+from this exact DAR via `fetchFromInterface`, so its package-id is part of the
+canonical-factory identity: re-vendoring a different build changes what
+counts as "the" factory.
+
+It is developed in `wormholelabs-xyz/CantonExamples` under `tokens/cip0056`
+and is consumed as a pinned artifact, exactly as `wormhole-core` above.
+
+Provenance: built from `wormholelabs-xyz/CantonExamples` branch `dev` at
+commit `b448589d8742ef5983ec8dc7c6ddd275ceccd1b7` — package `token-cip0056`
+version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
+
 ## sha256
 
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
 | `wormhole-core-0.3.0.dar` | `ntt`, `ntt-test` | `7587fe8fecd3b61b3b1eddc3558c227fa97eb577302466fdf24c3bb2ed55a090` |
+| `token-cip0056-0.2.0.dar` | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar` | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
 | `splice-api-token-allocation-v1-1.0.0.dar` | `ntt`, `ntt-test` | `c3f3b447142577ea4fa7d912ca11cd6821de7588e324e8877425932a02fccaa1` |
