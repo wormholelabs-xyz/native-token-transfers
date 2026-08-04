@@ -48,7 +48,7 @@ import Wormhole.Core.GuardianSet (GuardianSet(..))
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 import Wormhole.Core.State
-  ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
+  ( Emitter(..), CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
 import Wormhole.Core.VAA (parseVAA)
 import Token.CIP0056.CoinFactory
@@ -316,9 +316,9 @@ testNamespaceVector = do
   assert ("ntt:" `isPrefixOf` n0)
   assert (n0 /= n1)
 
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "NamespaceVectorAdmin"
-  d <- deploy operator gg admin LockUnlock
+  d <- deploy operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator d.mgrCid
   mgr.namespace === nttNamespaceFor d.instrumentId admin mgr.managerId
 
@@ -355,14 +355,26 @@ nttSetupFee = do
     createCmd NttGovernance with operator, guardianGovernance = gg, nextId = 0, consumedGovernance = Set.empty
   pure (operator, gg, csId, mockAdmin, inst, cs.feeRecipient)
 
--- | A registered deployment and the handles its tests need.
+-- | A registered deployment and the handles its tests need. @emitterCid@ is
+-- the live post-registration 'Emitter' (registration itself broadcasts the
+-- 'TransceiverInit', churning the freshly minted one).
 data Deployment = Deployment with
     mgrCid       : ContractId NttManager
     emitterCid   : ContractId Emitter
     factory      : NttFactory
     instrumentId : InstrumentId
     ledgerCid    : Optional (ContractId LockedLedger)  -- lock/unlock only
+    initMsg      : WormholeMessage  -- the TransceiverInit broadcast at registration
   deriving (Eq, Show)
+
+-- | Re-resolve @owner@'s live 'Emitter' by its stable @emitterId@ after a
+-- churn (a nested 'PublishMessage' consumes and recreates it).
+resolveEmitter : Party -> Int -> Script (ContractId Emitter)
+resolveEmitter owner eid = do
+  ems <- query @Emitter owner
+  case [ cid | (cid, em) <- ems, em.emitterId == eid ] of
+    [cid] -> pure cid
+    matches -> abort ("expected exactly one emitter for id " <> show eid <> ", got: " <> show (length matches))
 
 -- | Unwrap a burn/mint deployment's typed factory.
 theBurnMintFactory : NttFactory -> ContractId BurnMintFactory
@@ -383,12 +395,13 @@ coreRegistries operator = do
 
 -- | Create the gg-signed mock registry factory and register the manager
 -- through the shared 'NttGovernance' root — which atomically mints the
--- gg-owned transceiver 'Emitter' and claims the gg-scoped replay root, so no
+-- gg-owned transceiver 'Emitter', claims the gg-scoped replay root, and
+-- broadcasts the deployment's 'TransceiverInit' through that emitter, so no
 -- separate emitter registration precedes this. For burn/mint the instrument
 -- id must be bound to the registering admin, so each deployment gets its own
 -- instrument; lock/unlock uses the shared 'bridgedInstrument'.
-deploy : Party -> Party -> Party -> NttTokenConfig -> Script Deployment
-deploy operator gg admin config = do
+deploy : Party -> Party -> Party -> NttTokenConfig -> ContractId CoreState -> Script Deployment
+deploy operator gg admin config csId = do
   (instrumentId, factory) <- case config of
     BurnMint -> do
       let inst = InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
@@ -400,13 +413,14 @@ deploy operator gg admin config = do
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
   -- Burn/mint registration is co-signed by the instrument's minter (here gg);
   -- lock/unlock is admin-only.
   let minterActAs = case config of
         BurnMint -> actAs gg
         LockUnlock -> mempty
-  (_, mgrCid, emitterCid, ledgerCid) <-
-    submit (actAs admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+  (_, mgrCid, _emitterCid, ledgerCid, initMsg) <-
+    submit (actAs admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
       exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
@@ -417,20 +431,24 @@ deploy operator gg admin config = do
         tokenConfig = config
         tokenDecimals = 8
         factory
-        coreStateCid = None
+        coreStateCid = csId
+        consistencyLevel = 0
         emitterFeeAllocation = None
         claimFeeAllocation = None
-  pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid
+        feeAllocation = None
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
+  pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid, initMsg
 
 -- | Two deployments get distinct managers with sequential ids and owner-bound
 -- addresses; a lock/unlock deployment gets a zero-balance ledger.
 testNttDeployment : Script ()
 testNttDeployment = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   alice <- allocateParty "Alice"
   bob <- allocateParty "Bob"
-  dA <- deploy operator gg alice LockUnlock
-  dB <- deploy operator gg bob BurnMint
+  dA <- deploy operator gg alice LockUnlock csId
+  dB <- deploy operator gg bob BurnMint csId
   Some ma <- queryContractId operator dA.mgrCid
   Some mb <- queryContractId operator dB.mgrCid
   ma.managerId === 0
@@ -461,7 +479,7 @@ testTransceiverIsDeploymentBound = do
   alice <- allocateParty "BoundAlice"
   bob <- allocateParty "BoundBob"
   (dA, discsA) <- sendScaffold operator gg alice LockUnlock csId
-  dB <- deploy operator gg bob LockUnlock
+  dB <- deploy operator gg bob LockUnlock csId
   Some emA <- queryContractId operator dA.emitterCid
   Some emB <- queryContractId operator dB.emitterCid
   emA.owner === gg
@@ -491,14 +509,15 @@ testTransceiverIsDeploymentBound = do
 -- registering admin.
 testBurnMintRegistrationRequiresBoundInstrument : Script ()
 testBurnMintRegistrationRequiresBoundInstrument = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "BindAdmin"
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
   -- gg (the instrument admin) co-signs; the id binding still rejects the
   -- unbound instrument id.
-  res <- trySubmit (actAs admin <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+  res <- trySubmit (actAs admin <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
@@ -509,9 +528,11 @@ testBurnMintRegistrationRequiresBoundInstrument = do
       tokenConfig = BurnMint
       tokenDecimals = 8
       factory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; registration fails first
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
   expectAbort "not bound to the registering admin" res
 
 -- | The exclusivity attack the binding exists to stop: mallory registers her
@@ -522,15 +543,16 @@ testBurnMintRegistrationRequiresBoundInstrument = do
 -- co-signature.
 testBurnMintInstrumentIsExclusiveToItsAdmin : Script ()
 testBurnMintInstrumentIsExclusiveToItsAdmin = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   alice <- allocateParty "ExclAlice"
   mallory <- allocateParty "ExclMallory"
-  d <- deploy operator gg alice BurnMint
+  d <- deploy operator gg alice BurnMint csId
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
   forA_ [0, 1, 7] \nonce -> do
-    res <- trySubmit (actAs mallory <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+    res <- trySubmit (actAs mallory <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
       exerciseCmd govCid RegisterManager with
         admin = mallory
         chainId = cantonChainId
@@ -541,9 +563,11 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
         tokenConfig = BurnMint
         tokenDecimals = 8
         factory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; registration fails first
-        coreStateCid = None
+        coreStateCid = csId
+        consistencyLevel = 0
         emitterFeeAllocation = None
         claimFeeAllocation = None
+        feeAllocation = None
     expectAbort "not bound to the registering admin" res
 
 -- | Burn/mint registration rejects an instrument that gg does not administer
@@ -551,13 +575,14 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
 -- Daml Decimal cannot represent exactly.
 testRegistrationBounds : Script ()
 testRegistrationBounds = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "BoundsAdmin"
   outsider <- allocateParty "BoundsOutsider"
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
-  let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc
 
   -- A burn/mint instrument's minter must co-sign registration (it lends its
   -- mint authority). Here the external minter @outsider@ does not co-sign, so
@@ -573,9 +598,11 @@ testRegistrationBounds = do
       tokenConfig = BurnMint
       tokenDecimals = 8
       factory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; registration fails first
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
 
   res <- trySubmit (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
@@ -588,9 +615,11 @@ testRegistrationBounds = do
       tokenConfig = LockUnlock
       tokenDecimals = 11
       factory = TransferFactoryCid (coerceContractId emReg)   -- unused; registration fails first
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
   expectAbort "tokenDecimals must be between 0 and 10" res
 
   -- The committed factory's type must match the mode: a lock/unlock
@@ -606,9 +635,11 @@ testRegistrationBounds = do
       tokenConfig = LockUnlock
       tokenDecimals = 8
       factory = BurnMintFactoryCid (coerceContractId emReg)
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
   expectAbort "factory type does not match" res
 
   -- The deployment's own chain id must be a positive uint16.
@@ -623,9 +654,11 @@ testRegistrationBounds = do
       tokenConfig = LockUnlock
       tokenDecimals = 8
       factory = TransferFactoryCid (coerceContractId emReg)   -- unused; registration fails first
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
   expectAbort "chainId must be a positive uint16" res
 
 -- | 'SetPeer' rejects an out-of-range chain id, the deployment's own chain id
@@ -634,33 +667,38 @@ testRegistrationBounds = do
 -- misconfiguration rather than an attack.
 testSetPeerGuards : Script ()
 testSetPeerGuards = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "SetPeerAdmin"
-  d <- deploy operator gg admin LockUnlock
+  d <- deploy operator gg admin LockUnlock csId
   let goodPeer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  let discs = [csDisc, emitterDisc]
+      setPeerCmd chainId peer = exerciseCmd d.mgrCid SetPeer with
+        chainId
+        peer
+        transceiverEmitterCid = d.emitterCid
+        coreStateCid = csId
+        consistencyLevel = 0
+        payer = admin
+        feeAllocation = None
 
-  res <- trySubmit admin do
-    exerciseCmd d.mgrCid SetPeer with chainId = 70000, peer = goodPeer
+  res <- trySubmitWithDiscs admin discs do setPeerCmd 70000 goodPeer
   expectAbort "positive uint16" res
 
-  res <- trySubmit admin do
-    exerciseCmd d.mgrCid SetPeer with chainId = cantonChainId, peer = goodPeer
+  res <- trySubmitWithDiscs admin discs do setPeerCmd cantonChainId goodPeer
   expectAbort "own chain" res
 
-  res <- trySubmit admin do
-    exerciseCmd d.mgrCid SetPeer with
-      chainId = 2
-      peer = Peer with managerAddress = b32 "", transceiverAddress = b32 "cc", decimals = 8
+  res <- trySubmitWithDiscs admin discs do
+    setPeerCmd 2 (Peer with managerAddress = b32 "", transceiverAddress = b32 "cc", decimals = 8)
   expectAbort "manager address must be non-zero" res
 
-  res <- trySubmit admin do
-    exerciseCmd d.mgrCid SetPeer with
-      chainId = 2
-      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 0
+  res <- trySubmitWithDiscs admin discs do
+    setPeerCmd 2 (Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 0)
   expectAbort "peer decimals must be a positive uint8" res
 
   -- A well-formed peer on another chain is accepted.
-  _ <- submit admin do exerciseCmd d.mgrCid SetPeer with chainId = 2, peer = goodPeer
+  _ <- submitWithDiscs admin discs do setPeerCmd 2 goodPeer
   pure ()
 
 -- | Registration pins the caller-supplied registries to this bridge instance:
@@ -670,7 +708,7 @@ testSetPeerGuards = do
 -- checks.
 testRegistrationRejectsForeignRegistries : Script ()
 testRegistrationRejectsForeignRegistries = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "ForeignRegAdmin"
   rogue <- allocateParty "RogueOperator"
   rogueObserver <- allocateParty "RogueRegObserver"
@@ -679,11 +717,12 @@ testRegistrationRejectsForeignRegistries = do
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
 
   shadowEmReg <- submit rogue do
     createCmd (mkInitialEmitterRegistry rogue gg rogueObserver 0)
   shadowEmRegDisc <- fromSome <$> queryDisclosure rogue shadowEmReg
-  res <- trySubmit (actAs admin <> disclose govDisc <> disclose shadowEmRegDisc <> disclose rrRegDisc) do
+  res <- trySubmit (actAs admin <> disclose govDisc <> disclose shadowEmRegDisc <> disclose rrRegDisc <> disclose csDisc) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
@@ -694,15 +733,17 @@ testRegistrationRejectsForeignRegistries = do
       tokenConfig = LockUnlock
       tokenDecimals = 8
       factory
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
   expectAbort "emitter registry is not this bridge instance's" res
 
   shadowRrReg <- submit rogue do
     createCmd (mkInitialReplayRootRegistry rogue gg 0)
   shadowRrRegDisc <- fromSome <$> queryDisclosure rogue shadowRrReg
-  res <- trySubmit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose shadowRrRegDisc) do
+  res <- trySubmit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose shadowRrRegDisc <> disclose csDisc) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
@@ -713,10 +754,315 @@ testRegistrationRejectsForeignRegistries = do
       tokenConfig = LockUnlock
       tokenDecimals = 8
       factory
-      coreStateCid = None
+      coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
   expectAbort "replay root registry is not this bridge instance's" res
+
+----------------------------------------------------------------------
+-- Broadcast (bundled into SetPeer / RegisterManager; accountant bookkeeping)
+----------------------------------------------------------------------
+
+-- | Happy path: 'SetPeer' publishes the encoded registration at the emitter's
+-- own sequence (1, since 'deploy' already broadcast a 'TransceiverInit' at 0),
+-- and the sequence advances.
+testSetPeerBroadcastsRegistration : Script ()
+testSetPeerBroadcastsRegistration = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "SetPeerBroadcastAlice"
+  d <- deploy operator gg alice LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  (_, msg) <- submit (actAs alice <> disclose csDisc <> disclose emitterDisc) do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = alice
+      feeAllocation = None
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 2
+    peerAddress = b32 "cc"
+  msg.sequence === 1
+  [(_, em)] <- query @Emitter gg
+  em.sequence === 2
+
+-- | A foreign deployment's emitter is rejected, mirroring 'testTransceiverIsDeploymentBound'.
+testSetPeerRejectsForeignTransceiver : Script ()
+testSetPeerRejectsForeignTransceiver = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "SetPeerForeignAlice"
+  bob <- allocateParty "SetPeerForeignBob"
+  dA <- deploy operator gg alice LockUnlock csId
+  dB <- deploy operator gg bob LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterBDisc <- fromSome <$> queryDisclosure operator dB.emitterCid
+  res <- trySubmit (actAs alice <> disclose csDisc <> disclose emitterBDisc) do
+    exerciseCmd dA.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = dB.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = alice
+      feeAllocation = None
+  expectAbort "transceiver emitter is not this deployment's" res
+
+-- | Peer addresses must be exactly 32 bytes of lowercase hex:
+-- 'leftPadTo' is the identity above 32 bytes, so an unchecked oversized
+-- address would emit an over-length registration the accountant truncates
+-- and permanently mis-records into its write-once slot. Uppercase hex is
+-- REJECTED rather than normalized — the check runs on the raw field, before
+-- 'normalizePeer' lowercases, so this pins the actual behaviour rather than
+-- the alternative (normalize-then-accept). A valid 32-byte lowercase address
+-- is still accepted.
+testSetPeerRejectsMalformedAddress : Script ()
+testSetPeerRejectsMalformedAddress = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "SetPeerMalformedAdmin"
+  d <- deploy operator gg admin LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  let valid = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      doSetPeer peer = exerciseCmd d.mgrCid SetPeer with
+        chainId = 2
+        peer
+        transceiverEmitterCid = d.emitterCid
+        coreStateCid = csId
+        consistencyLevel = 0
+        payer = admin
+        feeAllocation = None
+      tryPeer peer = trySubmitWithDiscs admin [csDisc, emitterDisc] do doSetPeer peer
+
+  -- Oversized (33 bytes): rejected, not silently truncated.
+  res <- tryPeer (valid with transceiverAddress = "00" <> b32 "cc")
+  expectAbort "32 bytes of lowercase hex" res
+
+  -- Short (31 bytes): rejected, not silently zero-padded.
+  res <- tryPeer (valid with transceiverAddress = T.drop 2 (b32 "cc"))
+  expectAbort "32 bytes of lowercase hex" res
+
+  -- Non-hex characters: rejected even at the correct width.
+  res <- tryPeer (valid with transceiverAddress = "zz" <> T.drop 2 (b32 "cc"))
+  expectAbort "32 bytes of lowercase hex" res
+
+  -- Odd hex-digit count: 'byteLength' truncates via integer division, so
+  -- this is caught by the width check.
+  res <- tryPeer (valid with transceiverAddress = T.take (T.length (b32 "cc") - 1) (b32 "cc"))
+  expectAbort "32 bytes of lowercase hex" res
+
+  -- Uppercase hex: rejected, not normalized.
+  res <- tryPeer (valid with transceiverAddress = T.asciiToUpper (b32 "cc"))
+  expectAbort "32 bytes of lowercase hex" res
+
+  -- A valid 32-byte lowercase address is still accepted.
+  (_, msg) <- submitWithDiscs admin [csDisc, emitterDisc] do doSetPeer valid
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 2
+    peerAddress = b32 "cc"
+
+-- | 'consistencyLevel' is a uint8 on the wire: out of range the
+-- Canton watcher drops the message, so it is never observed or signed.
+-- Negative and >255 values are rejected; the boundary values 0 and 255 are
+-- accepted.
+testSetPeerRejectsOutOfRangeConsistencyLevel : Script ()
+testSetPeerRejectsOutOfRangeConsistencyLevel = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "SetPeerCLAdmin"
+  d <- deploy operator gg admin LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  let doSetPeer cl = exerciseCmd d.mgrCid SetPeer with
+        chainId = 2
+        peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+        transceiverEmitterCid = d.emitterCid
+        coreStateCid = csId
+        consistencyLevel = cl
+        payer = admin
+        feeAllocation = None
+
+  res <- trySubmitWithDiscs admin [csDisc, emitterDisc] do doSetPeer 256
+  expectAbort "consistency level must be a uint8" res
+  res <- trySubmitWithDiscs admin [csDisc, emitterDisc] do doSetPeer (-1)
+  expectAbort "consistency level must be a uint8" res
+
+  -- Boundary 0 accepted.
+  (_, msg0) <- submitWithDiscs admin [csDisc, emitterDisc] do doSetPeer 0
+  msg0.consistencyLevel === 0
+
+-- | Boundary value 255 accepted, on a separate deployment (the previous test
+-- already claims this manager's peer-chain-2 slot at consistencyLevel 0).
+testSetPeerAcceptsMaxConsistencyLevel : Script ()
+testSetPeerAcceptsMaxConsistencyLevel = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "SetPeerCLMaxAdmin"
+  d <- deploy operator gg admin LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  (_, msg) <- submitWithDiscs admin [csDisc, emitterDisc] do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 255
+      payer = admin
+      feeAllocation = None
+  msg.consistencyLevel === 255
+
+-- | 'SetPeer' at nonzero @messageFee@: no allocation aborts with
+-- the core's fee-required message, and a properly minted allocation from the
+-- admin's own wallet succeeds, publishes the registration, and the fee lands
+-- on the fee recipient — mirroring 'testNttSend's fee mechanism.
+testSetPeerFeeRequired : Script ()
+testSetPeerFeeRequired = do
+  (operator, gg, csId, mockAdmin, inst, feeRecipient) <- nttSetupFee
+  admin <- allocateParty "SetPeerFeeAdmin"
+  d <- deploy operator gg admin LockUnlock csId
+
+  -- Governance raises the message fee to 1000 (1e-7 tokens).
+  csId <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  let doSetPeer feeAlloc = exerciseCmd d.mgrCid SetPeer with
+        chainId = 2
+        peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+        transceiverEmitterCid = d.emitterCid
+        coreStateCid = csId
+        consistencyLevel = 0
+        payer = admin
+        feeAllocation = feeAlloc
+
+  -- (a) Fee due but none attached: rejected.
+  res <- trySubmitWithDiscs admin [csDisc, emitterDisc] do doSetPeer None
+  expectAbort "fee required" res
+
+  -- (b) Exact fee from admin's own wallet: succeeds, the registration
+  -- publishes, and the fee lands on the fee recipient.
+  feePay <- mintAndAllocate mockAdmin admin feeRecipient inst (feeToDecimal 1000)
+  (_, msg) <- submitWithDiscs admin [csDisc, emitterDisc] do doSetPeer (Some feePay)
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 2
+    peerAddress = b32 "cc"
+  bal <- mockBalance mockAdmin feeRecipient inst
+  bal === feeToDecimal 1000
+
+-- | Peers stay replaceable (D3): a second 'SetPeer' for the same chain
+-- succeeds and broadcasts the NEW address, not the old one.
+testSetPeerReplacementBroadcastsAgain : Script ()
+testSetPeerReplacementBroadcastsAgain = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "SetPeerReplaceAdmin"
+  (d, discs) <- sendScaffold operator gg admin LockUnlock csId
+  (_, msg) <- submitWithDiscs admin discs do
+    exerciseCmd d.mgrCid SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "dd", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 2
+    peerAddress = b32 "dd"
+
+-- | Pausing blocks value movement, not administration: 'SetPeer's broadcast still succeeds.
+testSetPeerWorksWhilePaused : Script ()
+testSetPeerWorksWhilePaused = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "SetPeerPausedAdmin"
+  d <- deploy operator gg admin LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  pausedMgr <- submit admin do exerciseCmd d.mgrCid SetPaused with newPaused = True
+  (_, msg) <- submit (actAs admin <> disclose csDisc <> disclose emitterDisc) do
+    exerciseCmd pausedMgr SetPeer with
+      chainId = 2
+      peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 2
+    peerAddress = b32 "cc"
+
+-- | 'RegisterManager' publishes the 'TransceiverInit' once, at registration,
+-- for both modes; the stored 'tokenAddress' agrees with 'nttTokenAddressFor'.
+testRegisterManagerBroadcastsInit : Script ()
+testRegisterManagerBroadcastsInit = do
+  (operator, gg, csId) <- nttSetup
+  aliceLock <- allocateParty "RegisterInitLockAlice"
+  bobBurn <- allocateParty "RegisterInitBurnBob"
+  dLock <- deploy operator gg aliceLock LockUnlock csId
+  dBurn <- deploy operator gg bobBurn BurnMint csId
+  Some mgrLock <- queryContractId operator dLock.mgrCid
+  Some mgrBurn <- queryContractId operator dBurn.mgrCid
+
+  dLock.initMsg.payload === encodeTransceiverInit TransceiverInit with
+    nttManagerAddress = mgrLock.managerAddress
+    nttManagerMode = 0
+    tokenAddress = mgrLock.tokenAddress
+    tokenDecimals = 8
+  dLock.initMsg.sequence === 0
+  mgrLock.tokenAddress === nttTokenAddressFor dLock.instrumentId
+
+  dBurn.initMsg.payload === encodeTransceiverInit TransceiverInit with
+    nttManagerAddress = mgrBurn.managerAddress
+    nttManagerMode = 1
+    tokenAddress = mgrBurn.tokenAddress
+    tokenDecimals = 8
+  dBurn.initMsg.sequence === 0
+  mgrBurn.tokenAddress === nttTokenAddressFor dBurn.instrumentId
+
+-- | 'RegisterManager''s init broadcast also bounds 'consistencyLevel' to a
+-- uint8: out of range is terminal there (no re-broadcast path),
+-- so it is rejected before anything is minted. Boundary 255 is accepted; 0
+-- is already exercised by every other 'deploy' call in this file.
+testRegisterManagerRejectsOutOfRangeConsistencyLevel : Script ()
+testRegisterManagerRejectsOutOfRangeConsistencyLevel = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "RegisterCLAdmin"
+  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
+  [(govCid, _)] <- query @NttGovernance operator
+  govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  let register cl = exerciseCmd govCid RegisterManager with
+        admin
+        chainId = cantonChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        instrumentId = bridgedInstrument gg
+        instrumentNonce = 0
+        tokenConfig = LockUnlock
+        tokenDecimals = 8
+        factory
+        coreStateCid = csId
+        consistencyLevel = cl
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+        feeAllocation = None
+      discs = actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc
+
+  res <- trySubmit discs do register 256
+  expectAbort "consistency level must be a uint8" res
+  res <- trySubmit discs do register (-1)
+  expectAbort "consistency level must be a uint8" res
+
+  -- Boundary 255 accepted.
+  (_, _, _, _, msg) <- submit discs do register 255
+  msg.consistencyLevel === 255
 
 ----------------------------------------------------------------------
 -- The locked ledger
@@ -726,9 +1072,9 @@ testRegistrationRejectsForeignRegistries = do
 -- can move the balance (the controller set is all three).
 testLockedLedgerCap : Script ()
 testLockedLedgerCap = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   alice <- allocateParty "LedgerAlice"
-  d <- deploy operator gg alice LockUnlock
+  d <- deploy operator gg alice LockUnlock csId
   let trio = actAs operator <> actAs alice <> actAs gg
   lcid <- submit trio do
     exerciseCmd (fromSome d.ledgerCid) Credit with amount = 5.0, newCustodyHint = None
@@ -757,13 +1103,21 @@ sendScaffold
   : Party -> Party -> Party -> NttTokenConfig -> ContractId CoreState
   -> Script (Deployment, [Disclosure])
 sendScaffold operator gg admin config csId = do
-  d <- deploy operator gg admin config
-  mgrCid <- submit admin do
+  d <- deploy operator gg admin config csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  peerEmitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  (mgrCid, _) <- submit (actAs admin <> disclose csDisc <> disclose peerEmitterDisc) do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
-  csDisc <- fromSome <$> queryDisclosure operator csId
-  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
   factoryDisc <- case config of
     BurnMint -> discloseBurnMintFactory gg
     LockUnlock -> discloseTransferFactory gg
@@ -772,7 +1126,7 @@ sendScaffold operator gg admin config csId = do
       ld <- fromSome <$> queryDisclosure operator lcid
       pure [ld]
     None -> pure []
-  pure ((d with mgrCid), csDisc :: emitterDisc :: factoryDisc :: ledgerDiscs)
+  pure ((d with mgrCid, emitterCid), csDisc :: emitterDisc :: factoryDisc :: ledgerDiscs)
 
 -- | Submit as @p@ with a list of disclosures attached.
 submitWithDiscs : Party -> [Disclosure] -> Commands a -> Script a
@@ -816,7 +1170,7 @@ testTransferLockAccounting = do
   [(ledgerCid, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
   [(_, em)] <- query @Emitter gg
-  em.sequence === 1
+  em.sequence === 3   -- deploy's TransceiverInit (0), SetPeer's registration (1), this Transfer (2)
   custody <- cip56HoldingsOwnedBy gg alice
   potCid <- case custody of
     [(cid, h)] -> do
@@ -870,11 +1224,25 @@ testTransferTrimsToPeerDecimals = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "DustAlice"
   (d, discs) <- sendScaffold operator gg alice LockUnlock csId
-  mgrCid <- submit alice do
+  (mgrCid, _) <- submitWithDiscs alice discs do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 5
       peer = Peer with managerAddress = b32 "b5", transceiverAddress = b32 "c5", decimals = 3
-  let d' = d with mgrCid
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = alice
+      feeAllocation = None
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId   -- this SetPeer's own broadcast churned it
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
+  factoryDisc <- discloseTransferFactory gg
+  ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
+  let d' = d with mgrCid, emitterCid
+      -- Rebuilt from scratch: 'discs' (from 'sendScaffold') still carries the
+      -- pre-churn emitter disclosure, which Canton rejects outright as stale.
+      discs' = [csDisc, emitterDisc, factoryDisc, ledgerDisc]
       sendTo chainId rawAmount holding =
         exerciseCmd d'.mgrCid Transfer with
           user = alice
@@ -893,13 +1261,13 @@ testTransferTrimsToPeerDecimals = do
 
   -- 0.00158434 at 8 decimals cannot be represented at 3 decimals: rejected.
   dustHolding <- mkHolding gg alice d.instrumentId 0.00158434
-  res <- trySubmitWithDiscs alice discs do sendTo 5 158434 dustHolding
+  res <- trySubmitWithDiscs alice discs' do sendTo 5 158434 dustHolding
   expectAbort "dust the peer cannot represent" res
 
   -- 0.001 is representable at 3 decimals: locked, and the ledger is credited
   -- by exactly that amount.
   roundHolding <- mkHolding gg alice d.instrumentId 0.001
-  _ <- submitWithDiscs alice discs do sendTo 5 100000 roundHolding
+  _ <- submitWithDiscs alice discs' do sendTo 5 100000 roundHolding
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.001
 
@@ -930,7 +1298,7 @@ testPauseHaltsRelease = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "PauseRelAdmin"
   recipient <- allocateParty "PauseRelRecipient"
-  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   pausedMgr <- submit admin do exerciseCmd mgrCid SetPaused with newPaused = True
   (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
@@ -1100,9 +1468,9 @@ testSetFactory = do
 -- not just at registration.
 testSetFactoryGgMintedRequiresGg : Script ()
 testSetFactoryGgMintedRequiresGg = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "SFGgAdmin"
-  d <- deploy operator gg admin BurnMint
+  d <- deploy operator gg admin BurnMint csId
   freshFc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = d.instrumentId
   let freshFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory freshFc)
   -- Admin alone cannot rotate a gg-minted factory.
@@ -1211,7 +1579,7 @@ testReplaySurvivesAdminTransfer = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "ReplaySurviveAlice"
   newAdmin <- allocateParty "ReplaySurviveNewAdmin"
-  d <- deploy operator gg alice LockUnlock
+  d <- deploy operator gg alice LockUnlock csId
   Some mgrBefore <- queryContractId operator d.mgrCid
   let feeDigest = (parseVAA govSetFeeVAA).hash
   (rootBefore, _) <- coveringDisclosure operator gg mgrBefore.namespace feeDigest
@@ -1285,7 +1653,7 @@ testOutboundTransferAfterAdminTransfer = do
   ledgerDisc  <- fromSome <$> queryDisclosure operator ledgerCid
   msg <- submitWithDiscs bob [csDisc, emitterDisc, factoryDisc, mgrDisc, ledgerDisc] do
     sendTransfer bob d' csId [holdingCid]
-  msg.sequence === 0
+  msg.sequence === 2   -- deploy's TransceiverInit (0) and SetPeer's registration (1) precede this Transfer
 
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
@@ -1296,10 +1664,10 @@ testOutboundTransferAfterAdminTransfer = do
 -- not see the successor.
 testLedgerObserverFollowsAdmin : Script ()
 testLedgerObserverFollowsAdmin = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   alice <- allocateParty "ObsAlice"
   newAdmin <- allocateParty "ObsNewAdmin"
-  d <- deploy operator gg alice LockUnlock
+  d <- deploy operator gg alice LockUnlock csId
   Some ledger <- queryContractId alice (fromSome d.ledgerCid)
   ledger.admin === alice
   (_, Some ledgerCid') <- submit (actAs alice <> actAs newAdmin) do
@@ -1415,7 +1783,7 @@ testTransferAdminAuthority = do
 
   -- Burn/mint: no reserve, no ledger; the role still transfers.
   bob <- allocateParty "XferAuthBob"
-  dB <- deploy operator gg bob BurnMint
+  dB <- deploy operator gg bob BurnMint csId
   (_, None) <- submit (actAs bob <> actAs gg) do
     exerciseCmd dB.mgrCid TransferAdmin with
       newAdmin = gg
@@ -1445,10 +1813,21 @@ testGgAdminnedOps = do
     exerciseCmd mgrCid SetPeer with
       chainId = 3
       peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = alice
+      feeAllocation = None
+  -- gg is a signatory of both the Emitter and CoreState, so no disclosure is needed here.
   _ <- submit gg do
     exerciseCmd mgrCid SetPeer with
       chainId = 3
       peer = Peer with managerAddress = b32 "b1", transceiverAddress = b32 "c1", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = gg
+      feeAllocation = None
   pure ()
 
 -- | The propose-accept handoff: the current admin leaves a standing
@@ -1598,9 +1977,9 @@ testDepositPreapprovalCreatesStanding = do
 -- the pre-approval contract itself.
 testDepositMintSucceeds : Script ()
 testDepositMintSucceeds = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   alice <- allocateParty "MintAlice"
-  d <- deploy operator gg alice BurnMint
+  d <- deploy operator gg alice BurnMint csId
   preCid <- submit alice do
     createCmd DepositPreapproval with owner = alice, instrumentId = d.instrumentId
 
@@ -1619,9 +1998,9 @@ testDepositMintSucceeds = do
 -- stale cid then fails.
 testRevokedPreapprovalFails : Script ()
 testRevokedPreapprovalFails = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   alice <- allocateParty "RevokeAlice"
-  d <- deploy operator gg alice BurnMint
+  d <- deploy operator gg alice BurnMint csId
   preCid <- submit alice do
     createCmd DepositPreapproval with owner = alice, instrumentId = d.instrumentId
   submit alice do exerciseCmd preCid Revoke
@@ -1646,14 +2025,22 @@ testNttSend : Script ()
 testNttSend = do
   (operator, gg, csId, mockAdmin, inst, feeRecipient) <- nttSetupFee
   alice <- allocateParty "SendAlice"
-  d <- deploy operator gg alice LockUnlock
+  d <- deploy operator gg alice LockUnlock csId
   holdingCid <- mkHolding gg alice d.instrumentId 0.01
-  _ <- submit alice do
+  csDisc0 <- fromSome <$> queryDisclosure operator csId
+  emitterDisc0 <- fromSome <$> queryDisclosure operator d.emitterCid
+  (mgrCid, _) <- submit (actAs alice <> disclose csDisc0 <> disclose emitterDisc0) do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
-  [(mgrCid, _)] <- query @NttManager operator
-  let d' = d with mgrCid
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = alice
+      feeAllocation = None
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId   -- SetPeer's own broadcast churned it
+  let d' = d with mgrCid, emitterCid
 
   -- Governance raises the message fee to 1000 (1e-7 tokens).
   csId <- submit operator do
@@ -1661,7 +2048,7 @@ testNttSend = do
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   csDisc <- fromSome <$> queryDisclosure operator csId
-  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  emitterDisc <- fromSome <$> queryDisclosure operator d'.emitterCid
   factoryDisc <- discloseTransferFactory gg
   ledgerDisc <- fromSome <$> queryDisclosure operator (fromSome d.ledgerCid)
   let discs = [csDisc, emitterDisc, factoryDisc, ledgerDisc]
@@ -1688,10 +2075,10 @@ testNttSend = do
   -- Exact fee from alice's wallet: succeeds, fee lands on the fee recipient.
   feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal 1000)
   msg <- submitWithDiscs alice discs do doTransfer (Some feePay)
-  msg.sequence === 0
+  msg.sequence === 2   -- deploy's TransceiverInit (0) and SetPeer's registration (1) precede this Transfer
 
   [(_, em)] <- query @Emitter gg
-  em.sequence === 1
+  em.sequence === 3
   [(_, ledger)] <- query @LockedLedger operator
   ledger.balance === 0.01
   custody <- cip56HoldingsOwnedBy gg alice
@@ -1721,12 +2108,21 @@ testNttTransferByDifferentUser = do
   (operator, gg, csId, mockAdmin, inst, feeRecipient) <- nttSetupFee
   admin <- allocateParty "TransferAdmin"
   bob <- allocateParty "TransferBob"
-  d <- deploy operator gg admin LockUnlock
+  d <- deploy operator gg admin LockUnlock csId
   holdingCid <- mkHolding gg bob d.instrumentId 0.01
-  mgrCid <- submit admin do
+  csDisc0 <- fromSome <$> queryDisclosure operator csId
+  emitterDisc0 <- fromSome <$> queryDisclosure operator d.emitterCid
+  (mgrCid, _) <- submit (actAs admin <> disclose csDisc0 <> disclose emitterDisc0) do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
+  Some mgrPostSetPeer <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgrPostSetPeer.transceiverEmitterId   -- SetPeer's own broadcast churned it
   -- TransferAdmin recreates the ledger (its admin observer moves to gg);
   -- track the successor cid, the old one is archived.
   (mgrCid, ledgerCid') <- submit (actAs admin <> actAs gg) do
@@ -1735,7 +2131,7 @@ testNttTransferByDifferentUser = do
       ledgerCid = Some (fromSome d.ledgerCid)
       vettedFactory = d.factory
       extraArgs = emptyExtraArgs
-  let d' = d with mgrCid, ledgerCid = ledgerCid'
+  let d' = d with mgrCid, ledgerCid = ledgerCid', emitterCid
 
   csId <- submit operator do
     exerciseCmd csId SubmitGovernanceVAA with
@@ -1744,7 +2140,7 @@ testNttTransferByDifferentUser = do
 
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 1000)
   dMgr     <- fromSome <$> queryDisclosure operator mgrCid
-  dEmitter <- fromSome <$> queryDisclosure operator d.emitterCid
+  dEmitter <- fromSome <$> queryDisclosure operator d'.emitterCid
   dFactory <- discloseTransferFactory gg
   dCs      <- fromSome <$> queryDisclosure operator csId
   dLedger  <- fromSome <$> queryDisclosure operator (fromSome d'.ledgerCid)
@@ -1765,7 +2161,7 @@ testNttTransferByDifferentUser = do
       extraArgs = emptyExtraArgs
 
   [(_, em)] <- query @Emitter gg
-  em.sequence === 1
+  em.sequence === 3   -- deploy's TransceiverInit (0), SetPeer's registration (1), this Transfer (2)
   custody <- cip56HoldingsOwnedBy gg gg
   case custody of
     [(_, h)] -> h.amount === 0.01
@@ -1780,11 +2176,18 @@ testNttTransferRequiresUserAuthority = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "ReqAdmin"
   bob <- allocateParty "ReqBob"
-  d <- deploy operator gg admin LockUnlock
-  mgrCid <- submit admin do
+  d <- deploy operator gg admin LockUnlock csId
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  (mgrCid, _) <- submit (actAs admin <> disclose csDisc <> disclose emitterDisc) do
     exerciseCmd d.mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
   let doTransfer = exerciseCmd mgrCid Transfer with
         user = bob
         transceiverEmitterCid = d.emitterCid
@@ -1824,17 +2227,17 @@ nttTransferDigest = (parseVAA nttTransferVAA).hash
 -- cannot reproduce, so the manager (and, for lock/unlock, its ledger) is
 -- created directly with all three signatures rather than registered.
 setupFixedManager
-  : Party -> Party -> Party -> NttTokenConfig
+  : Party -> Party -> Party -> NttTokenConfig -> ContractId CoreState
   -> Script (ContractId NttManager, NttFactory, Optional (ContractId LockedLedger))
-setupFixedManager operator gg admin config =
-  setupFixedManagerOn operator gg admin config cantonChainId
+setupFixedManager operator gg admin config csId =
+  setupFixedManagerOn operator gg admin config cantonChainId csId
 
 -- | 'setupFixedManager' with an explicit local chain id, for the inbound
 -- destination-chain check.
 setupFixedManagerOn
-  : Party -> Party -> Party -> NttTokenConfig -> Int
+  : Party -> Party -> Party -> NttTokenConfig -> Int -> ContractId CoreState
   -> Script (ContractId NttManager, NttFactory, Optional (ContractId LockedLedger))
-setupFixedManagerOn operator gg admin config chainId = do
+setupFixedManagerOn operator gg admin config chainId csId = do
   let instrumentId = bridgedInstrument gg
       namespace = nttNamespaceFor instrumentId admin 999
   factory <- case config of
@@ -1844,6 +2247,18 @@ setupFixedManagerOn operator gg admin config chainId = do
     LockUnlock -> do
       fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
       pure (TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
+  -- A fixed-address deployment bypasses 'RegisterManager', so it needs its own
+  -- directly-created transceiver Emitter for SetPeer's broadcast leg.
+  observer <- allocateParty "FixedMgrEmitterObserver"
+  emitterCid <- submit (actAs operator <> actAs gg) do
+    createCmd Emitter with
+      operator
+      guardianGovernance = gg
+      owner = gg
+      guardianObserver = observer
+      emitterId = 999
+      emitterAddress = b32 "cc"
+      sequence = 0
   mgrCid <- submit (actAs operator <> actAs admin <> actAs gg) do
     createCmd NttManager with
       operator
@@ -1857,15 +2272,24 @@ setupFixedManagerOn operator gg admin config chainId = do
       instrumentId
       tokenConfig = config
       tokenDecimals = 8
+      tokenAddress = nttTokenAddressFor instrumentId
       peers = Map.empty
       factory
       paused = False
       factoryEpoch = 0
+      peerEpoch = 0
       minter = None
-  mgrCid <- submit admin do
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
+  (mgrCid, _) <- submit (actAs admin <> disclose csDisc <> disclose emitterDisc) do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
   ledgerCid <- case config of
     LockUnlock -> Some <$> submit (actAs operator <> actAs admin <> actAs gg) do
       createCmd LockedLedger with
@@ -1890,7 +2314,7 @@ testReceiveByExecutorRecipientMismatchFails = do
   admin <- allocateParty "RecvAdmin"
   relayer <- allocateParty "Relayer"
   wrongRecipient <- allocateParty "WrongRecipient"
-  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
   dMgr <- fromSome <$> queryDisclosure operator mgrCid
@@ -1922,7 +2346,7 @@ testReceiveWrongChainRejected = do
   relayer <- allocateParty "WrongChainRelayer"
   recipient <- allocateParty "WrongChainRecipient"
   -- Same fixed deployment, but its own chain id is 99, not the fixture's 72.
-  (mgrCid, _, ledgerCid) <- setupFixedManagerOn operator gg admin LockUnlock 99
+  (mgrCid, _, ledgerCid) <- setupFixedManagerOn operator gg admin LockUnlock 99 csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
   dMgr <- fromSome <$> queryDisclosure operator mgrCid
@@ -1959,7 +2383,7 @@ testReleaseReplayPathAfterAdminTransfer = do
   newAdmin <- allocateParty "ReleaseReplayNewAdmin"
   relayer <- allocateParty "ReleaseReplayRelayer"
   wrongRecipient <- allocateParty "ReleaseReplayWrongRecipient"
-  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgrBefore <- queryContractId operator mgrCid
   (rootBefore, _) <- coveringDisclosure operator gg mgrBefore.namespace nttTransferDigest
 
@@ -1999,7 +2423,7 @@ testReleaseReplayPathAfterAdminTransfer = do
 -- under a throwaway gg party; it fails the pin before any verification runs.
 testReceivePinsGuardianGovernance : Script ()
 testReceivePinsGuardianGovernance = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "PinAdmin"
   recipient <- allocateParty "PinRecipient"
   rogueGov <- allocateParty "RogueGovernance"
@@ -2008,7 +2432,7 @@ testReceivePinsGuardianGovernance = do
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
                  ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
-  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock
+  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
 
@@ -2034,7 +2458,7 @@ testReleaseRejectsForeignLedger = do
   admin <- allocateParty "ForeignAdmin"
   other <- allocateParty "ForeignOther"
   recipient <- allocateParty "ForeignRecipient"
-  (mgrCid, _, _) <- setupFixedManager operator gg admin LockUnlock
+  (mgrCid, _, _) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
   -- A second deployment's ledger, owned by the same parties except the address.
@@ -2088,7 +2512,7 @@ integrationNttReceiveMatchSetup = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "MatchAdmin"
   recipient <- allocateParty "MatchRecipient"
-  (mgrId, factory, _) <- setupFixedManager operator gg admin BurnMint
+  (mgrId, factory, _) <- setupFixedManager operator gg admin BurnMint csId
   -- The recipient opts in once (a single self-signed create), then can stay
   -- offline.
   depositPreapprovalCid <- submit recipient do
@@ -2178,8 +2602,16 @@ acceptAdminHappyVAA = "010000000001009391f78297b7bd3fd25a52651e2b18216b625228226
 acceptAdminWrongModuleVAA : Bytes
 acceptAdminWrongModuleVAA = "010000000001006502d6d60ebb2c2452a430ac4510f0a5d13ad25a27a30fc54e062f9c9c88efaf3ef37c4db3b82a602cdbbfc95e663b4de642a28e5181c37434497287a3bede56006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000020000000000000000000000000000000000000000000000000000000000436f726501004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
+-- | Action byte 9 -- unassigned on BOTH lineages that define NTT governance
+-- actions: this branch uses 1 (AcceptAdminToGovernance) and 4
+-- (SetPeerByGovernance); the sibling ntt-token-factory/ntt-governance-vaa
+-- lineage (PR #48/#51) uses 1, 2 (RegisterBurnMintManager), and 3
+-- (RotateToCanonicalFactory). Action 2 was used here previously, but the
+-- sibling lineage assigns it, which would make this fixture start parsing
+-- successfully (and this test silently stop testing the unsupported-action
+-- path) the moment the two lineages merge.
 acceptAdminWrongActionVAA : Bytes
-acceptAdminWrongActionVAA = "01000000000100fff2b32d5777d24ee1a95a7eca6d8ec8600da55b70b1b2f825e300a41e369a9d0c8ba1e548c9da19cae990d5216fa058f2e80710e6e251d623f522d5145d92b6016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000030000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminWrongActionVAA = "010000000001004069f5c53af32a7e95f4e40ea9cddf48174b94cb8b3a2bfe58f3d9731544e05d62cfa08777f794fc2a2dd3338af225a9025be44c6da0cfa62cab7e361b90b539016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000030000000000000000000000000000000000000000000000000000000000004e747409004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
 acceptAdminWrongChainVAA : Bytes
 acceptAdminWrongChainVAA = "010000000001000c33a3788f18cfab0c4c88b141cee4d606138df7042cb13aeedc124e444462f4616adb4a026e5accd0569d276696d457ea754f996b571a006a712c48f2d8a989016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000004e747401000200000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
@@ -2222,9 +2654,9 @@ data AcceptAdminFixture = AcceptAdminFixture with
     namespace : Text
   deriving (Eq, Show)
 
-acceptAdminFixture : Party -> Party -> Party -> NttTokenConfig -> Script AcceptAdminFixture
-acceptAdminFixture operator gg admin config = do
-  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin config
+acceptAdminFixture : Party -> Party -> Party -> NttTokenConfig -> ContractId CoreState -> Script AcceptAdminFixture
+acceptAdminFixture operator gg admin config csId = do
+  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin config csId
   Some mgr <- queryContractId operator mgrCid
   propCid <- submit admin do
     createCmd AdminTransferProposal with
@@ -2274,7 +2706,7 @@ testAcceptAdminByVaaHappyPath = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptHappyAdmin"
   relayer <- allocateParty "AcceptHappyRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
   (nodeCid, discs) <- acceptAdminDiscs operator gg admin csId fx (parseVAA acceptAdminHappyVAA).hash
 
   (mgrCid', ledgerCid') <- submitWithDiscs relayer discs do
@@ -2294,7 +2726,7 @@ testAcceptAdminByVaaLockUnlock = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptLockAdmin"
   relayer <- allocateParty "AcceptLockRelayer"
-  fx <- acceptAdminFixture operator gg admin LockUnlock
+  fx <- acceptAdminFixture operator gg admin LockUnlock csId
   let lcid = fromSome fx.ledgerCid
   (nodeCid, discs) <- acceptAdminDiscs operator gg admin csId fx (parseVAA acceptAdminHappyVAA).hash
 
@@ -2319,7 +2751,7 @@ testAcceptAdminByVaaWorksWhilePaused = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptPausedAdmin"
   relayer <- allocateParty "AcceptPausedRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
   pausedMgrCid <- submit admin do exerciseCmd fx.mgrCid SetPaused with newPaused = True
   let fxP = fx with mgrCid = pausedMgrCid
   (nodeCid, discs) <- acceptAdminDiscs operator gg admin csId fxP (parseVAA acceptAdminHappyVAA).hash
@@ -2333,15 +2765,16 @@ testAcceptAdminByVaaWorksWhilePaused = do
 
 -- | Wrong governance payload — module, action, chain, managerAddress — each
 -- rejected at 'parseNttGovernance' or the post-parse field checks, never
--- reaching the proposal. 'acceptAdminWrongActionVAA' happens to parse as a
--- well-formed 'RegisterBurnMintManager', so it exercises the exhaustive
--- constructor dispatch, not merely a parse failure.
+-- reaching the proposal. 'acceptAdminWrongActionVAA' carries action id 9,
+-- genuinely unassigned (1-4 are all real), so it fails at the parser itself;
+-- 'testAcceptAdminByVaaRejectsRegisterAndRotateActions' covers the
+-- exhaustive constructor dispatch against real actions 2/3.
 testAcceptAdminByVaaRejectsWrongPayload : Script ()
 testAcceptAdminByVaaRejectsWrongPayload = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptWrongPayloadAdmin"
   relayer <- allocateParty "AcceptWrongPayloadRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
   let tryVaa vaaBytes = do
         (nodeCid, discs) <- acceptAdminDiscs operator gg admin csId fx (parseVAA vaaBytes).hash
         trySubmitWithDiscs relayer discs do
@@ -2350,11 +2783,29 @@ testAcceptAdminByVaaRejectsWrongPayload = do
   res <- tryVaa acceptAdminWrongModuleVAA
   expectAbort "not the Ntt module" res
   res <- tryVaa acceptAdminWrongActionVAA
-  expectAbort "not an accept-admin action" res
+  expectAbort "unsupported action" res
   res <- tryVaa acceptAdminWrongChainVAA
   expectAbort "wrong target chain" res
   res <- tryVaa acceptAdminWrongManagerVAA
   expectAbort "wrong manager address" res
+
+-- | Cross-action dispatch: a genuinely well-formed,
+-- guardian-signed action-4 ('SetPeerByGovernance') VAA fed to
+-- 'AcceptAdminTransferByVaa' hits the dedicated wrong-action abort, not the
+-- generic proposal or parse-failure paths — exactly the confusion the
+-- sum-type refactor exists to prevent. Uses 'setPeerHappyVAA' (defined in the
+-- SetPeerByVaa section below; Daml top-level order doesn't matter), which
+-- targets the same fixed address/chain 'acceptAdminFixture' builds.
+testAcceptAdminByVaaRejectsSetPeerAction : Script ()
+testAcceptAdminByVaaRejectsSetPeerAction = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "AcceptWrongActionKindAdmin"
+  relayer <- allocateParty "AcceptWrongActionKindRelayer"
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
+  (nodeCid, discs) <- acceptAdminDiscs operator gg admin csId fx (parseVAA setPeerHappyVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    acceptAdminByVaaCmd relayer fx csId nodeCid setPeerHappyVAA
+  expectAbort "wrong action for AcceptAdminTransferByVaa" res
 
 -- | Wrong emitter chain / address — the governance-hardening checks mirroring
 -- 'Wormhole.Core.State.SubmitGovernanceVAA'.
@@ -2363,7 +2814,7 @@ testAcceptAdminByVaaRejectsWrongEmitter = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptWrongEmitterAdmin"
   relayer <- allocateParty "AcceptWrongEmitterRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
 
   (nodeCid1, discs1) <- acceptAdminDiscs operator gg admin csId fx (parseVAA acceptAdminWrongEmitterChainVAA).hash
   res <- trySubmitWithDiscs relayer discs1 do
@@ -2384,7 +2835,7 @@ testAcceptAdminByVaaRequiresCurrentGuardianSet = do
   Some cs <- queryContractId operator csId
   admin <- allocateParty "AcceptStaleSetAdmin"
   relayer <- allocateParty "AcceptStaleSetRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
 
   staleCsId <- submit (actAs operator <> actAs gg) do
     createCmd cs with
@@ -2408,7 +2859,7 @@ testAcceptAdminByVaaEpochBindsFactory = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptEpochAdmin"
   relayer <- allocateParty "AcceptEpochRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
 
   freshFc <- submit gg do
     createCmd MockBurnMintFactory with admin = gg, instrument = bridgedInstrument gg
@@ -2433,7 +2884,7 @@ testAcceptAdminByVaaReplayRejected = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptReplayAdmin"
   relayer <- allocateParty "AcceptReplayRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
 
   (nodeCid, discs) <- acceptAdminDiscs operator gg admin csId fx (parseVAA acceptAdminHappyVAA).hash
   (mgrCid', _) <- submitWithDiscs relayer discs do
@@ -2469,7 +2920,7 @@ testAcceptAdminByVaaProposalChecks = do
   admin <- allocateParty "AcceptProposalChecksAdmin"
   outsider <- allocateParty "AcceptProposalChecksOutsider"
   relayer <- allocateParty "AcceptProposalChecksRelayer"
-  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin BurnMint
+  (mgrCid, factory, ledgerCid) <- setupFixedManager operator gg admin BurnMint csId
   Some mgr <- queryContractId operator mgrCid
 
   wrongNewAdminProp <- submit admin do
@@ -2515,7 +2966,7 @@ testAcceptAdminByVaaProposalChecks = do
 -- any VAA verification runs.
 testAcceptAdminByVaaPinsGuardianGovernance : Script ()
 testAcceptAdminByVaaPinsGuardianGovernance = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptPinAdmin"
   rogueGov <- allocateParty "AcceptPinRogueGovernance"
   rogueObserver <- allocateParty "AcceptPinRogueObserver"
@@ -2523,13 +2974,314 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
                  ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
   (nodeCid, _) <- coveringDisclosure operator gg fx.namespace (parseVAA acceptAdminHappyVAA).hash
   dProp <- fromSome <$> queryDisclosure admin fx.propCid
 
   res <- trySubmit (actAs operator <> disclose dProp) do
     acceptAdminByVaaCmd operator fx fakeCsId nodeCid acceptAdminHappyVAA
   expectAbort "committed guardian trust anchor" res
+
+----------------------------------------------------------------------
+-- SetPeerByVaa (NTT governance action 4)
+--
+-- Mirrors the accept-admin-by-VAA section above step for step: a gg-adminned
+-- 'setupFixedManagerOn' deployment (admin = gg directly), a guardian-signed
+-- action-4 VAA against its fixed address (0x00..aa, chain 72), targeting peer
+-- chain 3 (0x00..dd / 0x00..ee / 9 decimals) — distinct from the fixture's
+-- built-in chain-2 peer, so the happy path proves a real map edit. Fixtures
+-- signed by the same devnet guardian key as the accept-admin fixtures above;
+-- see that section's header for the signer/provenance note. All fixtures
+-- carry peerEpoch = 1: 'setupFixedManagerOn's own chain-2 'SetPeer' call
+-- already bumps the fresh manager's peerEpoch from 0 to 1 before any test runs.
+----------------------------------------------------------------------
+
+setPeerHappyVAA : Bytes
+setPeerHappyVAA = "010000000001000468e8da4d2da344abc56d5cec2cad48d27c9c6602f3c96cc924d7e44ee2c3454e4fabb1584be81e4e09b1f911c804f0660822780b76d313404dd830584ecc00016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+
+setPeerWrongChainVAA : Bytes
+setPeerWrongChainVAA = "01000000000100643c55d198fa60e0b3f8c5d6593922f4414082e8ea019db3bef0f7862c76a8e2218aa6aaef69aafb42eeb126afe323c0caefd00aa7c3d5b7ac2636890f60e5a3016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000680000000000000000000000000000000000000000000000000000000000004e747404000200000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+
+setPeerWrongManagerVAA : Bytes
+setPeerWrongManagerVAA = "01000000000100d60aee71588e3a6a10bec70875e1f22f6e46ad2c7d0797182dfbeb4f6485303162f34e8f7561e9498afb39d37b6bc8aa8b6dbd64fbb558d59a11cd4f4c7beace016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000690000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000ab0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+
+setPeerWrongEmitterChainVAA : Bytes
+setPeerWrongEmitterChainVAA = "0100000000010086fe05fc99eb9cedb0c82c49db91e171981c471eb4177ad316c046d10476453011c135c21ec89ae2e0b218ac93ef23e29519cb40715755170d38e901cf911c40016553f1000000000000020000000000000000000000000000000000000000000000000000000000000004000000000000006b0000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+
+setPeerWrongEmitterAddressVAA : Bytes
+setPeerWrongEmitterAddressVAA = "01000000000100a93323e15d5a1a053dd927a2d99b5593b01974a2f00e8533d6c959c6a8ae93573a2ab5b9c05273c46ad28cc3d7b101e2d9c4c7aba8156d972d576d6508610705016553f1000000000000010000000000000000000000000000000000000000000000000000000000000005000000000000006c0000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+
+-- | The gg-adminned fixed manager every 'SetPeerByVaa' test builds on. Admin
+-- is gg directly (no TransferAdmin ceremony needed to reach the state
+-- 'SetPeerByVaa' requires).
+data SetPeerByVaaFixture = SetPeerByVaaFixture with
+    mgrCid     : ContractId NttManager
+    emitterCid : ContractId Emitter
+    namespace  : Text
+  deriving (Eq, Show)
+
+setPeerByVaaFixture : Party -> Party -> ContractId CoreState -> Script SetPeerByVaaFixture
+setPeerByVaaFixture operator gg csId = do
+  (mgrCid, _, _) <- setupFixedManagerOn operator gg gg BurnMint cantonChainId csId
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
+  pure SetPeerByVaaFixture with mgrCid, emitterCid, namespace = mgr.namespace
+
+-- | Disclosures a stakeholder-less @executor@ needs to relay 'SetPeerByVaa':
+-- the manager, the core state, the transceiver (for the nested 'SetPeer'),
+-- and the covering replay node for @digest@.
+setPeerByVaaDiscs
+  : Party -> Party -> ContractId CoreState -> SetPeerByVaaFixture -> Text
+  -> Script (ContractId ReplayNode, [Disclosure])
+setPeerByVaaDiscs operator gg csId fx digest = do
+  dMgr <- fromSome <$> queryDisclosure operator fx.mgrCid
+  dCs <- fromSome <$> queryDisclosure operator csId
+  dEmitter <- fromSome <$> queryDisclosure operator fx.emitterCid
+  (nodeCid, dNode) <- coveringDisclosure operator gg fx.namespace digest
+  pure (nodeCid, [dMgr, dCs, dEmitter, dNode])
+
+-- | The 'SetPeerByVaa' exercise command against a 'SetPeerByVaaFixture'.
+setPeerByVaaCmd
+  : Party -> SetPeerByVaaFixture -> ContractId CoreState -> ContractId ReplayNode -> Bytes
+  -> Commands (ContractId NttManager, WormholeMessage)
+setPeerByVaaCmd executor fx csId nodeCid vaaBytes =
+  exerciseCmd fx.mgrCid SetPeerByVaa with
+    executor
+    coreStateCid = csId
+    replayNodeCid = nodeCid
+    vaaBytes
+    pubKeys = [(0, devnetGuardianPubKey)]
+    transceiverEmitterCid = fx.emitterCid
+    consistencyLevel = 0
+    feeAllocation = None
+
+-- | Happy path: the peer lands in the map and the returned message is the
+-- encoded registration for that peer.
+testSetPeerByVaaBroadcasts : Script ()
+testSetPeerByVaaBroadcasts = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerHappyVAA).hash
+
+  (mgrCid', msg) <- submitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerHappyVAA
+
+  Some mgr <- queryContractId operator mgrCid'
+  Map.lookup 3 mgr.peers
+    === Some (Peer with managerAddress = b32 "dd", transceiverAddress = b32 "ee", decimals = 9)
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 3
+    peerAddress = b32 "ee"
+
+-- | Wrong emitter chain — the governance-hardening check mirroring
+-- 'Wormhole.Core.State.SubmitGovernanceVAA'.
+testSetPeerByVaaRejectsWrongEmitterChain : Script ()
+testSetPeerByVaaRejectsWrongEmitterChain = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaWrongEmitterChainRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerWrongEmitterChainVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerWrongEmitterChainVAA
+  expectAbort "wrong emitter chain" res
+
+-- | Wrong emitter address — same hardening, the other half.
+testSetPeerByVaaRejectsWrongEmitterAddress : Script ()
+testSetPeerByVaaRejectsWrongEmitterAddress = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaWrongEmitterAddressRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerWrongEmitterAddressVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerWrongEmitterAddressVAA
+  expectAbort "wrong emitter address" res
+
+-- | A VAA signed under a superseded-but-unexpired guardian set fails the
+-- current-set-only hardening, mirroring 'testAcceptAdminByVaaRequiresCurrentGuardianSet':
+-- a 'CoreState' at @guardianSetIndex = 1@ with the devnet guardian key present
+-- under both indices 0 and 1 accepts the fixture VAA's signature in
+-- 'VerifyAndConsumeVAA' but 'SetPeerByVaa' still rejects it.
+testSetPeerByVaaRequiresCurrentGuardianSet : Script ()
+testSetPeerByVaaRequiresCurrentGuardianSet = do
+  (operator, gg, csId) <- nttSetup
+  Some cs <- queryContractId operator csId
+  relayer <- allocateParty "SetPeerByVaaStaleSetRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  staleCsId <- submit (actAs operator <> actAs gg) do
+    createCmd cs with
+      guardianSetIndex = 1
+      guardianSets = Map.fromList
+        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        ]
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg staleCsId fx (parseVAA setPeerHappyVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx staleCsId nodeCid setPeerHappyVAA
+  expectAbort "not signed by current guardian set" res
+
+-- | Wrong target chain in the packet — rejected before the nested 'SetPeer'.
+testSetPeerByVaaRejectsWrongChain : Script ()
+testSetPeerByVaaRejectsWrongChain = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaWrongChainRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerWrongChainVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerWrongChainVAA
+  expectAbort "wrong target chain" res
+
+-- | Wrong manager address in the packet — a VAA vetted for a different
+-- deployment can never be relayed here.
+testSetPeerByVaaRejectsWrongManagerAddress : Script ()
+testSetPeerByVaaRejectsWrongManagerAddress = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaWrongManagerRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerWrongManagerVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerWrongManagerVAA
+  expectAbort "wrong manager address" res
+
+-- | Cross-action dispatch, the other direction: a genuinely
+-- well-formed, guardian-signed action-1 ('AcceptAdminToGovernance') VAA fed
+-- to 'SetPeerByVaa' hits the dedicated wrong-action abort. A reversed pair
+-- here would let an admin-acceptance VAA drive a peer edit.
+testSetPeerByVaaRejectsAcceptAdminAction : Script ()
+testSetPeerByVaaRejectsAcceptAdminAction = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaWrongActionKindRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA acceptAdminHappyVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid acceptAdminHappyVAA
+  expectAbort "wrong action for SetPeerByVaa" res
+
+-- | Cross-action dispatch against the two newer actions: a genuinely well-formed action-2
+-- ('RegisterBurnMintManager') or action-3 ('RotateToCanonicalFactory') VAA
+-- fed to 'SetPeerByVaa' hits the dedicated wrong-action abort too, not just
+-- action 1.
+testSetPeerByVaaRejectsRegisterAndRotateActions : Script ()
+testSetPeerByVaaRejectsRegisterAndRotateActions = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaWrongActionKind2Relayer"
+  fx <- setPeerByVaaFixture operator gg csId
+
+  (nodeCid1, discs1) <- setPeerByVaaDiscs operator gg csId fx (parseVAA registerHappyVAA).hash
+  res1 <- trySubmitWithDiscs relayer discs1 do
+    setPeerByVaaCmd relayer fx csId nodeCid1 registerHappyVAA
+  expectAbort "wrong action for SetPeerByVaa" res1
+
+  (nodeCid2, discs2) <- setPeerByVaaDiscs operator gg csId fx (parseVAA rotateHappyVAA).hash
+  res2 <- trySubmitWithDiscs relayer discs2 do
+    setPeerByVaaCmd relayer fx csId nodeCid2 rotateHappyVAA
+  expectAbort "wrong action for SetPeerByVaa" res2
+
+-- | Replay: the same VAA relayed twice is rejected on digest membership
+-- alone, mirroring 'testAcceptAdminByVaaReplayRejected'.
+testSetPeerByVaaReplayRejected : Script ()
+testSetPeerByVaaReplayRejected = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaReplayRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerHappyVAA).hash
+  (mgrCid', _) <- submitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerHappyVAA
+
+  Some mgr' <- queryContractId operator mgrCid'
+  emitterCid' <- resolveEmitter gg mgr'.transceiverEmitterId
+  let fx2 = fx with mgrCid = mgrCid', emitterCid = emitterCid'
+  (nodeCid2, discs2) <- setPeerByVaaDiscs operator gg csId fx2 (parseVAA setPeerHappyVAA).hash
+  res <- trySubmitWithDiscs relayer discs2 do
+    setPeerByVaaCmd relayer fx2 csId nodeCid2 setPeerHappyVAA
+  expectAbort "digest already consumed" res
+
+-- | A manager still admin-owned (not gg) rejects even a perfectly valid VAA:
+-- the quorum only governs deployments it has taken custody of. Without this
+-- guard the nested 'SetPeer' would succeed regardless of who holds admin,
+-- since a nonconsuming choice body carries all of the manager's signatures —
+-- see 'SetPeerByVaa's doc comment.
+testSetPeerByVaaRequiresGovernanceAdmin : Script ()
+testSetPeerByVaaRequiresGovernanceAdmin = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "SetPeerByVaaNonGgAdmin"
+  relayer <- allocateParty "SetPeerByVaaNonGgRelayer"
+  (mgrCid, _, _) <- setupFixedManagerOn operator gg admin BurnMint cantonChainId csId
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
+  let fx = SetPeerByVaaFixture with mgrCid, emitterCid, namespace = mgr.namespace
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerHappyVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx csId nodeCid setPeerHappyVAA
+  expectAbort "manager is not governance-adminned" res
+
+-- | The freshness pin (supersession scenario): after the quorum signs
+-- 'setPeerHappyVAA' at 'setPeerByVaaFixture's post-setup peerEpoch (1), gg
+-- lands a DIFFERENT peer edit (chain 5) BEFORE the VAA is relayed, bumping
+-- peerEpoch to 2. The epoch-1 VAA is now stale and is rejected, even though
+-- every other field (module, action, chain, managerAddress) still matches —
+-- mirroring 'testAcceptAdminByVaaEpochBindsFactory' for action 4.
+testSetPeerByVaaRejectsStaleEpoch : Script ()
+testSetPeerByVaaRejectsStaleEpoch = do
+  (operator, gg, csId) <- nttSetup
+  relayer <- allocateParty "SetPeerByVaaStaleEpochRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+  -- gg is a signatory of both the Emitter and CoreState, so no disclosure is needed here.
+  (mgrCid', _) <- submit gg do
+    exerciseCmd fx.mgrCid SetPeer with
+      chainId = 5
+      peer = Peer with managerAddress = b32 "11", transceiverAddress = b32 "22", decimals = 7
+      transceiverEmitterCid = fx.emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = gg
+      feeAllocation = None
+  Some mgr' <- queryContractId operator mgrCid'
+  emitterCid' <- resolveEmitter gg mgr'.transceiverEmitterId   -- SetPeer's own broadcast churned it
+  let fx' = fx with mgrCid = mgrCid', emitterCid = emitterCid'
+
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx' (parseVAA setPeerHappyVAA).hash
+  res <- trySubmitWithDiscs relayer discs do
+    setPeerByVaaCmd relayer fx' csId nodeCid setPeerHappyVAA
+  expectAbort "wrong peer epoch" res
+
+-- | 'SetPeerByVaa' at nonzero @messageFee@: the executor self-funds the fee allocation (@payer =
+-- executor@) with no gg signature involved, proving a relayer can still
+-- submit the governance path without any guardian-quorum fee ceremony.
+testSetPeerByVaaFeeExecutorSelfFunds : Script ()
+testSetPeerByVaaFeeExecutorSelfFunds = do
+  (operator, gg, csId, mockAdmin, inst, feeRecipient) <- nttSetupFee
+  relayer <- allocateParty "SetPeerByVaaFeeRelayer"
+  fx <- setPeerByVaaFixture operator gg csId
+
+  -- Governance raises the message fee to 1000 (1e-7 tokens) AFTER the
+  -- fixture's own (fee-0) chain-2 SetPeer, mirroring 'testNttSend'.
+  csId <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  (nodeCid, discs) <- setPeerByVaaDiscs operator gg csId fx (parseVAA setPeerHappyVAA).hash
+  feePay <- mintAndAllocate mockAdmin relayer feeRecipient inst (feeToDecimal 1000)
+
+  (mgrCid', msg) <- submitWithDiscs relayer discs do
+    exerciseCmd fx.mgrCid SetPeerByVaa with
+      executor = relayer
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      vaaBytes = setPeerHappyVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      transceiverEmitterCid = fx.emitterCid
+      consistencyLevel = 0
+      feeAllocation = Some feePay
+
+  Some mgr <- queryContractId operator mgrCid'
+  Map.lookup 3 mgr.peers
+    === Some (Peer with managerAddress = b32 "dd", transceiverAddress = b32 "ee", decimals = 9)
+  msg.payload === encodeTransceiverRegistration TransceiverRegistration with
+    peerChain = 3
+    peerAddress = b32 "ee"
+  bal <- mockBalance mockAdmin feeRecipient inst
+  bal === feeToDecimal 1000
 
 ----------------------------------------------------------------------
 -- Accept-admin-by-VAA, live two-step harness (dynamic managerAddress)
@@ -2558,7 +3310,7 @@ integrationAcceptAdminSetup : Script AcceptAdminSetup
 integrationAcceptAdminSetup = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "IntegrationAcceptAdminAdmin"
-  d <- deploy operator gg admin BurnMint
+  d <- deploy operator gg admin BurnMint csId
   Some mgr <- queryContractId operator d.mgrCid
   propCid <- submit admin do
     createCmd AdminTransferProposal with
@@ -2710,7 +3462,7 @@ testAcceptAdminByVaaRejectsRegisterAndRotateActions = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptCrossActionAdmin"
   relayer <- allocateParty "AcceptCrossActionRelayer"
-  fx <- acceptAdminFixture operator gg admin BurnMint
+  fx <- acceptAdminFixture operator gg admin BurnMint csId
 
   (nodeCid1, discs1) <- acceptAdminDiscs operator gg admin csId fx (parseVAA registerHappyVAA).hash
   res <- trySubmitWithDiscs relayer discs1 do
@@ -2746,7 +3498,7 @@ registerByVaaFixture operator gg csId = do
 
 registerManagerByVaaCmd
   : Party -> RegisterByVaaFixture -> ContractId CoreState -> Int -> NttFactory -> Bytes
-  -> Commands (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
+  -> Commands (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
 registerManagerByVaaCmd admin fx csId nonce factory vaaBytes =
   exerciseCmd fx.govCid RegisterManagerByVaa with
     admin
@@ -2755,8 +3507,10 @@ registerManagerByVaaCmd admin fx csId nonce factory vaaBytes =
     instrumentNonce = nonce
     factory
     coreStateCid = csId
+    consistencyLevel = 0
     emitterFeeAllocation = None
     claimFeeAllocation = None
+    feeAllocation = None
     vaaBytes
     pubKeys = [(0, devnetGuardianPubKey)]
     extraArgs = emptyExtraArgs
@@ -2841,8 +3595,10 @@ testRegisterManagerByVaaReplayRejected = do
       instrumentNonce = 0
       factory = dummyFactory
       coreStateCid = csId
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
       vaaBytes = registerHappyVAA
       pubKeys = [(0, devnetGuardianPubKey)]
       extraArgs = emptyExtraArgs
@@ -2905,7 +3661,7 @@ testSetFactoryByVaaHappyPath : Script ()
 testSetFactoryByVaaHappyPath = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RotateHappyAdmin"
-  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint
+  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint csId
   Some mgr <- queryContractId operator mgrCid
   realFactoryCid <- nttCoinFactorySetup gg
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
@@ -2931,7 +3687,7 @@ testSetFactoryByVaaWrongEpoch : Script ()
 testSetFactoryByVaaWrongEpoch = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RotateWrongEpochAdmin"
-  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint
+  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint csId
   Some mgr <- queryContractId operator mgrCid
   realFactoryCid <- nttCoinFactorySetup gg
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
@@ -2948,7 +3704,7 @@ testSetFactoryByVaaRejectsNonCanonicalFactory : Script ()
 testSetFactoryByVaaRejectsNonCanonicalFactory = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RotateNonCanonicalAdmin"
-  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint
+  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint csId
   Some mgr <- queryContractId operator mgrCid
   mockFc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = bridgedInstrument gg
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory mockFc)
@@ -2967,7 +3723,7 @@ testSetFactoryByVaaRejectsLockUnlock : Script ()
 testSetFactoryByVaaRejectsLockUnlock = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RotateLockUnlockAdmin"
-  (mgrCid, _, _) <- setupFixedManager operator gg admin LockUnlock
+  (mgrCid, _, _) <- setupFixedManager operator gg admin LockUnlock csId
   csDisc <- fromSome <$> queryDisclosure operator csId
   realFactoryCid <- nttCoinFactorySetup gg
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
@@ -3001,10 +3757,12 @@ testSetFactoryByVaaRejectsExternalMinter = do
       instrumentId
       tokenConfig = BurnMint
       tokenDecimals = 8
+      tokenAddress = nttTokenAddressFor instrumentId
       peers = Map.empty
       factory
       paused = False
       factoryEpoch = 0
+      peerEpoch = 0
       minter = Some external
   _ <- registerReplayRoot operator gg namespace defaultSplitThreshold
   csDisc <- fromSome <$> queryDisclosure operator csId
@@ -3014,13 +3772,13 @@ testSetFactoryByVaaRejectsExternalMinter = do
     rotateByVaaCmd mgrCid newFactory csId (coerceContractId mgrCid) rotateHappyVAA
   expectAbort "only for gg-minted burn/mint deployments" res
 
--- | An action-1 (accept-admin) VAA aborts on the exhaustive constructor
--- dispatch.
+-- | An action-1 (accept-admin) or action-4 (set-peer) VAA aborts on the
+-- exhaustive constructor dispatch.
 testSetFactoryByVaaRejectsWrongConstructor : Script ()
 testSetFactoryByVaaRejectsWrongConstructor = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RotateWrongCtorAdmin"
-  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint
+  (mgrCid, _, _) <- setupFixedManager operator gg admin BurnMint csId
   Some mgr <- queryContractId operator mgrCid
   realFactoryCid <- nttCoinFactorySetup gg
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
@@ -3029,6 +3787,11 @@ testSetFactoryByVaaRejectsWrongConstructor = do
   res <- trySubmitWithDiscs admin [csDisc, dNode] do
     rotateByVaaCmd mgrCid newFactory csId nodeCid acceptAdminHappyVAA
   expectAbort "not a rotate-to-canonical-factory action" res
+
+  (nodeCid2, dNode2) <- coveringDisclosure operator gg mgr.namespace (parseVAA setPeerHappyVAA).hash
+  res2 <- trySubmitWithDiscs admin [csDisc, dNode2] do
+    rotateByVaaCmd mgrCid newFactory csId nodeCid2 setPeerHappyVAA
+  expectAbort "not a rotate-to-canonical-factory action" res2
 
 ----------------------------------------------------------------------
 -- RegisterManagerByVaa / SetFactoryByVaa, live three-step harness
@@ -3089,7 +3852,7 @@ integrationRegisterByVaa : RegisterByVaaInput -> Script RegisterByVaaResult
 integrationRegisterByVaa input = do
   let factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory input.factoryCid)
       actors = actAs input.operator <> actAs input.admin <> actAs input.gg
-  (govCid', mgrCid, _emitterCid, ledgerCid) <- submit actors do
+  (govCid', mgrCid, _emitterCid, ledgerCid, _msg) <- submit actors do
     exerciseCmd input.govCid RegisterManagerByVaa with
       admin = input.admin
       emitterRegistryCid = input.emReg
@@ -3097,8 +3860,10 @@ integrationRegisterByVaa input = do
       instrumentNonce = input.nonce
       factory
       coreStateCid = input.coreStateCid
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
       vaaBytes = input.vaaBytes
       pubKeys = [(0, devnetGuardianPubKey)]
       extraArgs = emptyExtraArgs
@@ -3124,8 +3889,10 @@ integrationRegisterByVaa input = do
       instrumentNonce = input.nonce
       factory
       coreStateCid = input.coreStateCid
+      consistencyLevel = 0
       emitterFeeAllocation = None
       claimFeeAllocation = None
+      feeAllocation = None
       vaaBytes = input.vaaBytes
       pubKeys = [(0, devnetGuardianPubKey)]
       extraArgs = emptyExtraArgs

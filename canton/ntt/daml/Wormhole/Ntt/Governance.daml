@@ -28,12 +28,14 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import Wormhole.Core.Bytes (Bytes, Bytes32, normalizeHex)
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.State
-  ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry
-  , RegisterEmitter (..), ClaimReplayRoot (..), ParseAndVerifyVAA (..) )
+  ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry, WormholeMessage
+  , RegisterEmitter (..), ClaimReplayRoot (..), ParseAndVerifyVAA (..), PublishMessage (..) )
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
-import Wormhole.Ntt.Payload (NttGovernanceAction (..), parseNttGovernance)
+import Wormhole.Ntt.Payload
+  ( NttGovernanceAction (..), parseNttGovernance
+  , TransceiverInit (..), encodeTransceiverInit, nttTokenAddressFor )
 
 template NttGovernance
   with
@@ -89,7 +91,7 @@ template NttGovernance
     -- 'ReplayRootRegistry' anchors); a loser re-resolves the fresh cids and
     -- retries.
     choice RegisterManager
-      : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
+      : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
       with
         admin                 : Party
         chainId               : Int   -- this deployment's own Wormhole chain id (uint16)
@@ -100,9 +102,11 @@ template NttGovernance
         tokenConfig           : NttTokenConfig
         tokenDecimals         : Int
         factory               : NttFactory  -- the registry's factory, typed by mode
-        coreStateCid          : Optional (ContractId CoreState)  -- required iff either onboarding fee > 0
+        coreStateCid          : ContractId CoreState  -- also funds the TransceiverInit broadcast, so no longer optional
+        consistencyLevel      : Int
         emitterFeeAllocation  : Optional (ContractId Allocation, ExtraArgs)
         claimFeeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+        feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- the TransceiverInit message fee
       -- For burn/mint, the instrument's admin (the minter) co-signs, because
       -- it is lending its mint authority to this deployment. An external
       -- minter simply consents, so registration stays permissionless; when
@@ -112,13 +116,13 @@ template NttGovernance
       -- @admin@-only.
       controller admin :: (if tokenConfig == BurnMint then [instrumentId.admin] else [])
       do
-        (mgr, emitterCid, ledger) <- registerManagerBody
+        (mgr, emitterCid, ledger, msg) <- registerManagerBody
           operator guardianGovernance nextId admin chainId
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce tokenConfig tokenDecimals factory
-          coreStateCid emitterFeeAllocation claimFeeAllocation
+          coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
         reg' <- create this with nextId = nextId + 1
-        pure (reg', mgr, emitterCid, ledger)
+        pure (reg', mgr, emitterCid, ledger, msg)
 
     -- | Governance-VAA-gated registration of a gg-minted burn/mint deployment:
     -- the guardian quorum co-signs off-chain, alongside the registering
@@ -136,7 +140,7 @@ template NttGovernance
     -- until that handoff runs, @admin@ still controls
     -- 'Wormhole.Ntt.Manager.SetPeer'.
     choice RegisterManagerByVaa
-      : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
+      : (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
       with
         admin                 : Party
         emitterRegistryCid    : ContractId EmitterRegistry
@@ -144,8 +148,10 @@ template NttGovernance
         instrumentNonce       : Int
         factory               : NttFactory
         coreStateCid          : ContractId CoreState  -- mandatory: needed for VAA verification even at zero fees
+        consistencyLevel      : Int
         emitterFeeAllocation  : Optional (ContractId Allocation, ExtraArgs)
         claimFeeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+        feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- the TransceiverInit message fee
         vaaBytes              : Bytes
         pubKeys               : [(Int, Bytes)]
         extraArgs             : ExtraArgs
@@ -197,22 +203,23 @@ template NttGovernance
               id = nttInstrumentIdFor admin instrumentNonce
 
         -- 9. Run the shared registration body; recreate the root once.
-        (mgr, emitterCid, ledger) <- registerManagerBody
+        (mgr, emitterCid, ledger, msg) <- registerManagerBody
           operator guardianGovernance nextId admin chainId
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce BurnMint tokenDecimals factory
-          (Some coreStateCid) emitterFeeAllocation claimFeeAllocation
+          coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
         reg' <- create this with
           nextId = nextId + 1
           consumedGovernance = Set.insert vaa.hash consumedGovernance
-        pure (reg', mgr, emitterCid, ledger)
+        pure (reg', mgr, emitterCid, ledger, msg)
 
 -- | Registration body shared by 'RegisterManager' and
 -- 'RegisterManagerByVaa': mints the transceiver 'Emitter', claims the
--- replay-trie root, and creates the 'NttManager' (plus 'LockedLedger' for
--- lock/unlock). Module-level, not a choice, so 'RegisterManagerByVaa' can
--- call it after consuming @self@, without nest-exercising 'RegisterManager'.
--- Callers create the successor 'NttGovernance' root themselves.
+-- replay-trie root, creates the 'NttManager' (plus 'LockedLedger' for
+-- lock/unlock), and publishes the deployment's identity for the accountant.
+-- Module-level, not a choice, so 'RegisterManagerByVaa' can call it after
+-- consuming @self@, without nest-exercising 'RegisterManager'. Callers create
+-- the successor 'NttGovernance' root themselves.
 registerManagerBody
   : Party                          -- operator
   -> Party                          -- guardianGovernance
@@ -226,21 +233,27 @@ registerManagerBody
   -> NttTokenConfig
   -> Int                            -- tokenDecimals
   -> NttFactory
-  -> Optional (ContractId CoreState)
+  -> ContractId CoreState           -- also funds the TransceiverInit broadcast, so no longer optional
+  -> Int                            -- consistencyLevel (the TransceiverInit broadcast)
   -> Optional (ContractId Allocation, ExtraArgs)  -- emitterFeeAllocation
   -> Optional (ContractId Allocation, ExtraArgs)  -- claimFeeAllocation
-  -> Update (ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger))
+  -> Optional (ContractId Allocation, ExtraArgs)  -- feeAllocation (TransceiverInit message fee)
+  -> Update (ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
 registerManagerBody
   operator guardianGovernance nextId admin chainId
   emitterRegistryCid replayRootRegistryCid
   instrumentId instrumentNonce tokenConfig tokenDecimals factory
-  coreStateCid emitterFeeAllocation claimFeeAllocation = do
+  coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation = do
     -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
     -- fractional digits a Daml Decimal carries.
     assertMsg "ntt: tokenDecimals must be between 0 and 10"
       (tokenDecimals >= 0 && tokenDecimals <= 10)
     assertMsg "ntt: chainId must be a positive uint16"
       (chainId > 0 && chainId <= 65535)
+    -- Uint8 on the wire; the watcher drops out-of-range messages, and this
+    -- one-shot init has no re-broadcast path.
+    assertMsg "ntt: consistency level must be a uint8"
+      (consistencyLevel >= 0 && consistencyLevel <= 255)
     case tokenConfig of
       BurnMint ->
         -- The instrument's admin co-signs via the controller, so no on-ledger
@@ -257,7 +270,7 @@ registerManagerBody
     (_, emitterCid) <- exercise emitterRegistryCid RegisterEmitter with
       requester = guardianGovernance
       payer = admin
-      coreStateCid
+      coreStateCid = Some coreStateCid
       feeAllocation = emitterFeeAllocation
     emitter <- fetch emitterCid
     -- operator is an Emitter signatory; guardianGovernance is a plain field,
@@ -275,7 +288,7 @@ registerManagerBody
       namespace
       splitThreshold = defaultSplitThreshold
       payer = admin
-      coreStateCid
+      coreStateCid = Some coreStateCid
       feeAllocation = claimFeeAllocation
     root <- fetch rootCid
     -- operator is a ReplayNode signatory, so this equality also proves the
@@ -295,13 +308,16 @@ registerManagerBody
       instrumentId
       tokenConfig
       tokenDecimals
+      tokenAddress = nttTokenAddressFor instrumentId
       peers = Map.empty
       factory
       paused = False
       factoryEpoch = 0
+      peerEpoch = 0
       -- An external minter (instrument admin ≠ gg) becomes a manager
-      -- signatory so burn/mint runs on its authority; gg-minted
-      -- deployments carry None and mint on gg's inherited signature.
+      -- signatory so the burn/mint paths run on its authority, not gg's;
+      -- gg-minted deployments carry None and mint on gg's inherited
+      -- signature.
       minter = case tokenConfig of
         BurnMint | instrumentId.admin /= guardianGovernance -> Some instrumentId.admin
         _ -> None
@@ -314,4 +330,17 @@ registerManagerBody
         balance = 0.0
         custodyHoldingCid = None
       BurnMint -> pure None
-    pure (mgr, emitterCid, ledger)
+
+    -- Publishes the deployment's identity for the accountant, once; no re-broadcast path.
+    msg <- exercise emitterCid PublishMessage with
+      payload = encodeTransceiverInit TransceiverInit with
+        nttManagerAddress = managerAddress
+        nttManagerMode = case tokenConfig of LockUnlock -> 0; BurnMint -> 1
+        tokenAddress = nttTokenAddressFor instrumentId
+        tokenDecimals
+      nonce = 0
+      consistencyLevel
+      coreStateCid
+      payer = admin
+      feeAllocation
+    pure (mgr, emitterCid, ledger, msg)

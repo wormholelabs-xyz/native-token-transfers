@@ -20,7 +20,7 @@ import Token.CIP0056.CoinFactory
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Deposit (DepositPreapproval(..), Deposit(..))
 import Wormhole.Ntt.Manager
-import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32)
+import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32, resolveEmitter)
 import Test.TestFactoryAuthority (registerBurnMint)
 
 -- | The interface-typed handle tests exercise choices on.
@@ -51,16 +51,16 @@ mintCoin factoryCid gg instrumentId owner amount = do
 -- proving genuine sharing, not per-deployment duplication.
 testNttCoinFactoryServesTwoDistinctAdmins : Script ()
 testNttCoinFactoryServesTwoDistinctAdmins = do
-  (operator, gg, _) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   factoryCid <- nttCoinFactorySetup gg
   alice <- allocateParty "CoinSharedAlice"
   bob <- allocateParty "CoinSharedBob"
   let instA = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
       instB = InstrumentId with admin = gg, id = nttInstrumentIdFor bob 0
 
-  (discsA, registerA) <- registerBurnMint operator alice instA (asBurnMintFactory factoryCid)
+  (discsA, registerA) <- registerBurnMint operator alice instA (asBurnMintFactory factoryCid) csId
   (mgrA, _) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsA)) registerA
-  (discsB, registerB) <- registerBurnMint operator bob instB (asBurnMintFactory factoryCid)
+  (discsB, registerB) <- registerBurnMint operator bob instB (asBurnMintFactory factoryCid) csId
   (mgrB, _) <- submit (actAs bob <> actAs gg <> mconcat (map disclose discsB)) registerB
 
   Some ma <- queryContractId operator mgrA
@@ -83,12 +83,23 @@ testNttCoinEndToEndRoundTrip = do
   alice <- allocateParty "CoinRoundTripAlice"
   let instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
 
-  (discsReg, register) <- registerBurnMint operator alice instrumentId (asBurnMintFactory factoryCid)
-  (mgrCid, emitterCid) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsReg)) register
-  mgrCid' <- submit alice do
+  (discsReg, register) <- registerBurnMint operator alice instrumentId (asBurnMintFactory factoryCid) csId
+  (mgrCid, _emitterCid) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsReg)) register
+  Some mgr <- queryContractId operator mgrCid
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId   -- RegisterManager's own init broadcast churned it
+  csDisc0 <- fromSome <$> queryDisclosure operator csId
+  emitterDisc0 <- fromSome <$> queryDisclosure operator emitterCid
+  (mgrCid', _) <- submit (actAs alice <> disclose csDisc0 <> disclose emitterDisc0) do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
       peer = Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 8
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = alice
+      feeAllocation = None
+  Some mgr' <- queryContractId operator mgrCid'
+  emitterCid <- resolveEmitter gg mgr'.transceiverEmitterId   -- SetPeer's own broadcast churned it
 
   coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
 

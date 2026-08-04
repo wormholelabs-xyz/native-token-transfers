@@ -14,9 +14,24 @@
 -- > WormholeTransceiverMessage (the VAA payload):
 -- >   prefix(4) = 0x9945FF10 ‖ sourceManager(32) ‖ recipientManager(32)
 -- >   ‖ managerPayloadLen(2) ‖ managerPayload ‖ transceiverPayloadLen(2) ‖ transceiverPayload
+-- >
+-- > TransceiverRegistration: prefix(4) = 0x18fc67c2 ‖ peerChain(2) ‖ peerAddress(32)
+-- > TransceiverInit: prefix(4) = 0x9c23bd3b ‖ nttManagerAddress(32) ‖ mode(1) ‖ tokenAddress(32) ‖ decimals(1)
+-- > Consumed only by the off-chain accountant; no chain receives these.
+-- >
+-- > NTT governance action 4 (SetPeerByGovernance): module(32) ‖ action(1)=4
+-- >   ‖ chain(2) ‖ managerAddress(32) ‖ peerEpoch(8) ‖ peerChain(2)
+-- >   ‖ peerManagerAddress(32) ‖ peerTransceiverAddress(32) ‖ peerDecimals(1) — 142 bytes.
+-- >   peerEpoch sits right after managerAddress, mirroring action 1's
+-- >   module‖action‖chain‖managerAddress‖factoryEpoch layout: the epoch is
+-- >   part of the common identity/freshness prefix, not the peer-specific tail.
 --
 -- Decoders 'error' on malformed input (bad prefix / short buffer).
 module Wormhole.Ntt.Payload where
+
+import DA.Crypto.Text (keccak256, toHex)
+
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 
 import Wormhole.Core.Bytes
 
@@ -171,6 +186,11 @@ nttGovernanceRegisterBurnMintManagerAction = 2
 nttGovernanceRotateToCanonicalFactoryAction : Int
 nttGovernanceRotateToCanonicalFactoryAction = 3
 
+-- | The guardian quorum edits a gg-adminned manager's peer table. See
+-- 'Wormhole.Ntt.Manager.SetPeerByVaa'.
+nttGovernanceSetPeerAction : Int
+nttGovernanceSetPeerAction = 4
+
 -- | A parsed NTT governance action. Every call site does an exhaustive
 -- constructor match and aborts on the wrong one, even where fields overlap
 -- positionally ('AcceptAdminToGovernance' vs 'RotateToCanonicalFactory') --
@@ -189,13 +209,23 @@ data NttGovernanceAction
       chain          : Int      -- uint16: Wormhole chain id
       managerAddress : Bytes32
       factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
+  | SetPeerByGovernance with
+      chain                  : Int      -- uint16: Wormhole chain id
+      managerAddress         : Bytes32
+      peerEpoch              : Int      -- uint64: the manager's current peerEpoch when the quorum signed
+      peerChain              : Int      -- uint16
+      peerManagerAddress     : Bytes32
+      peerTransceiverAddress : Bytes32
+      peerDecimals           : Int      -- uint8
   deriving (Eq, Show)
 
 -- | Encode an 'NttGovernanceAction'. The inverse of 'parseNttGovernance'.
 -- @AcceptAdminToGovernance@/@RotateToCanonicalFactory@ are 75 bytes
 -- (module(32) ‖ action(1) ‖ chain(2) ‖ managerAddress(32) ‖ factoryEpoch(8));
 -- @RegisterBurnMintManager@ is 68 (module(32) ‖ action(1) ‖ chain(2) ‖
--- registrationBinding(32) ‖ tokenDecimals(1)).
+-- registrationBinding(32) ‖ tokenDecimals(1)); @SetPeerByGovernance@ is 142
+-- (module(32) ‖ action(1) ‖ chain(2) ‖ managerAddress(32) ‖ peerEpoch(8) ‖
+-- peerChain(2) ‖ peerManagerAddress(32) ‖ peerTransceiverAddress(32) ‖ peerDecimals(1)).
 encodeNttGovernance : NttGovernanceAction -> Bytes
 encodeNttGovernance = \case
   AcceptAdminToGovernance chain managerAddress factoryEpoch ->
@@ -216,6 +246,16 @@ encodeNttGovernance = \case
       <> intToBytesN chain 2
       <> leftPadTo 32 managerAddress
       <> intToBytesN factoryEpoch 8
+  SetPeerByGovernance chain managerAddress peerEpoch peerChain peerManagerAddress peerTransceiverAddress peerDecimals ->
+    nttGovernanceModule
+      <> intToHexByte nttGovernanceSetPeerAction
+      <> intToBytesN chain 2
+      <> leftPadTo 32 managerAddress
+      <> intToBytesN peerEpoch 8
+      <> intToBytesN peerChain 2
+      <> leftPadTo 32 peerManagerAddress
+      <> leftPadTo 32 peerTransceiverAddress
+      <> intToHexByte peerDecimals
 
 -- | Parse an NTT governance packet: verify module = "Ntt", dispatch on action
 -- id, abort (via 'error') on wrong module/unknown action/malformed input.
@@ -228,20 +268,106 @@ parseNttGovernance payload =
     moduleId = normalizeHex (sliceBytes 0 32 payload)
     action = bytesToInt (sliceBytes 32 1 payload)
     chain = bytesToInt (sliceBytes 33 2 payload)
+    managerAddress = normalizeHex (sliceBytes 35 32 payload)
   in
     if moduleId /= nttGovernanceModule
       then error "ntt governance: not the Ntt module"
       else case action of
         1 -> AcceptAdminToGovernance
                chain
-               (normalizeHex (sliceBytes 35 32 payload))
+               managerAddress
                (bytesToInt (sliceBytes 67 8 payload))
         2 -> RegisterBurnMintManager
                chain
-               (normalizeHex (sliceBytes 35 32 payload))
+               managerAddress
                (bytesToInt (sliceBytes 67 1 payload))
         3 -> RotateToCanonicalFactory
                chain
-               (normalizeHex (sliceBytes 35 32 payload))
+               managerAddress
                (bytesToInt (sliceBytes 67 8 payload))
+        4 -> SetPeerByGovernance
+               chain
+               managerAddress
+               (bytesToInt (sliceBytes 67 8 payload))
+               (bytesToInt (sliceBytes 75 2 payload))
+               (normalizeHex (sliceBytes 77 32 payload))
+               (normalizeHex (sliceBytes 109 32 payload))
+               (bytesToInt (sliceBytes 141 1 payload))
         _ -> error ("ntt governance: unsupported action " <> show action)
+
+----------------------------------------------------------------------
+-- TransceiverRegistration / TransceiverInit
+----------------------------------------------------------------------
+
+-- | bytes4(keccak256("WormholePeerRegistration")).
+wormholePeerRegistrationPrefix : Bytes
+wormholePeerRegistrationPrefix = "18fc67c2"
+
+-- | bytes4(keccak256("WormholeTransceiverInit")).
+wormholeTransceiverInitPrefix : Bytes
+wormholeTransceiverInitPrefix = "9c23bd3b"
+
+-- | The accountant's record of a foreign transceiver registration. 38 bytes.
+data TransceiverRegistration = TransceiverRegistration with
+    peerChain   : Int      -- uint16
+    peerAddress : Bytes32
+  deriving (Eq, Show)
+
+encodeTransceiverRegistration : TransceiverRegistration -> Bytes
+encodeTransceiverRegistration r =
+  wormholePeerRegistrationPrefix
+    <> intToBytesN r.peerChain 2
+    <> leftPadTo 32 r.peerAddress
+
+decodeTransceiverRegistration : Bytes -> TransceiverRegistration
+decodeTransceiverRegistration b =
+  let prefix = normalizeHex (sliceBytes 0 4 b)
+      peerChain = bytesToInt (sliceBytes 4 2 b)
+      peerAddress = normalizeHex (sliceBytes 6 32 b)
+  in if prefix /= wormholePeerRegistrationPrefix
+       then error ("ntt: bad TransceiverRegistration prefix: " <> prefix)
+       else TransceiverRegistration with ..
+
+-- | The accountant's record of a deployment's manager/token behind a
+-- transceiver. 70 bytes. @nttManagerMode@: 0 = LockUnlock, 1 = BurnMint.
+data TransceiverInit = TransceiverInit with
+    nttManagerAddress : Bytes32
+    nttManagerMode    : Int      -- uint8
+    tokenAddress      : Bytes32
+    tokenDecimals     : Int      -- uint8
+  deriving (Eq, Show)
+
+encodeTransceiverInit : TransceiverInit -> Bytes
+encodeTransceiverInit i =
+  wormholeTransceiverInitPrefix
+    <> leftPadTo 32 i.nttManagerAddress
+    <> intToHexByte i.nttManagerMode
+    <> leftPadTo 32 i.tokenAddress
+    <> intToHexByte i.tokenDecimals
+
+decodeTransceiverInit : Bytes -> TransceiverInit
+decodeTransceiverInit b =
+  let prefix = normalizeHex (sliceBytes 0 4 b)
+      nttManagerAddress = normalizeHex (sliceBytes 4 32 b)
+      nttManagerMode = bytesToInt (sliceBytes 36 1 b)
+      tokenAddress = normalizeHex (sliceBytes 37 32 b)
+      tokenDecimals = bytesToInt (sliceBytes 69 1 b)
+  in if prefix /= wormholeTransceiverInitPrefix
+       then error ("ntt: bad TransceiverInit prefix: " <> prefix)
+       else TransceiverInit with ..
+
+-- | Domain-separation tag for the token-address binding.
+nttTokenAddressTag : Text
+nttTokenAddressTag = "wormhole:ntt-token:v1"
+
+-- | Canton's opaque 32-byte stand-in for a CIP-56 'InstrumentId' on the wire
+-- (no chain has a native 32-byte token address). Split from
+-- 'nttTokenAddressFor' so tests can pin the encoding against fixed text.
+nttTokenAddressFromText : Text -> Text -> Bytes32
+nttTokenAddressFromText adminText idText =
+  normalizeHex (keccak256 (toHex nttTokenAddressTag
+    <> unLenPrefixed (lenPrefixed (toHex adminText))
+    <> unLenPrefixed (lenPrefixed (toHex idText))))
+
+nttTokenAddressFor : InstrumentId -> Bytes32
+nttTokenAddressFor inst = nttTokenAddressFromText (partyToText inst.admin) inst.id
