@@ -309,7 +309,7 @@ func newDeployCmd(a *app) *cobra.Command {
 			var deployRemote json.RawMessage
 			if cfg.Mode == "burn-mint" && cfg.TokenKind == "mock" {
 				ownerRole := participantRoleForParty(s, s.GuardianGovernance)
-				deployRemote, err = prepareRemoteSeam(ctx, cmd, a, s, "", ownerRole, "Playground.Prepare:prepareDeployNtt", func(templates []string) any {
+				deployRemote, err = prepareRemoteSeam(ctx, cmd, a, s, "", ownerRole, "Playground.Prepare:prepareDeployNtt", "deployNtt", func(templates []string) any {
 					return prepareDeployNttInput{
 						GuardianGovernance: s.GuardianGovernance,
 						FactoryCid:         *regOut.FactoryCid,

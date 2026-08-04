@@ -18,7 +18,7 @@ type ScriptRunner interface {
 }
 
 // seamScripts maps the POST /v1/seam/{name} path segment to the Playground.Prepare script it
-// runs. Only these four exist today (the plan's §5.6: no new Daml resolution logic beyond
+// runs. Only these five exist today (the plan's §5.6: no new Daml resolution logic beyond
 // prepareAcceptAdmin, itself mechanical);
 // any other name 404s.
 var seamScripts = map[string]string{
@@ -26,6 +26,7 @@ var seamScripts = map[string]string{
 	"receive":             "Playground.Prepare:prepareReceive",
 	"publish":             "Playground.Prepare:preparePublish",
 	"acceptAdminTransfer": "Playground.Prepare:prepareAcceptAdmin",
+	"deployNtt":           "Playground.Prepare:prepareDeployNtt",
 }
 
 // Service is the allow-list-gated, stateless disclosure server fronting one participant (the
