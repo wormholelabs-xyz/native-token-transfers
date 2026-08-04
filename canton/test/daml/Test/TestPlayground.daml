@@ -607,6 +607,7 @@ testPlaygroundAcceptAdminByVaaRemoteSeamLockUnlockNonEmptyPot = do
       factory
       paused = False
       factoryEpoch = 0
+      minter = None
   _ <- registerReplayRoot operator gg namespace defaultSplitThreshold
 
   -- A pre-funded admin-owned custody pot: the ledger's own 'Credit' choice (controller
