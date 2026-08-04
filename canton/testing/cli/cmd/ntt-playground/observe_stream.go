@@ -102,7 +102,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 			defer cancel()
 
 			var results []observedOutput
-			streamErr := observer.Stream(streamCtx, observer.Config{
+			streamErr := observer.StreamWithReconnect(streamCtx, observer.Config{
 				JSONAPIBaseURL: ep.JSONAPIBaseURL,
 				Token:          watcherToken,
 				ObserverParty:  s.GuardianObserver,
@@ -120,7 +120,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 				return fmt.Errorf("observe stream: %w", streamErr)
 			}
 			if len(results) < count {
-				return fmt.Errorf("observe stream: timed out after %s waiting for %d message(s) (observed %d)", timeout, count, len(results))
+				return fmt.Errorf("observe stream: timed out after %s waiting for %d message(s) (observed %d): %v", timeout, count, len(results), streamErr)
 			}
 
 			raw, err := json.Marshal(results)
