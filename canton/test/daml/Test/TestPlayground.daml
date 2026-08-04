@@ -34,7 +34,8 @@ import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager (NttManager (..), NttTokenConfig (..), NttFactory (..), nttInstrumentIdFor, nttNamespaceFor)
 import Wormhole.Ntt.Payload
-  ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer )
+  ( decodeWormholeTransceiverMessage, decodeNttManagerMessage, decodeNativeTokenTransfer
+  , nttTokenAddressFor )
 
 import Test.TestCore (devnetGuardianPubKey)
 import Test.TestNtt
@@ -536,10 +537,10 @@ acceptAdminDiscloseTemplates =
 -- rather than signing one live.
 testPlaygroundAcceptAdminByVaaRemoteSeamBurnMint : Script ()
 testPlaygroundAcceptAdminByVaaRemoteSeamBurnMint = do
-  (operator, gg, _csId) <- nttSetup
+  (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptSeamBurnMintAdmin"
   executor <- allocateParty "AcceptSeamBurnMintExecutor"
-  (mgrCid, _factory, _ledgerCid) <- setupFixedManager operator gg admin BurnMint
+  (mgrCid, _factory, _ledgerCid) <- setupFixedManager operator gg admin BurnMint csId
   Some mgr <- queryContractId operator mgrCid
 
   _ <- proposeAdminTransferToGg ProposeAdminTransferToGgInput with
@@ -603,10 +604,12 @@ testPlaygroundAcceptAdminByVaaRemoteSeamLockUnlockNonEmptyPot = do
       instrumentId
       tokenConfig = LockUnlock
       tokenDecimals = 8
+      tokenAddress = nttTokenAddressFor instrumentId
       peers = Map.empty
       factory
       paused = False
       factoryEpoch = 0
+      peerEpoch = 0
       minter = None
   _ <- registerReplayRoot operator gg namespace defaultSplitThreshold
 

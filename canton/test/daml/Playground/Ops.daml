@@ -96,14 +96,26 @@ data SetPeerOutput = SetPeerOutput with
 
 setPeer : SetPeerInput -> Script SetPeerOutput
 setPeer input = do
-  (mgrCid, _mgr) <- resolveManager input.operator input.managerId
-  _ <- submit input.admin do
+  (mgrCid, mgr) <- resolveManager input.operator input.managerId
+  -- SetPeer bundles the TransceiverRegistration broadcast, so it fetches the deployment's
+  -- own transceiver Emitter and the CoreState -- both operator/gg-signed, so the admin's
+  -- submit needs their disclosures (same pattern as publishMessage's resolution below).
+  (emCid, _em) <- resolveEmitter input.operator mgr.transceiverEmitterId
+  csCid <- resolveCoreState input.operator
+  emDisc <- fromSome <$> queryDisclosure input.operator emCid
+  csDisc <- fromSome <$> queryDisclosure input.operator csCid
+  _ <- submit (actAs input.admin <> disclose emDisc <> disclose csDisc) do
     exerciseCmd mgrCid SetPeer with
       chainId = input.chain
       peer = Peer with
         managerAddress = input.peerManager
         transceiverAddress = input.peerTransceiver
         decimals = input.decimals
+      transceiverEmitterCid = emCid
+      coreStateCid = csCid
+      consistencyLevel = 0
+      payer = input.admin
+      feeAllocation = None
   pure SetPeerOutput with managerId = input.managerId
 
 ----------------------------------------------------------------------

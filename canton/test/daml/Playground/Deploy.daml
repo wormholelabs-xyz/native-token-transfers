@@ -183,8 +183,13 @@ deployNtt input =
         None -> abort "playground: amulet deployNtt needs a CLI-resolved transfer-factory cid -- run setupAmuletAdmin first"
         Some cid -> pure (TransferFactoryCid (coerceContractId cid))
 
-      (_, mgrCid, emitterCid, _ledgerCid) <-
-        submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+      -- RegisterManager bundles the TransceiverInit broadcast, so CoreState is mandatory
+      -- (it funds the publish) and needs disclosing to admin's submit.
+      csCid <- resolveCoreState input.operator
+      csDisc <- fromSome <$> queryDisclosure input.operator csCid
+
+      (_, mgrCid, emitterCid, _ledgerCid, _msg) <-
+        submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
           exerciseCmd govCid RegisterManager with
             admin = input.admin
             chainId = cantonChainId
@@ -195,12 +200,16 @@ deployNtt input =
             tokenConfig = config
             tokenDecimals = input.tokenDecimals
             factory
-            coreStateCid = None
+            coreStateCid = csCid
+            consistencyLevel = 0
             emitterFeeAllocation = None
             claimFeeAllocation = None
+            feeAllocation = None
 
       Some mgr <- queryContractId input.operator mgrCid
-      Some em <- queryContractId input.operator emitterCid
+      -- Re-resolve the transceiver by id: the bundled TransceiverInit publish is a consuming
+      -- PublishMessage, so the emitterCid RegisterManager returned is already archived.
+      (_, em) <- resolveEmitter input.operator mgr.transceiverEmitterId
       pure DeployOutput with
         managerId = mgr.managerId
         managerAddress = mgr.managerAddress
@@ -229,11 +238,11 @@ deployNtt input =
             BurnMint -> BurnMintFactoryCid (coerceContractId factoryCid)
             LockUnlock -> TransferFactoryCid (coerceContractId factoryCid)
 
-      (_, mgrCid, emitterCid, _ledgerCid) <- case config of
+      (_, mgrCid, emitterCid, _ledgerCid, _msg) <- case config of
         -- Guardian-VAA-gated: co-signed by the guardian quorum's off-chain signature instead
         -- of a live gg signature -- see this module's header. CoreState/its disclosure are
-        -- needed here (unlike the LockUnlock RegisterManager call below) because
-        -- RegisterManagerByVaa's VAA verification is mandatory regardless of fees.
+        -- needed here because RegisterManagerByVaa's VAA verification is mandatory
+        -- regardless of fees (and CoreState now also funds the TransceiverInit broadcast).
         BurnMint -> do
           csCid <- resolveCoreState input.operator
           csDisc <- fromSome <$> queryDisclosure input.operator csCid
@@ -273,16 +282,22 @@ deployNtt input =
               instrumentNonce = input.instrumentNonce
               factory
               coreStateCid = csCid
+              consistencyLevel = 0
               emitterFeeAllocation = None
               claimFeeAllocation = None
+              feeAllocation = None
               vaaBytes
               pubKeys = input.pubKeys
               extraArgs = emptyExtraArgs
           case res of
             Right r -> pure r
             Left err -> abort (show err)
-        LockUnlock ->
-          submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc) do
+        LockUnlock -> do
+          -- CoreState is mandatory here too now: RegisterManager bundles the
+          -- TransceiverInit broadcast, which CoreState funds.
+          csCid <- resolveCoreState input.operator
+          csDisc <- fromSome <$> queryDisclosure input.operator csCid
+          submit (actAs input.admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
             exerciseCmd govCid RegisterManager with
               admin = input.admin
               chainId = cantonChainId
@@ -293,9 +308,11 @@ deployNtt input =
               tokenConfig = config
               tokenDecimals = input.tokenDecimals
               factory
-              coreStateCid = None
+              coreStateCid = csCid
+              consistencyLevel = 0
               emitterFeeAllocation = None
               claimFeeAllocation = None
+              feeAllocation = None
 
       -- Lock/unlock: the admin is the lock's custodian/receiver (Manager.daml's admin-owned
       -- custody), so it self-creates its own standing preapproval here -- this is what makes
@@ -311,7 +328,9 @@ deployNtt input =
         BurnMint -> pure ()
 
       Some mgr <- queryContractId input.operator mgrCid
-      Some em <- queryContractId input.operator emitterCid
+      -- Re-resolve the transceiver by id: the bundled TransceiverInit publish is a consuming
+      -- PublishMessage, so the emitterCid RegisterManager returned is already archived.
+      (_, em) <- resolveEmitter input.operator mgr.transceiverEmitterId
       pure DeployOutput with
         managerId = mgr.managerId
         managerAddress = mgr.managerAddress
