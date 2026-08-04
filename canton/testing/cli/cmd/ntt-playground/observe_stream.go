@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/network"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/observer"
 	"github.com/wormholelabs-xyz/native-token-transfers/canton/testing/cli/internal/wire"
 )
@@ -62,26 +61,9 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 		Short: "Read the real Ledger API v2 update stream as the guardianObserver reader (read-only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			prof, err := a.resolvedProfile()
+			ep, s, err := resolveGuardianObserverEndpoint(a, "observe stream")
 			if err != nil {
 				return err
-			}
-			// The guardian observation genuinely happens on the guardians' own node: GO is an
-			// observer of Emitter/CoreState, so its OWN participant is what receives those
-			// projections and must serve the stream (plan §3's "observe stream" routing).
-			ep, err := prof.Endpoint("guardian-observer")
-			if err != nil {
-				return err
-			}
-			if ep.JSONAPIBaseURL == "" {
-				return fmt.Errorf("observe stream: requires the localnet profile")
-			}
-			s, err := a.loadState()
-			if err != nil {
-				return err
-			}
-			if s.GuardianObserver == "" {
-				return fmt.Errorf("observe stream: no guardianObserver party in state -- run `init` first")
 			}
 
 			var wantAddress string
@@ -93,18 +75,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 				wantAddress = d.TransceiverAddress
 			}
 
-			adminToken, err := network.MintUnsafeToken(network.LocalNetAdminUser, time.Hour)
-			if err != nil {
-				return err
-			}
-			// The reader user carries ONLY CanReadAs(guardianObserver) -- no actAs, ever.
-			// This is the CLI's one non-`dpm script` ledger surface, and it is strictly
-			// read-only: no command on this path submits anything.
-			a.vlogf(cmd, "observe stream: ensuring reader user %q exists with ONLY CanReadAs(%s)", guardianWatcherUser, s.GuardianObserver)
-			if err := network.CreateLedgerUser(ctx, ep.JSONAPIBaseURL, adminToken, guardianWatcherUser, []string{s.GuardianObserver}, nil); err != nil {
-				return fmt.Errorf("observe stream: create reader user: %w", err)
-			}
-			watcherToken, err := network.MintUnsafeToken(guardianWatcherUser, timeout+time.Hour)
+			watcherToken, err := mintGuardianReaderToken(ctx, a, cmd, "observe stream", ep, s.GuardianObserver, timeout+time.Hour)
 			if err != nil {
 				return err
 			}
@@ -131,7 +102,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 			defer cancel()
 
 			var results []observedOutput
-			streamErr := observer.Stream(streamCtx, observer.Config{
+			streamErr := observer.StreamWithReconnect(streamCtx, observer.Config{
 				JSONAPIBaseURL: ep.JSONAPIBaseURL,
 				Token:          watcherToken,
 				ObserverParty:  s.GuardianObserver,
@@ -149,7 +120,7 @@ func newObserveStreamCmd(a *app) *cobra.Command {
 				return fmt.Errorf("observe stream: %w", streamErr)
 			}
 			if len(results) < count {
-				return fmt.Errorf("observe stream: timed out after %s waiting for %d message(s) (observed %d)", timeout, count, len(results))
+				return fmt.Errorf("observe stream: timed out after %s waiting for %d message(s) (observed %d): %v", timeout, count, len(results), streamErr)
 			}
 
 			raw, err := json.Marshal(results)
