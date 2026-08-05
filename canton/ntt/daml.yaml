@@ -22,7 +22,7 @@ build-options:
   # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
   - --target=2.3
 data-dependencies:
-  - ../dars/wormhole-core-0.3.0.dar
+  - ../dars/wormhole-core-0.4.0.dar
   - ../dars/token-cip0056-0.2.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar

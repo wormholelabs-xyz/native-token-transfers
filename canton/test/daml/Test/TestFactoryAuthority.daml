@@ -474,9 +474,7 @@ testExternalMinterMaliciousFactoryFirewallsGg = do
   let inst = InstrumentId with admin = minter, id = M.nttInstrumentIdFor minter 0
   (discs, register) <- registerBurnMint operator minter inst
     (toInterfaceContractId @BurnMintFactory evilFactory) csId
-  (mgrCid, _) <- submit (actAs minter <> mconcat (map disclose discs)) register
-  Some mgr0 <- queryContractId operator mgrCid
-  emitterCid <- resolveEmitter gg mgr0.transceiverEmitterId   -- RegisterManager's own init broadcast churned it
+  (mgrCid, emitterCid) <- submit (actAs minter <> mconcat (map disclose discs)) register
   emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
   csDisc0 <- fromSome <$> queryDisclosure operator csId
   (mgrCid, _) <- submit (actAs minter <> disclose emitterDisc <> disclose csDisc0) do

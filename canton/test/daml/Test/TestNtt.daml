@@ -356,8 +356,9 @@ nttSetupFee = do
   pure (operator, gg, csId, mockAdmin, inst, cs.feeRecipient)
 
 -- | A registered deployment and the handles its tests need. @emitterCid@ is
--- the live post-registration 'Emitter' (registration itself broadcasts the
--- 'TransceiverInit', churning the freshly minted one).
+-- the live post-registration 'Emitter' -- 'RegisterManager' returns the
+-- successor of its own bundled 'TransceiverInit' broadcast directly, so no
+-- re-resolve is needed here.
 data Deployment = Deployment with
     mgrCid       : ContractId NttManager
     emitterCid   : ContractId Emitter
@@ -419,7 +420,7 @@ deploy operator gg admin config csId = do
   let minterActAs = case config of
         BurnMint -> actAs gg
         LockUnlock -> mempty
-  (_, mgrCid, _emitterCid, ledgerCid, initMsg) <-
+  (_, mgrCid, emitterCid, ledgerCid, initMsg) <-
     submit (actAs admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
       exerciseCmd govCid RegisterManager with
         admin
@@ -436,8 +437,6 @@ deploy operator gg admin config csId = do
         emitterFeeAllocation = None
         claimFeeAllocation = None
         feeAllocation = None
-  Some mgr <- queryContractId operator mgrCid
-  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
   pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid, initMsg
 
 -- | Two deployments get distinct managers with sequential ids and owner-bound
@@ -1023,6 +1022,42 @@ testRegisterManagerBroadcastsInit = do
     tokenDecimals = 8
   dBurn.initMsg.sequence === 0
   mgrBurn.tokenAddress === nttTokenAddressFor dBurn.instrumentId
+
+-- | 'RegisterManager''s bundled 'TransceiverInit' broadcast is a nested,
+-- consuming 'PublishMessage' on the freshly minted transceiver, so the
+-- returned 'Emitter' cid must be the live successor, not the pre-publish cid
+-- the nested exercise already archived. Reads it back directly off gg's ACS
+-- by cid (no re-resolve by id) to pin that it is active on the ledger.
+testRegisterManagerReturnsActiveEmitter : Script ()
+testRegisterManagerReturnsActiveEmitter = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "RegisterActiveEmitterAdmin"
+  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
+  [(govCid, _)] <- query @NttGovernance operator
+  govDisc <- fromSome <$> queryDisclosure operator govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  (_, _, emitterCid, _, _) <-
+    submit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+      exerciseCmd govCid RegisterManager with
+        admin
+        chainId = cantonChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        instrumentId = bridgedInstrument gg
+        instrumentNonce = 0
+        tokenConfig = LockUnlock
+        tokenDecimals = 8
+        factory
+        coreStateCid = csId
+        consistencyLevel = 0
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+        feeAllocation = None
+  Some em <- queryContractId gg emitterCid
+  em.sequence === 1
+  em.owner === gg
 
 -- | 'RegisterManager''s init broadcast also bounds 'consistencyLevel' to a
 -- uint8: out of range is terminal there (no re-broadcast path),

@@ -540,7 +540,7 @@ publishMessage input = do
       seed <- mkSeedDisclosure input.owner
       let toDisc = map (toDisclosureByName seed) seam.disclosed
       pure (emCid, em, csCid, foldl (\opts d -> opts <> disclose d) (actAs input.owner) toDisc)
-  msg <- submit submitOpts do
+  (_, msg) <- submit submitOpts do
     exerciseCmd emCid PublishMessage with
       nonce = input.nonce
       payload = normalizeHex input.payload

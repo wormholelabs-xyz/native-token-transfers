@@ -207,9 +207,7 @@ deployNtt input =
             feeAllocation = None
 
       Some mgr <- queryContractId input.operator mgrCid
-      -- Re-resolve the transceiver by id: the bundled TransceiverInit publish is a consuming
-      -- PublishMessage, so the emitterCid RegisterManager returned is already archived.
-      (_, em) <- resolveEmitter input.operator mgr.transceiverEmitterId
+      Some em <- queryContractId input.operator emitterCid
       pure DeployOutput with
         managerId = mgr.managerId
         managerAddress = mgr.managerAddress
@@ -328,9 +326,7 @@ deployNtt input =
         BurnMint -> pure ()
 
       Some mgr <- queryContractId input.operator mgrCid
-      -- Re-resolve the transceiver by id: the bundled TransceiverInit publish is a consuming
-      -- PublishMessage, so the emitterCid RegisterManager returned is already archived.
-      (_, em) <- resolveEmitter input.operator mgr.transceiverEmitterId
+      Some em <- queryContractId input.operator emitterCid
       pure DeployOutput with
         managerId = mgr.managerId
         managerAddress = mgr.managerAddress
