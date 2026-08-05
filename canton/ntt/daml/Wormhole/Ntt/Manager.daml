@@ -390,22 +390,30 @@ resolveLedger mgr ledgerCid = do
   assertMsg "ntt: ledger admin observer out of sync" (ledger.admin == mgr.admin)
   pure ledger
 
--- | Validate custody holdings (owned by the deployment's current @admin@ —
--- the custodian — this deployment's instrument, unlocked) and return their
--- total. Run over every custody holding the manager spends: the choice bodies
--- carry all four signatures, so without this check a caller could steer a
--- choice into spending another signatory's holdings on ambient authority
--- alone.
+-- | Validate one custody holding — owned by the deployment's current @admin@
+-- (the custodian), this deployment's instrument, unlocked, and signed by the
+-- instrument admin, which a template-computed view cannot forge — and return
+-- its amount. Run over every custody holding the manager spends or points at:
+-- the choice bodies carry all four signatures, so without this a caller could
+-- steer a choice into spending another signatory's holdings on ambient
+-- authority alone.
+validateCustodyHolding : NttManager -> Holding -> Either Text Decimal
+validateCustodyHolding mgr holding = do
+  let hv = view holding
+  assertMsg "ntt: custody holding is not owned by the custodian"
+    (hv.owner == mgr.admin)
+  assertMsg "ntt: custody holding instrument mismatch"
+    (hv.instrumentId == mgr.instrumentId)
+  assertMsg "ntt: custody holding is locked" (hv.lock == None)
+  assertMsg "ntt: custody holding not signed by the instrument admin"
+    (mgr.instrumentId.admin `elem` signatory holding)
+  pure hv.amount
+
 sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
 sumCustodyHoldings mgr cids = do
   amounts <- forA cids \cid -> do
-    hv <- view <$> fetch cid
-    assertMsg "ntt: custody holding is not owned by the custodian"
-      (hv.owner == mgr.admin)
-    assertMsg "ntt: custody holding instrument mismatch"
-      (hv.instrumentId == mgr.instrumentId)
-    assertMsg "ntt: custody holding is locked" (hv.lock == None)
-    pure hv.amount
+    holding <- fetch cid
+    either assertFail pure (validateCustodyHolding mgr holding)
   pure (sum amounts)
 
 -- | The hint stored back on the ledger after an operation: the single
