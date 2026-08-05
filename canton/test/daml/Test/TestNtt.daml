@@ -95,6 +95,26 @@ template Cip56MockHolding
         lock = None
         meta = emptyMetadata
 
+-- | A holding signed by its owner alone -- the forgery class 'Test.TestFactoryAuthority.FakeHolding'
+-- also models (not imported from there directly: that module imports this one
+-- for its own test helpers, and Daml modules cannot import each other
+-- cyclically). Its interface view can claim anything, including this
+-- deployment's own instrument, but the instrument admin never signs it.
+template ForgedHolding
+  with
+    owner      : Party
+    instrument : InstrumentId
+    amount     : Decimal
+  where
+    signatory owner
+    interface instance Holding for ForgedHolding where
+      view = HoldingView with
+        owner
+        instrumentId = instrument
+        amount
+        lock = None
+        meta = emptyMetadata
+
 -- | A local 'BurnMintFactory': archives the burned inputs and creates one
 -- 'Cip56MockHolding' per output.
 template MockBurnMintFactory
@@ -1382,6 +1402,91 @@ testConsolidateCustody = do
       custodyHoldingCids = [ggHolding]
       extraArgs = emptyExtraArgs
   expectAbort "not owned by the custodian" res
+
+-- | 'ForgedHolding' is signed by its owner alone; its interface view lies
+-- freely, but never carries the instrument admin's (gg's) signature.
+-- 'ConsolidateCustody's single-holding branch reads the view for the
+-- owner/instrument/lock checks, then must pin the fetched contract's actual
+-- signatories -- rejecting the forgery instead of repointing the ledger's
+-- custody hint to it.
+testConsolidateCustodyRejectsForgedHolding : Script ()
+testConsolidateCustodyRejectsForgedHolding = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "ForgeAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  fakeCid <- toInterfaceContractId @Holding <$> submit alice do
+    createCmd ForgedHolding with owner = alice, instrument = d.instrumentId, amount = 1.0
+  res <- trySubmitWithDiscs alice discs do
+    exerciseCmd d.mgrCid ConsolidateCustody with
+      caller = alice
+      ledgerCid = fromSome d.ledgerCid
+      custodyHoldingCids = [fakeCid]
+      extraArgs = emptyExtraArgs
+  expectAbort "ntt: custody holding not signed by the instrument admin" res
+
+-- | The positive companion, guarding against over-pinning: a genuine holding
+-- -- signed by both the owner and the instrument admin, like a real CIP-56
+-- holding -- still clears 'ConsolidateCustody's single-holding branch.
+testConsolidateCustodyAcceptsGenuineHolding : Script ()
+testConsolidateCustodyAcceptsGenuineHolding = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "GenuineAlice"
+  (d, discs) <- sendScaffold operator gg alice LockUnlock csId
+  holdingCid <- mkHolding gg alice d.instrumentId 1.0
+  holdingDisc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding holdingCid)
+  _ <- submitWithDiscs alice (holdingDisc :: discs) do
+    exerciseCmd d.mgrCid ConsolidateCustody with
+      caller = alice
+      ledgerCid = fromSome d.ledgerCid
+      custodyHoldingCids = [holdingCid]
+      extraArgs = emptyExtraArgs
+  [(_, ledger)] <- query @LockedLedger operator
+  ledger.custodyHoldingCid === Some holdingCid
+
+-- | The same forged-holding griefing, reached through 'Transfer's lock path
+-- instead of 'ConsolidateCustody': a poisoned custody hint (planted here via
+-- 'SetCustodyHint', standing in for a pre-fix 'ConsolidateCustody' or a
+-- registry-side reorganization) is merged with a fresh deposit into
+-- 'sumCustodyHoldings' the moment a second holding needs consolidating. Note
+-- this is the multi-holding merge branch, distinct from the single-holding
+-- branch the two tests above cover -- a real 'Release' cannot be driven this
+-- far in a script test (no static VAA can match a freshly allocated Party's
+-- recipient hash; see the live two-step harness below), so this exercises
+-- the same pin at NTT's other value-moving custody-merge call site.
+testTransferLockRejectsForgedCustodyPot : Script ()
+testTransferLockRejectsForgedCustodyPot = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "TransferForgeAlice"
+  (d, _) <- sendScaffold operator gg alice LockUnlock csId
+  fakePotCid <- toInterfaceContractId @Holding <$> submit alice do
+    createCmd ForgedHolding with owner = alice, instrument = d.instrumentId, amount = 1.0
+  -- 'SetCustodyHint' archives and recreates the ledger, so every disclosure
+  -- must be re-queried fresh afterward -- reusing 'sendScaffold's original
+  -- 'discs' here would disclose an already-archived ledger cid and fail the
+  -- submission before the choice body even runs.
+  poisonedLedgerCid <- submit (actAs operator <> actAs gg) do
+    exerciseCmd (fromSome d.ledgerCid) SetCustodyHint with newCustodyHint = Some fakePotCid
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  emitterDisc <- fromSome <$> queryDisclosure operator d.emitterCid
+  ledgerDisc <- fromSome <$> queryDisclosure operator poisonedLedgerCid
+  factoryDisc <- discloseTransferFactory gg
+  depositCid <- mkHolding gg alice d.instrumentId 0.01
+  res <- trySubmitWithDiscs alice [csDisc, emitterDisc, ledgerDisc, factoryDisc] do
+    exerciseCmd d.mgrCid Transfer with
+      user = alice
+      transceiverEmitterCid = d.emitterCid
+      coreStateCid = csId
+      ledgerCid = Some poisonedLedgerCid
+      recipientChain = 2
+      recipientAddress = b32 "ee"
+      sourceToken = b32 "dd"
+      rawAmount = 1000000
+      nonce = 0
+      consistencyLevel = 0
+      inputHoldingCids = [depositCid]
+      feeAllocation = None
+      extraArgs = emptyExtraArgs
+  expectAbort "ntt: custody holding not signed by the instrument admin" res
 
 -- | A lock against a registry that answers Pending moves nothing, so the
 -- manager's synchronous-settlement check aborts the send. Admin repoints the
