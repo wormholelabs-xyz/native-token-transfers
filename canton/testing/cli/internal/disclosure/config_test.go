@@ -127,3 +127,33 @@ func TestEntry_MissOnEmptyConfig(t *testing.T) {
 	_, ok := c.Entry("anything:AtAll")
 	require.False(t, ok)
 }
+
+// ----------------------------------------------------------------------
+// Templates: the server-side allow-list a disclosure Service enforces (the plan's §5.4)
+// ----------------------------------------------------------------------
+
+func TestTemplates_ListsAllDiscloseEntriesInOrder(t *testing.T) {
+	c, err := Load(writeConfig(t, exampleConfigJSON))
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"Wormhole.Ntt.Manager:NttManager",
+		"Wormhole.Core.State:CoreState",
+		"Wormhole.Core.State:Emitter",
+		"Playground.MockToken:MockToken",
+		"Wormhole.Ntt.TokenCip56:Cip56BurnMintToken",
+		"Test.TestNtt:MockBurnMintFactory",
+	}, c.Templates())
+}
+
+func TestTemplates_EmptyOnEmptyConfig(t *testing.T) {
+	c, err := Load(writeConfig(t, `{"disclose": []}`))
+	require.NoError(t, err)
+	require.Empty(t, c.Templates())
+}
+
+func TestTemplates_DefaultsWhenFileMissing(t *testing.T) {
+	c, err := Load(filepath.Join(t.TempDir(), "does-not-exist.json"))
+	require.NoError(t, err)
+	require.Len(t, c.Templates(), len(DefaultDisclose()))
+	require.Equal(t, "Wormhole.Ntt.Manager:NttManager", c.Templates()[0])
+}

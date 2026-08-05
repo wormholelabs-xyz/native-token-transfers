@@ -55,10 +55,10 @@ type Profile struct {
 	ValidatorBaseURL string
 
 	// Participants maps a participant role (e.g. "app-provider", "app-user", "bob",
-	// "guardian-governance", "guardian-observer") to that participant's connection details.
-	// LocalNet has all five (see the plan's §2 port table); the sandbox -- a single
-	// in-process participant, per internal/network/sandbox.go -- has exactly one, keyed
-	// "default".
+	// "guardian-governance", "guardian-observer", "alice-solo") to that participant's
+	// connection details. LocalNet has all six (see the plan's §2 port table); the sandbox --
+	// a single in-process participant, per internal/network/sandbox.go -- has exactly one,
+	// keyed "default".
 	//
 	// TODO(phase 3): nothing routes through this map yet. The existing top-level
 	// LedgerHost/LedgerPort/JSONAPIBaseURL/ValidatorBaseURL/UserID fields above remain the
@@ -155,7 +155,7 @@ func Get(name Name) (Profile, error) {
 
 		// app-provider is the only endpoint the LOCALNET_* env overrides ever touch (see
 		// TestGet_LocalNet_EnvOverrides_HitDefaultOnly) -- it is both the top-level
-		// LedgerHost/... fields above AND Participants["app-provider"]. The other four
+		// LedgerHost/... fields above AND Participants["app-provider"]. The other five
 		// participants (see the plan's §2 port table) are localnet-only, bundle-fixed
 		// ports with no env override of their own yet.
 		appProvider := Endpoint{
@@ -191,6 +191,7 @@ func Get(name Name) (Profile, error) {
 				"bob":                 localEndpoint(5901, 5975, 5903),
 				"guardian-governance": localEndpoint(6901, 6975, 6903),
 				"guardian-observer":   localEndpoint(7901, 7975, 7903),
+				"alice-solo":          localEndpoint(8901, 8975, 8903),
 			},
 			DefaultParticipant: "app-provider",
 		}, nil

@@ -52,6 +52,7 @@ testMappedPlaygroundTemplatesResolve : Script ()
 testMappedPlaygroundTemplatesResolve = do
   results <- mapA tryToDisclosureByName
     [ "pkg:Wormhole.Ntt.Manager:NttManager"
+    , "pkg:Wormhole.Ntt.Manager:AdminTransferProposal"
     , "pkg:Wormhole.Ntt.Governance:NttGovernance"
     , "pkg:Wormhole.Ntt.Ledger:LockedLedger"
     , "pkg:Wormhole.Core.State:CoreState"
@@ -63,7 +64,7 @@ testMappedPlaygroundTemplatesResolve = do
     , "pkg:Test.TestNtt:MockBurnMintFactory"
     , "pkg:Test.TestNtt:Cip56MockHolding"
     ]
-  results === replicate 11 "mapped"
+  results === replicate 12 "mapped"
 
 -- | A genuinely unmapped templateId still aborts loudly rather than silently dropping the
 -- disclosure the submit needs.

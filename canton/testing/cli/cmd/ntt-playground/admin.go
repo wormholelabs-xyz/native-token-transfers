@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -9,9 +10,12 @@ import (
 )
 
 // proposeAdminTransferToGgInput/proposeAdminTransferToGgOutput mirror Playground.Ops.daml's
-// ProposeAdminTransferToGgInput/ProposeAdminTransferToGgOutput.
+// ProposeAdminTransferToGgInput/ProposeAdminTransferToGgOutput. Admin is the deployment's
+// CURRENT admin (Deployment.CurrentAdminOrAdmin()), not operator: the script is single-party --
+// reads and submits as Admin alone -- which is what lets the CLI route the whole call to
+// Admin's own participant (see newAdminProposeGgCmd's doc comment).
 type proposeAdminTransferToGgInput struct {
-	Operator  string `json:"operator"`
+	Admin     string `json:"admin"`
 	ManagerID int    `json:"managerId"`
 }
 
@@ -28,6 +32,9 @@ type acceptAdminTransferByVaaInput struct {
 	Executor  string              `json:"executor"`
 	VaaBytes  string              `json:"vaaBytes"`
 	PubKeys   []ledger.PubKeyHint `json:"pubKeys"`
+	// Remote carries a pre-fetched Playground.Prepare:prepareAcceptAdmin RemoteSeam, as raw
+	// JSON -- see transferOutInput.Remote's doc comment (transfer.go).
+	Remote json.RawMessage `json:"remote"`
 }
 
 type acceptAdminTransferByVaaOutput struct {
@@ -37,14 +44,20 @@ type acceptAdminTransferByVaaOutput struct {
 
 // newAdminCmd builds the `admin` command group: the two halves of the VAA-gated gg custody
 // opt-in (Wormhole.Ntt.Manager's header) -- `propose-gg` (the current admin's standing offer)
-// and `accept-gg-vaa` (permissionlessly relaying the guardians' signed acceptance). Neither
-// subcommand builds a Playground.Disclose.RemoteSeam: both run the sandbox-first `remote =
-// None` path Playground.Ops:acceptAdminTransferByVaa supports today (see that script's doc
-// comment). This works unmodified on the single-participant sandbox profile; on a
-// multi-participant LocalNet topology, `accept-gg-vaa` needs the executing participant to see
-// operator/admin/guardianGovernance's contracts directly, so pass an `--executor` hint that
-// resolves to a party already co-located with them (the default, no `--executor`, stays on the
-// operator's own participant). A RemoteSeam extension mirroring `receive`'s is follow-up work.
+// and `accept-gg-vaa` (permissionlessly relaying the guardians' signed acceptance). `propose-gg`
+// is single-party (Playground.Ops:proposeAdminTransferToGg reads AND submits as the CURRENT
+// admin alone), so it routes the whole script run to THAT party's own participant --
+// participantRoleForParty(s, d.CurrentAdminOrAdmin()) -- rather than the default runner: before
+// any handoff the current admin is the registering admin, co-located with operator under the
+// default topology, so this is byte-identical to before; after a successful `accept-gg-vaa` the
+// current admin is guardianGovernance, hosted on its own participant, and the old
+// always-default-participant routing would fail PERMISSION_DENIED there (the bug a second
+// propose/accept cycle post-handoff exposed). `accept-gg-vaa` gets the standard prepareRemoteSeam
+// treatment mirroring `receive`'s (see remote.go): the actor (the relaying `--executor`, or
+// operator by default) and the data owner (guardianGovernance) are compared, and a RemoteSeam is
+// fetched via Playground.Prepare:prepareAcceptAdmin whenever they differ -- unconditionally the
+// case on a multi-participant LocalNet topology once guardianGovernance became its own
+// participant, where no single participant hosts both operator and gg.
 func newAdminCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin",
@@ -71,19 +84,24 @@ func newAdminProposeGgCmd(a *app) *cobra.Command {
 				return fmt.Errorf("admin propose-gg: unknown deployment %q", deployment)
 			}
 
-			// The proposal is a self-signed create by the CURRENT admin; the deployment's
-			// admin is co-located with operator under the default topology (mirrors
-			// `deploy`'s deployNtt routing), so the default runner suffices.
-			runner, cleanup, err := a.newScriptRunner(ctx)
+			// The proposal is a self-signed create by the CURRENT admin -- route the script
+			// run to THAT party's own participant, not the default one: pre-handoff this is
+			// the registering admin (co-located with operator under the default topology,
+			// participantRoleForParty resolves "" -- unchanged from before this fix); after a
+			// successful `accept-gg-vaa` it is guardianGovernance, hosted elsewhere (see
+			// newAdminCmd's doc comment).
+			adminParty := d.CurrentAdminOrAdmin()
+			role := participantRoleForParty(s, adminParty)
+			runner, cleanup, err := a.newScriptRunnerFor(ctx, role)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
 
-			a.vlogf(cmd, "admin propose-gg: deployment=%s admin=%s -> guardianGovernance=%s", deployment, d.CurrentAdminOrAdmin(), s.GuardianGovernance)
+			a.vlogf(cmd, "admin propose-gg: deployment=%s admin=%s -> guardianGovernance=%s", deployment, adminParty, s.GuardianGovernance)
 			var out proposeAdminTransferToGgOutput
 			if err := runner.Run(ctx, "Playground.Ops:proposeAdminTransferToGg", proposeAdminTransferToGgInput{
-				Operator:  s.Operator,
+				Admin:     adminParty,
 				ManagerID: d.ManagerID,
 			}, &out); err != nil {
 				return err
@@ -119,9 +137,8 @@ func newAdminAcceptGgVaaCmd(a *app) *cobra.Command {
 			}
 
 			// executor defaults to the Operator (stays on the default/app-provider
-			// participant); an explicit --executor routes the submit to THAT hint's own
-			// participant instead -- mirrors `receive`'s executor routing, minus the
-			// RemoteSeam fallback (see newAdminCmd's doc comment).
+			// participant, executorRole=""); an explicit --executor routes the submit to
+			// THAT hint's own participant instead -- mirrors `receive`'s executor routing.
 			executorParty := s.Operator
 			executorRole := ""
 			if executorHint != "" {
@@ -130,6 +147,27 @@ func newAdminAcceptGgVaaCmd(a *app) *cobra.Command {
 					return err
 				}
 				executorRole = s.UserParticipants[executorHint]
+			}
+
+			// Record the actor's participant role as the --strict-participant-isolation
+			// baseline (runner.go), immediately after it is known and before
+			// prepareRemoteSeam below (which may need to cross a participant boundary).
+			a.isolationBaselineRole = executorRole
+			a.isolationBaselineSet = true
+
+			// The data owner for a Mock-kind prepare fetch is gg's OWN participant, not
+			// operator's -- see remote.go's doc comment and receive.go's identical reasoning.
+			ownerRole := participantRoleForParty(s, s.GuardianGovernance)
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, executorRole, ownerRole, "Playground.Prepare:prepareAcceptAdmin", "acceptAdminTransfer", func(templates []string) any {
+				return prepareAcceptAdminInput{
+					GuardianGovernance: s.GuardianGovernance,
+					ManagerID:          d.ManagerID,
+					VaaBytes:           vaaHex,
+					DiscloseTemplates:  templates,
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("admin accept-gg-vaa: prepare remote disclosure: %w", err)
 			}
 
 			runner, cleanup, err := a.newScriptRunnerFor(ctx, executorRole)
@@ -146,6 +184,7 @@ func newAdminAcceptGgVaaCmd(a *app) *cobra.Command {
 				Executor:  executorParty,
 				VaaBytes:  vaaHex,
 				PubKeys:   []ledger.PubKeyHint{{Index: 0, Key: pubKeyHex}},
+				Remote:    remoteSeam,
 			}, &out); err != nil {
 				return err
 			}

@@ -44,11 +44,11 @@ var postgresOverride []byte
 // postgresOverrideFile is the override's filename inside ComposeDir.
 const postgresOverrideFile = "wormhole-postgres-override.yaml"
 
-// participantsOverride adds three new Canton participants -- bob, guardian-governance,
-// guardian-observer -- hosted inside the bundle's existing `canton`/`splice` containers (see
-// the plan's §2 port table, .claude/tasks/e2e-separate-participants.md). A fourth candidate,
-// app-user (Alice), needs no override: verified live that it already runs today under the
-// bundle's own default (see the Up doc comment below).
+// participantsOverride adds four new Canton participants -- bob, guardian-governance,
+// guardian-observer, alice-solo -- hosted inside the bundle's existing `canton`/`splice`
+// containers (see the participant/port table in the CLI README's Topology section). A
+// fifth candidate, app-user (Alice), needs no override: verified live that it already runs
+// today under the bundle's own default (see the Up doc comment below).
 //
 //go:embed localnet_participants_override.yaml
 var participantsOverride []byte
@@ -249,20 +249,21 @@ func (m *LocalNetManager) env() []string {
 // check. First boot bootstraps the DSO (the network's Decentralized Synchronizer Operator
 // party) and is documented at 2-6 minutes, so the timeout should be generous.
 //
-// Despite only "sv" and "app-provider" being passed as --profile flags, FIVE participants
+// Despite only "sv" and "app-provider" being passed as --profile flags, SIX participants
 // come up: app-provider and sv (named by the passed profiles), app-user (verified live --
 // compose.env defaults APP_USER_PROFILE=on, and conf/canton/app.conf's
 // `include file("/app/app-user/on/app.conf")` is unconditional once the canton container
 // starts under any profile, since Compose's --profile flag only gates which SERVICES start,
 // not which conf/env-file paths a running service's own volume mounts resolve to -- so
 // app-user's participant and validator run today with no override needed), plus this
-// package's own bob/guardian-governance/guardian-observer additions (participantsOverride).
+// package's own bob/guardian-governance/guardian-observer/alice-solo additions
+// (participantsOverride).
 func (m *LocalNetManager) Up(ctx context.Context, timeout time.Duration) error {
 	tag := m.ImageTag
 	if tag == "" {
 		tag = "default"
 	}
-	m.logf("localnet: compose dir=%s image-tag=%s profiles=[sv app-provider] (app-user, bob, guardian-governance, guardian-observer also come up -- see Up's doc comment)", m.ComposeDir, tag)
+	m.logf("localnet: compose dir=%s image-tag=%s profiles=[sv app-provider] (app-user, bob, guardian-governance, guardian-observer, alice-solo also come up -- see Up's doc comment)", m.ComposeDir, tag)
 	if err := m.ensureOverrides(); err != nil {
 		return err
 	}
@@ -397,7 +398,7 @@ type participantProbe struct {
 // allParticipantProbes lists every participant waitReady must see stably ready before a
 // LocalNet `network up` returns: the two named by --profile (app-provider via the manager's
 // own configurable ledgerAddr/validatorBaseURL, sv has no user-facing participant of its
-// own), app-user (already running today -- see Up's doc comment), and this package's three
+// own), app-user (already running today -- see Up's doc comment), and this package's four
 // additions. Ports are the plan's §2 table; localnet-only fixed ports, no env override (only
 // app-provider's has one, matching profile.Profile's existing LOCALNET_* env vars).
 func (m *LocalNetManager) allParticipantProbes() []participantProbe {
@@ -407,6 +408,7 @@ func (m *LocalNetManager) allParticipantProbes() []participantProbe {
 		{role: "bob", ledgerAddr: "localhost:5901", validatorURL: "http://localhost:5903"},
 		{role: "guardian-governance", ledgerAddr: "localhost:6901", validatorURL: "http://localhost:6903"},
 		{role: "guardian-observer", ledgerAddr: "localhost:7901", validatorURL: "http://localhost:7903"},
+		{role: "alice-solo", ledgerAddr: "localhost:8901", validatorURL: "http://localhost:8903"},
 	}
 }
 
@@ -581,7 +583,7 @@ func (m *LocalNetManager) UploadDAR(ctx context.Context, jsonLedgerAPIBaseURL, d
 
 // allParticipantJSONAPIBaseURLs lists every participant's JSON Ledger API v2 base URL --
 // app-provider (via the manager's own configurable ValidatorBaseURL-adjacent JSON API,
-// mirrored from the port table) plus the four others, all fixed localnet ports (plan §2).
+// mirrored from the port table) plus the five others, all fixed localnet ports (plan §2).
 func (m *LocalNetManager) allParticipantJSONAPIBaseURLs() map[string]string {
 	return map[string]string{
 		"app-provider":        m.jsonAPIBaseURL(),
@@ -589,6 +591,7 @@ func (m *LocalNetManager) allParticipantJSONAPIBaseURLs() map[string]string {
 		"bob":                 "http://localhost:5975",
 		"guardian-governance": "http://localhost:6975",
 		"guardian-observer":   "http://localhost:7975",
+		"alice-solo":          "http://localhost:8975",
 	}
 }
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wormhole replacement for docker/splice/health-check.sh: the original three profile-gated
-# probes, plus unconditional probes of the three new validator apps' readyz endpoints.
+# probes, plus unconditional probes of the four new validator apps' readyz endpoints.
 set -eou pipefail
 
 if [ "$APP_USER_PROFILE" = "on" ]; then
@@ -18,3 +18,4 @@ fi
 wget --no-verbose --tries=1 --spider http://localhost:5903/api/validator/readyz
 wget --no-verbose --tries=1 --spider http://localhost:6903/api/validator/readyz
 wget --no-verbose --tries=1 --spider http://localhost:7903/api/validator/readyz
+wget --no-verbose --tries=1 --spider http://localhost:8903/api/validator/readyz

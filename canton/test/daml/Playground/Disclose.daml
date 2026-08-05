@@ -36,7 +36,7 @@ import Token.CIP0056.CoinFactory (CoinFactory)
 import Wormhole.Ntt.Deposit (DepositPreapproval)
 import Wormhole.Ntt.Governance (NttGovernance)
 import Wormhole.Ntt.Ledger (LockedLedger)
-import Wormhole.Ntt.Manager (NttManager)
+import Wormhole.Ntt.Manager (NttManager, AdminTransferProposal)
 import Test.TestNtt (Cip56MockHolding, MockBurnMintFactory)
 import Playground.MockRegistry (MockPreapprovedTransferFactory, MockTransferPreapproval)
 
@@ -120,6 +120,8 @@ toDisclosureByName seed d
       mkDisclosure @ExternalPartyConfigState.ExternalPartyConfigState
   | "Wormhole.Ntt.Manager:NttManager" `isSuffixOf` d.templateId =
       mkDisclosure @NttManager
+  | "Wormhole.Ntt.Manager:AdminTransferProposal" `isSuffixOf` d.templateId =
+      mkDisclosure @AdminTransferProposal
   | "Wormhole.Ntt.Governance:NttGovernance" `isSuffixOf` d.templateId =
       mkDisclosure @NttGovernance
   | "Wormhole.Ntt.Ledger:LockedLedger" `isSuffixOf` d.templateId =
@@ -178,5 +180,9 @@ data RemoteSeam = RemoteSeam with
     replayNodeCid      : Optional (ContractId ReplayNode)
     preapprovalCid     : Optional (ContractId DepositPreapproval)      -- burn/mint recipient opt-in
     mockPreapprovalCid : Optional (ContractId MockTransferPreapproval) -- lock/unlock owner opt-in
+    -- The standing 'Wormhole.Ntt.Manager:AdminTransferProposal' offering the admin role to gg
+    -- (gg is its OBSERVER, since @newAdmin = gg@ by construction) -- 'prepareAcceptAdmin's own
+    -- addition, unused by every other 'prepare*' script (they leave it 'None').
+    proposalCid        : Optional (ContractId AdminTransferProposal)
     disclosed          : [DisclosedContractIn]
   deriving (Eq, Show)

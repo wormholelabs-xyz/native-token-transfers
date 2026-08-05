@@ -65,6 +65,13 @@ func newReceiveCmd(a *app) *cobra.Command {
 				}
 				executorRole = s.UserParticipants[executorHint]
 			}
+
+			// Record the actor's participant role as the --strict-participant-isolation
+			// baseline (runner.go), immediately after it is known and before
+			// prepareRemoteSeam below (which may need to cross a participant boundary).
+			a.isolationBaselineRole = executorRole
+			a.isolationBaselineSet = true
+
 			if pubKeyHex == "" {
 				return fmt.Errorf("receive: --pubkey is required (the signing guardian's 65-byte uncompressed pubkey)")
 			}
@@ -72,7 +79,7 @@ func newReceiveCmd(a *app) *cobra.Command {
 			// The data owner for a Mock-kind prepare fetch is gg's OWN participant, not
 			// operator's -- see remote.go's doc comment and transfer.go's identical reasoning.
 			ownerRole := participantRoleForParty(s, s.GuardianGovernance)
-			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, executorRole, ownerRole, "Playground.Prepare:prepareReceive", func(templates []string) any {
+			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, executorRole, ownerRole, "Playground.Prepare:prepareReceive", "receive", func(templates []string) any {
 				return prepareReceiveInput{
 					GuardianGovernance: s.GuardianGovernance,
 					ManagerID:          d.ManagerID,

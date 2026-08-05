@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,7 +24,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
@@ -212,6 +215,126 @@ func decimalsEqual(t *testing.T, a, b string) bool {
 	fb, err := strconv.ParseFloat(b, 64)
 	require.NoErrorf(t, err, "parse decimal %q", b)
 	return fa == fb
+}
+
+// safeBuffer is a concurrency-safe io.Writer wrapping bytes.Buffer. os/exec copies a
+// subprocess's stderr into whatever io.Writer Cmd.Stderr names from a background goroutine it
+// starts internally (Cmd.Start), so a test that polls the accumulated output while the process
+// is still running needs a writer safe for concurrent Write/String -- a bare bytes.Buffer is not.
+// Used by startDisclosureServe, below.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// startDisclosureServe launches `ntt-playground disclosure serve` as a REAL subprocess of the
+// built CLI binary -- not an in-process httptest.Server standing in for it. The disclosure-
+// service design's entire point is that a consumer reaches the service over the network without
+// the fronted participant's own credentials, so the e2e proof has to exercise the actual
+// `disclosure serve` command end to end (cmd/ntt-playground/disclosure.go's RunE), including its
+// startup banner and its --topology-config-driven allow-list, not a Go-level stand-in for it.
+//
+// It shares this harness's base flags (--state-file/--canton-dir/--profile/--run-dir) so the
+// service reads the SAME on-ledger world and state file this subtest's earlier steps already
+// built, binds an ephemeral loopback port (--listen 127.0.0.1:0 -- disclosure.go resolves the
+// concrete port only after Listen succeeds, hence the banner-line parse below), and fronts
+// guardian-governance (disclosure.go's default --participant, the data owner every existing
+// prepare* seam needs), loading its allow-list from topologyFile.
+//
+// Blocks until the "disclosure serve: listening on http://" banner line appears on the process's
+// stderr, or a few seconds elapse, whichever comes first, and returns the resolved base URL plus
+// a logs func that snapshots everything the process has written to stderr so far -- used by the
+// acceptance subtest below to confirm the service actually served a seam, not just that the CLI
+// claims to have fetched one. t.Cleanup kills the process; the process also shuts itself down
+// when its own context is cancelled (disclosure.go's context.AfterFunc), so this is
+// belt-and-suspenders, not the only teardown path.
+func startDisclosureServe(t *testing.T, h *harness, topologyFile string) (baseURL string, logs func() string) {
+	t.Helper()
+	args := []string{
+		"--state-file", h.stateFile,
+		"--canton-dir", cantonDir,
+		"--profile", playgroundProfile,
+		"--run-dir", filepath.Join(h.workDir, ".run"),
+		"--topology-config", topologyFile,
+		"--verbose",
+		"disclosure", "serve", "--listen", "127.0.0.1:0",
+	}
+	cmd := exec.CommandContext(t.Context(), cliBinPath, args...)
+	var stderr safeBuffer
+	cmd.Stderr = &stderr
+	require.NoErrorf(t, cmd.Start(), "start `disclosure serve` (topology=%s)", topologyFile)
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+
+	const marker = "disclosure serve: listening on http://"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if out := stderr.String(); strings.Contains(out, marker) {
+			rest := out[strings.Index(out, marker)+len(marker):]
+			addr := rest
+			if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+				addr = rest[:nl]
+			}
+			return "http://" + strings.TrimSpace(addr), stderr.String
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("disclosure serve (topology=%s): did not print its listening address within 10s; stderr so far:\n%s", topologyFile, stderr.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// requireRoutedTo asserts that every "participant=... party=<party> ... isLocal=..." line in
+// `party list`'s (verbose-stripped) output agrees with wantParticipant: isLocal=true on that
+// participant, isLocal=false everywhere else the same party is topology-visible (only its home
+// participant actually hosts it). A package-level twin of the identically-shaped local closure
+// "parties live on separate participants" defines for itself further down -- duplicated rather
+// than hoisted out from under that subtest, which predates this one and documents its own
+// reasoning inline; sharing it here avoids a third copy for the disclosure-service subtests
+// below.
+func requireRoutedTo(t *testing.T, out, party, wantParticipant string) {
+	t.Helper()
+	matched := 0
+	for _, line := range strings.Split(stripVerbose(out), "\n") {
+		fields := strings.Fields(line)
+		var gotParty, gotParticipant, gotIsLocal string
+		for _, f := range fields {
+			switch {
+			case strings.HasPrefix(f, "party="):
+				gotParty = strings.TrimPrefix(f, "party=")
+			case strings.HasPrefix(f, "participant="):
+				gotParticipant = strings.TrimPrefix(f, "participant=")
+			case strings.HasPrefix(f, "isLocal="):
+				gotIsLocal = strings.TrimPrefix(f, "isLocal=")
+			}
+		}
+		if gotParty != party {
+			continue
+		}
+		matched++
+		if gotParticipant == wantParticipant {
+			require.Equal(t, "true", gotIsLocal, "party %s on its home participant=%s should be local: %q", party, wantParticipant, line)
+		} else {
+			require.Equal(t, "false", gotIsLocal, "party %s under a foreign participant=%s should not be local: %q", party, gotParticipant, line)
+		}
+	}
+	require.Positivef(t, matched, "expected party %s to appear in `party list` output at all:\n%s", party, out)
 }
 
 func TestPlaygroundE2E(t *testing.T) {
@@ -426,8 +549,9 @@ func TestPlaygroundE2E(t *testing.T) {
 		require.Contains(t, out, "emitterChain=72")
 		require.Contains(t, out, "guardianSetIndex=0")
 
-		// observe: confirm the manager's own on-ledger outboundSequence advanced (0 -> 1
-		// from the single transfer above) -- the transfer output's sequence is
+		// observe: confirm the manager's own on-ledger outboundSequence advanced to 3
+		// (two bundled broadcasts at deploy time plus the single transfer above) -- the
+		// transfer output's sequence is
 		// recompute-based, so this is the suite's only direct on-ledger check of it. Also
 		// cross-check the reported chain-2 peer against the state file's peer entry (set
 		// from testdata/deploy-burnmint.json at deploy time).
@@ -441,8 +565,8 @@ func TestPlaygroundE2E(t *testing.T) {
 			} `json:"peers"`
 		}
 		require.NoErrorf(t, json.Unmarshal([]byte(stripVerbose(out)), &observed), "observe should print JSON:\n%s", out)
-		require.Equal(t, 1, observed.OutboundSequence,
-			"outboundSequence should have advanced from 0 by the single outbound transfer above")
+		require.Equal(t, 3, observed.OutboundSequence,
+			"outboundSequence: TransceiverInit broadcast at deploy (seq 0) + the pre-set peer's TransceiverRegistration broadcast (seq 1) + the single outbound transfer above (seq 2)")
 		require.Len(t, observed.Peers, 1)
 		require.Equal(t, 2, observed.Peers[0].Chain)
 		require.Equal(t, peer.ManagerAddress, observed.Peers[0].ManagerAddress)
@@ -1417,6 +1541,164 @@ func TestPlaygroundE2E(t *testing.T) {
 		// co-signed submit.
 		require.Contains(t, initOut, "[v] script Playground.Init:proposeGenesis")
 		require.Contains(t, initOut, "[v] script Playground.Init:acceptGenesis")
+	})
+
+	// ----------------------------------------------------------------------
+	// The disclosure-service design's own acceptance criterion (its §0/§6): "an e2e test
+	// showing that a fresh participant, hosting nothing but the alice party, with only the DARs
+	// uploaded, can transact." alice-solo is that fresh participant: it hosts no playground
+	// party but the one this subtest allocates, and no playground contract exists there until it
+	// transacts (it does host its own Splice validator operator party, unavoidably -- the
+	// design's §7 R1 -- which is honest to note, not a violation of the criterion's intent).
+	//
+	// The hint allocated below is "Zoe", a fresh one, not "Alice": Alice is already routed to
+	// app-user by roughly fifteen earlier subtests in this file, and resolveParty pins a hint's
+	// participant on first allocation, so re-routing "Alice" here would force all of them
+	// cross-participant. The design doc's own §6.1 records that "alice" in the acceptance
+	// criterion denotes a plain end-user party with no privileges -- the hint's name is
+	// incidental, not load-bearing.
+	// ----------------------------------------------------------------------
+
+	t.Run("fresh participant transacts via the disclosure service", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("alice-solo and the disclosure service are localnet-only concepts (sandbox has a single participant)")
+		}
+
+		// Two disclosure services, both fronting guardian-governance: one with the full
+		// disclosure allow-list (testdata/topology-alice-solo.json, widened to the same 11
+		// templates internal/disclosure.DefaultDisclose ships), one with an empty list
+		// (testdata/topology-empty.json -- the suite's existing "disclose nothing" negative
+		// control; see "cross-participant transfer fails without disclosure config" above).
+		fullURL, fullLogs := startDisclosureServe(t, h, testdataPath("topology-alice-solo.json"))
+		emptyURL, _ := startDisclosureServe(t, h, testdataPath("topology-empty.json"))
+
+		// 1. Allocate Zoe, routed to alice-solo by topology-alice-solo.json's partyHosting
+		// entry. This is the design doc's §7 R3 first-failure point: the very first ledger
+		// submit alice-solo's participant ever processes (allocatePlaygroundParty) -- a
+		// participant that, until this line runs, has never hosted a playground party at all.
+		// If this step fails, the failure is the participant-onboarding/DAR gap the design
+		// doc's §7 R1-R3 describe, not a disclosure-service problem, and is worth reporting
+		// verbatim rather than working around.
+		out := h.mustRun(t, "party", "allocate", "--hint", "Zoe", "--topology-config", testdataPath("topology-alice-solo.json"))
+		zoe := extractField(t, out, "party")
+		require.NotEmpty(t, zoe)
+
+		out = h.mustRun(t, "party", "list")
+		requireRoutedTo(t, out, zoe, "alice-solo")
+
+		// 2. Fund Zoe via the operator's own CLI (design doc §5.5): `fund` ensures Zoe's
+		// standing DepositPreapproval (routed to alice-solo, Zoe's own participant) and mints
+		// via gg's fundUser faucet (routed to gg's own participant) -- both legitimately
+		// cross-participant, operator-side actions, so `fund` never sets
+		// a.isolationBaselineRole and stays unaffected by --strict-participant-isolation below
+		// (runner.go's doc comment).
+		h.mustRun(t, "fund", "--deployment", "burnmint", "--user", "Zoe", "--amount", "500000")
+
+		// 3. Negative control A: --strict-participant-isolation with NO disclosure-service URL.
+		// Zoe's own participant cannot resolve gg-owned data (NttManager/CoreState/Emitter/the
+		// committed factory) by itself, so the isolation guard (runner.go's newScriptRunnerFor)
+		// must refuse the cross-participant prepare fetch client-side, before any script runs at
+		// all -- proving the flow genuinely needs cross-participant data it cannot reach on its
+		// own, not merely that today's harness happens to make it work.
+		out, err := h.run(t, "--topology-config", testdataPath("topology-alice-solo.json"),
+			"--strict-participant-isolation",
+			"transfer", "--deployment", "burnmint", "--user", "Zoe", "--chain", "2",
+			"--recipient-address", addr32("77"), "--amount", "500000")
+		require.Error(t, err, "a strict-isolation transfer with no disclosure-service URL must fail before reaching the ledger")
+		require.Contains(t, out, "strict-participant-isolation")
+
+		// 4. Negative control B: a disclosure service IS configured, but its own allow-list is
+		// empty. The prepare seam still runs (it is gg's own script, on gg's own participant),
+		// but discloses nothing at all, so Zoe's own submit-side Playground.Ops:transferOut
+		// (running on alice-solo) still cannot see -- let alone exercise -- the gg-owned
+		// NttManager the transfer needs. Fails ON-LEDGER, not client-side, proving the
+		// service's allow-list is genuinely load-bearing and not merely a URL-presence check.
+		// Neither this control nor the one above moves any of Zoe's just-funded 500000: a Daml
+		// transaction is atomic, so a client-side abort (A) or an on-ledger CONTRACT_NOT_FOUND
+		// (B, here) leaves no partial effect -- the same literal amount is reused unspent by
+		// the successful transfer in step 5.
+		out, err = h.run(t, "--topology-config", testdataPath("topology-alice-solo.json"),
+			"--strict-participant-isolation", "--disclosure-service-url", emptyURL,
+			"transfer", "--deployment", "burnmint", "--user", "Zoe", "--chain", "2",
+			"--recipient-address", addr32("77"), "--amount", "500000")
+		require.Error(t, err, "a disclosure service with an empty allow-list must not let the transfer through")
+		require.Contains(t, out, "CONTRACT_NOT_FOUND")
+
+		// 5. The acceptance criterion itself: the SAME command, against the full-allow-list
+		// service, with --sign -- succeeds WITHOUT Zoe's CLI ever holding gg's participant's
+		// credentials (--strict-participant-isolation is still on). The narration must show the
+		// RemoteSeam came from the disclosure service, and must NOT show a local
+		// "script Playground.Prepare:prepareTransferOut" run -- that would mean this
+		// invocation fell back to the pre-disclosure-service local path, which defeats the
+		// point entirely (see remote.go's prepareRemoteSeam doc comment). The service's own
+		// captured stderr independently confirms it actually served the transferOut seam.
+		out = h.mustRun(t, "--topology-config", testdataPath("topology-alice-solo.json"),
+			"--strict-participant-isolation", "--disclosure-service-url", fullURL,
+			"transfer", "--deployment", "burnmint", "--user", "Zoe", "--chain", "2",
+			"--recipient-address", addr32("77"), "--amount", "500000", "--sign")
+		require.Contains(t, out, "emitterChain=72")
+		require.Contains(t, out, "disclosure: fetching a RemoteSeam from the disclosure service")
+		require.NotContains(t, out, "script Playground.Prepare:prepareTransferOut",
+			"the prepare/disclose script must run inside the disclosure-service process, not this CLI invocation")
+		require.Contains(t, fullLogs(), "disclosure: seam transferOut ok",
+			"the service's own logs should confirm it served the transferOut seam")
+
+		// 6. Round trip: Zoe also RECEIVES, as her own executor, through the same service --
+		// exercising the "receive" seam (prepareReceive) rather than "transferOut", still under
+		// --strict-participant-isolation. Her standing DepositPreapproval (created by `fund`'s
+		// own preapprove step above) already satisfies receive's prior-opt-in gate, so no
+		// separate preapprove call is needed here.
+		out = h.mustRun(t, "guardian", "sign-transfer",
+			"--deployment", "burnmint", "--to-recipient", "Zoe", "--amount", "250000", "--source-chain", "2")
+		vaaHex := extractField(t, out, "vaa")
+		pubKeyHex := extractField(t, out, "pubkey")
+		require.NotEmpty(t, vaaHex)
+
+		out = h.mustRun(t, "--topology-config", testdataPath("topology-alice-solo.json"),
+			"--strict-participant-isolation", "--disclosure-service-url", fullURL,
+			"receive", "--deployment", "burnmint",
+			"--vaa", vaaHex, "--recipient", "Zoe", "--executor", "Zoe", "--pubkey", pubKeyHex)
+		require.Contains(t, out, "recipientChain=72")
+		require.Contains(t, out, "amount=250000")
+
+		out = h.mustRun(t, "balance", "--party", "Zoe", "--deployment", "burnmint")
+		require.Contains(t, out, "cip56HoldingTotal=")
+	})
+
+	t.Run("disclosure service enforces the allow-list server-side", func(t *testing.T) {
+		if playgroundProfile != "localnet" {
+			t.Skip("alice-solo and the disclosure service are localnet-only concepts (sandbox has a single participant)")
+		}
+
+		// A service whose allow-list is missing exactly one entry (CoreState) -- the same
+		// negative control as "disclosure config recovers the transfer" above
+		// (testdata/topology-missing-corestate.json), now enforced SERVER-side instead of
+		// client-side: the client sends no discloseTemplates of its own at all on the
+		// disclosure-service path (remote.go's prepareRemoteSeam calls buildInput(nil) there),
+		// so a failure here proves the SERVICE's own Config.Disclose -- not anything the client
+		// asked for -- is authoritative, and that the granularity survives the move to a
+		// service: it is still per-template, not an all-or-nothing switch (the e2e:1394-style
+		// assertion, now moved server-side).
+		missingURL, _ := startDisclosureServe(t, h, testdataPath("topology-missing-corestate.json"))
+
+		// Re-fund Zoe before reusing the acceptance subtest's own transfer command verbatim:
+		// that subtest's step 5 already spent her funded 500000 (BurnMint burns exactly the
+		// requested amount and returns any surplus as change, Wormhole.Ntt.Manager.daml's
+		// Transfer choice), and her subsequent receive only replaced part of it. Without this,
+		// Playground.Ops:transferOut's insufficient-holdings assertion ("ntt: input holdings do
+		// not cover the burn amount") could fire before the transaction ever reaches the
+		// CoreState visibility check this subtest exists to pin, which would make the test pass
+		// for the wrong reason (or fail with a confusing, unrelated message).
+		h.mustRun(t, "fund", "--deployment", "burnmint", "--user", "Zoe", "--amount", "500000")
+
+		// The SAME command as the acceptance subtest's step 5 (same deployment/user/chain/
+		// amount/recipient-address/--sign), pointed at the CoreState-missing service instead.
+		out, err := h.run(t, "--topology-config", testdataPath("topology-alice-solo.json"),
+			"--strict-participant-isolation", "--disclosure-service-url", missingURL,
+			"transfer", "--deployment", "burnmint", "--user", "Zoe", "--chain", "2",
+			"--recipient-address", addr32("77"), "--amount", "500000", "--sign")
+		require.Error(t, err, "a disclosure service missing one required template from its allow-list must still fail the transfer")
+		require.Contains(t, out, "CONTRACT_NOT_FOUND")
 	})
 
 	t.Run("network down", func(t *testing.T) {

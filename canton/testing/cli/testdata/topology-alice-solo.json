@@ -1,0 +1,24 @@
+{
+  "partyHosting": {
+    "Alice": "app-user",
+    "Bob": "bob",
+    "GuardianGovernance": "guardian-governance",
+    "GuardianObserver": "guardian-observer",
+    "Zoe": "alice-solo",
+    "*": "app-provider"
+  },
+  "disclose": [
+    { "template": "Wormhole.Ntt.Manager:NttManager", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Ntt.Governance:NttGovernance", "fetchAs": "Operator" },
+    { "template": "Wormhole.Ntt.Ledger:LockedLedger", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Core.State:CoreState", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Core.State:Emitter", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Core.Replay:ReplayNode", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Ntt.Deposit:DepositPreapproval", "fetchAs": "GuardianGovernance" },
+    { "template": "Playground.MockRegistry:MockTransferPreapproval", "fetchAs": "GuardianGovernance" },
+    { "template": "Playground.MockRegistry:MockPreapprovedTransferFactory", "fetchAs": "GuardianGovernance" },
+    { "template": "Token.CIP0056.CoinFactory:CoinFactory", "fetchAs": "GuardianGovernance" },
+    { "template": "Test.TestNtt:Cip56MockHolding", "fetchAs": "GuardianGovernance" },
+    { "template": "Wormhole.Ntt.Manager:AdminTransferProposal", "fetchAs": "GuardianGovernance" }
+  ]
+}

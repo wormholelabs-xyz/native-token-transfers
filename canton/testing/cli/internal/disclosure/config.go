@@ -79,6 +79,7 @@ func DefaultDisclose() []Entry {
 		{Template: "Playground.MockRegistry:MockPreapprovedTransferFactory", FetchAs: "GuardianGovernance"},
 		{Template: "Token.CIP0056.CoinFactory:CoinFactory", FetchAs: "GuardianGovernance"},
 		{Template: "Test.TestNtt:Cip56MockHolding", FetchAs: "GuardianGovernance"},
+		{Template: "Wormhole.Ntt.Manager:AdminTransferProposal", FetchAs: "GuardianGovernance"},
 	}
 }
 
@@ -125,4 +126,15 @@ func (c Config) Entry(template string) (Entry, bool) {
 		}
 	}
 	return Entry{}, false
+}
+
+// Templates returns Disclose's template names -- the server-side allow-list a disclosure
+// Service enforces (the plan's §5.4) and injects into a POST /v1/seam/* request's
+// discloseTemplates, overriding anything the client sent.
+func (c Config) Templates() []string {
+	out := make([]string, len(c.Disclose))
+	for i, e := range c.Disclose {
+		out[i] = e.Template
+	}
+	return out
 }
