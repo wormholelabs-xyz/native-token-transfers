@@ -49,14 +49,19 @@ type app struct {
 
 	// isolationBaselineRole is the current invocation's actor participant role -- the baseline
 	// strictParticipantIsolation compares every newScriptRunnerFor call's target against. This
-	// is NOT a cobra flag: it is set once per invocation by the three actor-routing commands
-	// (transfer.go, receive.go, publish.go), immediately after the actor's own role is resolved
-	// and before any call that might cross a participant boundary. Commands that legitimately
-	// span participants by design -- init, deploy, fund, party -- never set it, so it stays ""
-	// for them, which the guard treats as "no actor-routing command is in play" and therefore
-	// never fires (design doc §7 R8: the guard must not break those commands even when
-	// --strict-participant-isolation is passed globally).
+	// is NOT a cobra flag: it is set once per invocation by the actor-routing commands
+	// (transfer.go, receive.go, publish.go, admin.go's accept-gg-vaa), immediately after the
+	// actor's own role is resolved and before any call that might cross a participant boundary.
+	// "" is a valid baseline meaning the profile's default participant (normalizeRole resolves
+	// it for comparison), so isolationBaselineSet below -- not this value -- records whether a
+	// baseline was taken at all.
 	isolationBaselineRole string
+
+	// isolationBaselineSet records that an actor-routing command took a baseline this
+	// invocation. Commands that legitimately span participants by design -- init, deploy, fund,
+	// party -- never set it, and the guard never fires for them even when
+	// --strict-participant-isolation is passed globally (design doc §7 R8).
+	isolationBaselineSet bool
 
 	// stderr is the invoked command's error stream, captured once in PersistentPreRun so
 	// helpers constructed without a *cobra.Command in scope (the script runner and network

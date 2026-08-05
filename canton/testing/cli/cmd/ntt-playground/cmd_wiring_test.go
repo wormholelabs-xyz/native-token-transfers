@@ -1290,9 +1290,12 @@ func TestCmd_AdminAcceptGgVaa_DisclosureServiceURL_UsesAcceptAdminSeam(t *testin
 // TestNewScriptRunnerFor_StrictIsolationGuard is a focused unit test of the guard itself
 // (normalizeRole comparison), bypassing any subcommand: strict isolation with a recorded
 // baseline that differs from the target role must error naming
-// "strict-participant-isolation"; an empty baseline (no actor-routing command in play, e.g.
-// init/deploy/fund/party -- design doc §7 R8) must never trip the guard, even against a
-// participant role that would otherwise differ from the profile's default.
+// "strict-participant-isolation" -- including when the recorded baseline is "" (an actor on
+// the profile's DEFAULT participant, e.g. receive/accept-gg-vaa with no --executor), which
+// normalizeRole resolves to the default participant rather than treating as "guard off". Only
+// an UNSET baseline (no actor-routing command in play, e.g. init/deploy/fund/party -- design
+// doc §7 R8) must never trip the guard, even against a participant role that would otherwise
+// differ from the profile's default.
 func TestNewScriptRunnerFor_StrictIsolationGuard(t *testing.T) {
 	r := newFakeRunner()
 
@@ -1301,19 +1304,33 @@ func TestNewScriptRunnerFor_StrictIsolationGuard(t *testing.T) {
 		profile:                    profile.LocalNet,
 		strictParticipantIsolation: true,
 		isolationBaselineRole:      "app-user",
+		isolationBaselineSet:       true,
 	}
 	if _, _, err := blocked.newScriptRunnerFor(context.Background(), "guardian-governance"); err == nil || !contains(err.Error(), "strict-participant-isolation") {
 		t.Fatalf("expected a strict-participant-isolation error for a cross-participant target, got %v", err)
+	}
+
+	defaultActor := &app{
+		runnerOverride:             r,
+		profile:                    profile.LocalNet,
+		strictParticipantIsolation: true,
+		isolationBaselineRole:      "",
+		isolationBaselineSet:       true,
+	}
+	if _, _, err := defaultActor.newScriptRunnerFor(context.Background(), "guardian-governance"); err == nil || !contains(err.Error(), "strict-participant-isolation") {
+		t.Fatalf("expected a strict-participant-isolation error for a default-participant actor targeting another participant, got %v", err)
+	}
+	if _, _, err := defaultActor.newScriptRunnerFor(context.Background(), ""); err != nil {
+		t.Fatalf("expected no error for a default-participant actor targeting the default participant, got %v", err)
 	}
 
 	noBaseline := &app{
 		runnerOverride:             r,
 		profile:                    profile.LocalNet,
 		strictParticipantIsolation: true,
-		isolationBaselineRole:      "",
 	}
-	if _, _, err := noBaseline.newScriptRunnerFor(context.Background(), ""); err != nil {
-		t.Fatalf("expected no error with an empty isolationBaselineRole (no actor-routing command in play), got %v", err)
+	if _, _, err := noBaseline.newScriptRunnerFor(context.Background(), "guardian-governance"); err != nil {
+		t.Fatalf("expected no error with an unset baseline (no actor-routing command in play), got %v", err)
 	}
 }
 

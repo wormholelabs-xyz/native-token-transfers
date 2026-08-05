@@ -176,6 +176,7 @@ func newTransferCmd(a *app) *cobra.Command {
 			// normalization treats it -- "" means the profile's default participant, not a
 			// distinct, unrouted one.
 			a.isolationBaselineRole = s.UserParticipants[userHint]
+			a.isolationBaselineSet = true
 
 			// Daml's `[ContractId Holding]` needs a JSON array, never `null` -- must start
 			// non-nil (a nil Go slice marshals to `null`).

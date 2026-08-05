@@ -60,6 +60,7 @@ func newPublishCmd(a *app) *cobra.Command {
 			// baseline (runner.go), immediately after it is known and before prepareRemoteSeam
 			// below (which may need to cross a participant boundary).
 			a.isolationBaselineRole = actorRole
+			a.isolationBaselineSet = true
 
 			dataOwnerRole := participantRoleForParty(s, s.Operator)
 			remoteSeam, err := prepareRemoteSeam(ctx, cmd, a, s, actorRole, dataOwnerRole, "Playground.Prepare:preparePublish", "publish", func(templates []string) any {

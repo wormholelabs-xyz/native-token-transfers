@@ -153,6 +153,7 @@ func newAdminAcceptGgVaaCmd(a *app) *cobra.Command {
 			// baseline (runner.go), immediately after it is known and before
 			// prepareRemoteSeam below (which may need to cross a participant boundary).
 			a.isolationBaselineRole = executorRole
+			a.isolationBaselineSet = true
 
 			// The data owner for a Mock-kind prepare fetch is gg's OWN participant, not
 			// operator's -- see remote.go's doc comment and receive.go's identical reasoning.

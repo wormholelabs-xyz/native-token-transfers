@@ -61,12 +61,14 @@ func (a *app) newScriptRunner(ctx context.Context) (scriptRunner, func(), error)
 // behavior (which participant a call would have targeted) without a live sandbox/LocalNet.
 // Placing it after the short-circuit would make every fakeRunner-based wiring test blind to it.
 func (a *app) newScriptRunnerFor(ctx context.Context, role string) (scriptRunner, func(), error) {
-	// a.isolationBaselineRole is set once per invocation by the three actor-routing commands
-	// (transfer/receive/publish -- see their RunE), immediately after the actor's own role is
-	// known. An empty baseline means no actor-routing command is in play for this invocation
-	// (init, deploy, fund, party, ... -- design doc §7 R8), so the guard can never fire for
-	// them, regardless of --strict-participant-isolation.
-	if a.strictParticipantIsolation && a.isolationBaselineRole != "" {
+	// a.isolationBaselineSet is set once per invocation by the actor-routing commands
+	// (transfer/receive/publish/admin accept-gg-vaa -- see their RunE), immediately after the
+	// actor's own role is known; the baseline role itself may be "" (the profile's default
+	// participant -- normalizeRole resolves it). An unset baseline means no actor-routing
+	// command is in play for this invocation (init, deploy, fund, party, ... -- design doc
+	// §7 R8), so the guard can never fire for them, regardless of
+	// --strict-participant-isolation.
+	if a.strictParticipantIsolation && a.isolationBaselineSet {
 		prof, err := a.resolvedProfile()
 		if err != nil {
 			return nil, nil, err

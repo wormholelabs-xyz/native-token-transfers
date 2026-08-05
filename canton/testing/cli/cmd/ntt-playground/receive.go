@@ -70,6 +70,7 @@ func newReceiveCmd(a *app) *cobra.Command {
 			// baseline (runner.go), immediately after it is known and before
 			// prepareRemoteSeam below (which may need to cross a participant boundary).
 			a.isolationBaselineRole = executorRole
+			a.isolationBaselineSet = true
 
 			if pubKeyHex == "" {
 				return fmt.Errorf("receive: --pubkey is required (the signing guardian's 65-byte uncompressed pubkey)")
