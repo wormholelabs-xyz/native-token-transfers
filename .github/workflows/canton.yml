@@ -49,7 +49,7 @@ jobs:
         run: dpm test
 
   cli:
-    name: playground CLI (go vet/test + sandbox e2e)
+    name: playground CLI (go vet/test + sandbox integration)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -84,10 +84,14 @@ jobs:
           go vet ./...
           go test ./...
 
-      # The existing live-sandbox integration test (canton/testing/go) and the playground
-      # e2e suite (sandbox profile: no docker/LocalNet needed) both drive a real `dpm
-      # sandbox`, so they run in this dpm-provisioned job rather than the plain unit-test
+      # The existing live-sandbox integration test (canton/testing/go) drives a real `dpm
+      # sandbox`, so it runs in this dpm-provisioned job rather than the plain unit-test
       # step above.
+      #
+      # The playground e2e suite is deliberately NOT a CI gate on either profile: it is 33
+      # sequential subtests shelling out to `dpm script` per step (~134 fresh JVM starts),
+      # which takes ~30 minutes on a hosted runner. Run it locally instead --
+      # `just e2e-sandbox` (no docker) or `just e2e-localnet` in canton/testing/cli.
       #
       # NOTE: as of this commit, TestCantonNttReceiveMatchIntegration fails independent of
       # the playground CLI work in this job (reproduced against an unmodified checkout too:
@@ -98,13 +102,9 @@ jobs:
         working-directory: ./canton/testing/go
         run: go test -tags integration ./... -v -timeout 10m
 
-      - name: Playground e2e (sandbox profile)
-        working-directory: ./canton/testing/cli
-        run: go test -tags e2e ./e2e -v -timeout 15m
-
-  # The sandbox e2e job above never exercises LocalNet's distinguishing surface
+  # The sandbox profile never exercises LocalNet's distinguishing surface
   # (unsafe-JWT auth, CanActAs grants, DAR vetting against a real DSO topology),
-  # so sandbox-green gives no signal for it. This job runs the same e2e suite
+  # so sandbox-green gives no signal for it. This job runs the e2e suite
   # against a real Splice LocalNet 0.6.12 stack instead. It's deliberately not a
   # PR gate: the stack is heavy (761 MB release tarball, several GB of images,
   # 2-6 minute DSO bootstrap) and not worth the wait on every push, so it only
