@@ -2096,6 +2096,20 @@ testBurnExactCoverNoChange = do
   remaining <- cip56HoldingsOwnedBy gg alice
   remaining === []
 
+-- | A burn input owned by someone other than the sender is rejected, even
+-- once the holding is disclosed to the sender.
+testBurnWrongOwnerRejected : Script ()
+testBurnWrongOwnerRejected = do
+  (operator, gg, csId) <- nttSetup
+  alice <- allocateParty "BurnWrongOwnerAlice"
+  bob <- allocateParty "BurnWrongOwnerBob"
+  (d, discs) <- sendScaffold operator gg alice BurnMint csId
+  holdingCid <- mkHolding gg bob d.instrumentId 0.01
+  holdingDisc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding holdingCid)
+
+  res <- trySubmitWithDiscs alice (holdingDisc :: discs) do sendTransfer alice d csId [holdingCid]
+  expectAbort "not owned by sender" res
+
 ----------------------------------------------------------------------
 -- Deposit pre-approval + mint (inbound burn/mint)
 ----------------------------------------------------------------------
