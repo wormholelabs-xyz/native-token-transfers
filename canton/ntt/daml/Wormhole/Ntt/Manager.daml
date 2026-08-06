@@ -871,7 +871,6 @@ template NttManager
         ledgerCid             : Optional (ContractId LockedLedger)  -- required for lock/unlock
         recipientChain        : Int
         recipientAddress      : Bytes32
-        sourceToken           : Bytes32
         rawAmount             : Int      -- integer units at tokenDecimals
         nonce                 : Int
         consistencyLevel      : Int
@@ -965,13 +964,13 @@ template NttManager
         let ntt = NativeTokenTransfer with
               decimals = trimmed.decimals
               amount = trimmed.amount
-              sourceToken = normalizeHex sourceToken
+              sourceToken = tokenAddress
               recipientAddress = normalizeHex recipientAddress
               recipientChain
               additionalPayload = ""
             mm = NttManagerMessage with
               id = leftPadTo 32 (intToBytesN transceiver.sequence 8)
-              sender = managerAddress
+              sender = recipientAddressFor user
               payload = encodeNativeTokenTransfer ntt
             wm = WormholeTransceiverMessage with
               sourceManager = managerAddress

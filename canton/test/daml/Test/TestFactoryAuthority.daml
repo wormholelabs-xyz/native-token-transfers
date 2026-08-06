@@ -499,7 +499,6 @@ testExternalMinterMaliciousFactoryFirewallsGg = do
       ledgerCid = None
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 100000000
       nonce = 0
       consistencyLevel = 0
