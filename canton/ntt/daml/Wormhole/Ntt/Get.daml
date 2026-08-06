@@ -1,0 +1,124 @@
+-- | A minimal parser-combinator monad for the wire codecs in
+-- "Wormhole.Ntt.Payload". A 'Get' walks a hex 'Bytes' buffer by byte offset
+-- (not by hand-computed absolute positions), so a decoder built from it reads
+-- as a sequence of fields in wire order.
+module Wormhole.Ntt.Get
+  ( Get
+  , runGet
+  , getBytes
+  , getBytes32
+  , getUint8
+  , getUint16
+  , getUint64
+  , getLengthPrefixed
+  , remainingBytes
+  , assertPrefix
+  ) where
+
+import Wormhole.Core.Bytes
+
+-- | A parser over a hex 'Bytes' buffer: given the buffer and the current byte
+-- offset, either fails with a message or returns a value together with the
+-- offset just past what it consumed. The buffer itself is threaded unchanged
+-- through every step; only the offset advances, so every primitive can report
+-- a failure position without re-slicing.
+newtype Get a = Get (Bytes -> Int -> Either Text (a, Int))
+
+instance Functor Get where
+  fmap f (Get g) = Get $ \b o -> case g b o of
+    Left e -> Left e
+    Right (a, o') -> Right (f a, o')
+
+instance Applicative Get where
+  pure a = Get $ \_ o -> Right (a, o)
+  Get gf <*> Get ga = Get $ \b o -> case gf b o of
+    Left e -> Left e
+    Right (f, o') -> case ga b o' of
+      Left e -> Left e
+      Right (a, o'') -> Right (f a, o'')
+
+instance Action Get where
+  Get g >>= f = Get $ \b o -> case g b o of
+    Left e -> Left e
+    Right (a, o') -> case f a of
+      Get g' -> g' b o'
+
+-- | Run a parser from offset 0 and require it to consume the buffer exactly:
+-- this is the single trailing-bytes check every decoder in
+-- "Wormhole.Ntt.Payload" relies on instead of a hand-written length
+-- assertion of its own.
+runGet : Get a -> Bytes -> Either Text a
+runGet (Get g) b = case g b 0 of
+  Left e -> Left e
+  Right (a, o) ->
+    let total = byteLength b
+    in if o == total
+         then Right a
+         else Left ("length: consumed " <> show o <> " of " <> show total
+           <> " bytes, " <> show (total - o) <> " left over")
+
+-- | Failure is a 'Left', so a parser aborts with 'abort' and the rest of the
+-- 'do' block is skipped. Mirrors how the standard library treats
+-- @Either Text@, the type this parser threads: 'ActionFail' carries the
+-- mechanism (and desugars failing pattern matches in 'do' notation), while
+-- 'CanAbort' is the surface callers use.
+instance ActionFail Get where
+  fail msg = Get $ \_ _ -> Left msg
+
+instance CanAbort Get where
+  abort = fail
+
+-- | Bytes remaining in the buffer from the current offset, without consuming
+-- any of them. Lets a parser branch on how much input is left, e.g. to tell
+-- an omitted trailing field from a present one.
+remainingBytes : Get Int
+remainingBytes = Get $ \b o -> Right (byteLength b - o, o)
+
+-- | Consume exactly @n@ bytes, normalized to lowercase hex. The one bounds
+-- check every other primitive here goes through.
+getBytes : Int -> Get Bytes
+getBytes n = Get $ \b o ->
+  let total = byteLength b
+  in if o + n > total
+       then Left ("getBytes: need " <> show n <> " bytes at offset " <> show o
+         <> ", only " <> show (total - o) <> " left")
+       else Right (normalizeHex (sliceBytes o n b), o + n)
+
+-- | A 32-byte field: addresses, ids and hashes, the width every fixed-size
+-- field in these schemas that is not an integer uses.
+getBytes32 : Get Bytes32
+getBytes32 = getBytes 32
+
+-- | The wire integer widths, named after the schema types they read rather
+-- than a byte count, so a decoder cannot ask for a width the protocol has no
+-- field of. All are big-endian and unsigned on the wire; Daml's 'Int' is a
+-- signed 64-bit, so a uint64 at or above 2^63 does not round-trip (see
+-- 'Test.TestNttVectors.testAmountUint64Bound').
+getUint8 : Get Int
+getUint8 = getUint 1
+
+getUint16 : Get Int
+getUint16 = getUint 2
+
+getUint64 : Get Int
+getUint64 = getUint 8
+
+getUint : Int -> Get Int
+getUint n = bytesToInt <$> getBytes n
+
+-- | A length-prefixed field: a uint16 byte length, then that many bytes.
+-- Mirrors 'Wormhole.Ntt.Payload.encodeLengthPrefixed'.
+getLengthPrefixed : Get Bytes
+getLengthPrefixed = do
+  len <- getUint16
+  getBytes len
+
+-- | Consume a fixed leading tag and require it to match. Sized from @expected@
+-- itself, so a schema's prefix width is stated once, where the prefix is
+-- defined.
+assertPrefix : Bytes -> Get ()
+assertPrefix expected = do
+  actual <- getBytes (byteLength expected)
+  if actual == normalizeHex expected
+    then pure ()
+    else abort ("prefix: " <> actual)
