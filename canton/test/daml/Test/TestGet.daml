@@ -1,0 +1,39 @@
+-- | Unit tests for the 'Wormhole.Ntt.Get' parser primitives, independent of
+-- any concrete NTT wire structure.
+module Test.TestGet where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Text (isInfixOf)
+
+import Wormhole.Ntt.Get
+import Wormhole.Ntt.Payload (encodeLengthPrefixed)
+
+-- | 'getBytes' fails, rather than slicing past the end, when fewer bytes
+-- remain than requested.
+testGetBytesPastEnd : Script ()
+testGetBytesPastEnd =
+  case runGet (getBytes 5) "aabb" of
+    Right _ -> abort "expected a bounds failure past the end of input"
+    Left e -> assertMsg ("expected a bounds message, got: " <> e) ("need 5 bytes" `isInfixOf` e)
+
+-- | 'runGet' rejects a parser that leaves bytes unconsumed, even when every
+-- individual field it read was in bounds.
+testRunGetRejectsLeftoverBytes : Script ()
+testRunGetRejectsLeftoverBytes =
+  case runGet (getBytes 2) "aabbcc" of
+    Right _ -> abort "expected runGet to reject the trailing byte"
+    Left e -> assertMsg ("expected a trailing-bytes message, got: " <> e) ("left over" `isInfixOf` e)
+
+-- | 'getLengthPrefixed' recovers exactly what 'encodeLengthPrefixed' wrote.
+testLengthPrefixedRoundTrip : Script ()
+testLengthPrefixedRoundTrip = do
+  let payload = "deadbeef00112233"
+  runGet getLengthPrefixed (encodeLengthPrefixed payload) === Right payload
+
+-- | A failing parser short-circuits: nothing sequenced after it runs, so its
+-- error is the only one that can surface, no matter what would happen next.
+testShortCircuitsOnFirstFailure : Script ()
+testShortCircuitsOnFirstFailure =
+  runGet (abort "first failure" >>= \_ -> pure "shouldNeverAppear") "aabb"
+    === Left "first failure"

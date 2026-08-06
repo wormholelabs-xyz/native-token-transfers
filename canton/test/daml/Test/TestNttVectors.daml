@@ -12,12 +12,33 @@ module Test.TestNttVectors where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.Exception (GeneralError (..))
+import DA.Text (isInfixOf)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 
 import Wormhole.Core.Bytes
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Payload
+
+-- | Run a decode call, catching a decoder's 'error'. The decoders are pure
+-- and signal malformed input via 'error', so this plays the role
+-- 'expectAbort' (in "Test.TestNtt") plays for ledger-level failures. Takes
+-- the decode call suspended behind @()@ so it is only forced inside 'try'.
+expectDecodeError : (Show a, Eq a) => Text -> (() -> a) -> Script ()
+expectDecodeError needle decode = do
+  outcome <- try
+      do
+        let decoded = decode ()
+        decoded === decoded
+        pure None
+    catch
+      GeneralError msg -> pure (Some msg)
+  case outcome of
+    Some msg ->
+      assertMsg ("expected failure containing '" <> needle <> "', got: " <> msg)
+        (needle `isInfixOf` msg)
+    None -> abort ("decoding succeeded; expected failure containing '" <> needle <> "'")
 
 ----------------------------------------------------------------------
 -- The canonical shared TransceiverMessage vector
@@ -95,6 +116,17 @@ testVectorTransceiverMessage1 = do
   mm.sender === vecSender
   decodeNativeTokenTransfer mm.payload === vecNtt
 
+-- | The buffer must end exactly where the message ends: one byte appended to
+-- the reference vector is rejected at both the outer 'WormholeTransceiverMessage'
+-- layer and the nested 'NttManagerMessage' layer.
+testVectorExactLengthTransceiverAndManager : Script ()
+testVectorExactLengthTransceiverAndManager = do
+  expectDecodeError "bad WormholeTransceiver length"
+    (\() -> decodeWormholeTransceiverMessage (transceiverMessage1 <> "ff"))
+  let wm = decodeWormholeTransceiverMessage transceiverMessage1
+  expectDecodeError "bad NttManagerMessage length"
+    (\() -> decodeNttManagerMessage (wm.managerPayload <> "ff"))
+
 ----------------------------------------------------------------------
 -- The 32-byte-additionalPayload vector
 -- (transceiver_message_with_32byte_payload.txt, 251 bytes).
@@ -121,6 +153,12 @@ testVectorAdditionalPayload = do
       ntt = decodeNativeTokenTransfer mm.payload
   ntt === vecNtt32
   ntt.additionalPayload === "deadbeef000000000000000000000000000000000000000000000000deadbeef"
+
+-- | One byte appended to the 32-byte-payload encoding is rejected.
+testVectorExactLengthNativeTokenTransferWithPayload : Script ()
+testVectorExactLengthNativeTokenTransferWithPayload =
+  expectDecodeError "bad NativeTokenTransfer length"
+    (\() -> decodeNativeTokenTransfer (encodeNativeTokenTransfer vecNtt32 <> "ff"))
 
 ----------------------------------------------------------------------
 -- The non-canonical empty-payload vector
@@ -150,6 +188,14 @@ testVectorNonCanonicalEmptyPayload = do
   assert (encodeNativeTokenTransfer decoded /= emptyPayloadInnerNtt)
   byteLength emptyPayloadInnerNtt === 81
   byteLength (encodeNativeTokenTransfer decoded) === 79
+
+-- | One byte appended to the non-canonical (explicit-zero-length) form above
+-- is rejected: the buffer must end exactly where the message ends even when
+-- the empty 'additionalPayload' is spelled out rather than omitted.
+testVectorExactLengthNativeTokenTransferNoPayload : Script ()
+testVectorExactLengthNativeTokenTransferNoPayload =
+  expectDecodeError "bad NativeTokenTransfer length"
+    (\() -> decodeNativeTokenTransfer (emptyPayloadInnerNtt <> "ff"))
 
 ----------------------------------------------------------------------
 -- TrimmedAmount numeric vectors, ported from
@@ -263,6 +309,12 @@ testVectorTransceiverRegistration = do
   byteLength transceiverRegistration1 === 38
   decodeTransceiverRegistration transceiverRegistration1 === vecTransceiverRegistration
 
+-- | One byte appended to the fixture is rejected.
+testVectorTransceiverRegistrationExactLength : Script ()
+testVectorTransceiverRegistrationExactLength =
+  expectDecodeError "bad TransceiverRegistration length"
+    (\() -> decodeTransceiverRegistration (transceiverRegistration1 <> "ff"))
+
 ----------------------------------------------------------------------
 -- TransceiverInit vector (evm/test/payloads/transceiver_info_1.txt, 70 bytes:
 -- prefix ‖ manager hex"BABABABABABA" ‖ mode=LOCKING(0) ‖ token
@@ -292,6 +344,12 @@ testVectorTransceiverInit = do
   byteLength transceiverInit1 === 70
   decodeTransceiverInit transceiverInit1 === vecTransceiverInit
 
+-- | One byte appended to the fixture is rejected.
+testVectorTransceiverInitExactLength : Script ()
+testVectorTransceiverInitExactLength =
+  expectDecodeError "bad TransceiverInit length"
+    (\() -> decodeTransceiverInit (transceiverInit1 <> "ff"))
+
 ----------------------------------------------------------------------
 -- NTT governance action 4 (SetPeerByGovernance) vector: module(32) ‖
 -- action(1)=04 ‖ chain(2) ‖ managerAddress(32) ‖ peerEpoch(8) ‖ peerChain(2) ‖
@@ -319,6 +377,12 @@ testVectorNttGovernanceSetPeer = do
   encodeNttGovernance vecSetPeerAction === nttGovernanceSetPeer1
   byteLength nttGovernanceSetPeer1 === 142
   parseNttGovernance nttGovernanceSetPeer1 === vecSetPeerAction
+
+-- | One byte appended to the fixture is rejected.
+testVectorNttGovernanceSetPeerExactLength : Script ()
+testVectorNttGovernanceSetPeerExactLength =
+  expectDecodeError "ntt governance: length"
+    (\() -> parseNttGovernance (nttGovernanceSetPeer1 <> "ff"))
 
 ----------------------------------------------------------------------
 -- Token-address vector: Canton's InstrumentId -> Bytes32 stand-in for

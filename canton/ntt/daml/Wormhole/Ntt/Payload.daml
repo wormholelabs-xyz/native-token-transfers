@@ -26,7 +26,8 @@
 -- >   module‖action‖chain‖managerAddress‖factoryEpoch layout: the epoch is
 -- >   part of the common identity/freshness prefix, not the peer-specific tail.
 --
--- Decoders 'error' on malformed input (bad prefix / short buffer).
+-- Decoders 'error' on malformed input (bad prefix, short buffer, or trailing
+-- bytes past the decoded message).
 module Wormhole.Ntt.Payload where
 
 import DA.Crypto.Text (keccak256, toHex)
@@ -34,6 +35,7 @@ import DA.Crypto.Text (keccak256, toHex)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 
 import Wormhole.Core.Bytes
+import Wormhole.Ntt.Get
 
 ----------------------------------------------------------------------
 -- Big-endian encoding helpers. 'intToBytesN' / 'leftPadTo' live in
@@ -79,23 +81,27 @@ encodeNativeTokenTransfer n =
     <> intToBytesN n.recipientChain 2
     <> (if n.additionalPayload == "" then "" else encodeLengthPrefixed n.additionalPayload)
 
+-- | The 'Get' counterpart of 'decodeNativeTokenTransfer', for callers that
+-- want an 'Either' instead of an aborting 'error'.
+getNativeTokenTransfer : Get NativeTokenTransfer
+getNativeTokenTransfer = do
+  assertPrefix nativeTokenTransferPrefix
+  decimals <- getUint8
+  amount <- getUint64
+  sourceToken <- getBytes32
+  recipientAddress <- getBytes32
+  recipientChain <- getUint16
+  -- Two valid wire forms of an absent additionalPayload: omitted
+  -- entirely, or an explicit zero-length field (non-canonical, but
+  -- accepted for cross-runtime compatibility).
+  left <- remainingBytes
+  additionalPayload <- if left == 0 then pure "" else getLengthPrefixed
+  pure NativeTokenTransfer with ..
+
 decodeNativeTokenTransfer : Bytes -> NativeTokenTransfer
-decodeNativeTokenTransfer b =
-  let prefix = normalizeHex (sliceBytes 0 4 b)
-      decimals = bytesToInt (sliceBytes 4 1 b)
-      amount = bytesToInt (sliceBytes 5 8 b)
-      sourceToken = normalizeHex (sliceBytes 13 32 b)
-      recipientAddress = normalizeHex (sliceBytes 45 32 b)
-      recipientChain = bytesToInt (sliceBytes 77 2 b)
-      additionalPayload =
-        if byteLength b <= 79
-          then ""
-          else let rest = sliceFrom 79 b
-                   alen = bytesToInt (sliceBytes 0 2 rest)
-               in sliceBytes 2 alen rest
-  in if prefix /= nativeTokenTransferPrefix
-       then error ("ntt: bad NativeTokenTransfer prefix: " <> prefix)
-       else NativeTokenTransfer with ..
+decodeNativeTokenTransfer b = case runGet getNativeTokenTransfer b of
+  Right a -> a
+  Left e -> error ("ntt: bad NativeTokenTransfer " <> e)
 
 ----------------------------------------------------------------------
 -- NttManagerMessage
@@ -111,13 +117,18 @@ encodeNttManagerMessage : NttManagerMessage -> Bytes
 encodeNttManagerMessage m =
   leftPadTo 32 m.id <> leftPadTo 32 m.sender <> encodeLengthPrefixed m.payload
 
+-- | The 'Get' counterpart of 'decodeNttManagerMessage'.
+getNttManagerMessage : Get NttManagerMessage
+getNttManagerMessage = do
+  id <- getBytes32
+  sender <- getBytes32
+  payload <- getLengthPrefixed
+  pure NttManagerMessage with ..
+
 decodeNttManagerMessage : Bytes -> NttManagerMessage
-decodeNttManagerMessage b =
-  let id = normalizeHex (sliceBytes 0 32 b)
-      sender = normalizeHex (sliceBytes 32 32 b)
-      plen = bytesToInt (sliceBytes 64 2 b)
-      payload = sliceBytes 66 plen b
-  in NttManagerMessage with ..
+decodeNttManagerMessage b = case runGet getNttManagerMessage b of
+  Right a -> a
+  Left e -> error ("ntt: bad NttManagerMessage " <> e)
 
 ----------------------------------------------------------------------
 -- WormholeTransceiverMessage (the Wormhole VAA payload)
@@ -138,19 +149,20 @@ encodeWormholeTransceiverMessage w =
     <> encodeLengthPrefixed w.managerPayload
     <> encodeLengthPrefixed w.transceiverPayload
 
+-- | The 'Get' counterpart of 'decodeWormholeTransceiverMessage'.
+getWormholeTransceiverMessage : Get WormholeTransceiverMessage
+getWormholeTransceiverMessage = do
+  assertPrefix wormholeTransceiverPrefix
+  sourceManager <- getBytes32
+  recipientManager <- getBytes32
+  managerPayload <- getLengthPrefixed
+  transceiverPayload <- getLengthPrefixed
+  pure WormholeTransceiverMessage with ..
+
 decodeWormholeTransceiverMessage : Bytes -> WormholeTransceiverMessage
-decodeWormholeTransceiverMessage b =
-  let prefix = normalizeHex (sliceBytes 0 4 b)
-      sourceManager = normalizeHex (sliceBytes 4 32 b)
-      recipientManager = normalizeHex (sliceBytes 36 32 b)
-      mlen = bytesToInt (sliceBytes 68 2 b)
-      managerPayload = sliceBytes 70 mlen b
-      tOffset = 70 + mlen
-      tlen = bytesToInt (sliceBytes tOffset 2 b)
-      transceiverPayload = sliceBytes (tOffset + 2) tlen b
-  in if prefix /= wormholeTransceiverPrefix
-       then error ("ntt: bad WormholeTransceiver prefix: " <> prefix)
-       else WormholeTransceiverMessage with ..
+decodeWormholeTransceiverMessage b = case runGet getWormholeTransceiverMessage b of
+  Right a -> a
+  Left e -> error ("ntt: bad WormholeTransceiver " <> e)
 
 ----------------------------------------------------------------------
 -- NTT governance packets
@@ -257,43 +269,51 @@ encodeNttGovernance = \case
       <> leftPadTo 32 peerTransceiverAddress
       <> intToHexByte peerDecimals
 
+-- | The 'Get' counterpart of 'parseNttGovernance'. Each action reads its own
+-- fields and nothing more; a packet longer than the action's layout is caught
+-- by 'runGet''s end-of-input check.
+getNttGovernance : Get NttGovernanceAction
+getNttGovernance = do
+  moduleId <- getBytes32
+  if moduleId /= nttGovernanceModule
+    then abort "not the Ntt module"
+    else do
+      action <- getUint8
+      chain <- getUint16
+      case action of
+        1 -> do
+          managerAddress <- getBytes32
+          factoryEpoch <- getUint64
+          pure AcceptAdminToGovernance with chain, managerAddress, factoryEpoch
+        2 -> do
+          registrationBinding <- getBytes32
+          tokenDecimals <- getUint8
+          pure RegisterBurnMintManager with chain, registrationBinding, tokenDecimals
+        3 -> do
+          managerAddress <- getBytes32
+          factoryEpoch <- getUint64
+          pure RotateToCanonicalFactory with chain, managerAddress, factoryEpoch
+        4 -> do
+          managerAddress <- getBytes32
+          peerEpoch <- getUint64
+          peerChain <- getUint16
+          peerManagerAddress <- getBytes32
+          peerTransceiverAddress <- getBytes32
+          peerDecimals <- getUint8
+          pure SetPeerByGovernance with
+            chain, managerAddress, peerEpoch, peerChain
+            peerManagerAddress, peerTransceiverAddress, peerDecimals
+        _ -> abort ("unsupported action " <> show action)
+
 -- | Parse an NTT governance packet: verify module = "Ntt", dispatch on action
 -- id, abort (via 'error') on wrong module/unknown action/malformed input.
 -- Callers only reach this after VAA signature verification, so a parse
 -- failure here means a genuinely guardian-signed VAA for the wrong purpose,
 -- not a forgery.
 parseNttGovernance : Bytes -> NttGovernanceAction
-parseNttGovernance payload =
-  let
-    moduleId = normalizeHex (sliceBytes 0 32 payload)
-    action = bytesToInt (sliceBytes 32 1 payload)
-    chain = bytesToInt (sliceBytes 33 2 payload)
-    managerAddress = normalizeHex (sliceBytes 35 32 payload)
-  in
-    if moduleId /= nttGovernanceModule
-      then error "ntt governance: not the Ntt module"
-      else case action of
-        1 -> AcceptAdminToGovernance
-               chain
-               managerAddress
-               (bytesToInt (sliceBytes 67 8 payload))
-        2 -> RegisterBurnMintManager
-               chain
-               managerAddress
-               (bytesToInt (sliceBytes 67 1 payload))
-        3 -> RotateToCanonicalFactory
-               chain
-               managerAddress
-               (bytesToInt (sliceBytes 67 8 payload))
-        4 -> SetPeerByGovernance
-               chain
-               managerAddress
-               (bytesToInt (sliceBytes 67 8 payload))
-               (bytesToInt (sliceBytes 75 2 payload))
-               (normalizeHex (sliceBytes 77 32 payload))
-               (normalizeHex (sliceBytes 109 32 payload))
-               (bytesToInt (sliceBytes 141 1 payload))
-        _ -> error ("ntt governance: unsupported action " <> show action)
+parseNttGovernance payload = case runGet getNttGovernance payload of
+  Right a -> a
+  Left e -> error ("ntt governance: " <> e)
 
 ----------------------------------------------------------------------
 -- TransceiverRegistration / TransceiverInit
@@ -319,14 +339,20 @@ encodeTransceiverRegistration r =
     <> intToBytesN r.peerChain 2
     <> leftPadTo 32 r.peerAddress
 
+-- | The 'Get' counterpart of 'decodeTransceiverRegistration'. Its 38-byte
+-- fixed size follows from consuming exactly these fields plus 'runGet''s end
+-- check; no separate length assertion is needed.
+getTransceiverRegistration : Get TransceiverRegistration
+getTransceiverRegistration = do
+  assertPrefix wormholePeerRegistrationPrefix
+  peerChain <- getUint16
+  peerAddress <- getBytes32
+  pure TransceiverRegistration with ..
+
 decodeTransceiverRegistration : Bytes -> TransceiverRegistration
-decodeTransceiverRegistration b =
-  let prefix = normalizeHex (sliceBytes 0 4 b)
-      peerChain = bytesToInt (sliceBytes 4 2 b)
-      peerAddress = normalizeHex (sliceBytes 6 32 b)
-  in if prefix /= wormholePeerRegistrationPrefix
-       then error ("ntt: bad TransceiverRegistration prefix: " <> prefix)
-       else TransceiverRegistration with ..
+decodeTransceiverRegistration b = case runGet getTransceiverRegistration b of
+  Right a -> a
+  Left e -> error ("ntt: bad TransceiverRegistration " <> e)
 
 -- | The accountant's record of a deployment's manager/token behind a
 -- transceiver. 70 bytes. @nttManagerMode@: 0 = LockUnlock, 1 = BurnMint.
@@ -345,16 +371,22 @@ encodeTransceiverInit i =
     <> leftPadTo 32 i.tokenAddress
     <> intToHexByte i.tokenDecimals
 
+-- | The 'Get' counterpart of 'decodeTransceiverInit'. Its 70-byte fixed size
+-- follows from consuming exactly these fields plus 'runGet''s end check; no
+-- separate length assertion is needed.
+getTransceiverInit : Get TransceiverInit
+getTransceiverInit = do
+  assertPrefix wormholeTransceiverInitPrefix
+  nttManagerAddress <- getBytes32
+  nttManagerMode <- getUint8
+  tokenAddress <- getBytes32
+  tokenDecimals <- getUint8
+  pure TransceiverInit with ..
+
 decodeTransceiverInit : Bytes -> TransceiverInit
-decodeTransceiverInit b =
-  let prefix = normalizeHex (sliceBytes 0 4 b)
-      nttManagerAddress = normalizeHex (sliceBytes 4 32 b)
-      nttManagerMode = bytesToInt (sliceBytes 36 1 b)
-      tokenAddress = normalizeHex (sliceBytes 37 32 b)
-      tokenDecimals = bytesToInt (sliceBytes 69 1 b)
-  in if prefix /= wormholeTransceiverInitPrefix
-       then error ("ntt: bad TransceiverInit prefix: " <> prefix)
-       else TransceiverInit with ..
+decodeTransceiverInit b = case runGet getTransceiverInit b of
+  Right a -> a
+  Left e -> error ("ntt: bad TransceiverInit " <> e)
 
 -- | Domain-separation tag for the token-address binding.
 nttTokenAddressTag : Text
