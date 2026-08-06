@@ -515,7 +515,6 @@ testTransceiverIsDeploymentBound = do
       ledgerCid = dA.ledgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 1000000
       nonce = 0
       consistencyLevel = 0
@@ -1200,7 +1199,6 @@ sendTransfer user d csId holdings =
     ledgerCid = d.ledgerCid
     recipientChain = 2
     recipientAddress = b32 "ee"
-    sourceToken = b32 "dd"
     rawAmount = 1000000
     nonce = 0
     consistencyLevel = 0
@@ -1252,7 +1250,6 @@ testTransferLockAccounting = do
       ledgerCid = Some ledgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 500000
       nonce = 1
       consistencyLevel = 0
@@ -1306,7 +1303,6 @@ testTransferTrimsToPeerDecimals = do
           ledgerCid = d'.ledgerCid
           recipientChain = chainId
           recipientAddress = b32 "ee"
-          sourceToken = b32 "dd"
           rawAmount
           nonce = 0
           consistencyLevel = 0
@@ -1514,7 +1510,6 @@ testTransferLockRejectsForgedCustodyPot = do
       ledgerCid = Some poisonedLedgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 1000000
       nonce = 0
       consistencyLevel = 0
@@ -1545,7 +1540,6 @@ testLockPendingSettlementRejected = do
       ledgerCid = d.ledgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 1000000
       nonce = 0
       consistencyLevel = 0
@@ -1682,7 +1676,6 @@ testTransferAdminToGg = do
       ledgerCid = Some ledgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 500000
       nonce = 1
       consistencyLevel = 0
@@ -2045,7 +2038,6 @@ testTransferArgumentChecks = do
       ledgerCid = d.ledgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 0
       nonce = 0
       consistencyLevel = 0
@@ -2214,7 +2206,6 @@ testNttSend = do
         ledgerCid = d'.ledgerCid
         recipientChain = 2
         recipientAddress = b32 "ee"
-        sourceToken = b32 "dd"
         rawAmount = 1000000
         nonce = 7
         consistencyLevel = 0
@@ -2230,6 +2221,15 @@ testNttSend = do
   feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal 1000)
   msg <- submitWithDiscs alice discs do doTransfer (Some feePay)
   msg.sequence === 2   -- deploy's TransceiverInit (0) and SetPeer's registration (1) precede this Transfer
+
+  -- The wire NativeTokenTransfer carries the deployment's own bridged token,
+  -- and the manager message's sender identifies alice, not the deployment.
+  let wm = decodeWormholeTransceiverMessage msg.payload
+      mm = decodeNttManagerMessage wm.managerPayload
+      ntt = decodeNativeTokenTransfer mm.payload
+  ntt.sourceToken === mgr.tokenAddress
+  mm.sender === recipientAddressFor alice
+  assert (mm.sender /= mgr.managerAddress)
 
   [(_, em)] <- query @Emitter gg
   em.sequence === 3
@@ -2306,7 +2306,6 @@ testNttTransferByDifferentUser = do
       ledgerCid = d'.ledgerCid
       recipientChain = 2
       recipientAddress = b32 "ee"
-      sourceToken = b32 "dd"
       rawAmount = 1000000
       nonce = 1
       consistencyLevel = 0
@@ -2349,7 +2348,6 @@ testNttTransferRequiresUserAuthority = do
         ledgerCid = d.ledgerCid
         recipientChain = 2
         recipientAddress = b32 "ee"
-        sourceToken = b32 "dd"
         rawAmount = 1000000
         nonce = 1
         consistencyLevel = 0
