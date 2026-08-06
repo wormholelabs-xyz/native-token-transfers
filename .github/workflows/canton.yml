@@ -1,0 +1,49 @@
+name: Canton CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: ./canton
+
+jobs:
+  daml:
+    name: dpm build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # dpm is Digital Asset's Daml package manager. There is no official
+      # published GitHub Action for it yet; the install step below uses the
+      # same installer as the wormhole repo's canton/Dockerfile and pins the
+      # SDK version declared in every daml.yaml (sdk-version: 3.5.1). The Daml
+      # source builds against the vendored wormhole-core DAR — this job never
+      # rebuilds core.
+      - name: Install dpm
+        run: |
+          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Install SDK
+        run: dpm install 3.5.1
+
+      - name: Build all Canton packages
+        run: dpm build --all
+
+      - name: Run Daml tests
+        working-directory: ./canton/test
+        run: dpm test

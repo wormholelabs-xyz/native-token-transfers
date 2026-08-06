@@ -1,0 +1,9 @@
+# Multi-package project for the Canton NTT layer. The production package
+# (`ntt`) builds against the vendored wormhole-core and CIP-56 interface DARs
+# (see dars/README.md; core is consumed as a pinned artifact, never built
+# here). The separate `ntt-test` package carries the Daml Scripts, which keeps
+# daml-script and the test code out of the uploadable production DAR.
+# `dpm build --all` builds `ntt`, then `test`, which data-depends on it.
+packages:
+  - ./ntt
+  - ./test
