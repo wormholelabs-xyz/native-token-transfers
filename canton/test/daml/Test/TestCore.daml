@@ -74,12 +74,13 @@ registerEmitter operator owner = do
 publishVia : Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script WormholeMessage
 publishVia operator csId owner emCid nonce payload consistencyLevel = do
   csDisc <- fromSome <$> queryDisclosure operator csId
-  submit (actAs owner <> disclose csDisc) do
+  (_, msg) <- submit (actAs owner <> disclose csDisc) do
     exerciseCmd emCid PublishMessage with
       nonce, payload, consistencyLevel
       coreStateCid = csId
       payer = owner
       feeAllocation = None
+  pure msg
 
 -- | Publishing increments the per-emitter sequence and yields the expected
 -- 'WormholeMessage' (carrying the emitter identity the watcher hashes into the

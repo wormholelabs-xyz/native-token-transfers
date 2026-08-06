@@ -84,9 +84,8 @@ testNttCoinEndToEndRoundTrip = do
   let instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
 
   (discsReg, register) <- registerBurnMint operator alice instrumentId (asBurnMintFactory factoryCid) csId
-  (mgrCid, _emitterCid) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsReg)) register
+  (mgrCid, emitterCid) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsReg)) register
   Some mgr <- queryContractId operator mgrCid
-  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId   -- RegisterManager's own init broadcast churned it
   csDisc0 <- fromSome <$> queryDisclosure operator csId
   emitterDisc0 <- fromSome <$> queryDisclosure operator emitterCid
   (mgrCid', _) <- submit (actAs alice <> disclose csDisc0 <> disclose emitterDisc0) do

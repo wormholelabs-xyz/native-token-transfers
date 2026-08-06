@@ -535,11 +535,16 @@ stable across ordinary `Transfer` traffic (which is nonconsuming). What
 serializes is:
 
 - Publishing, on the transceiver `Emitter` (consumed by every
-  `PublishMessage`). This is no longer sends-only: `SetPeer` bundles its
+  `PublishMessage`, which returns the successor cid to its caller alongside
+  the published message). This is no longer sends-only: `SetPeer` bundles its
   registration broadcast through the same emitter (see "Accountant
   broadcasts"), so a peer edit now contends with `Transfer` traffic on the
   identical contract, not a separate one. `RegisterManager`'s one-shot init
-  broadcast contends the same way, but only once, at registration.
+  broadcast contends the same way, but only once, at registration, and
+  because it forwards the broadcast's returned cid, `RegisterManager` itself
+  hands back a live `Emitter` — no re-resolve needed right after registration.
+  A later `SetPeer` (or a racing `Transfer`) still churns the same contract,
+  so anyone holding an older cid re-resolves before its next publish.
 - Lock-mode value movement, on the `LockedLedger` and the custody pot holding
   (both `Transfer` and `Release` touch them, in the same transactions).
   Burn/mint deployments have no ledger, so their sends contend only on the

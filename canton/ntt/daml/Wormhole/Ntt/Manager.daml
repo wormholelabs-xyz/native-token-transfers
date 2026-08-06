@@ -559,7 +559,7 @@ template NttManager
             && transceiver.operator == operator
             && transceiver.emitterId == transceiverEmitterId)
         -- Publishes the registration for the accountant; write-once there, replacements are local-only.
-        msg <- exercise transceiverEmitterCid PublishMessage with
+        (_, msg) <- exercise transceiverEmitterCid PublishMessage with
           payload = encodeTransceiverRegistration TransceiverRegistration with
             peerChain = chainId
             peerAddress = peer'.transceiverAddress
@@ -978,13 +978,14 @@ template NttManager
               recipientManager = peer.managerAddress
               managerPayload = encodeNttManagerMessage mm
               transceiverPayload = ""
-        exercise transceiverEmitterCid PublishMessage with
+        (_, msg) <- exercise transceiverEmitterCid PublishMessage with
           payload = encodeWormholeTransceiverMessage wm
           nonce
           consistencyLevel
           coreStateCid
           payer = user
           feeAllocation
+        pure msg
 
     -- | Inbound unlock (lock/unlock deployments), permissionless. Any
     -- @executor@ relays the VAA; 'verifyInboundTransfer' is the gate. The
