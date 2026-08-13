@@ -1,12 +1,11 @@
 // Parses + validates a pasted VAA hex against the private-deployment registry.
-// Uses the Canton-aware hoisted SDK singleton — never import sdk-base /
-// sdk-definitions / sdk-definitions-ntt by bare name here: those resolve to
-// the nested Canton-less 2.x copies under cli/node_modules (pulled in by
-// sdk-sui-ntt). Import "@wormhole-foundation/sdk-evm-ntt" for its side
-// effect only: it registers the "Ntt" payload types into the hoisted
-// sdk-definitions registry that "@wormhole-foundation/sdk" reads from.
+// SDK 6.x payload registration is not a module side effect anymore — register
+// explicitly before deserialize(). register() is idempotent, so calling it at
+// module load is safe even when the CLI entrypoint already registered.
 import { deserialize } from "@wormhole-foundation/sdk";
-import "@wormhole-foundation/sdk-evm-ntt";
+import { register } from "@wormhole-foundation/sdk-definitions-ntt";
+
+register();
 
 import { base58ToHex32, hexToBytes, pad32, strip0x } from "./binding.js";
 import type {

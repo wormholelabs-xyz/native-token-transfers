@@ -1,9 +1,7 @@
 // Drives Ethereum sends/redeems directly against ethers + EvmNtt — never
 // through ChainContext/signSendWait, so we control the RPC Origin header and
 // can target a Canton destination chain the platform layer knows nothing
-// about. Never import sdk-base / sdk-definitions / sdk-connect /
-// sdk-definitions-ntt by bare name: those resolve to the nested Canton-less
-// 2.x copies under cli/node_modules (pulled in by sdk-sui-ntt).
+// about.
 import {
   Contract,
   FetchRequest,

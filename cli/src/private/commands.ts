@@ -3,8 +3,8 @@
 // solana.ts) — this file is glue: argument parsing, recipient defaulting,
 // confirmation printing, dispatch.
 import type { Argv } from "yargs";
-import chalk from "chalk";
 
+import { colors } from "../colors.js";
 import {
   DEPLOYMENT_NAMES,
   loadConfig,
@@ -161,7 +161,7 @@ function printNextSteps(cfg: PrivateDeploymentsConfig, sourceChain: ChainName, s
 // --- list --------------------------------------------------------------
 
 function runList(cfg: PrivateDeploymentsConfig): void {
-  console.log(chalk.bold(`private deployments (network: ${cfg.network})`));
+  console.log(colors.blue(`private deployments (network: ${cfg.network})`));
   for (const name of DEPLOYMENT_NAMES) {
     const dep = cfg.deployments[name];
     const legs: string[] = [];
@@ -170,7 +170,7 @@ function runList(cfg: PrivateDeploymentsConfig): void {
     if (dep.chains.Solana) {
       legs.push(`Solana(${dep.chains.Solana.mode},d${dep.chains.Solana.decimals})`);
     }
-    console.log(`  ${chalk.cyan(name.padEnd(8))} ${legs.join("  <->  ")}`);
+    console.log(`  ${colors.cyan(name.padEnd(8))} ${legs.join("  <->  ")}`);
   }
 }
 
@@ -202,13 +202,13 @@ async function runSend(
   console.log(`recipient: ${resolved.description}`);
   if (resolved.dangerousRaw && toChain === "Canton") {
     console.log(
-      chalk.bold.red(
+      colors.red(
         "  WARNING: raw bytes32 recipient bypasses the derived Canton binding. " +
           "A wrong value strands funds permanently."
       )
     );
   }
-  if (dryRun) console.log(chalk.yellow("--dry-run: nothing will be submitted"));
+  if (dryRun) console.log(colors.yellow("--dry-run: nothing will be submitted"));
 
   let sequence: string | undefined;
 
@@ -262,10 +262,10 @@ async function runRedeem(
     `redeeming ${deploymentName}: ${sourceChain} -> ${destinationChain}, ` +
       `amount ${amountHuman} (sequence ${parsed.sequence})`
   );
-  if (dryRun) console.log(chalk.yellow("--dry-run: nothing will be submitted"));
+  if (dryRun) console.log(colors.yellow("--dry-run: nothing will be submitted"));
 
   if (destinationChain !== "Canton" && recipientOpt) {
-    console.log(chalk.yellow(`note: --recipient is ignored for a ${destinationChain} redeem (Canton leg only)`));
+    console.log(colors.yellow(`note: --recipient is ignored for a ${destinationChain} redeem (Canton leg only)`));
   }
 
   if (destinationChain === "Canton") {
