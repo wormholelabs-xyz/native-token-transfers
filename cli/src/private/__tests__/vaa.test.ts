@@ -3,12 +3,10 @@
 // real deserialization of chain-75 VAAs, the canary for "exactly one sdk-base
 // instance is resolved."
 //
-// SDK imports here go through "@wormhole-foundation/sdk" (hoisted, Canton-aware)
-// and the workspace "@wormhole-foundation/sdk-evm-ntt". Never import sdk-base /
-// sdk-definitions / sdk-definitions-ntt by bare name from cli source: those
-// resolve to the nested Canton-less 2.x copies under cli/node_modules
-// (pulled in by sdk-sui-ntt).
+// SDK 6.x payload registration is not a module side effect anymore — register()
+// explicitly before any deserialize() call.
 import { describe, expect, test } from "bun:test";
+import { register } from "@wormhole-foundation/sdk-definitions-ntt";
 import {
   CANTON_VAA,
   ETH_VAA,
@@ -17,6 +15,8 @@ import {
 } from "./fixtures/vaas.js";
 import { loadConfig } from "../config.js";
 import { recipientBinding } from "../binding.js";
+
+register();
 
 const hasCanton = (() => {
   try {
@@ -40,11 +40,10 @@ describe.skipIf(!hasCanton)(
 
     test("Canton-emitted VAA registers the canburn Ethereum transceiver", async () => {
       const { deserialize } = await import("@wormhole-foundation/sdk");
-      await import("@wormhole-foundation/sdk-evm-ntt");
       const config = loadConfig();
 
       const vaa = deserialize("Ntt:TransceiverRegistration", CANTON_VAA);
-      // String(): tsc types Chain from the nested Canton-less sdk-base copy
+      // String(): emitterChain is typed as a template-literal union; coerce for comparison
       expect(String(vaa.emitterChain)).toBe("Canton");
       expect(vaa.sequence).toBe(1n);
       expect(vaa.emitterAddress.toString().replace(/^0x/, "")).toBe(
@@ -58,7 +57,6 @@ describe.skipIf(!hasCanton)(
 
     test("Ethereum-emitted VAA registers the canburn Canton transceiver", async () => {
       const { deserialize } = await import("@wormhole-foundation/sdk");
-      await import("@wormhole-foundation/sdk-evm-ntt");
       const config = loadConfig();
 
       const vaa = deserialize("Ntt:TransceiverRegistration", ETH_VAA);
@@ -75,7 +73,6 @@ describe.skipIf(!hasCanton)(
 
     test("Canton -> Ethereum transfer VAA carries the canburn managers", async () => {
       const { deserialize } = await import("@wormhole-foundation/sdk");
-      await import("@wormhole-foundation/sdk-evm-ntt");
       const config = loadConfig();
       const dep = config.deployments.canburn.chains;
 
@@ -96,7 +93,6 @@ describe.skipIf(!hasCanton)(
 
     test("Ethereum -> Canton transfer VAA targets recipientBinding(alice)", async () => {
       const { deserialize } = await import("@wormhole-foundation/sdk");
-      await import("@wormhole-foundation/sdk-evm-ntt");
       const config = loadConfig();
       const dep = config.deployments.canburn.chains;
 

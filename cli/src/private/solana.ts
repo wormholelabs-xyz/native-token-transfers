@@ -1,9 +1,7 @@
 // Drives Solana sends/redeems directly against @solana/web3.js + SolanaNtt
 // (the vendored solana/ts SDK, whose AsyncGenerators natively produce
 // @solana/web3.js Transaction/VersionedTransaction objects — there is no kit
-// equivalent for this path). Never import sdk-base / sdk-definitions /
-// sdk-connect / sdk-definitions-ntt by bare name: those resolve to the
-// nested Canton-less 2.x copies under cli/node_modules.
+// equivalent for this path).
 import {
   Connection,
   Keypair,
