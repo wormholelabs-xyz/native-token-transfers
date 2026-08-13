@@ -21,6 +21,7 @@ import {
   createInitCommand,
   createManualCommand,
   createNewCommand,
+  createPrivateCommand,
   createPullCommand,
   createPushCommand,
   createSetMintAuthorityCommand,
@@ -74,6 +75,7 @@ yargs(hideBin(process.argv))
   .command(createManualCommand(overrides))
   .command(createSuiCommand(overrides))
   .command(createXrplCommand(overrides))
+  .command(createPrivateCommand())
   .help()
   .strict()
   .demandCommand()
