@@ -1,9 +1,9 @@
-// Command disclosure-service is a standalone host for internal/disclosure.Service: an
-// unauthenticated, loopback-by-default HTTP sidecar fronting one participant's allow-listed
-// contract disclosures and prepare-seam scripts. Unlike cmd/ntt-playground's `disclosure serve`
-// (canton/playground-merged), this binary carries no playground state file, cobra, or party
-// bookkeeping -- every input is a flag, and --access-token-file is the only auth material it
-// ever reads (no JWT minting).
+// Command disclosure-service is a standalone host for internal/disclosure.Service. It is an
+// unauthenticated HTTP sidecar that fronts one participant's allow-listed contract disclosures
+// and prepare-seam scripts. It binds to loopback by default. It differs from cmd/ntt-playground's
+// `disclosure serve` (canton/playground-merged): it has no playground state file, no cobra, and
+// no party bookkeeping. Every input is a flag. The only auth material it reads is
+// --access-token-file; it mints no tokens.
 package main
 
 import (
@@ -31,8 +31,8 @@ const (
 	defaultProfile     = "sandbox"
 )
 
-// options is every flag this binary takes, as a plain struct so parseFlags/buildService/run are
-// each independently unit-testable without a live dpm/ledger.
+// options holds every flag as a plain struct. This makes parseFlags, buildService, and run
+// testable without a live dpm or ledger.
 type options struct {
 	listen          string
 	participant     string
@@ -63,8 +63,8 @@ func parseFlags(args []string) (*options, error) {
 	return opts, nil
 }
 
-// verboseLogf returns a "[v] "-prefixed logger writing to w, or nil when verbose is off --
-// mirrors cmd/ntt-playground/main.go's verboseLogf shape.
+// verboseLogf returns a logger that writes "[v] "-prefixed lines to w. It returns nil when
+// verbose is off. Same shape as cmd/ntt-playground/main.go's verboseLogf.
 func verboseLogf(w io.Writer, verbose bool) func(string, ...any) {
 	if !verbose {
 		return nil
@@ -74,10 +74,10 @@ func verboseLogf(w io.Writer, verbose bool) func(string, ...any) {
 	}
 }
 
-// resolvedCantonDir discovers the canton/ directory by walking up from the working directory
-// for multi-package.yaml (the canton/ root's marker file). Local copy of cmd/ntt-playground/
-// main.go's resolvedCantonDir (playground-merged) -- this binary has no --canton-dir flag, only
-// --dar, so there is no override to check first.
+// resolvedCantonDir finds the canton/ directory. It walks up from the working directory until
+// it finds multi-package.yaml, the canton/ root's marker file. Local copy of
+// cmd/ntt-playground/main.go's resolvedCantonDir (playground-merged). This binary has only
+// --dar, no --canton-dir flag, so there is no override to check first.
 func resolvedCantonDir() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -96,10 +96,10 @@ func resolvedCantonDir() (string, error) {
 	return "", fmt.Errorf("disclosure-service: canton-dir: could not find multi-package.yaml by walking up from the working directory; pass --dar explicitly")
 }
 
-// resolvedDarPath returns dar if non-empty, else the default path under a discovered canton
-// directory, then stat-checks whichever path resulted -- same remediation text as
-// cmd/ntt-playground/runner.go's newScriptRunnerFor. Called lazily (per seam invocation, not at
-// startup), matching the source's own timing.
+// resolvedDarPath returns dar when it is non-empty. Otherwise it returns the default path under
+// the found canton directory. It then stat-checks the result, with the same remediation text as
+// cmd/ntt-playground/runner.go's newScriptRunnerFor. It runs per seam invocation, not at
+// startup, to match the source's timing.
 func resolvedDarPath(dar string) (string, error) {
 	if dar == "" {
 		dir, err := resolvedCantonDir()
@@ -114,12 +114,12 @@ func resolvedDarPath(dar string) (string, error) {
 	return dar, nil
 }
 
-// buildService wires a disclosure.Service from opts: loads the topology config, resolves the
-// profile/endpoint, and -- only when both an ACS backend is reachable (ep.JSONAPIBaseURL) and a
-// reading party is given (--acs-party) -- attaches an ActiveContracts backend for
-// GET /v1/disclosures. --access-token-file is read once, trimmed, and used both as the ACS
-// bearer token and as the file `dpm script` reads for POST /v1/seam/* -- the only auth material
-// this binary ever handles; it mints nothing.
+// buildService wires a disclosure.Service from opts. It loads the topology config and resolves
+// the profile and endpoint. It attaches an ActiveContracts backend for GET /v1/disclosures only
+// when the endpoint has a JSON API URL and --acs-party is set. The service reads
+// --access-token-file once and trims it. The same file is the ACS bearer token and the token
+// file that `dpm script` reads for POST /v1/seam/*. It is the only auth material this binary
+// handles; the binary mints nothing.
 func buildService(opts *options) (*disclosure.Service, profile.Profile, error) {
 	cfg, err := disclosure.Load(opts.topologyConfig)
 	if err != nil {
@@ -129,8 +129,8 @@ func buildService(opts *options) (*disclosure.Service, profile.Profile, error) {
 	if err != nil {
 		return nil, profile.Profile{}, fmt.Errorf("disclosure-service: %w", err)
 	}
-	// Fail fast: a profile requiring auth needs --access-token-file regardless of whether ACS
-	// is enabled, since POST /v1/seam/* also passes it straight to `dpm script`.
+	// Fail fast: a profile with auth needs --access-token-file even when the ACS backend is
+	// off, because POST /v1/seam/* passes the file straight to `dpm script`.
 	if prof.RequiresAuth && opts.accessTokenFile == "" {
 		return nil, profile.Profile{}, fmt.Errorf("disclosure-service: profile %s requires --access-token-file (used for dpm script auth and, when --acs-party is set, ACS reads) but none was given", prof.Name)
 	}
@@ -186,10 +186,10 @@ func buildService(opts *options) (*disclosure.Service, profile.Profile, error) {
 	return svc, prof, nil
 }
 
-// isLoopbackListenAddr reports whether addr's host part names a loopback interface --
-// "127.0.0.1", "localhost", or "::1". Any other host, including an empty one (net.Listen binds
-// every interface), is treated as non-loopback. Ported verbatim from cmd/ntt-playground/
-// disclosure.go (playground-merged).
+// isLoopbackListenAddr reports whether addr's host part names a loopback interface:
+// "127.0.0.1", "localhost", or "::1". Every other host counts as non-loopback. An empty host
+// also counts as non-loopback, because net.Listen then binds every interface. Ported verbatim
+// from cmd/ntt-playground/disclosure.go (playground-merged).
 func isLoopbackListenAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -203,11 +203,11 @@ func isLoopbackListenAddr(addr string) bool {
 	}
 }
 
-// run listens on opts.listen, prints the startup banner to stderr, serves svc.Handler() until
-// ctx is done, then shuts down gracefully (5s timeout). The banner's "listening on http://"
-// line is not gated on --verbose: it is the address an e2e harness parses after an ephemeral
-// ":0" port resolves, and the security posture lines are load-bearing information, not
-// narration -- both mirror cmd/ntt-playground/disclosure.go's RunE exactly.
+// run listens on opts.listen and prints the startup banner to stderr. It serves svc.Handler()
+// until ctx is done, then shuts down with a 5-second timeout. The banner does not depend on
+// --verbose: an e2e harness parses the "listening on http://" line to learn the resolved ":0"
+// port, and the posture lines carry information, not narration. Both mirror
+// cmd/ntt-playground/disclosure.go's RunE exactly.
 func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	svc, _, err := buildService(opts)
 	if err != nil {
@@ -227,8 +227,8 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	fmt.Fprintf(stderr, "disclosure serve: listening on http://%s\n", ln.Addr().String())
 
 	srv := &http.Server{Handler: svc.Handler()}
-	// Shut down once ctx is done (SIGINT/SIGTERM via main, or a test cancellation).
-	// srv.Serve then returns http.ErrServerClosed, which is not itself an error.
+	// Shut down when ctx is done (SIGINT/SIGTERM via main, or a test cancels).
+	// srv.Serve then returns http.ErrServerClosed, which is not an error here.
 	context.AfterFunc(ctx, func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

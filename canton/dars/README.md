@@ -65,19 +65,19 @@ version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
 `ntt-test`'s `Playground.Disclose` module needs concrete `TemplateTypeRep`s
 (`AmuletRules`, `Round`, `ExternalPartyAmuletRules`, `ExternalPartyConfigState`)
-to construct `Disclosure` values for the registry's disclosed contracts. This
-is the only reason it is vendored: the production DAR (`ntt`) never depends
-on it.
+to construct `Disclosure` values for the registry's disclosed contracts. That
+is the only reason we vendor this DAR. The production DAR (`ntt`) never
+depends on it.
 
-Provenance: `0.6.12_splice-node.tar.gz` (same release as the token-standard
-interfaces above), path `splice-node/dars/splice-amulet-0.1.22.dar`. Verified
+Provenance: `0.6.12_splice-node.tar.gz`, the same release as the
+token-standard interfaces above, path
+`splice-node/dars/splice-amulet-0.1.22.dar`. We checked that the file is
 byte-identical to `splice-amulet-current.dar` in the same bundle. Its embedded
 interface DALF package-ids (`holding-v1`, `transfer-instruction-v1`,
-`metadata-v1`) match the ones already vendored above, so `damlc` dedupes them
-cleanly with no conflict.
+`metadata-v1`) match the ones above, so `damlc` dedupes them with no conflict.
 
-**Consumed by `ntt-test` only** (a `data-dependencies` entry in
-`canton/test/daml.yaml`) — never a dependency of `ntt`.
+**Only `ntt-test` consumes this DAR** (a `data-dependencies` entry in
+`canton/test/daml.yaml`). It is never a dependency of `ntt`.
 
 ## sha256
 

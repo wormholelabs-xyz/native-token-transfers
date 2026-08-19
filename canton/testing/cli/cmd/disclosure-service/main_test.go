@@ -183,7 +183,7 @@ func TestIsLoopbackListenAddr(t *testing.T) {
 		{"[::1]:7599", true},
 		{"0.0.0.0:7599", false},
 		{"192.168.1.5:7599", false},
-		{":7599", false}, // empty host binds every interface -- not loopback
+		{":7599", false}, // an empty host binds every interface -- not loopback
 	}
 	for _, c := range cases {
 		require.Equal(t, c.want, isLoopbackListenAddr(c.addr), "addr=%s", c.addr)
@@ -226,8 +226,8 @@ func TestRun_ListensServesHealthzAndShutsDown(t *testing.T) {
 }
 
 // readListenAddr scans stderr for the "disclosure serve: listening on http://" marker line and
-// returns the host:port that follows. Bounded so a missing/garbled banner fails fast rather than
-// hanging the test.
+// returns the host:port that follows. The wait is bounded, so a missing or garbled banner fails
+// the test fast instead of hanging it.
 func readListenAddr(t *testing.T, r *os.File) string {
 	t.Helper()
 	const marker = "disclosure serve: listening on http://"

@@ -59,8 +59,8 @@ jobs:
         with:
           go-version-file: ./canton/testing/cli/go.mod
 
-      # Unit tests only: the ledger tests fabricate fake dpm scripts in
-      # tempdirs, so no JDK, dpm, or sandbox is provisioned here.
+      # Unit tests only. The ledger tests make fake dpm scripts in temp
+      # directories, so this job does not install a JDK, dpm, or a sandbox.
       - name: go vet + unit tests
         working-directory: ./canton/testing/cli
         run: |

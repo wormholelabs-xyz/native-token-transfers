@@ -1,49 +1,52 @@
 # canton/testing/cli
 
-Go packages and standalone binaries supporting the Canton NTT test harnesses. The full
-playground CLI (network bring-up, party allocation, transfer/receive flows, and the
-sandbox/LocalNet e2e suite) lives on `canton/playground-merged`; this branch carries only the
-pieces ported for standalone use.
+This module contains Go packages and standalone binaries for the Canton NTT test harnesses.
+The full playground CLI lives on the `canton/playground-merged` branch. That branch has the
+network bring-up, the party allocation, the transfer flows, and the e2e suite. This branch
+carries only the parts that the disclosure service needs.
 
 ## disclosure-service
 
-`cmd/disclosure-service` is a harness-grade, unauthenticated HTTP sidecar that fronts one
-Canton participant. It lets a consumer read allow-listed active contracts, or run a
-prepare-seam Daml Script, without holding that participant's own admin credentials. It has no
-TLS, no auth beyond an optional bearer token file, and binds to loopback by default -- it is
-not a production service.
+`cmd/disclosure-service` is an unauthenticated HTTP sidecar for test harnesses. It fronts one
+Canton participant. Through it, a consumer can read allow-listed active contracts and run
+prepare-seam Daml Scripts. The consumer does not need the participant's admin credentials.
+
+The service is not a production service. It has no TLS. Its only auth input is an optional
+bearer token file. It binds to loopback by default.
 
 Endpoints:
 
-- `GET /v1/healthz` -- participant name, configured template allow-list, and (when an ACS
-  backend is wired) the current ledger end.
-- `GET /v1/disclosures?template=<name>` -- active contracts for one or more allow-listed
-  templates, read via the JSON Ledger API v2. 503s if no ACS backend is configured
-  (`--acs-party` unset, or the target participant has no JSON API endpoint).
-- `POST /v1/seam/{name}` -- runs one of a fixed set of `Playground.Prepare` Daml Scripts
-  (`transferOut`, `receive`, `publish`, `acceptAdminTransfer`, `deployNtt`) via `dpm script`
-  and returns its JSON output. The server's own template allow-list is always injected into the
-  script input, overriding anything the caller sent.
+- `GET /v1/healthz` — returns the participant name and the template allow-list. When the ACS
+  backend is on, the response also contains the current ledger end.
+- `GET /v1/disclosures?template=<name>` — returns active contracts for allow-listed templates.
+  The service reads them from the JSON Ledger API v2. The service returns 503 when the ACS
+  backend is off (no `--acs-party`, or the participant has no JSON API endpoint).
+- `POST /v1/seam/{name}` — runs one `Playground.Prepare` Daml Script with `dpm script` and
+  returns the script's JSON output. The seam names are `transferOut`, `receive`, `publish`,
+  `acceptAdminTransfer`, and `deployNtt`. The server always replaces the caller's template
+  list with its own allow-list.
 
 ### Build and run
 
-```sh
-cd canton/testing/cli
-go build ./cmd/disclosure-service
-./disclosure-service --profile sandbox
-```
+1. Go to the module directory: `cd canton/testing/cli`.
+2. Build the binary: `go build ./cmd/disclosure-service`.
+3. Start the service: `./disclosure-service --profile sandbox`.
 
-Common flags:
+Flags:
 
-- `--listen` (default `127.0.0.1:7599`) -- bind address; a non-loopback value prints a warning.
-- `--participant` (default `guardian-governance`) -- which participant this instance fronts.
-- `--profile` (`sandbox` or `localnet`) -- network profile, per `internal/profile`.
-- `--topology-config` -- path to the disclosure allow-list config; a missing file falls back to
-  built-in defaults (see `internal/disclosure.Config`).
-- `--dar` -- path to the compiled test DAR; defaults to discovering `canton/` by walking up for
-  `multi-package.yaml` and resolving `test/.daml/dist/ntt-test-0.1.0.dar`.
-- `--dpm-path` -- path to the `dpm` binary; defaults to `PATH` or `~/.dpm/bin`.
-- `--access-token-file` -- path to a file holding a bearer JWT. This is the service's only auth
-  input (it mints nothing); required whenever the selected profile requires auth.
-- `--acs-party` -- reading party for `GET /v1/disclosures`; ACS stays disabled without it.
-- `--verbose` -- narrate each `dpm script` invocation to stderr.
+- `--listen` (default `127.0.0.1:7599`) — the bind address. The service prints a warning for
+  a non-loopback value.
+- `--participant` (default `guardian-governance`) — the participant that this instance fronts.
+- `--profile` (`sandbox` or `localnet`) — the network profile. See `internal/profile`.
+- `--topology-config` — the path to the disclosure allow-list config. When the file is
+  missing, the service uses the built-in defaults. See `internal/disclosure.Config`.
+- `--dar` — the path to the compiled test DAR. By default, the service finds `canton/` with a
+  walk up to `multi-package.yaml`, then uses `test/.daml/dist/ntt-test-0.1.0.dar`.
+- `--dpm-path` — the path to the `dpm` binary. The default search is `PATH`, then
+  `~/.dpm/bin`.
+- `--access-token-file` — the path to a file that contains a bearer JWT. This is the only
+  auth input. The service mints no tokens. The flag is mandatory when the profile requires
+  auth.
+- `--acs-party` — the reading party for `GET /v1/disclosures`. Without it, the ACS backend
+  stays disabled.
+- `--verbose` — writes each `dpm script` invocation to stderr.
