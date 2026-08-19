@@ -31,7 +31,33 @@ func TestParseFlags_Defaults(t *testing.T) {
 	assert.Equal(t, "Alice", opts.party)
 	assert.Equal(t, "", opts.accessTokenFile)
 	assert.Equal(t, "", opts.allowListPath)
+	assert.Equal(t, 1000, opts.maxContractsPerTemplate)
 	assert.False(t, opts.verbose)
+}
+
+func TestParseFlags_MaxContractsPerTemplate(t *testing.T) {
+	opts, err := parseFlags([]string{
+		"--json-api", "http://localhost:6975", "--party", "Alice",
+		"--max-contracts-per-template", "50000",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 50000, opts.maxContractsPerTemplate)
+
+	srv := newServer(opts, defaultAllowList(), nil)
+	assert.Equal(t, 50000, srv.maxContracts)
+}
+
+func TestParseFlags_MaxContractsPerTemplate_RejectsNonPositive(t *testing.T) {
+	for _, bad := range []string{"0", "-1"} {
+		t.Run(bad, func(t *testing.T) {
+			_, err := parseFlags([]string{
+				"--json-api", "http://localhost:6975", "--party", "Alice",
+				"--max-contracts-per-template", bad,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--max-contracts-per-template")
+		})
+	}
 }
 
 func TestParseFlags_MissingRequired(t *testing.T) {
@@ -200,7 +226,7 @@ func acsContractJSON(templateID, contractID, blob, synchronizerID string) string
 
 func newTestServer(t *testing.T, upstream *httptest.Server, party string, allowList []string) *server {
 	t.Helper()
-	opts := &options{party: party, jsonAPIBaseURL: upstream.URL}
+	opts := &options{party: party, jsonAPIBaseURL: upstream.URL, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
 	acs := newHTTPACSClient(upstream.URL, "")
 	return newServer(opts, allowList, acs)
 }
@@ -482,9 +508,10 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 	})
 
 	opts := &options{
-		listen:         "127.0.0.1:0",
-		jsonAPIBaseURL: upstream.URL,
-		party:          "Alice",
+		listen:                  "127.0.0.1:0",
+		jsonAPIBaseURL:          upstream.URL,
+		party:                   "Alice",
+		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
 	}
 
 	var out syncBuffer
