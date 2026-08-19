@@ -26,7 +26,7 @@ trie, disclosed-cid submission, the trust model) is in the core
 | Directory (Daml package) | Contents |
 | --- | --- |
 | `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
-| `disclosure` (`ntt-disclosure`) | `Wormhole.Ntt.Disclosure`, the canonical per-flow disclosure-set library a relayer or disclosure service reads to submit NTT choices as a non-stakeholder. Built on `ntt`; daml-script-bearing, so kept out of the uploadable production DAR. |
+| `disclosure` (`ntt-disclosure`) | `Wormhole.Ntt.Disclosure`, the canonical per-flow disclosure-set library a relayer or disclosure service reads to submit NTT choices as a non-stakeholder. Built on `ntt`; daml-script-bearing, so kept out of the uploadable production DAR. `disclosure/service` is the Go binary that serves these sets over HTTP; see [`disclosure/README.md`](disclosure/README.md). |
 | `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
 | `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
 
