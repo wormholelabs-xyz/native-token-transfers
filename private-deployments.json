@@ -1,0 +1,128 @@
+{
+  "network": "Mainnet",
+  "chainIds": {
+    "Canton": 75,
+    "Ethereum": 2,
+    "Solana": 1
+  },
+  "canton": {
+    "jsonApi": "https://participant-validator-wormhole.canton.catalyst.wormholelabs.xyz",
+    "keycloak": {
+      "url": "https://keycloak.catalyst.wormholelabs.xyz",
+      "realm": "catalyst-canton",
+      "clientId": "validator-wormhole"
+    },
+    "namespace": "122085bf64156420a95663eb8b8cce516858de1d531d95850debe9ec8d15e3f6263e",
+    "parties": {
+      "user": "alice",
+      "operator": "operator",
+      "governance": "guardianGovernance"
+    },
+    "guardianPubkey": "042cb0fec84a83ca7b143d369451d73bc1c26080c93ee813142bf0f0351fa76ca711b20b0294c495ecbf04d9daf7c97cf84a5f1262716ca2c06bbf7e0b72059c85"
+  },
+  "deployments": {
+    "canlock": {
+      "chains": {
+        "Canton": {
+          "mode": "locking",
+          "decimals": 10,
+          "instrument": "canLock",
+          "manager": "eec3f36500f944291446ea1f415792eb1f029c6f60992bc3f60245def22752dd",
+          "emitter": "d86ae6deb028c1ce820519944a38bc64e5787f3a364569d04304c1601927e1f1"
+        },
+        "Ethereum": {
+          "mode": "locking",
+          "decimals": 18,
+          "token": "0xbb75AA1DB1263f823667a36f651be1b0c707AA7b",
+          "manager": "0x0CBC30d7F2708367fa65EaEBfc6691ED82162e01",
+          "transceiver": "0xd10c939Ce11814d4c1dF1280d091Eb3A6F2797Ae",
+          "emitter": "000000000000000000000000d10c939ce11814d4c1df1280d091eb3a6f2797ae"
+        }
+      }
+    },
+    "canhub": {
+      "chains": {
+        "Canton": {
+          "mode": "locking",
+          "decimals": 10,
+          "instrument": "canHub",
+          "manager": "26994b15a09e11a98018087fed31a933d47508b37218942481170d7ac4328a40",
+          "emitter": "754410223d45c6fc7a363c7d0cb5366f6d0f91312b28f4d728c2fd0b1a4b9d92"
+        },
+        "Ethereum": {
+          "mode": "burning",
+          "decimals": 18,
+          "token": "0xd4831ed96b7CCC344F9f204A1cf4A405c874A7Ca",
+          "manager": "0xa3E34e45cCBE1Aaa19fb2D2749f3538bB315EbE7",
+          "transceiver": "0xF667C3fB684534cdFC2936FCC1e0848463fD9652",
+          "emitter": "000000000000000000000000f667c3fb684534cdfc2936fcc1e0848463fd9652"
+        },
+        "Solana": {
+          "mode": "burning",
+          "decimals": 9,
+          "idlVersion": "3.0.0",
+          "manager": "chubzpSA92ErGkSKVKH879EqpnLgfLyR3dPpRRnw71a",
+          "mint": "2ZN1W83rXgZjjTT3b8zTjthP1q2nh4PJR8zpuCoRGGB1",
+          "transceiver": "GxpnzMm62LW4m4yzU45jZYUXEMqbo71ZsjK4u9UbrvnT",
+          "emitter": "ed2c49bb37857841aadc1e98c732e25d2652c342ac79759b6de0b94bbc91cb68"
+        }
+      }
+    },
+    "ethlock": {
+      "chains": {
+        "Canton": {
+          "mode": "burning",
+          "decimals": 8,
+          "instrument": "wormhole-ntt:f64a568e3d670aa270325903dc5ec5b766ca963e7e704aa309e82e97f51bbd1d",
+          "manager": "0baa1efcfed2655a87a5a40ffad304285e5cdff13b6cb116518044582e2c205a",
+          "emitter": "fd6b7ac843c704ec6af494b26df35295c9c385b957c6b6d69165bd171576df5a"
+        },
+        "Ethereum": {
+          "mode": "locking",
+          "decimals": 18,
+          "token": "0x60715Bf14B0B8f83dd917ADA78E5360d3839924A",
+          "manager": "0x4fDdA9e37f890D85b324C731a28E91118fbA7223",
+          "transceiver": "0x297eF67b81fAEB54E6352AD0Cff74e3e488BEA03",
+          "emitter": "000000000000000000000000297ef67b81faeb54e6352ad0cff74e3e488bea03"
+        },
+        "Solana": {
+          "mode": "burning",
+          "decimals": 9,
+          "idlVersion": "3.0.0",
+          "manager": "ntTU9UwBo5aUzJdT1n4mSYySXHwDp3PUrG8wkb7VLST",
+          "mint": "9kh5G8DKpZ6aaqMKLgZtBFhiTQ4X6etWk8B4VdRf2zPz",
+          "transceiver": "8MjeKe8P7DcUF6PMEDd28PLAzTjTpN5TzuTVeojHFoFY",
+          "emitter": "6d51a44c95928f60355a764d96cd63a599dcd6c1924c22cd8a8644bc76194733"
+        }
+      }
+    },
+    "canburn": {
+      "chains": {
+        "Canton": {
+          "mode": "burning",
+          "decimals": 10,
+          "instrument": "wormhole-ntt:d8740ea9950b48eb490f6aa9bd91e5ccb4066971482e476a6bb98cbff10a4e7d",
+          "manager": "d03c78c99b240126e5e18bf07bae40847bb41b345b1850c71afb75e809f24d08",
+          "emitter": "b35f6b925a765a5ea9db67f640352c7fed7a8fda0ccd5f21ec53d984281755af"
+        },
+        "Ethereum": {
+          "mode": "burning",
+          "decimals": 18,
+          "token": "0x88c4f2412c1f2CA5D459E3355C44F04be7bA8cA8",
+          "manager": "0xfd2322c8b9D79c605A4263F1baCeC9a0B4Ff6d42",
+          "transceiver": "0x06803b132816e8F6d277Ad7984305B2F590b038D",
+          "emitter": "00000000000000000000000006803b132816e8f6d277ad7984305b2f590b038d"
+        },
+        "Solana": {
+          "mode": "burning",
+          "decimals": 9,
+          "idlVersion": "3.0.0",
+          "manager": "CBUrnuMWaMMDMWiJhmskaGmnRxH9Ye1DC6rvVNtqKKRt",
+          "mint": "HxzGfiD91zPh6eYoP8363a8eDom4tpCoNWwSo7C1Gciw",
+          "transceiver": "6knb13neqpTUKTkVru4aFdhvSJf1Q8MAxJEEaXx2aQLU",
+          "emitter": "5581f43488b27e6c320d081523c04beefc1e58f7eee7576b1631a440adac453d"
+        }
+      }
+    }
+  }
+}
