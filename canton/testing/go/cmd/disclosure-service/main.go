@@ -1,11 +1,11 @@
 // Command disclosure-service is a thin, production-runnable HTTP endpoint that serves
 // createdEventBlobs for a hardcoded allow-list of Daml templates, read from one stakeholder
-// participant's ACS over the JSON Ledger API v2. It is the transport half only: the canonical
+// participant's ACS over the JSON Ledger API v2. It is the transport half: the canonical
 // per-flow disclosure SETS live in the Daml library (Wormhole.Ntt.Disclosure); this binary
-// knows only the flat union of templates that library ever names, not which flow needs which.
+// serves the flat union of templates that library names.
 //
 // Posture: unauthenticated, harness/ops-grade. Loopback by default; --access-token-file adds a
-// single shared bearer token forwarded to the upstream JSON API, nothing more.
+// single shared bearer token forwarded to the upstream JSON API.
 package main
 
 import (
@@ -161,8 +161,7 @@ type ledgerEnder interface {
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
 // request body: one filtersByParty entry for the reading party, one cumulative template filter
 // per call, includeCreatedEventBlob:true. Shape confirmed live against a real participant (see
-// canton/disclosure-service-port's internal/disclosure/acs.go); reimplemented fresh here rather
-// than imported, per this binary's own minimal-dependency mandate.
+// canton/disclosure-service-port's internal/disclosure/acs.go).
 type activeContractsRequest struct {
 	ActiveAtOffset int64 `json:"activeAtOffset"`
 	EventFormat    struct {
@@ -336,7 +335,7 @@ type server struct {
 	allowList        map[string]bool // exact "Module:Entity" membership, for the 403 gate
 	allowListOrdered []string        // preserves the configured order for the no-param default
 	acs              acsClient
-	maxContracts     int // cap per template; exceeding it is an error, never a silent truncation
+	maxContracts     int // cap per template; exceeding it is an error
 	mux              *http.ServeMux
 }
 

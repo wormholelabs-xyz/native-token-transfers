@@ -1,6 +1,5 @@
 -- | Tests for 'Wormhole.Ntt.Disclosure'. Each flow gets two proofs, run
--- against the real NTT choices, never against a mock of the visibility
--- check:
+-- against the real NTT choices:
 --
 --   1. SUFFICIENCY. A fresh executor party, a stakeholder of nothing,
 --      submits with only the library's disclosures attached. For Release
