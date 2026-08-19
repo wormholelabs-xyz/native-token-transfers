@@ -1,0 +1,343 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+-- | The canonical per-flow disclosure sets for the NTT layer: one typed
+-- function per relayer-facing choice. This generalizes the proven shape of
+-- 'Test.TestReplay.coveringDisclosure' and TestNtt's ad-hoc set builders.
+-- This module is the CANONICAL ALLOW-LIST: a relayer, a future disclosure
+-- service, or this test suite reads the sets here and never re-derives them
+-- from choice bodies. Transport is deliberately absent: no HTTP, no Go, no
+-- JSON boundary -- only 'Daml.Script.queryDisclosure' against a live
+-- participant, which is what any future disclosure service calls too.
+--
+-- Flow -> disclosure set (a party's own stakeholding contracts still need no
+-- entry here; only what a non-stakeholder executor must additionally see):
+--
+--   * releaseDisclosures      -- NttManager, CoreState, covering ReplayNode,
+--                                LockedLedger, custody-pot Holding (if any),
+--                                committed TransferFactory
+--   * mintDisclosures         -- NttManager, CoreState, covering ReplayNode,
+--                                DepositPreapproval, committed BurnMintFactory
+--   * acceptAdminDisclosures  -- NttManager, CoreState, covering ReplayNode,
+--                                AdminTransferProposal; LockUnlock adds
+--                                LockedLedger, and (if a pot exists) the pot
+--                                Holding + committed TransferFactory
+--   * setPeerByVaaDisclosures -- NttManager, CoreState, transceiver Emitter,
+--                                covering ReplayNode
+--   * transferDisclosures     -- NttManager, transceiver Emitter, CoreState;
+--                                LockUnlock adds LockedLedger (+ pot, if
+--                                any) and the committed TransferFactory;
+--                                BurnMint adds the committed BurnMintFactory
+--   * registerDisclosures     -- NttGovernance, EmitterRegistry,
+--                                ReplayRootRegistry, CoreState; the ByVaa
+--                                variant adds the canonical CoinFactory
+--   * consolidateDisclosures  -- NttManager, LockedLedger, the supplied
+--                                custody holdings, committed TransferFactory
+--
+-- Every set is derived from the identity cid(s) alone: each function fetches
+-- the live 'NttManager' (or equivalent root) to read its OWN committed
+-- namespace/factory/tokenConfig, rather than trusting caller-supplied copies
+-- of those fields -- parse the deployment's own state, don't ask the caller
+-- to re-assert it.
+--
+-- INTERFACE LEGS: the committed factory ('NttManager.factory') and the
+-- custody pot ('LockedLedger.custodyHoldingCid') are stored as INTERFACE
+-- contract ids ('Splice.Api.Token.TransferInstructionV1.TransferFactory',
+-- 'Splice.Api.Token.BurnMintV1.BurnMintFactory',
+-- 'Splice.Api.Token.HoldingV1.Holding'). 'Daml.Script.queryDisclosure' only
+-- resolves a CONCRETE template type -- calling it directly on an interface
+-- cid fails at runtime ("unserializableType"), since the underlying payload
+-- does not decode as the interface's own (nonexistent) record shape. Only
+-- the caller -- the registry integration, which created the contract -- knows
+-- which concrete template backs a given interface cid, so those two legs
+-- take a small discloser CALLBACK instead of a bare cid: this module still
+-- decides WHETHER and WHEN each leg is needed (from the deployment's own
+-- live state), the callback supplies HOW to resolve it. 'discloseConcrete'
+-- is the one-line adapter callers use to build such a callback from a known
+-- concrete type, via 'DA.Internal.Interface.fromInterfaceContractId'.
+module Test.Disclosure where
+
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (Holding)
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+import Token.CIP0056.CoinFactory (CoinFactory)
+
+import Wormhole.Core.Replay (ReplayNode)
+import Wormhole.Core.State (CoreState, Emitter, EmitterRegistry, ReplayRootRegistry)
+import Wormhole.Ntt.Deposit (DepositPreapproval)
+import Wormhole.Ntt.Governance (NttGovernance)
+import Wormhole.Ntt.Ledger (LockedLedger)
+import Wormhole.Ntt.Manager
+  ( NttManager, NttFactory(..), NttTokenConfig(..), AdminTransferProposal )
+
+import Test.TestReplay (coveringDisclosure)
+
+----------------------------------------------------------------------
+-- Shared lookups
+----------------------------------------------------------------------
+
+-- | 'queryDisclosure', or a precise abort naming what @reader@ could not see.
+-- Every function below routes its CONCRETE-template fetches through this, so
+-- a missing disclosure fails loudly and specifically rather than surfacing
+-- later as an opaque submission error. Do not call this on an interface
+-- contract id -- see 'discloseConcrete'.
+requireDisclosure : Template t => Party -> ContractId t -> Text -> Script Disclosure
+requireDisclosure reader cid label =
+  queryDisclosure reader cid >>= \case
+    Some d -> pure d
+    None -> abort ("disclosure: " <> label <> " not visible to " <> show reader)
+
+-- | 'queryContractId', or a precise abort naming what could not be resolved.
+-- Used to read a deployment's OWN committed fields (namespace, factory,
+-- tokenConfig) instead of trusting a caller-supplied copy of them.
+requireContract : (Template t, HasEnsure t) => Party -> ContractId t -> Text -> Script t
+requireContract reader cid label =
+  queryContractId reader cid >>= \case
+    Some c -> pure c
+    None -> abort ("disclosure: " <> label <> " could not be resolved by " <> show reader)
+
+-- | Build a discloser callback for an interface-backed cid by downcasting to
+-- its known concrete template @t@ first (e.g. @discloseConcrete \@MyToken gg
+-- "committed TransferFactory"@), then disclosing that. The downcast is a
+-- caller assertion -- sound only when @t@ genuinely backs the given
+-- interface cid, exactly like every other use of 'fromInterfaceContractId'
+-- in this codebase.
+discloseConcrete
+  : forall t i. (Template t, HasFromInterface t i, HasTemplateTypeRep t, HasInterfaceTypeRep i)
+  => Party -> Text -> ContractId i -> Script Disclosure
+discloseConcrete reader label ifaceCid = requireDisclosure reader (fromInterfaceContractId @t ifaceCid) label
+
+-- | Unwrap the committed 'TransferFactory' cid, or abort -- unreachable for a
+-- genuinely LockUnlock deployment, since 'factoryMatchesConfig' ties the two
+-- together at registration and every rotation.
+requireTransferFactoryCid : NttFactory -> Script (ContractId TIV1.TransferFactory)
+requireTransferFactoryCid = \case
+  TransferFactoryCid cid -> pure cid
+  BurnMintFactoryCid _ -> abort "disclosure: committed factory is not a transfer factory"
+
+-- | Unwrap the committed 'BurnMintFactory' cid, or abort -- unreachable for a
+-- genuinely BurnMint deployment, by the same invariant.
+requireBurnMintFactoryCid : NttFactory -> Script (ContractId BurnMintFactory)
+requireBurnMintFactoryCid = \case
+  BurnMintFactoryCid cid -> pure cid
+  TransferFactoryCid _ -> abort "disclosure: committed factory is not a burn/mint factory"
+
+----------------------------------------------------------------------
+-- Release
+----------------------------------------------------------------------
+
+-- | Disclosures a stakeholder-less @executor@ needs to relay 'Release'.
+-- 'CoreState'/covering 'ReplayNode'/'LockedLedger' are always required;
+-- the custody-pot 'Holding' is added only if the ledger's hint names one
+-- (the deployment's very first release has none yet); the committed
+-- 'TransferFactory' is always required, since 'Release' spends through it
+-- regardless of where the funding holdings come from. @discloseHolding@ /
+-- @discloseFactory@ resolve those two interface-backed legs -- see the
+-- module header.
+releaseDisclosures
+  : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId LockedLedger -> Text
+  -> (ContractId Holding -> Script Disclosure)
+  -> (ContractId TIV1.TransferFactory -> Script Disclosure)
+  -> Script (ContractId ReplayNode, [Disclosure])
+releaseDisclosures operator gg mgrCid csId ledgerCid digest discloseHolding discloseFactory = do
+  mgr <- requireContract operator mgrCid "NttManager"
+  assertMsg "releaseDisclosures: deployment is not lock/unlock" (mgr.tokenConfig == LockUnlock)
+  dMgr <- requireDisclosure operator mgrCid "NttManager"
+  dCs <- requireDisclosure operator csId "CoreState"
+  (nodeCid, dNode) <- coveringDisclosure operator gg mgr.namespace digest
+  dLedger <- requireDisclosure operator ledgerCid "LockedLedger"
+  ledger <- requireContract operator ledgerCid "LockedLedger"
+  potDiscs <- case ledger.custodyHoldingCid of
+    Some potCid -> (\d -> [d]) <$> discloseHolding potCid
+    None -> pure []
+  factoryCid <- requireTransferFactoryCid mgr.factory
+  dFactory <- discloseFactory factoryCid
+  let discs = [dMgr, dCs, dNode, dLedger] <> potDiscs <> [dFactory]
+  assertMsg "releaseDisclosures: disclosure set must not be empty" (not (null discs))
+  pure (nodeCid, discs)
+
+----------------------------------------------------------------------
+-- Mint
+----------------------------------------------------------------------
+
+-- | Disclosures a stakeholder-less @executor@ needs to relay 'Mint'.
+-- 'DepositPreapproval' is queried as @gg@: it observes it (the instrument
+-- admin), while @operator@ is not a stakeholder of it at all.
+-- @discloseFactory@ resolves the committed 'BurnMintFactory' leg.
+mintDisclosures
+  : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId DepositPreapproval -> Text
+  -> (ContractId BurnMintFactory -> Script Disclosure)
+  -> Script (ContractId ReplayNode, [Disclosure])
+mintDisclosures operator gg mgrCid csId preapprovalCid digest discloseFactory = do
+  mgr <- requireContract operator mgrCid "NttManager"
+  assertMsg "mintDisclosures: deployment is not burn/mint" (mgr.tokenConfig == BurnMint)
+  dMgr <- requireDisclosure operator mgrCid "NttManager"
+  dCs <- requireDisclosure operator csId "CoreState"
+  (nodeCid, dNode) <- coveringDisclosure operator gg mgr.namespace digest
+  dPre <- requireDisclosure gg preapprovalCid "DepositPreapproval"
+  factoryCid <- requireBurnMintFactoryCid mgr.factory
+  dFactory <- discloseFactory factoryCid
+  let discs = [dMgr, dCs, dNode, dPre, dFactory]
+  assertMsg "mintDisclosures: disclosure set must not be empty" (not (null discs))
+  pure (nodeCid, discs)
+
+----------------------------------------------------------------------
+-- AcceptAdminTransferByVaa
+----------------------------------------------------------------------
+
+-- | Disclosures a stakeholder-less @executor@ needs to relay
+-- 'AcceptAdminTransferByVaa'. 'AdminTransferProposal' is queried as @admin@
+-- (the proposing party) -- @operator@ is not a stakeholder of it. For a
+-- LockUnlock deployment the 'LockedLedger' is always required (its
+-- observership always changes hands); the pot Holding and committed
+-- 'TransferFactory' are added only when the ledger names a pot to move
+-- (matching 'TransferAdmin's own branch on 'custodyHoldingCid').
+acceptAdminDisclosures
+  : Party -> Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId AdminTransferProposal
+  -> Optional (ContractId LockedLedger) -> Text
+  -> (ContractId Holding -> Script Disclosure)
+  -> (ContractId TIV1.TransferFactory -> Script Disclosure)
+  -> Script (ContractId ReplayNode, [Disclosure])
+acceptAdminDisclosures operator gg admin mgrCid csId propCid ledgerCid digest discloseHolding discloseFactory = do
+  mgr <- requireContract operator mgrCid "NttManager"
+  dMgr <- requireDisclosure operator mgrCid "NttManager"
+  dCs <- requireDisclosure operator csId "CoreState"
+  (nodeCid, dNode) <- coveringDisclosure operator gg mgr.namespace digest
+  dProp <- requireDisclosure admin propCid "AdminTransferProposal"
+  extra <- case (mgr.tokenConfig, ledgerCid) of
+    (LockUnlock, Some lcid) -> do
+      dLedger <- requireDisclosure operator lcid "LockedLedger"
+      ledger <- requireContract operator lcid "LockedLedger"
+      potAndFactory <- case ledger.custodyHoldingCid of
+        None -> pure []
+        Some potCid -> do
+          dPot <- discloseHolding potCid
+          factoryCid <- requireTransferFactoryCid mgr.factory
+          dFactory <- discloseFactory factoryCid
+          pure [dPot, dFactory]
+      pure ([dLedger] <> potAndFactory)
+    (LockUnlock, None) -> abort "acceptAdminDisclosures: LockUnlock deployment requires a ledger cid"
+    (BurnMint, None) -> pure []
+    (BurnMint, Some _) -> abort "acceptAdminDisclosures: BurnMint deployment must not carry a ledger cid"
+  let discs = [dMgr, dCs, dNode, dProp] <> extra
+  assertMsg "acceptAdminDisclosures: disclosure set must not be empty" (not (null discs))
+  pure (nodeCid, discs)
+
+----------------------------------------------------------------------
+-- SetPeerByVaa
+----------------------------------------------------------------------
+
+-- | Disclosures a stakeholder-less @executor@ needs to relay 'SetPeerByVaa':
+-- the manager, core state, the transceiver 'Emitter' (for the nested
+-- 'SetPeer' broadcast), and the covering replay node. 'Emitter' is a plain
+-- template (not interface-backed), so no discloser callback is needed here.
+setPeerByVaaDisclosures
+  : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId Emitter -> Text
+  -> Script (ContractId ReplayNode, [Disclosure])
+setPeerByVaaDisclosures operator gg mgrCid csId emitterCid digest = do
+  mgr <- requireContract operator mgrCid "NttManager"
+  dMgr <- requireDisclosure operator mgrCid "NttManager"
+  dCs <- requireDisclosure operator csId "CoreState"
+  dEmitter <- requireDisclosure operator emitterCid "transceiver Emitter"
+  (nodeCid, dNode) <- coveringDisclosure operator gg mgr.namespace digest
+  let discs = [dMgr, dCs, dEmitter, dNode]
+  assertMsg "setPeerByVaaDisclosures: disclosure set must not be empty" (not (null discs))
+  assertMsg "setPeerByVaaDisclosures: expected exactly 4 elements" (length discs == 4)
+  pure (nodeCid, discs)
+
+----------------------------------------------------------------------
+-- Transfer (outbound)
+----------------------------------------------------------------------
+
+-- | Disclosures a cross-hosted @user@ needs to drive 'Transfer' alone. The
+-- user's own input holdings need no entry here (a party always sees its own
+-- holdings). LockUnlock always needs the committed 'TransferFactory' (the
+-- lock leg always runs through it) plus, only if an existing pot must be
+-- merged, the pot Holding. BurnMint always needs the committed
+-- 'BurnMintFactory' and never a ledger. Only the discloser callback for the
+-- deployment's actual mode is ever invoked.
+transferDisclosures
+  : Party -> Party -> ContractId NttManager -> ContractId Emitter -> ContractId CoreState
+  -> Optional (ContractId LockedLedger)
+  -> (ContractId Holding -> Script Disclosure)
+  -> (ContractId TIV1.TransferFactory -> Script Disclosure)
+  -> (ContractId BurnMintFactory -> Script Disclosure)
+  -> Script [Disclosure]
+transferDisclosures operator gg mgrCid emitterCid csId ledgerCid discloseHolding discloseTransferFactory discloseBurnMintFactory = do
+  mgr <- requireContract operator mgrCid "NttManager"
+  dMgr <- requireDisclosure operator mgrCid "NttManager"
+  dEmitter <- requireDisclosure operator emitterCid "transceiver Emitter"
+  dCs <- requireDisclosure operator csId "CoreState"
+  extra <- case (mgr.tokenConfig, mgr.factory, ledgerCid) of
+    (LockUnlock, TransferFactoryCid factoryCid, Some lcid) -> do
+      dLedger <- requireDisclosure operator lcid "LockedLedger"
+      ledger <- requireContract operator lcid "LockedLedger"
+      potDiscs <- case ledger.custodyHoldingCid of
+        Some potCid -> (\d -> [d]) <$> discloseHolding potCid
+        None -> pure []
+      dFactory <- discloseTransferFactory factoryCid
+      pure ([dLedger] <> potDiscs <> [dFactory])
+    (BurnMint, BurnMintFactoryCid factoryCid, None) -> do
+      dFactory <- discloseBurnMintFactory factoryCid
+      pure [dFactory]
+    _ -> abort "transferDisclosures: token config, committed factory, and ledger cid are inconsistent"
+  let discs = [dMgr, dEmitter, dCs] <> extra
+  assertMsg "transferDisclosures: disclosure set must not be empty" (not (null discs))
+  pure discs
+
+----------------------------------------------------------------------
+-- Register
+----------------------------------------------------------------------
+
+-- | Disclosures a registering @admin@ needs for the shared bootstrap roots:
+-- the 'NttGovernance' root, the core 'EmitterRegistry' /
+-- 'ReplayRootRegistry' anchors, and 'CoreState'. Passing @Some coinFactoryCid@
+-- additionally discloses the canonical 'CoinFactory' -- the ByVaa variant's
+-- extra leg, needed only when 'RegisterManagerByVaa' reaches
+-- 'requireCanonicalFactory'. 'CoinFactory' is a plain, concrete template (the
+-- one factory a VAA-gated choice may ever commit -- see
+-- 'Wormhole.Ntt.Manager.requireCanonicalFactory'), so no discloser callback
+-- is needed here.
+registerDisclosures
+  : Party -> Party -> ContractId NttGovernance -> ContractId EmitterRegistry -> ContractId ReplayRootRegistry
+  -> ContractId CoreState -> Optional (ContractId CoinFactory)
+  -> Script [Disclosure]
+registerDisclosures operator gg govCid emReg rrReg csId byVaaFactory = do
+  dGov <- requireDisclosure operator govCid "NttGovernance"
+  dEmReg <- requireDisclosure operator emReg "EmitterRegistry"
+  dRrReg <- requireDisclosure operator rrReg "ReplayRootRegistry"
+  dCs <- requireDisclosure operator csId "CoreState"
+  factoryDiscs <- case byVaaFactory of
+    Some factoryCid -> (\d -> [d]) <$> requireDisclosure gg factoryCid "canonical CoinFactory"
+    None -> pure []
+  let discs = [dGov, dEmReg, dRrReg, dCs] <> factoryDiscs
+  assertMsg "registerDisclosures: disclosure set must not be empty" (not (null discs))
+  assertMsg "registerDisclosures: expected at least the 4 base elements" (length discs >= 4)
+  pure discs
+
+----------------------------------------------------------------------
+-- ConsolidateCustody
+----------------------------------------------------------------------
+
+-- | Disclosures a stranger @caller@ needs to run 'ConsolidateCustody': the
+-- manager, the ledger, every supplied custody holding, and the committed
+-- 'TransferFactory' -- required only by the merge branch (two or more
+-- holdings), which is this function's intended use; the single-holding
+-- repoint branch never touches the factory.
+consolidateDisclosures
+  : Party -> Party -> ContractId NttManager -> ContractId LockedLedger -> [ContractId Holding]
+  -> (ContractId Holding -> Script Disclosure)
+  -> (ContractId TIV1.TransferFactory -> Script Disclosure)
+  -> Script [Disclosure]
+consolidateDisclosures operator gg mgrCid ledgerCid holdingCids discloseHolding discloseFactory = do
+  mgr <- requireContract operator mgrCid "NttManager"
+  assertMsg "consolidateDisclosures: deployment is not lock/unlock" (mgr.tokenConfig == LockUnlock)
+  assertMsg "consolidateDisclosures: at least one custody holding required" (not (null holdingCids))
+  dMgr <- requireDisclosure operator mgrCid "NttManager"
+  dLedger <- requireDisclosure operator ledgerCid "LockedLedger"
+  dHoldings <- forA holdingCids discloseHolding
+  factoryCid <- requireTransferFactoryCid mgr.factory
+  dFactory <- discloseFactory factoryCid
+  let discs = [dMgr, dLedger] <> dHoldings <> [dFactory]
+  assertMsg "consolidateDisclosures: disclosure set must not be empty" (not (null discs))
+  pure discs
