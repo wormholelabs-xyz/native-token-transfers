@@ -1,0 +1,74 @@
+-- | Tests for 'Playground.Disclose:toDisclosureByName' (see .claude/tasks/
+-- e2e-separate-participants.md §4/§6(b)), reconciled against the CIP-56/namespace-retirement
+-- rework's actual template set (integration plan §8). Every template name
+-- 'Playground.Prepare''s `prepare*` scripts can disclose now maps cleanly (the Amulet-covered
+-- arms were already real since phase 1, duplicated from Playground.Amulet:toDisclosure to
+-- avoid a module cycle -- see Playground/Disclose.daml's doc comment); only a genuinely
+-- unmapped name still hits the `otherwise -> error` arm, asserted below via
+-- 'tryFailureStatus' (Daml.Script's non-deprecated catch-a-failure helper, which catches a
+-- Daml exception thrown by pure code exactly like 'toDisclosureByName''s `error` call, not
+-- just a submission failure -- unlike `try`/`catch`, which the SDK now deprecates in favor of
+-- it). 'toDisclosureByName' is a pure function, never itself submitted, so this -- not this
+-- repo's usual 'submitMustFail'/'trySubmit', which only catch LEDGER-side failures -- is the
+-- correct idiom here.
+module Test.TestDisclose where
+
+import Daml.Script
+import DA.Assert ((===))
+import Playground.Disclose (DisclosedContractIn (..), mkSeedDisclosure, toDisclosureByName)
+
+-- | Attempts toDisclosureByName on templateId, catching (only) the failure
+-- toDisclosureByName's `otherwise` arm throws on an unmapped name. Returns "mapped" if it
+-- resolved without error (forcing `.blob` is what actually triggers evaluation -- see the
+-- module comment above), or "unmapped" if the stub's error fired.
+tryToDisclosureByName : Text -> Script Text
+tryToDisclosureByName templateId = do
+  alice <- allocateParty "Alice"
+  seed <- mkSeedDisclosure alice
+  let d = DisclosedContractIn with
+        templateId
+        contractId = seed.contractId
+        blob = "deadbeef"
+  outcome <- tryFailureStatus do
+    let out = toDisclosureByName seed d
+    out.blob === "deadbeef" -- forces evaluation of `out` inside the tried block
+    pure "mapped"
+  pure $ case outcome of
+    Right result -> result
+    Left _        -> "unmapped"
+
+-- | The Amulet-covered arms still work after the move to Playground.Disclose (this is the
+-- "whatever subset already works" the plan's §6(b) asks for) -- NOT inverted, this holds true
+-- today.
+testMappedAmuletTemplateResolves : Script ()
+testMappedAmuletTemplateResolves = do
+  result <- tryToDisclosureByName "abcd1234:Splice.AmuletRules:AmuletRules"
+  result === "mapped"
+
+-- | Every playground template 'Playground.Prepare''s `prepare*` scripts can disclose (the
+-- integration plan's §8 full list, reconciled against the CIP-56/namespace-retirement rework's
+-- actual template set) now maps cleanly, real arms in 'Playground.Disclose:toDisclosureByName'.
+testMappedPlaygroundTemplatesResolve : Script ()
+testMappedPlaygroundTemplatesResolve = do
+  results <- mapA tryToDisclosureByName
+    [ "pkg:Wormhole.Ntt.Manager:NttManager"
+    , "pkg:Wormhole.Ntt.Manager:AdminTransferProposal"
+    , "pkg:Wormhole.Ntt.Governance:NttGovernance"
+    , "pkg:Wormhole.Ntt.Ledger:LockedLedger"
+    , "pkg:Wormhole.Core.State:CoreState"
+    , "pkg:Wormhole.Core.State:Emitter"
+    , "pkg:Wormhole.Core.Replay:ReplayNode"
+    , "pkg:Wormhole.Ntt.Deposit:DepositPreapproval"
+    , "pkg:Playground.MockRegistry:MockTransferPreapproval"
+    , "pkg:Playground.MockRegistry:MockPreapprovedTransferFactory"
+    , "pkg:Test.TestNtt:MockBurnMintFactory"
+    , "pkg:Test.TestNtt:Cip56MockHolding"
+    ]
+  results === replicate 12 "mapped"
+
+-- | A genuinely unmapped templateId still aborts loudly rather than silently dropping the
+-- disclosure the submit needs.
+testUnmappedTemplateStillAborts : Script ()
+testUnmappedTemplateStillAborts = do
+  result <- tryToDisclosureByName "pkg:Some.Bogus.Module:NotARealTemplate"
+  result === "unmapped"

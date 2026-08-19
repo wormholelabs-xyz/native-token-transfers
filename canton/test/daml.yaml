@@ -33,3 +33,8 @@ data-dependencies:
   - ../dars/splice-api-token-allocation-instruction-v1-1.0.0.dar
   - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
   - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
+  # Real Canton Coin (Amulet) templates -- consumed ONLY for the TemplateTypeReps
+  # Playground.Disclose needs to disclose the registry's AmuletRules/Round/
+  # ExternalPartyAmuletRules/ExternalPartyConfigState contracts. Never a
+  # dependency of ntt/ntt-token/ntt-cip56 -- see canton/dars/README.md.
+  - ../dars/splice-amulet-0.1.22.dar

@@ -1,0 +1,144 @@
+-- | A playground-local mock lock/unlock registry with Splice-style receiver preapprovals --
+-- the missing piece that makes executor-only ("permissionless relay") receive possible for
+-- a mock deployment, mirroring how real Amulet's own @TransferPreapproval@ and this
+-- package's own burn/mint @DepositPreapproval@ (Wormhole.Ntt.Deposit) already work.
+--
+-- Why this exists (see the approved integration plan's §4 for the full derivation): Daml
+-- authority is not transitive through nested exercises, so a factory's
+-- @transferFactory_transferImpl@ can only create a receiver's holding when the receiver's
+-- own signature (or the factory-signing party's) is reachable inside the choice body. The
+-- upstream mock 'Test.TestNtt.MockTransferFactory' therefore only demonstrates lock/unlock
+-- to a receiver whose signature the factory can already reach (self-locks, or the promoted
+-- custodian gg). This module's factory instead resolves the receiver's standing
+-- 'MockTransferPreapproval' cid from 'ExtraArgs.context' and exercises its
+-- 'MockPreapprovedDeliver' choice, whose controller (@registryAdmin@, i.e. gg) supplies the
+-- authority the factory's signatories didn't have, exactly the way real Amulet and this
+-- package's own 'Wormhole.Ntt.Deposit.DepositPreapproval' close the identical gap for their
+-- deliveries. This is kept playground-local (not upstreamed into 'Test.TestNtt'): the
+-- upstream mock's job is pinning the manager's own accounting under its documented
+-- workarounds, not modeling a real registry's receiver-consent UX.
+module Playground.MockRegistry where
+
+import DA.Foldable (forA_)
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (AnyValue (..), emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1
+  ( TransferFactory, TransferFactoryView (..)
+  , TransferInstructionResult (..), TransferInstructionResult_Output (..) )
+import Test.TestNtt (Cip56MockHolding (..))
+
+-- | The 'ExtraArgs.context' key a caller stashes the receiver's 'MockTransferPreapproval'
+-- cid under (as an @AV_ContractId@), for 'MockPreapprovedTransferFactory' to resolve.
+mockTransferPreapprovalContextKey : Text
+mockTransferPreapprovalContextKey = "wormhole-playground.transfer-preapproval"
+
+-- | A recipient's standing consent to receive a mock lock/unlock delivery -- the playground
+-- analog of Amulet's @TransferPreapproval@ and this package's own
+-- 'Wormhole.Ntt.Deposit.DepositPreapproval'. Signed by @owner@ alone (a single self-signed
+-- create is the opt-in), observed by @registryAdmin@ (gg) so the registry's tooling (and any
+-- relayer it discloses to) can resolve it. 'MockPreapprovedDeliver' is controlled by
+-- @registryAdmin@: inside that choice both required signatures for creating the owner's
+-- holding are in scope -- @owner@ from this contract's own signatory, @registryAdmin@ from
+-- the controller -- closing the same gap 'Wormhole.Ntt.Deposit.Deposit' closes for burn/mint.
+template MockTransferPreapproval
+  with
+    owner         : Party
+    registryAdmin : Party
+    instrument    : InstrumentId
+  where
+    signatory owner
+    observer registryAdmin
+
+    -- | Mint @amount@ to the pre-approving @owner@ under @instrument@. The factory drives
+    -- this choice with its own (registryAdmin/gg) authority; the recipient stays offline.
+    nonconsuming choice MockPreapprovedDeliver : ContractId Holding
+      with
+        amount : Decimal
+      controller registryAdmin
+      do
+        toInterfaceContractId @Holding <$> create Cip56MockHolding with
+          admin = registryAdmin
+          owner
+          instrument
+          amount
+
+    -- | The owner alone can tear down its standing consent, mirroring
+    -- 'Wormhole.Ntt.Deposit.DepositPreapproval.Revoke'. Delivery keeps working until then;
+    -- there is no expiry and no admin-side cancel.
+    choice Revoke : ()
+      controller owner
+      do pure ()
+
+-- | A local 'TransferFactory' that, unlike 'Test.TestNtt.MockTransferFactory', can deliver
+-- to an arbitrary receiver (not just the sender or the factory-signing admin) by resolving
+-- the receiver's standing 'MockTransferPreapproval' -- see the module header. Signed by
+-- @admin@ (gg), matching the upstream mock's shape.
+template MockPreapprovedTransferFactory
+  with
+    admin : Party
+  where
+    signatory admin
+
+    interface instance TransferFactory for MockPreapprovedTransferFactory where
+      view = TransferFactoryView with admin, meta = emptyMetadata
+
+      -- Resolve the delivery path FIRST (before touching the inputs), so a missing/mismatched
+      -- preapproval aborts with its own clear message regardless of whether the supplied
+      -- inputs happen to cover the amount -- this is the abort
+      -- 'testMockRegistryRequiresPreapproval' pins. Self-merge (receiver == sender) needs no
+      -- preapproval at all, matching the upstream mock.
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+        preCidOpt <-
+          if transfer.receiver == transfer.sender
+            then pure None
+            else case TextMap.lookup mockTransferPreapprovalContextKey arg.extraArgs.context.values of
+              Some (AV_ContractId preAcid) -> do
+                let preCid = coerceContractId preAcid : ContractId MockTransferPreapproval
+                pre <- fetch preCid
+                assertMsg "mock-registry: receiver has no standing transfer pre-approval"
+                  (pre.owner == transfer.receiver && pre.instrument == transfer.instrumentId)
+                pure (Some preCid)
+              _ -> abort "mock-registry: receiver has no standing transfer pre-approval"
+
+        -- Like the upstream mock: require the inputs to cover the amount and return the
+        -- surplus to the sender as a single change holding.
+        views <- forA transfer.inputHoldingCids \cid -> view <$> fetch cid
+        let total = sum (map (.amount) views)
+        assertMsg "mock-registry: inputs do not cover the transfer amount"
+          (total >= transfer.amount)
+        forA_ transfer.inputHoldingCids archive
+
+        rcid <- case preCidOpt of
+          None ->
+            -- Self-merge: the receiver's own signature (== sender) is already in scope.
+            toInterfaceContractId @Holding <$> create Cip56MockHolding with
+              admin
+              owner = transfer.receiver
+              instrument = transfer.instrumentId
+              amount = transfer.amount
+          Some preCid ->
+            -- gg (this factory's signatory) satisfies MockPreapprovedDeliver's controller;
+            -- the preapproval's own signatory (the receiver) supplies the receiver's
+            -- signature the factory alone could never reach.
+            exercise preCid MockPreapprovedDeliver with amount = transfer.amount
+
+        changeCids <-
+          if total > transfer.amount
+            then do
+              c <- create Cip56MockHolding with
+                admin
+                owner = transfer.sender
+                instrument = transfer.instrumentId
+                amount = total - transfer.amount
+              pure [toInterfaceContractId @Holding c]
+            else pure []
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = [rcid]
+          senderChangeCids = changeCids
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin, meta = emptyMetadata
