@@ -47,3 +47,22 @@ jobs:
       - name: Run Daml tests
         working-directory: ./canton/test
         run: dpm test
+
+  cli:
+    name: disclosure service (go vet/test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5
+        with:
+          go-version-file: ./canton/testing/cli/go.mod
+
+      # Unit tests only: the ledger tests fabricate fake dpm scripts in
+      # tempdirs, so no JDK, dpm, or sandbox is provisioned here.
+      - name: go vet + unit tests
+        working-directory: ./canton/testing/cli
+        run: |
+          go vet ./...
+          go test ./...
