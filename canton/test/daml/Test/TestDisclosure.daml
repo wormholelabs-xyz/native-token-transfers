@@ -1,49 +1,40 @@
--- | Tests for 'Test.Disclosure', the per-flow disclosure-set library.
+-- | Tests for 'Wormhole.Ntt.Disclosure'. Each flow gets two proofs, run
+-- against the real NTT choices, never against a mock of the visibility
+-- check:
 --
--- Two proof obligations per flow, run against the real NTT choices (never a
--- mock of the visibility check):
+--   1. SUFFICIENCY. A fresh executor party, a stakeholder of nothing,
+--      submits with only the library's disclosures attached. For Release
+--      and Mint no static fixture VAA can pass the recipient check (see
+--      KNOWN LIMITS). There the test requires the deepest reachable abort.
+--      That abort proves that every visibility-sensitive fetch before it
+--      succeeded.
+--   2. MINIMALITY. Drop one disclosure at a time. Each drop must turn the
+--      same submission into a failure. A disclosure that sits past an
+--      unreachable gate is excluded: dropping an unused disclosure cannot
+--      change the outcome. The exclusions are listed below.
 --
---   1. SUFFICIENCY: a fresh executor party -- a stakeholder of nothing --
---      submits with only the library's disclosures attached, actAs alone.
---      Where a flow's happy path needs a receive VAA whose recipientAddress
---      binds to a live, freshly allocated Party (Release, Mint), no static
---      fixture can complete it; the submission is required to fail with the
---      documented DEEPEST reachable abort instead, which proves every
---      visibility-sensitive fetch before that point already succeeded.
---   2. MINIMALITY: for every disclosure the flow's abort/success actually
---      depends on, dropping it alone must turn the same submission into a
---      failure. Elements that sit past an unreachable gate are excluded from
---      this drop-one (dropping an unused disclosure never changes an
---      outcome) and are called out below instead.
+-- KNOWN LIMITS. A receive VAA's recipientAddress is the keccak256 hash of a
+-- Party id. The Party does not exist until Daml Script allocates it. So no
+-- static fixture VAA can drive Release or Mint to a full commit.
 --
--- KNOWN LIMITS (both stem from the same cause: a receive VAA's
--- recipientAddress must equal keccak256 of a Party id that does not exist
--- until Daml Script allocates it, so no static fixture can drive these
--- choices to a full commit):
---
---   * Release's custody-pot 'Holding' and committed 'TransferFactory' legs
---     are fetched only once 'verifyInboundTransfer' succeeds. They are
---     pinned instead via 'AcceptAdminTransferByVaa' on a LockUnlock
---     deployment carrying a real, nonzero-balance pot: 'TransferAdmin's own
---     LockUnlock branch calls the identical 'sumCustodyHoldings' /
---     'requireTransferFactory' pair Release does, off a deterministic VAA
---     (accept-admin's binding is a fixed manager address, not a party
---     fingerprint).
---   * Mint's 'DepositPreapproval' and committed 'BurnMintFactory' legs have
---     no such proxy -- no other choice fetches them under a deterministic
---     VAA. They are included in 'mintDisclosures' output (the canonical
---     allow-list a real relayer needs) and proven sufficient, but their
---     necessity is established only by reading 'NttManager.Mint': it fetches
---     both strictly after the recipient check, so this file's drop-one
---     covers only the reachable prefix [NttManager, CoreState, ReplayNode].
---     The full path is exercised by the live, Go-signed
---     'Test.TestNtt.integrationNttReceiveMatch' harness.
---
--- registerDisclosures' ByVaa-only CoinFactory leg has the same shape: no
--- static registration VAA can satisfy 'nttRegistrationBindingFor' (see
--- 'Test.TestNtt.testRegisterManagerByVaaBindingMismatch'), so it is proven
--- via 'SetFactoryByVaa' instead, which runs the identical
--- 'requireCanonicalFactory' check off a deterministic rotation VAA.
+--   * Release fetches the custody-pot 'Holding' and the committed
+--     'TransferFactory' only after 'verifyInboundTransfer' succeeds. These
+--     two are pinned through 'AcceptAdminTransferByVaa' on a LockUnlock
+--     deployment with a nonzero pot instead. 'TransferAdmin' runs the same
+--     'sumCustodyHoldings' and 'requireTransferFactory' pair, and its VAA
+--     binds to a fixed manager address, not to a party hash.
+--   * Mint fetches 'DepositPreapproval' and the committed 'BurnMintFactory'
+--     after the recipient check, and no other choice fetches them under a
+--     deterministic VAA. Both stay in 'mintDisclosures' (a real relayer
+--     needs them), and the sufficiency proof covers them. The drop-one
+--     proof covers only the reachable prefix [NttManager, CoreState,
+--     ReplayNode]. The live 'Test.TestNtt.integrationNttReceiveMatch'
+--     harness exercises the full path.
+--   * registerDisclosures' ByVaa-only 'CoinFactory' entry has the same
+--     shape: no static registration VAA satisfies
+--     'nttRegistrationBindingFor'. It is pinned through 'SetFactoryByVaa',
+--     which runs the same 'requireCanonicalFactory' check off a
+--     deterministic rotation VAA.
 module Test.TestDisclosure where
 
 import Daml.Script
@@ -61,21 +52,19 @@ import Wormhole.Ntt.Deposit (DepositPreapproval(..))
 import Wormhole.Ntt.Governance (NttGovernance, RegisterManager(..))
 import Wormhole.Ntt.Ledger (LockedLedger(..))
 import Wormhole.Ntt.Manager
-import Test.TestReplay (coveringDisclosure)
 import Test.TestCore (devnetGuardianPubKey)
 import Test.TestNtt
 
-import Test.Disclosure
+import Wormhole.Ntt.Disclosure
 
 ----------------------------------------------------------------------
 -- Shared minimality helper
 ----------------------------------------------------------------------
 
--- | For each labeled index into @discs@, resubmit @run@ with that one
--- disclosure dropped and require failure. A label ties a failing case back
--- to the element whose absence broke it. Callers check the FULL set's
--- outcome (success or the documented abort) separately -- this only proves
--- every element is load-bearing.
+-- | Resubmit @run@ once per disclosure, each time with that one disclosure
+-- dropped, and require failure. The label names the element whose absence
+-- broke the case. Callers check the full set's outcome separately; this
+-- only proves that every element is necessary.
 dropOneMustFail : [Text] -> [Disclosure] -> ([Disclosure] -> Script (Either SubmitError a)) -> Script ()
 dropOneMustFail labels discs run = do
   assertMsg "dropOneMustFail: one label per disclosure" (length labels == length discs)
@@ -91,12 +80,12 @@ dropOneMustFail labels discs run = do
 -- releaseDisclosures
 ----------------------------------------------------------------------
 
--- | Reachable prefix: a stranger relayer gets all the way to the
--- recipient-binding check, the deepest abort a static fixture can reach.
--- Dropping any of the four elements the check actually depends on turns that
--- abort into an earlier, visibility-related failure; the fifth element
--- (committed TransferFactory -- there is no pot yet at this fixture's zero
--- balance) sits past the check and is excluded, per the module header.
+-- | Reachable prefix. A stranger relayer reaches the recipient-binding
+-- check, the deepest abort a static fixture can reach. Each drop of one of
+-- the four elements before that check turns the abort into an earlier
+-- visibility failure. The committed TransferFactory sits past the check
+-- (this fixture's balance is zero, so there is no pot) and is excluded, per
+-- the module header.
 testReleaseDisclosuresReachablePrefix : Script ()
 testReleaseDisclosuresReachablePrefix = do
   (operator, gg, csId) <- nttSetup

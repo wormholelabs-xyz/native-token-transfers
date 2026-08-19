@@ -1,9 +1,9 @@
 -- | Tests for the replay-protection trie ('Wormhole.Core.Replay'), plus a
 -- script-side simulation of the disclosure service: 'coveringNode' resolves the
 -- unique active node whose prefix covers a digest (asserting the partition
--- invariant), and 'coveringDisclosure' packages it for a non-stakeholder.
--- Production runs the same logic off-ledger over an ACS index by
--- (consumer, namespace, prefix).
+-- invariant). The disclosure-set library's own copy is
+-- 'Wormhole.Ntt.Disclosure.coveringDisclosure'. Production runs the same
+-- logic off-ledger over an ACS index by (consumer, namespace, prefix).
 --
 -- Trie tests use tiny thresholds so splits are cheap to reach (production uses
 -- 'defaultSplitThreshold').
@@ -16,8 +16,8 @@ import DA.List (sort)
 import DA.Optional (fromSome)
 import DA.Set qualified as Set
 import DA.Text qualified as T
-import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
+import Wormhole.Ntt.Disclosure (coveringNode)
 import Wormhole.Core.State
 import Test.TestCore (setup, govSetFeeVAA, devnetGuardianPubKey)
 
@@ -48,28 +48,8 @@ registerReplayRoot operator consumer namespace threshold = do
       coreStateCid = None    -- claimFee is 0 in the fixture
       feeAllocation = None
 
--- | The disclosure-service lookup: the unique active node of @consumer@'s
--- @namespace@ trie covering @digest@. Aborts unless coverage is exactly one —
--- checking the partition invariant and detecting a forked trie (parallel
--- roots).
-coveringNode : Party -> Text -> Text -> Script (ContractId ReplayNode, ReplayNode)
-coveringNode consumer namespace digest = do
-  nodes <- query @ReplayNode consumer
-  let d = normalizeHex digest
-  case filter (\(_, n) -> n.consumer == consumer && n.namespace == namespace && n.prefix `T.isPrefixOf` d) nodes of
-    [one] -> pure one
-    covering -> abort ("partition invariant violated: " <> show (length covering) <> " covering nodes")
-
--- | 'coveringNode' plus the disclosure a non-stakeholder attaches. @reader@ is
--- any party that sees the node.
-coveringDisclosure : Party -> Party -> Text -> Text -> Script (ContractId ReplayNode, Disclosure)
-coveringDisclosure reader consumer namespace digest = do
-  (cid, _) <- coveringNode consumer namespace digest
-  disc <- fromSome <$> queryDisclosure reader cid
-  pure (cid, disc)
-
 -- | Consume @digest@ into @consumer@'s @namespace@ trie via the
--- disclosure-service lookup.
+-- disclosure-service lookup ('Wormhole.Ntt.Disclosure.coveringNode').
 consume : Party -> Text -> Text -> Script (ContractId ReplayNode)
 consume consumer namespace digest = do
   (cid, _) <- coveringNode consumer namespace digest

@@ -1,15 +1,20 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
--- | The canonical per-flow disclosure sets for the NTT layer: one typed
--- function per relayer-facing choice. This generalizes the proven shape of
--- 'Test.TestReplay.coveringDisclosure' and TestNtt's ad-hoc set builders.
--- This module is the CANONICAL ALLOW-LIST: a relayer, a future disclosure
--- service, or this test suite reads the sets here and never re-derives them
--- from choice bodies. Transport is deliberately absent: no HTTP, no Go, no
--- JSON boundary -- only 'Daml.Script.queryDisclosure' against a live
--- participant, which is what any future disclosure service calls too.
+-- | The disclosure sets for the NTT flows.
 --
--- Flow -> disclosure set (a party's own stakeholding contracts still need no
--- entry here; only what a non-stakeholder executor must additionally see):
+-- A disclosure set is the list of contracts that a submitter must attach to
+-- a transaction when the submitter is not a stakeholder of those contracts.
+-- Example: a relayer that delivers a Release VAA is a stakeholder of
+-- nothing. The relayer must attach the manager, the core state, the replay
+-- node, the ledger, the custody pot, and the factory.
+--
+-- This module defines one function per flow. Each function returns that
+-- flow's disclosure set. This module is the only definition of these sets.
+-- Do not derive a set from the choice bodies again. This module has no
+-- HTTP server and no Go code. It uses only 'Daml.Script.queryDisclosure'.
+-- A disclosure service can serve these sets over a transport later.
+--
+-- The sets (a submitter's own contracts are not listed; only what a
+-- non-stakeholder must attach):
 --
 --   * releaseDisclosures      -- NttManager, CoreState, covering ReplayNode,
 --                                LockedLedger, custody-pot Holding (if any),
@@ -32,36 +37,31 @@
 --   * consolidateDisclosures  -- NttManager, LockedLedger, the supplied
 --                                custody holdings, committed TransferFactory
 --
--- Every set is derived from the identity cid(s) alone: each function fetches
--- the live 'NttManager' (or equivalent root) to read its OWN committed
--- namespace/factory/tokenConfig, rather than trusting caller-supplied copies
--- of those fields -- parse the deployment's own state, don't ask the caller
--- to re-assert it.
+-- Each function reads the live 'NttManager' for the deployment's own
+-- namespace, factory, and token config. It does not trust caller-supplied
+-- copies of those fields.
 --
--- INTERFACE LEGS: the committed factory ('NttManager.factory') and the
--- custody pot ('LockedLedger.custodyHoldingCid') are stored as INTERFACE
--- contract ids ('Splice.Api.Token.TransferInstructionV1.TransferFactory',
--- 'Splice.Api.Token.BurnMintV1.BurnMintFactory',
--- 'Splice.Api.Token.HoldingV1.Holding'). 'Daml.Script.queryDisclosure' only
--- resolves a CONCRETE template type -- calling it directly on an interface
--- cid fails at runtime ("unserializableType"), since the underlying payload
--- does not decode as the interface's own (nonexistent) record shape. Only
--- the caller -- the registry integration, which created the contract -- knows
--- which concrete template backs a given interface cid, so those two legs
--- take a small discloser CALLBACK instead of a bare cid: this module still
--- decides WHETHER and WHEN each leg is needed (from the deployment's own
--- live state), the callback supplies HOW to resolve it. 'discloseConcrete'
--- is the one-line adapter callers use to build such a callback from a known
--- concrete type, via 'DA.Internal.Interface.fromInterfaceContractId'.
-module Test.Disclosure where
+-- Two set members are interface contract ids: the committed factory
+-- ('NttManager.factory') and the custody pot
+-- ('LockedLedger.custodyHoldingCid'). 'queryDisclosure' accepts only a
+-- concrete template type. On an interface contract id it fails at runtime
+-- with "unserializableType". Only the caller knows which concrete template
+-- backs such a contract id. For these two members the caller therefore
+-- supplies a callback that resolves the contract id to a 'Disclosure'.
+-- 'discloseConcrete' builds that callback from the known concrete type.
+-- The functions in this module still decide when each member is necessary.
+module Wormhole.Ntt.Disclosure where
 
 import Daml.Script
+import DA.Optional (fromSome)
+import DA.Text qualified as T
 
 import Splice.Api.Token.HoldingV1 (Holding)
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Token.CIP0056.CoinFactory (CoinFactory)
 
+import Wormhole.Core.Bytes (normalizeHex)
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State (CoreState, Emitter, EmitterRegistry, ReplayRootRegistry)
 import Wormhole.Ntt.Deposit (DepositPreapproval)
@@ -70,53 +70,73 @@ import Wormhole.Ntt.Ledger (LockedLedger)
 import Wormhole.Ntt.Manager
   ( NttManager, NttFactory(..), NttTokenConfig(..), AdminTransferProposal )
 
-import Test.TestReplay (coveringDisclosure)
+----------------------------------------------------------------------
+-- Replay-node coverage lookup
+----------------------------------------------------------------------
+
+-- | Find the one active node of @consumer@'s @namespace@ trie that covers
+-- @digest@. Aborts unless exactly one node covers it: more or fewer shows a
+-- broken partition invariant or a forked trie. The trie tests in
+-- 'Test.TestReplay' also call this directly.
+coveringNode : Party -> Text -> Text -> Script (ContractId ReplayNode, ReplayNode)
+coveringNode consumer namespace digest = do
+  nodes <- query @ReplayNode consumer
+  let d = normalizeHex digest
+  case filter (\(_, n) -> n.consumer == consumer && n.namespace == namespace && n.prefix `T.isPrefixOf` d) nodes of
+    [one] -> pure one
+    covering -> abort ("partition invariant violated: " <> show (length covering) <> " covering nodes")
+
+-- | 'coveringNode' plus its 'Disclosure'. @reader@ is any party that sees
+-- the node.
+coveringDisclosure : Party -> Party -> Text -> Text -> Script (ContractId ReplayNode, Disclosure)
+coveringDisclosure reader consumer namespace digest = do
+  (cid, _) <- coveringNode consumer namespace digest
+  disc <- fromSome <$> queryDisclosure reader cid
+  pure (cid, disc)
 
 ----------------------------------------------------------------------
 -- Shared lookups
 ----------------------------------------------------------------------
 
--- | 'queryDisclosure', or a precise abort naming what @reader@ could not see.
--- Every function below routes its CONCRETE-template fetches through this, so
--- a missing disclosure fails loudly and specifically rather than surfacing
--- later as an opaque submission error. Do not call this on an interface
--- contract id -- see 'discloseConcrete'.
+-- | 'queryDisclosure', or an abort that names what @reader@ could not see.
+-- A missing disclosure fails here with a specific message, not later as an
+-- opaque submission error. Do not call this on an interface contract id --
+-- use 'discloseConcrete'.
 requireDisclosure : Template t => Party -> ContractId t -> Text -> Script Disclosure
 requireDisclosure reader cid label =
   queryDisclosure reader cid >>= \case
     Some d -> pure d
     None -> abort ("disclosure: " <> label <> " not visible to " <> show reader)
 
--- | 'queryContractId', or a precise abort naming what could not be resolved.
--- Used to read a deployment's OWN committed fields (namespace, factory,
--- tokenConfig) instead of trusting a caller-supplied copy of them.
+-- | 'queryContractId', or an abort that names what could not be resolved.
+-- Reads a deployment's own committed fields (namespace, factory, token
+-- config); callers never pass copies of those fields.
 requireContract : (Template t, HasEnsure t) => Party -> ContractId t -> Text -> Script t
 requireContract reader cid label =
   queryContractId reader cid >>= \case
     Some c -> pure c
     None -> abort ("disclosure: " <> label <> " could not be resolved by " <> show reader)
 
--- | Build a discloser callback for an interface-backed cid by downcasting to
--- its known concrete template @t@ first (e.g. @discloseConcrete \@MyToken gg
--- "committed TransferFactory"@), then disclosing that. The downcast is a
--- caller assertion -- sound only when @t@ genuinely backs the given
--- interface cid, exactly like every other use of 'fromInterfaceContractId'
--- in this codebase.
+-- | Build a discloser callback for an interface contract id. Downcasts the
+-- id to the known concrete template @t@, then discloses that (example:
+-- @discloseConcrete \@MyToken gg "committed TransferFactory"@). The downcast
+-- is a caller assertion: it is sound only when @t@ backs the given contract
+-- id, as with every use of 'fromInterfaceContractId'.
 discloseConcrete
   : forall t i. (Template t, HasFromInterface t i, HasTemplateTypeRep t, HasInterfaceTypeRep i)
   => Party -> Text -> ContractId i -> Script Disclosure
 discloseConcrete reader label ifaceCid = requireDisclosure reader (fromInterfaceContractId @t ifaceCid) label
 
--- | Unwrap the committed 'TransferFactory' cid, or abort -- unreachable for a
--- genuinely LockUnlock deployment, since 'factoryMatchesConfig' ties the two
--- together at registration and every rotation.
+-- | Unwrap the committed 'TransferFactory' cid, or abort. The abort is
+-- unreachable for a real LockUnlock deployment: 'factoryMatchesConfig' ties
+-- the factory type to the config at registration and at every rotation.
 requireTransferFactoryCid : NttFactory -> Script (ContractId TIV1.TransferFactory)
 requireTransferFactoryCid = \case
   TransferFactoryCid cid -> pure cid
   BurnMintFactoryCid _ -> abort "disclosure: committed factory is not a transfer factory"
 
--- | Unwrap the committed 'BurnMintFactory' cid, or abort -- unreachable for a
--- genuinely BurnMint deployment, by the same invariant.
+-- | Unwrap the committed 'BurnMintFactory' cid, or abort. Unreachable for a
+-- real BurnMint deployment, by the same invariant.
 requireBurnMintFactoryCid : NttFactory -> Script (ContractId BurnMintFactory)
 requireBurnMintFactoryCid = \case
   BurnMintFactoryCid cid -> pure cid
@@ -126,14 +146,12 @@ requireBurnMintFactoryCid = \case
 -- Release
 ----------------------------------------------------------------------
 
--- | Disclosures a stakeholder-less @executor@ needs to relay 'Release'.
--- 'CoreState'/covering 'ReplayNode'/'LockedLedger' are always required;
--- the custody-pot 'Holding' is added only if the ledger's hint names one
--- (the deployment's very first release has none yet); the committed
--- 'TransferFactory' is always required, since 'Release' spends through it
--- regardless of where the funding holdings come from. @discloseHolding@ /
--- @discloseFactory@ resolve those two interface-backed legs -- see the
--- module header.
+-- | The disclosure set for 'Release', for an @executor@ that is a
+-- stakeholder of nothing. The custody-pot 'Holding' is included only when
+-- the ledger's hint names one; a deployment's first release has none. The
+-- committed 'TransferFactory' is always included: 'Release' spends through
+-- it for every funding source. @discloseHolding@ and @discloseFactory@
+-- resolve the two interface members -- see the module header.
 releaseDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId LockedLedger -> Text
   -> (ContractId Holding -> Script Disclosure)
@@ -160,10 +178,10 @@ releaseDisclosures operator gg mgrCid csId ledgerCid digest discloseHolding disc
 -- Mint
 ----------------------------------------------------------------------
 
--- | Disclosures a stakeholder-less @executor@ needs to relay 'Mint'.
--- 'DepositPreapproval' is queried as @gg@: it observes it (the instrument
--- admin), while @operator@ is not a stakeholder of it at all.
--- @discloseFactory@ resolves the committed 'BurnMintFactory' leg.
+-- | The disclosure set for 'Mint', for an @executor@ that is a stakeholder
+-- of nothing. 'DepositPreapproval' is queried as @gg@, its observer;
+-- @operator@ is not a stakeholder of it. @discloseFactory@ resolves the
+-- committed 'BurnMintFactory' member.
 mintDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId DepositPreapproval -> Text
   -> (ContractId BurnMintFactory -> Script Disclosure)
@@ -185,13 +203,13 @@ mintDisclosures operator gg mgrCid csId preapprovalCid digest discloseFactory = 
 -- AcceptAdminTransferByVaa
 ----------------------------------------------------------------------
 
--- | Disclosures a stakeholder-less @executor@ needs to relay
--- 'AcceptAdminTransferByVaa'. 'AdminTransferProposal' is queried as @admin@
--- (the proposing party) -- @operator@ is not a stakeholder of it. For a
--- LockUnlock deployment the 'LockedLedger' is always required (its
--- observership always changes hands); the pot Holding and committed
--- 'TransferFactory' are added only when the ledger names a pot to move
--- (matching 'TransferAdmin's own branch on 'custodyHoldingCid').
+-- | The disclosure set for 'AcceptAdminTransferByVaa', for an @executor@
+-- that is a stakeholder of nothing. 'AdminTransferProposal' is queried as
+-- @admin@, the proposing party; @operator@ is not a stakeholder of it. For
+-- LockUnlock the 'LockedLedger' is always included, because its observer
+-- changes hands. The pot 'Holding' and committed 'TransferFactory' are
+-- included only when the ledger names a pot to move. This matches
+-- 'TransferAdmin's own branch on 'custodyHoldingCid'.
 acceptAdminDisclosures
   : Party -> Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId AdminTransferProposal
   -> Optional (ContractId LockedLedger) -> Text
@@ -227,10 +245,9 @@ acceptAdminDisclosures operator gg admin mgrCid csId propCid ledgerCid digest di
 -- SetPeerByVaa
 ----------------------------------------------------------------------
 
--- | Disclosures a stakeholder-less @executor@ needs to relay 'SetPeerByVaa':
--- the manager, core state, the transceiver 'Emitter' (for the nested
--- 'SetPeer' broadcast), and the covering replay node. 'Emitter' is a plain
--- template (not interface-backed), so no discloser callback is needed here.
+-- | The disclosure set for 'SetPeerByVaa', for an @executor@ that is a
+-- stakeholder of nothing. The 'Emitter' serves the nested 'SetPeer'
+-- broadcast. 'Emitter' is a plain template, so no callback is needed here.
 setPeerByVaaDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId Emitter -> Text
   -> Script (ContractId ReplayNode, [Disclosure])
@@ -249,13 +266,12 @@ setPeerByVaaDisclosures operator gg mgrCid csId emitterCid digest = do
 -- Transfer (outbound)
 ----------------------------------------------------------------------
 
--- | Disclosures a cross-hosted @user@ needs to drive 'Transfer' alone. The
--- user's own input holdings need no entry here (a party always sees its own
--- holdings). LockUnlock always needs the committed 'TransferFactory' (the
--- lock leg always runs through it) plus, only if an existing pot must be
--- merged, the pot Holding. BurnMint always needs the committed
--- 'BurnMintFactory' and never a ledger. Only the discloser callback for the
--- deployment's actual mode is ever invoked.
+-- | The disclosure set for 'Transfer', for a @user@ hosted away from the
+-- deployment. The user's own input holdings are not listed: a party always
+-- sees its own holdings. LockUnlock always includes the committed
+-- 'TransferFactory'; the pot 'Holding' is included only when a pot exists
+-- to merge. BurnMint always includes the committed 'BurnMintFactory' and
+-- never a ledger. Only the callback for the deployment's own mode runs.
 transferDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId Emitter -> ContractId CoreState
   -> Optional (ContractId LockedLedger)
@@ -289,15 +305,11 @@ transferDisclosures operator gg mgrCid emitterCid csId ledgerCid discloseHolding
 -- Register
 ----------------------------------------------------------------------
 
--- | Disclosures a registering @admin@ needs for the shared bootstrap roots:
--- the 'NttGovernance' root, the core 'EmitterRegistry' /
--- 'ReplayRootRegistry' anchors, and 'CoreState'. Passing @Some coinFactoryCid@
--- additionally discloses the canonical 'CoinFactory' -- the ByVaa variant's
--- extra leg, needed only when 'RegisterManagerByVaa' reaches
--- 'requireCanonicalFactory'. 'CoinFactory' is a plain, concrete template (the
--- one factory a VAA-gated choice may ever commit -- see
--- 'Wormhole.Ntt.Manager.requireCanonicalFactory'), so no discloser callback
--- is needed here.
+-- | The disclosure set for 'RegisterManager', for a registering @admin@
+-- hosted away from the bootstrap roots. Pass @Some coinFactoryCid@ for the
+-- ByVaa variant: 'RegisterManagerByVaa' also reaches
+-- 'requireCanonicalFactory', so it also needs the canonical 'CoinFactory'.
+-- 'CoinFactory' is a plain, concrete template, so no callback is needed.
 registerDisclosures
   : Party -> Party -> ContractId NttGovernance -> ContractId EmitterRegistry -> ContractId ReplayRootRegistry
   -> ContractId CoreState -> Optional (ContractId CoinFactory)
@@ -319,11 +331,11 @@ registerDisclosures operator gg govCid emReg rrReg csId byVaaFactory = do
 -- ConsolidateCustody
 ----------------------------------------------------------------------
 
--- | Disclosures a stranger @caller@ needs to run 'ConsolidateCustody': the
--- manager, the ledger, every supplied custody holding, and the committed
--- 'TransferFactory' -- required only by the merge branch (two or more
--- holdings), which is this function's intended use; the single-holding
--- repoint branch never touches the factory.
+-- | The disclosure set for 'ConsolidateCustody', for a @caller@ that is a
+-- stakeholder of nothing. The committed 'TransferFactory' is used only by
+-- the merge branch (two or more holdings), which is this function's
+-- intended use. The single-holding repoint branch never touches the
+-- factory.
 consolidateDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId LockedLedger -> [ContractId Holding]
   -> (ContractId Holding -> Script Disclosure)

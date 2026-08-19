@@ -59,11 +59,11 @@ import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Governance
 import Test.MockToken (mintAndAllocate, mockBalance)
-import Test.TestReplay (registerReplayRoot, coveringDisclosure)
+import Test.TestReplay (registerReplayRoot)
 import Test.TestCore
   ( setup, setupWithInstrument
   , govSetFeeVAA, devnetGuardianPubKey, devnetGuardian )
-import Test.Disclosure (releaseDisclosures, acceptAdminDisclosures, discloseConcrete)
+import Wormhole.Ntt.Disclosure (releaseDisclosures, acceptAdminDisclosures, discloseConcrete, coveringDisclosure)
 
 ----------------------------------------------------------------------
 -- CIP-56 mocks: local implementations of the vendored Holding /
@@ -2813,7 +2813,7 @@ acceptAdminFixture operator gg admin config csId = do
   pure AcceptAdminFixture with mgrCid, factory, ledgerCid, propCid, namespace = mgr.namespace
 
 -- | Disclosures a stakeholder-less @executor@ needs to relay
--- 'AcceptAdminTransferByVaa': see 'Test.Disclosure.acceptAdminDisclosures',
+-- 'AcceptAdminTransferByVaa': see 'Wormhole.Ntt.Disclosure.acceptAdminDisclosures',
 -- which this delegates to. Every existing caller here fixes either a
 -- BurnMint deployment or a zero-balance LockUnlock one, so the pot/factory
 -- discloser callbacks are never actually invoked; they still need a
