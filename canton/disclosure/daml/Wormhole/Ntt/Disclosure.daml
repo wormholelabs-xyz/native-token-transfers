@@ -9,12 +9,8 @@
 --
 -- This module defines one function per flow. Each function returns that
 -- flow's disclosure set. This module is the only definition of these sets.
--- Do not derive a set from the choice bodies again. This module has no
--- HTTP server and no Go code. It uses only 'Daml.Script.queryDisclosure'.
--- A disclosure service can serve these sets over a transport later.
 --
--- The sets (a submitter's own contracts are not listed; only what a
--- non-stakeholder must attach):
+-- The sets (each lists only what a non-stakeholder must attach):
 --
 --   * releaseDisclosures      -- NttManager, CoreState, covering ReplayNode,
 --                                LockedLedger, custody-pot Holding (if any),
@@ -38,8 +34,7 @@
 --                                custody holdings, committed TransferFactory
 --
 -- Each function reads the live 'NttManager' for the deployment's own
--- namespace, factory, and token config. It does not trust caller-supplied
--- copies of those fields.
+-- namespace, factory, and token config.
 --
 -- Two set members are interface contract ids: the committed factory
 -- ('NttManager.factory') and the custody pot
@@ -148,10 +143,10 @@ requireBurnMintFactoryCid = \case
 
 -- | The disclosure set for 'Release', for an @executor@ that is a
 -- stakeholder of nothing. The custody-pot 'Holding' is included only when
--- the ledger's hint names one; a deployment's first release has none. The
--- committed 'TransferFactory' is always included: 'Release' spends through
--- it for every funding source. @discloseHolding@ and @discloseFactory@
--- resolve the two interface members -- see the module header.
+-- the ledger's hint names one. The committed 'TransferFactory' is always
+-- included: 'Release' spends through it for every funding source.
+-- @discloseHolding@ and @discloseFactory@ resolve the two interface
+-- members -- see the module header.
 releaseDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId LockedLedger -> Text
   -> (ContractId Holding -> Script Disclosure)
@@ -267,11 +262,11 @@ setPeerByVaaDisclosures operator gg mgrCid csId emitterCid digest = do
 ----------------------------------------------------------------------
 
 -- | The disclosure set for 'Transfer', for a @user@ hosted away from the
--- deployment. The user's own input holdings are not listed: a party always
--- sees its own holdings. LockUnlock always includes the committed
--- 'TransferFactory'; the pot 'Holding' is included only when a pot exists
--- to merge. BurnMint always includes the committed 'BurnMintFactory' and
--- never a ledger. Only the callback for the deployment's own mode runs.
+-- deployment. A party always sees its own holdings, so the set covers only
+-- the deployment's contracts. LockUnlock includes the committed
+-- 'TransferFactory', plus the pot 'Holding' when a pot exists to merge.
+-- BurnMint includes the committed 'BurnMintFactory'. Only the callback for
+-- the deployment's own mode runs.
 transferDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId Emitter -> ContractId CoreState
   -> Optional (ContractId LockedLedger)
@@ -332,10 +327,8 @@ registerDisclosures operator gg govCid emReg rrReg csId byVaaFactory = do
 ----------------------------------------------------------------------
 
 -- | The disclosure set for 'ConsolidateCustody', for a @caller@ that is a
--- stakeholder of nothing. The committed 'TransferFactory' is used only by
--- the merge branch (two or more holdings), which is this function's
--- intended use. The single-holding repoint branch never touches the
--- factory.
+-- stakeholder of nothing. The committed 'TransferFactory' serves the merge
+-- branch (two or more holdings), which is this function's intended use.
 consolidateDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId LockedLedger -> [ContractId Holding]
   -> (ContractId Holding -> Script Disclosure)
