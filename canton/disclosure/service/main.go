@@ -38,12 +38,13 @@ const (
 
 // options is parseFlags' pure result: no I/O happens until run() consumes it.
 type options struct {
-	listen          string
-	jsonAPIBaseURL  string
-	party           string
-	accessTokenFile string
-	allowListPath   string
-	verbose         bool
+	listen                  string
+	jsonAPIBaseURL          string
+	party                   string
+	accessTokenFile         string
+	allowListPath           string
+	maxContractsPerTemplate int
+	verbose                 bool
 }
 
 // parseFlags parses args (normally os.Args[1:]) into options. It performs no I/O -- required
@@ -58,6 +59,7 @@ func parseFlags(args []string) (*options, error) {
 	party := fs.String("party", "", "reading party whose ACS is served (required)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream")
 	allowList := fs.String("allow-list", "", "path to a JSON array of \"Module:Entity\" template names, overriding the built-in allow-list")
+	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -72,13 +74,17 @@ func parseFlags(args []string) (*options, error) {
 	if *listen == "" {
 		return nil, fmt.Errorf("disclosure-service: --listen must not be empty")
 	}
+	if *maxContracts <= 0 {
+		return nil, fmt.Errorf("disclosure-service: --max-contracts-per-template must be positive, got %d", *maxContracts)
+	}
 	return &options{
-		listen:          *listen,
-		jsonAPIBaseURL:  *jsonAPI,
-		party:           *party,
-		accessTokenFile: *tokenFile,
-		allowListPath:   *allowList,
-		verbose:         *verbose,
+		listen:                  *listen,
+		jsonAPIBaseURL:          *jsonAPI,
+		party:                   *party,
+		accessTokenFile:         *tokenFile,
+		allowListPath:           *allowList,
+		maxContractsPerTemplate: *maxContracts,
+		verbose:                 *verbose,
 	}, nil
 }
 
@@ -345,7 +351,7 @@ func newServer(opts *options, allowList []string, acs acsClient) *server {
 		allowList:        make(map[string]bool, len(allowList)),
 		allowListOrdered: allowList,
 		acs:              acs,
-		maxContracts:     defaultMaxContractsPerTemplate,
+		maxContracts:     opts.maxContractsPerTemplate,
 	}
 	for _, t := range allowList {
 		s.allowList[t] = true
