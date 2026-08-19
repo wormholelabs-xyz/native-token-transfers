@@ -1,9 +1,12 @@
 # Multi-package project for the Canton NTT layer. The production package
 # (`ntt`) builds against the vendored wormhole-core and CIP-56 interface DARs
 # (see dars/README.md; core is consumed as a pinned artifact, never built
-# here). The separate `ntt-test` package carries the Daml Scripts, which keeps
-# daml-script and the test code out of the uploadable production DAR.
-# `dpm build --all` builds `ntt`, then `test`, which data-depends on it.
+# here). `ntt-disclosure` is the ops-grade per-flow disclosure-set library,
+# built on `ntt` but daml-script-bearing, so it stays out of the uploadable
+# production DAR. The `ntt-test` package carries the Daml Scripts, which
+# depends on both. `dpm build --all` builds `ntt`, then `disclosure`, then
+# `test`, in that data-dependency order.
 packages:
   - ./ntt
+  - ./disclosure
   - ./test

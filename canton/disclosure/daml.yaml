@@ -1,0 +1,32 @@
+# Ops-grade disclosure-set library: 'Wormhole.Ntt.Disclosure' is the
+# canonical allow-list a relayer or disclosure service reads to submit NTT
+# choices as a non-stakeholder (see the module header). It carries no
+# templates and no daml-script-bearing test code of its own, but it does use
+# 'Daml.Script' (queryDisclosure/queryContractId), so daml-script is a
+# regular dependency here, not a test-only one.
+#
+# It data-depends on the vendored wormhole-core DAR, the CIP-56 interface
+# DARs, and the locally built ntt DAR. The root multi-package.yaml ensures
+# those are built first. `dpm build --all` packs their DALFs into this DAR
+# too.
+sdk-version: 3.5.1
+name: ntt-disclosure
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+build-options:
+  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
+  - --target=2.3
+data-dependencies:
+  - ../dars/wormhole-core-0.5.0.dar
+  - ../dars/token-cip0056-0.2.0.dar
+  - ../ntt/.daml/dist/ntt-0.2.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-allocation-v1-1.0.0.dar
+  - ../dars/splice-api-token-allocation-instruction-v1-1.0.0.dar
+  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
