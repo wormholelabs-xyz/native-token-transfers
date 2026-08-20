@@ -57,8 +57,8 @@ func parseFlags(args []string) (*options, error) {
 	listen := fs.String("listen", defaultListen, "address to listen on")
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
 	party := fs.String("party", "", "reading party whose ACS is served (required)")
-	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream")
-	allowList := fs.String("allow-list", "", "path to a JSON array of \"Module:Entity\" template names, overriding the built-in allow-list")
+	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
+	allowList := fs.String("allow-list", "", "path to a JSON array of package-qualified \"#name:Module:Entity\" template names, overriding the built-in allow-list")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
@@ -96,26 +96,34 @@ func parseFlags(args []string) (*options, error) {
 // (canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml): the flat union of every template any
 // disclosure-set function there ever names. The canonical, flow-aware sets live in that Daml
 // module; this table only decides which templates this service may ever be asked to fetch.
+//
+// Entries are package-name-qualified ("#<package-name>:Module:Entity"): the JSON Ledger API v2
+// returns HTTP 400 for an unqualified "Module:Entity" template filter (confirmed live). The
+// package names are each DAR's own "name:" field (see canton/dars/*.conf inside the DAR, and
+// canton/ntt/daml.yaml for "ntt").
 func defaultAllowList() []string {
 	return []string{
-		"Wormhole.Ntt.Manager:NttManager",
-		"Wormhole.Ntt.Manager:AdminTransferProposal",
-		"Wormhole.Ntt.Ledger:LockedLedger",
-		"Wormhole.Ntt.Deposit:DepositPreapproval",
-		"Wormhole.Ntt.Governance:NttGovernance",
-		"Wormhole.Core.State:CoreState",
-		"Wormhole.Core.State:Emitter",
-		"Wormhole.Core.State:EmitterRegistry",
-		"Wormhole.Core.State:ReplayRootRegistry",
-		"Wormhole.Core.Replay:ReplayNode",
-		"Token.CIP0056.CoinFactory:CoinFactory",
-		"Token.CIP0056.Coin:Coin",
+		"#ntt:Wormhole.Ntt.Manager:NttManager",
+		"#ntt:Wormhole.Ntt.Manager:AdminTransferProposal",
+		"#ntt:Wormhole.Ntt.Ledger:LockedLedger",
+		"#ntt:Wormhole.Ntt.Deposit:DepositPreapproval",
+		"#ntt:Wormhole.Ntt.Governance:NttGovernance",
+		"#wormhole-core:Wormhole.Core.State:CoreState",
+		"#wormhole-core:Wormhole.Core.State:Emitter",
+		"#wormhole-core:Wormhole.Core.State:EmitterRegistry",
+		"#wormhole-core:Wormhole.Core.State:ReplayRootRegistry",
+		"#wormhole-core:Wormhole.Core.Replay:ReplayNode",
+		"#token-cip0056:Token.CIP0056.CoinFactory:CoinFactory",
+		"#token-cip0056:Token.CIP0056.Coin:Coin",
+		"#token-cip0056:Token.CIP0056.CoinTransfer:TransferPreapproval",
 	}
 }
 
-// loadAllowList reads a JSON array of "Module:Entity" strings from path, overriding
-// defaultAllowList. An empty array is rejected -- an operator who wants "serve nothing" should
-// not run this service at all; a genuinely empty override is far more likely a mistake.
+// loadAllowList reads a JSON array of template name strings from path, overriding
+// defaultAllowList. Entries should be package-qualified ("#name:Module:Entity"), matching
+// defaultAllowList's convention. An empty array is rejected -- an operator who wants "serve
+// nothing" should not run this service at all; a genuinely empty override is far more likely a
+// mistake.
 func loadAllowList(path string) ([]string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -131,11 +139,24 @@ func loadAllowList(path string) ([]string, error) {
 	return list, nil
 }
 
-// templateIDMatches reports whether a fully-qualified templateId ("packageId:Module:Entity",
-// as returned by the ACS) belongs to the given "Module:Entity" allow-list name. The package-id
-// prefix varies by deployment/upgrade, so matching is by suffix, not equality.
-func templateIDMatches(fullyQualified, moduleEntity string) bool {
-	return fullyQualified == moduleEntity || strings.HasSuffix(fullyQualified, ":"+moduleEntity)
+// templateTail returns the trailing "Module:Entity" segment of a template id, stripping any
+// package qualifier ("#name:" or a hex package id). A value with no qualifier (already exactly
+// "Module:Entity") is returned unchanged. Module names never contain ':', so the tail is always
+// exactly the last two ':'-separated segments.
+func templateTail(templateID string) string {
+	parts := strings.Split(templateID, ":")
+	if len(parts) <= 2 {
+		return templateID
+	}
+	return strings.Join(parts[len(parts)-2:], ":")
+}
+
+// templateIDMatches reports whether two template ids name the same "Module:Entity", regardless
+// of how each is qualified: bare, "#name:"-qualified, or package-ID-qualified (as the ACS
+// returns them). Comparing tails lets a package-name-qualified allow-list entry match a
+// package-ID-qualified upstream response.
+func templateIDMatches(a, b string) bool {
+	return templateTail(a) == templateTail(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +217,13 @@ type acsCreatedEvent struct {
 	ContractID       string `json:"contractId"`
 	TemplateID       string `json:"templateId"`
 	CreatedEventBlob string `json:"createdEventBlob"`
-	SynchronizerID   string `json:"synchronizerId"`
 }
 
-// acsActiveContract is the JsActiveContract variant of a contractEntry oneOf.
+// acsActiveContract is the JsActiveContract variant of a contractEntry oneOf. synchronizerId is
+// a sibling field on JsActiveContract, alongside createdEvent (confirmed live).
 type acsActiveContract struct {
-	CreatedEvent *acsCreatedEvent `json:"createdEvent"`
+	CreatedEvent   *acsCreatedEvent `json:"createdEvent"`
+	SynchronizerID string           `json:"synchronizerId"`
 }
 
 // acsContractEntry is a Daml-JSON sum type; only JsActiveContract carries a createdEvent. Other
@@ -216,23 +238,33 @@ type acsResponseEntry struct {
 
 // httpACSClient is the production acsClient, talking to one participant's JSON Ledger API v2.
 type httpACSClient struct {
-	baseURL string
-	token   string // bearer token; empty sends no Authorization header
-	client  *http.Client
+	baseURL   string
+	tokenFile string // path to the bearer token file; empty sends no Authorization header
+	client    *http.Client
 }
 
-func newHTTPACSClient(baseURL, token string) *httpACSClient {
+func newHTTPACSClient(baseURL, tokenFile string) *httpACSClient {
 	return &httpACSClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		client:  &http.Client{Timeout: httpClientTimeout},
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		tokenFile: tokenFile,
+		client:    &http.Client{Timeout: httpClientTimeout},
 	}
 }
 
-func (c *httpACSClient) authHeader(req *http.Request) {
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+// authHeader sets Authorization by re-reading tokenFile on every call, so an operator can
+// rotate the token file's contents and have the next request pick it up without a restart.
+func (c *httpACSClient) authHeader(req *http.Request) error {
+	if c.tokenFile == "" {
+		return nil
 	}
+	token, err := readAccessToken(c.tokenFile)
+	if err != nil {
+		return fmt.Errorf("disclosure-service: reload access token: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return nil
 }
 
 // LedgerEnd calls GET /v2/state/ledger-end, pinning ActiveContracts' activeAtOffset.
@@ -242,7 +274,9 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("disclosure-service: build ledger-end request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c.authHeader(req)
+	if err := c.authHeader(req); err != nil {
+		return 0, err
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -294,7 +328,9 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 		return nil, fmt.Errorf("disclosure-service: build active-contracts request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c.authHeader(req)
+	if err := c.authHeader(req); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -324,7 +360,7 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 			TemplateID:       ac.CreatedEvent.TemplateID,
 			ContractID:       ac.CreatedEvent.ContractID,
 			CreatedEventBlob: ac.CreatedEvent.CreatedEventBlob,
-			SynchronizerID:   ac.CreatedEvent.SynchronizerID,
+			SynchronizerID:   ac.SynchronizerID,
 		})
 	}
 	return out, nil
@@ -338,8 +374,8 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 // id is ever cached across requests.
 type server struct {
 	opts             *options
-	allowList        map[string]bool // exact "Module:Entity" membership, for the 403 gate
-	allowListOrdered []string        // preserves the configured order for the no-param default
+	allowListByTail  map[string]string // "Module:Entity" tail -> configured qualified name, for the 403 gate
+	allowListOrdered []string          // preserves the configured order for the no-param default
 	acs              acsClient
 	maxContracts     int // cap per template; exceeding it is an error
 	mux              *http.ServeMux
@@ -348,13 +384,13 @@ type server struct {
 func newServer(opts *options, allowList []string, acs acsClient) *server {
 	s := &server{
 		opts:             opts,
-		allowList:        make(map[string]bool, len(allowList)),
+		allowListByTail:  make(map[string]string, len(allowList)),
 		allowListOrdered: allowList,
 		acs:              acs,
 		maxContracts:     opts.maxContractsPerTemplate,
 	}
 	for _, t := range allowList {
-		s.allowList[t] = true
+		s.allowListByTail[templateTail(t)] = t
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1/healthz", s.handleHealthz)
@@ -410,18 +446,23 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 		requested = s.allowListOrdered
 	}
 
-	// Validate every requested template before querying any of them: a bad request must not
-	// have partial upstream side effects. The server-side list is authoritative; a client
-	// asking for something outside it is refused outright, naming the offender.
-	for _, t := range requested {
-		if !s.allowList[t] {
+	// Resolve every requested template to its configured, qualified allow-list entry before
+	// querying any of them: a bad request must not have partial upstream side effects. The
+	// server-side list is authoritative; a client asking for something outside it (by
+	// Module:Entity tail) is refused outright, naming the offender. A matched request is
+	// forwarded upstream using the CONFIGURED spelling, never the client's own.
+	resolved := make([]string, len(requested))
+	for i, t := range requested {
+		canonical, ok := s.allowListByTail[templateTail(t)]
+		if !ok {
 			http.Error(w, fmt.Sprintf("disclosure-service: template %q is not in the allow-list", t), http.StatusForbidden)
 			return
 		}
+		resolved[i] = canonical
 	}
 
 	out := make([]discloseEntry, 0)
-	for _, t := range requested {
+	for _, t := range resolved {
 		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.party, t)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), http.StatusBadGateway)
@@ -488,16 +529,15 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		}
 	}
 
-	token := ""
+	// Fail fast at startup if the token file is missing or unreadable. The path, not this
+	// read's value, is what httpACSClient keeps -- see readAccessToken's call in authHeader.
 	if opts.accessTokenFile != "" {
-		var err error
-		token, err = readAccessToken(opts.accessTokenFile)
-		if err != nil {
+		if _, err := readAccessToken(opts.accessTokenFile); err != nil {
 			return err
 		}
 	}
 
-	acs := newHTTPACSClient(opts.jsonAPIBaseURL, token)
+	acs := newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile)
 	srv := newServer(opts, allowList, acs)
 
 	ln, err := net.Listen("tcp", opts.listen)

@@ -96,21 +96,48 @@ func TestParseFlags_MissingRequired(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultAllowList(t *testing.T) {
+	// Package-qualified: the JSON Ledger API v2 returns HTTP 400 for
+	// unqualified "Module:Entity" template filters (confirmed live).
 	want := []string{
-		"Wormhole.Ntt.Manager:NttManager",
-		"Wormhole.Ntt.Manager:AdminTransferProposal",
-		"Wormhole.Ntt.Ledger:LockedLedger",
-		"Wormhole.Ntt.Deposit:DepositPreapproval",
-		"Wormhole.Ntt.Governance:NttGovernance",
-		"Wormhole.Core.State:CoreState",
-		"Wormhole.Core.State:Emitter",
-		"Wormhole.Core.State:EmitterRegistry",
-		"Wormhole.Core.State:ReplayRootRegistry",
-		"Wormhole.Core.Replay:ReplayNode",
-		"Token.CIP0056.CoinFactory:CoinFactory",
-		"Token.CIP0056.Coin:Coin",
+		"#ntt:Wormhole.Ntt.Manager:NttManager",
+		"#ntt:Wormhole.Ntt.Manager:AdminTransferProposal",
+		"#ntt:Wormhole.Ntt.Ledger:LockedLedger",
+		"#ntt:Wormhole.Ntt.Deposit:DepositPreapproval",
+		"#ntt:Wormhole.Ntt.Governance:NttGovernance",
+		"#wormhole-core:Wormhole.Core.State:CoreState",
+		"#wormhole-core:Wormhole.Core.State:Emitter",
+		"#wormhole-core:Wormhole.Core.State:EmitterRegistry",
+		"#wormhole-core:Wormhole.Core.State:ReplayRootRegistry",
+		"#wormhole-core:Wormhole.Core.Replay:ReplayNode",
+		"#token-cip0056:Token.CIP0056.CoinFactory:CoinFactory",
+		"#token-cip0056:Token.CIP0056.Coin:Coin",
+		"#token-cip0056:Token.CIP0056.CoinTransfer:TransferPreapproval",
 	}
 	assert.ElementsMatch(t, want, defaultAllowList())
+}
+
+// ---------------------------------------------------------------------------
+// templateTail / templateIDMatches
+// ---------------------------------------------------------------------------
+
+func TestTemplateIDMatches(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"exact tail equality", "Module:Entity", "Module:Entity", true},
+		{"package-id-qualified vs bare tail", "abcdef1234:Module:Entity", "Module:Entity", true},
+		{"package-name-qualified vs bare tail", "#ntt:Module:Entity", "Module:Entity", true},
+		{"both qualified, different prefixes", "abcdef1234:Module:Entity", "#ntt:Module:Entity", true},
+		{"different entity", "abcdef1234:Module:Entity", "Module:Other", false},
+		{"different module", "abcdef1234:Module:Entity", "Other:Entity", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, templateIDMatches(tc.a, tc.b))
+		})
+	}
 }
 
 func TestLoadAllowList(t *testing.T) {
@@ -168,6 +195,26 @@ func newFakeJSONAPI(t *testing.T, acHandler http.HandlerFunc) (*httptest.Server,
 			t.Errorf("fake json-api: active-contracts: got method %s, want POST", r.Method)
 		}
 		capture.set(r.Header.Get("Authorization"))
+
+		// Real participant behavior: unqualified "Module:Entity" template
+		// filters get HTTP 400. Only "#name:Module:Entity" or
+		// "packageId:Module:Entity" are accepted. Re-buffer the body so
+		// acHandler can still decode it.
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var req activeContractsRequest
+		require.NoError(t, json.Unmarshal(body, &req))
+		for _, pf := range req.EventFormat.FiltersByParty {
+			for _, cf := range pf.Cumulative {
+				tmpl := cf.IdentifierFilter.TemplateFilter.Value.TemplateID
+				if strings.Count(tmpl, ":") != 2 {
+					http.Error(w, fmt.Sprintf("fake json-api: unqualified templateId %q", tmpl), http.StatusBadRequest)
+					return
+				}
+			}
+		}
+
 		acHandler(w, r)
 	})
 	srv := httptest.NewServer(mux)
@@ -211,11 +258,13 @@ func decodeRequestedTemplate(t *testing.T, r *http.Request) (party, template str
 }
 
 // acsContractJSON renders one active-contracts response element in the JSON Ledger API v2
-// wire shape (contractEntry.JsActiveContract.createdEvent), independent of main.go's internal
-// decode types, so the test pins the actual wire contract rather than a struct's shape.
+// wire shape (contractEntry.JsActiveContract{createdEvent, synchronizerId, ...}), independent
+// of main.go's internal decode types, so the test pins the actual wire contract rather than a
+// struct's shape. synchronizerId is a SIBLING of createdEvent, not nested inside it (confirmed
+// live).
 func acsContractJSON(templateID, contractID, blob, synchronizerID string) string {
 	return fmt.Sprintf(
-		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"createdEventBlob":%q,"synchronizerId":%q}}}}`,
+		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"createdEventBlob":%q},"synchronizerId":%q}}}`,
 		contractID, templateID, blob, synchronizerID,
 	)
 }
@@ -235,7 +284,7 @@ func TestHandleDisclosures_RejectsUnknownTemplate(t *testing.T) {
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("active-contracts must not be queried for a rejected request")
 	})
-	srv := newTestServer(t, upstream, "Alice", []string{"Wormhole.Ntt.Manager:NttManager"})
+	srv := newTestServer(t, upstream, "Alice", []string{"#ntt:Wormhole.Ntt.Manager:NttManager"})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/disclosures?template=Evil.Module:Backdoor", nil)
@@ -245,8 +294,30 @@ func TestHandleDisclosures_RejectsUnknownTemplate(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Evil.Module:Backdoor")
 }
 
+// TestHandleDisclosures_TailOnlyClientRequestForwardedQualified pins the 403 gate's matching
+// rule: a client may ask by bare "Module:Entity" tail. The gate matches it against the
+// allow-list by tail and forwards the CONFIGURED, package-qualified name upstream.
+func TestHandleDisclosures_TailOnlyClientRequestForwardedQualified(t *testing.T) {
+	const tail = "Wormhole.Ntt.Manager:NttManager"
+	const qualified = "#ntt:" + tail
+	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		_, tmpl := decodeRequestedTemplate(t, r)
+		assert.Equal(t, qualified, tmpl)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	})
+	srv := newTestServer(t, upstream, "Alice", []string{qualified})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/disclosures?template="+tail, nil)
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+}
+
 func TestHandleDisclosures_HappyPath(t *testing.T) {
-	const template = "Wormhole.Ntt.Manager:NttManager"
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		party, tmpl := decodeRequestedTemplate(t, r)
 		assert.Equal(t, "Alice", party)
@@ -277,8 +348,8 @@ func TestHandleDisclosures_HappyPath(t *testing.T) {
 }
 
 func TestHandleDisclosures_MultipleTemplates(t *testing.T) {
-	const tA = "Wormhole.Core.State:CoreState"
-	const tB = "Wormhole.Core.State:Emitter"
+	const tA = "#wormhole-core:Wormhole.Core.State:CoreState"
+	const tB = "#wormhole-core:Wormhole.Core.State:Emitter"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_, tmpl := decodeRequestedTemplate(t, r)
 		body := "[" + acsContractJSON("pkg1:"+tmpl, "cid-"+tmpl, "Yg==", "") + "]"
@@ -323,7 +394,7 @@ func TestHandleDisclosures_WholeAllowListDefault(t *testing.T) {
 }
 
 func TestHandleDisclosures_UpstreamError(t *testing.T) {
-	const template = "Wormhole.Ntt.Manager:NttManager"
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	})
@@ -337,7 +408,7 @@ func TestHandleDisclosures_UpstreamError(t *testing.T) {
 }
 
 func TestHandleDisclosures_OverflowCapRejectsRatherThanTruncates(t *testing.T) {
-	const template = "Wormhole.Ntt.Manager:NttManager"
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		items := make([]string, 0, 3)
 		for i := 0; i < 3; i++ {
@@ -361,7 +432,7 @@ func TestHandleDisclosures_OverflowCapRejectsRatherThanTruncates(t *testing.T) {
 }
 
 func TestHandleDisclosures_EmptyResultIsValid(t *testing.T) {
-	const template = "Wormhole.Ntt.Manager:NttManager"
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -378,7 +449,7 @@ func TestHandleDisclosures_EmptyResultIsValid(t *testing.T) {
 }
 
 func TestHandleDisclosures_MismatchedUpstreamTemplateRejected(t *testing.T) {
-	const template = "Wormhole.Ntt.Manager:NttManager"
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		// Upstream returns a contract under a completely different template -- must not be
 		// trusted blindly even though it came back on the requested-template query.
@@ -454,17 +525,43 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "secret-token-value", token) // trimmed
 
-	const template = "Wormhole.Ntt.Manager:NttManager"
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, capture := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, token)
+	client := newHTTPACSClient(upstream.URL, tokenPath)
 	_, err = client.ActiveContracts(context.Background(), "Alice", template)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
+}
+
+// TestBearerTokenRereadOnEveryRequest pins FIX 4: each upstream request reads the token file
+// fresh, so a rotated token takes effect on the next request.
+func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("first-token\n"), 0o600))
+
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
+	upstream, capture := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	})
+
+	client := newHTTPACSClient(upstream.URL, tokenPath)
+	_, err := client.ActiveContracts(context.Background(), "Alice", template)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer first-token", capture.get())
+
+	require.NoError(t, os.WriteFile(tokenPath, []byte("second-token\n"), 0o600))
+
+	_, err = client.ActiveContracts(context.Background(), "Alice", template)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer second-token", capture.get())
 }
 
 // ---------------------------------------------------------------------------

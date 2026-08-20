@@ -18,7 +18,13 @@ The service exposes two endpoints:
   an allow-listed template, with each contract's createdEventBlob. The
   service reads these contracts from the JSON Ledger API v2.
 
-A template not on the allow-list gets a 403 response.
+A template not on the allow-list gets a 403 response. The allow-list uses
+package-qualified names, for example `#ntt:Wormhole.Ntt.Manager:NttManager`.
+A `template` query value can give just the `Module:Entity` tail; the service
+matches it against the allow-list and forwards the qualified name upstream.
+
+The service re-reads `--access-token-file` on each upstream request. An
+operator can rotate the token file's contents without a restart.
 
 Build and run the service:
 
