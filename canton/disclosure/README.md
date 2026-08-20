@@ -26,12 +26,17 @@ matches it against the allow-list and forwards the qualified name upstream.
 The service re-reads `--access-token-file` on each upstream request. An
 operator can rotate the token file's contents without a restart.
 
+`--disclosing-party` names the disclosing party: the party as which the
+service reads the ledger. Every served blob is a contract this party sees.
+The disclosing party is the source of the disclosures; the submitter that
+attaches them is a different party.
+
 Build and run the service:
 
 1. Go to the service directory. Run `cd canton/disclosure/service`.
 2. Build the binary. Run `go build -o disclosure-service .`.
-3. Start the service. Run `./disclosure-service --json-api <url> --party
-   <reading-party> [--access-token-file <jwt-file>]`.
+3. Start the service. Run `./disclosure-service --json-api <url>
+   --disclosing-party <party> [--access-token-file <jwt-file>]`.
 
 ## Deployment posture
 

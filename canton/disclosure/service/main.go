@@ -40,7 +40,7 @@ const (
 type options struct {
 	listen                  string
 	jsonAPIBaseURL          string
-	party                   string
+	disclosingParty         string
 	accessTokenFile         string
 	allowListPath           string
 	maxContractsPerTemplate int
@@ -56,7 +56,7 @@ func parseFlags(args []string) (*options, error) {
 
 	listen := fs.String("listen", defaultListen, "address to listen on")
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
-	party := fs.String("party", "", "reading party whose ACS is served (required)")
+	disclosingParty := fs.String("disclosing-party", "", "the disclosing party: the party as which the service reads the ledger; every served disclosure is a contract this party sees (required)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
 	allowList := fs.String("allow-list", "", "path to a JSON array of package-qualified \"#name:Module:Entity\" template names, overriding the built-in allow-list")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
@@ -68,8 +68,8 @@ func parseFlags(args []string) (*options, error) {
 	if *jsonAPI == "" {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://localhost:6975)")
 	}
-	if *party == "" {
-		return nil, fmt.Errorf("disclosure-service: --party is required (the reading party whose ACS this service serves)")
+	if *disclosingParty == "" {
+		return nil, fmt.Errorf("disclosure-service: --disclosing-party is required (the party as which the service reads the ledger)")
 	}
 	if *listen == "" {
 		return nil, fmt.Errorf("disclosure-service: --listen must not be empty")
@@ -80,7 +80,7 @@ func parseFlags(args []string) (*options, error) {
 	return &options{
 		listen:                  *listen,
 		jsonAPIBaseURL:          *jsonAPI,
-		party:                   *party,
+		disclosingParty:         *disclosingParty,
 		accessTokenFile:         *tokenFile,
 		allowListPath:           *allowList,
 		maxContractsPerTemplate: *maxContracts,
@@ -186,7 +186,7 @@ type ledgerEnder interface {
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
-// request body: one filtersByParty entry for the reading party, one cumulative template filter
+// request body: one filtersByParty entry for the disclosing party, one cumulative template filter
 // per call, includeCreatedEventBlob:true. Shape confirmed live against a real participant (see
 // canton/disclosure-service-port's internal/disclosure/acs.go).
 type activeContractsRequest struct {
@@ -403,9 +403,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type healthzResponse struct {
-	Party     string `json:"party"`
-	Templates int    `json:"templates"`
-	LedgerEnd int64  `json:"ledgerEnd,omitempty"`
+	DisclosingParty string `json:"disclosingParty"`
+	Templates       int    `json:"templates"`
+	LedgerEnd       int64  `json:"ledgerEnd,omitempty"`
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -414,8 +414,8 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := healthzResponse{
-		Party:     s.opts.party,
-		Templates: len(s.allowListOrdered),
+		DisclosingParty: s.opts.disclosingParty,
+		Templates:       len(s.allowListOrdered),
 	}
 	if le, ok := s.acs.(ledgerEnder); ok {
 		if offset, err := le.LedgerEnd(r.Context()); err == nil {
@@ -463,7 +463,7 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]discloseEntry, 0)
 	for _, t := range resolved {
-		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.party, t)
+		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParty, t)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), http.StatusBadGateway)
 			return
@@ -545,7 +545,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
 
-	fmt.Fprintf(stderr, "disclosure-service: fronting party %s, %d allow-listed template(s)\n", opts.party, len(allowList))
+	fmt.Fprintf(stderr, "disclosure-service: disclosing party %s, %d allow-listed template(s)\n", opts.disclosingParty, len(allowList))
 	fmt.Fprintln(stderr, "disclosure-service: WARNING unauthenticated harness/ops-grade service -- do not expose beyond a trusted network")
 	if host, _, splitErr := net.SplitHostPort(ln.Addr().String()); splitErr == nil {
 		if host != "127.0.0.1" && host != "::1" && host != "localhost" {

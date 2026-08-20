@@ -24,11 +24,11 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestParseFlags_Defaults(t *testing.T) {
-	opts, err := parseFlags([]string{"--json-api", "http://localhost:6975", "--party", "Alice"})
+	opts, err := parseFlags([]string{"--json-api", "http://localhost:6975", "--disclosing-party", "Alice"})
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1:7599", opts.listen)
 	assert.Equal(t, "http://localhost:6975", opts.jsonAPIBaseURL)
-	assert.Equal(t, "Alice", opts.party)
+	assert.Equal(t, "Alice", opts.disclosingParty)
 	assert.Equal(t, "", opts.accessTokenFile)
 	assert.Equal(t, "", opts.allowListPath)
 	assert.Equal(t, 1000, opts.maxContractsPerTemplate)
@@ -37,7 +37,7 @@ func TestParseFlags_Defaults(t *testing.T) {
 
 func TestParseFlags_MaxContractsPerTemplate(t *testing.T) {
 	opts, err := parseFlags([]string{
-		"--json-api", "http://localhost:6975", "--party", "Alice",
+		"--json-api", "http://localhost:6975", "--disclosing-party", "Alice",
 		"--max-contracts-per-template", "50000",
 	})
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestParseFlags_MaxContractsPerTemplate_RejectsNonPositive(t *testing.T) {
 	for _, bad := range []string{"0", "-1"} {
 		t.Run(bad, func(t *testing.T) {
 			_, err := parseFlags([]string{
-				"--json-api", "http://localhost:6975", "--party", "Alice",
+				"--json-api", "http://localhost:6975", "--disclosing-party", "Alice",
 				"--max-contracts-per-template", bad,
 			})
 			require.Error(t, err)
@@ -68,13 +68,13 @@ func TestParseFlags_MissingRequired(t *testing.T) {
 	}{
 		{
 			name:       "missing json-api",
-			args:       []string{"--party", "Alice"},
+			args:       []string{"--disclosing-party", "Alice"},
 			wantErrSub: "--json-api",
 		},
 		{
 			name:       "missing party",
 			args:       []string{"--json-api", "http://localhost:6975"},
-			wantErrSub: "--party",
+			wantErrSub: "--disclosing-party",
 		},
 		{
 			name:       "missing both",
@@ -239,7 +239,7 @@ func (a *authCapture) get() string {
 	return a.last
 }
 
-// decodeRequestedTemplate pulls the single requested templateId (and reading party) out of an
+// decodeRequestedTemplate pulls the single requested templateId (and disclosing party) out of an
 // active-contracts request body, matching activeContractsRequest's shape in main.go.
 func decodeRequestedTemplate(t *testing.T, r *http.Request) (party, template string) {
 	t.Helper()
@@ -275,7 +275,7 @@ func acsContractJSON(templateID, contractID, blob, synchronizerID string) string
 
 func newTestServer(t *testing.T, upstream *httptest.Server, party string, allowList []string) *server {
 	t.Helper()
-	opts := &options{party: party, jsonAPIBaseURL: upstream.URL, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
+	opts := &options{disclosingParty: party, jsonAPIBaseURL: upstream.URL, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
 	acs := newHTTPACSClient(upstream.URL, "")
 	return newServer(opts, allowList, acs)
 }
@@ -507,7 +507,7 @@ func TestHandleHealthz(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	var got healthzResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	assert.Equal(t, "Alice", got.Party)
+	assert.Equal(t, "Alice", got.DisclosingParty)
 	assert.Equal(t, 2, got.Templates)
 	assert.Equal(t, int64(42), got.LedgerEnd) // from the fake's fixed ledger-end offset
 }
@@ -607,7 +607,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 	opts := &options{
 		listen:                  "127.0.0.1:0",
 		jsonAPIBaseURL:          upstream.URL,
-		party:                   "Alice",
+		disclosingParty:         "Alice",
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
 	}
 
