@@ -44,6 +44,7 @@ import DA.Optional (fromSome)
 
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.TransferInstructionV1 (TransferFactory)
+import Token.CIP0056.CoinTransfer (TransferPreapproval(..))
 
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.VAA (parseVAA)
@@ -356,7 +357,7 @@ testTransferDisclosuresLockUnlockCrossHostedUser = do
       extraArgs = emptyExtraArgs
   let d' = d with mgrCid, ledgerCid = ledgerCid', emitterCid
 
-  discs <- transferDisclosures operator gg mgrCid emitterCid csId ledgerCid'
+  discs <- transferDisclosures operator gg mgrCid emitterCid csId ledgerCid' None
     (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
     (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
     (discloseConcrete @MockBurnMintFactory gg "committed BurnMintFactory")
@@ -384,7 +385,7 @@ testTransferDisclosuresBurnMintCrossHostedUser = do
   (d, _) <- sendScaffold operator gg admin BurnMint csId
   holding <- mkHolding gg bob d.instrumentId 0.01
 
-  discs <- transferDisclosures operator gg d.mgrCid d.emitterCid csId None
+  discs <- transferDisclosures operator gg d.mgrCid d.emitterCid csId None None
     (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
     (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
     (discloseConcrete @MockBurnMintFactory gg "committed BurnMintFactory")
@@ -396,6 +397,30 @@ testTransferDisclosuresBurnMintCrossHostedUser = do
   _ <- submitWithDiscs bob discs do sendTransfer bob d csId [holding]
   remaining <- cip56HoldingsOwnedBy gg bob
   remaining === []   -- exact burn, no change
+
+-- | The custodian TransferPreapproval leg. 'TransferPreapproval' is
+-- owner-only-signed, so a real one is created directly rather than mocked.
+-- The mock 'MockTransferFactory' used elsewhere in this suite never reads
+-- it, so there is no live submission to drop-one test against here -- see
+-- the module header's known limits.
+testTransferDisclosuresCustodianPreapproval : Script ()
+testTransferDisclosuresCustodianPreapproval = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "XferDiscPreapprovalAdmin"
+  (d, _) <- sendScaffold operator gg admin LockUnlock csId
+  preapprovalCid <- submit admin do
+    createCmd TransferPreapproval with owner = admin, instrumentId = d.instrumentId
+
+  discsWithout <- transferDisclosures operator gg d.mgrCid d.emitterCid csId d.ledgerCid None
+    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
+    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+    (discloseConcrete @MockBurnMintFactory gg "committed BurnMintFactory")
+  discsWith <- transferDisclosures operator gg d.mgrCid d.emitterCid csId d.ledgerCid (Some preapprovalCid)
+    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
+    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+    (discloseConcrete @MockBurnMintFactory gg "committed BurnMintFactory")
+
+  length discsWith === length discsWithout + 1
 
 ----------------------------------------------------------------------
 -- registerDisclosures
