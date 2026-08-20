@@ -9,6 +9,9 @@
 --
 -- This module defines one function per flow. Each function returns that
 -- flow's disclosure set. This module is the only definition of these sets.
+-- The Go service's per-flow endpoints (canton/disclosure/service) mirror
+-- this table for callers that submit over the Ledger API; keep the two in
+-- step when a set changes.
 --
 -- The sets (each lists only what a non-stakeholder must attach):
 --

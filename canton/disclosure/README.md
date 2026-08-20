@@ -11,12 +11,35 @@ its disclosure set. Read that table for the current set contents.
 
 ## Service
 
-The service exposes two endpoints:
+The service exposes three endpoints:
 
 - `GET /v1/healthz` — a liveness check.
 - `GET /v1/disclosures?template=Module:Entity` — the active contracts for
   an allow-listed template, with each contract's createdEventBlob. The
   service reads these contracts from the JSON Ledger API v2.
+- `GET /v1/flows/{flow}` — one NTT flow's assembled disclosure set, each
+  contract labeled by its role. The service selects natively in Go over
+  decoded `createArgument` payloads; it runs no Daml interpreter. `flow` and
+  its query parameters:
+
+  | Flow | Params |
+  |---|---|
+  | `release` | `manager`, `digest`, `recipient` (optional) |
+  | `mint` | `manager`, `digest`, `recipient` |
+  | `set-peer` | `manager`, `digest` |
+  | `accept-admin` | `manager`, `digest` |
+  | `transfer` | `manager` |
+  | `register` | `gg` (optional), `by-vaa` (bool, optional) |
+  | `consolidate` | `manager` |
+
+  `manager` and `digest` are hex strings, 64 characters (32 bytes) each.
+  The response carries a `disclosures` array (role, templateId, contractId,
+  createdEventBlob, synchronizerId) and a `missing` array naming set members
+  the disclosing party cannot see (owner-only contracts such as
+  `AdminTransferProposal` and `TransferPreapproval`); the client supplies
+  those itself. `canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml`'s
+  module header is the canonical definition of each flow's set; this
+  service mirrors its table.
 
 A template not on the allow-list gets a 403 response. The allow-list uses
 package-qualified names, for example `#ntt:Wormhole.Ntt.Manager:NttManager`.
