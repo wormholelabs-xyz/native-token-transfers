@@ -16,10 +16,10 @@ import (
 // ---------------------------------------------------------------------------
 //
 // /v1/flows/{flow} assembles one NTT flow's disclosure set natively in Go, selecting over
-// decoded createArgument payloads instead of running a Daml interpreter.
-// canton/test/daml/Wormhole/Ntt/Disclosure.daml is the canonical definition of each flow's
-// set; this section mirrors its table and reuses its role labels 1:1. Keep the two in step when
-// a flow's set changes.
+// decoded createArgument payloads. Each set is derived from its choice body in
+// canton/ntt/daml/Wormhole/Ntt/Manager.daml: the set holds exactly the contracts the choice
+// fetches that a non-stakeholder submitter cannot see. Update the flow's assembler when a
+// choice body gains or loses a fetch.
 
 // Template tails this handler fetches. Each is present in defaultAllowList.
 const (
@@ -38,7 +38,7 @@ const (
 	tailTransferPreapproval   = "Token.CIP0056.CoinTransfer:TransferPreapproval"
 )
 
-// Role labels, reused 1:1 from Wormhole.Ntt.Disclosure so the two definitions diff cleanly.
+// Role labels: one per set member, served to clients on each disclosure entry.
 const (
 	roleNttManager                   = "NttManager"
 	roleCoreState                    = "CoreState"
@@ -74,7 +74,7 @@ const (
 // of that contract, so the client must supply it.
 const reasonNotVisible = "no matching contract visible to the disclosing party"
 
-// --- Decode shapes: Wormhole.Ntt.Disclosure's Daml-JSON createArgument payloads ---
+// --- Decode shapes: the templates' Daml-JSON createArgument payloads ---
 
 // daInstrumentId decodes Splice.Api.Token.HoldingV1.InstrumentId.
 type daInstrumentId struct {
@@ -337,7 +337,7 @@ func (s *server) fetchEntries(ctx context.Context, tail string, offset int64) ([
 	return entries, nil
 }
 
-// --- Role selectors: one per Wormhole.Ntt.Disclosure selection rule ---
+// --- Role selectors: one per set member ---
 
 // findManager returns the NttManager whose managerAddress equals manager (already normalized:
 // lowercase, 64 hex chars). Zero matches is a 404: the client named an unknown deployment. Two
@@ -385,8 +385,9 @@ func findGuardianAnchor(entries []decodedEntry[daGuardianAnchor], gg, label stri
 	}
 }
 
-// coveringReplayNode finds the one node of consumer's namespace trie that covers digest,
-// mirroring Wormhole.Ntt.Disclosure.coveringNode's partition invariant.
+// coveringReplayNode finds the one node of consumer's namespace trie that covers digest.
+// Exactly one node covers any digest (the trie partition invariant); more or fewer shows a
+// forked or broken trie.
 func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer, namespace, digest string) (decodedEntry[daReplayNode], error) {
 	return exactlyOne(entries, roleCoveringReplayNode, func(e decodedEntry[daReplayNode]) bool {
 		return e.value.Consumer == consumer &&

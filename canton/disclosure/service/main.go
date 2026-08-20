@@ -1,8 +1,7 @@
 // Command disclosure-service is a production-runnable HTTP endpoint. It serves createdEventBlobs
-// for a hardcoded allow-list of Daml templates. It reads the templates from one stakeholder
-// participant's ACS over the JSON Ledger API v2. This binary is the transport half. The
-// canonical per-flow disclosure sets live in the Daml library Wormhole.Ntt.Disclosure. This
-// binary serves the flat union of templates that library names.
+// for a hardcoded allow-list of Daml templates, read from one stakeholder participant's ACS over
+// the JSON Ledger API v2. /v1/flows/{flow} assembles a whole flow's disclosure set; each set is
+// derived from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml (see flows.go).
 //
 // Posture: the service is unauthenticated and harness/ops-grade. It listens on loopback by
 // default. The --access-token-file flag adds a single shared bearer token. The service forwards

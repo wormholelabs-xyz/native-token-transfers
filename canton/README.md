@@ -27,7 +27,7 @@ trie, disclosed-cid submission, the trust model) is in the core
 | --- | --- |
 | `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
 | `disclosure/service` | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md). |
-| `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. Also holds `Wormhole.Ntt.Disclosure`, the executable specification of the per-flow disclosure sets, proven by `Test.TestDisclosure`. |
+| `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
 | `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
@@ -39,7 +39,7 @@ reason.)
 ## Build & test
 
 Requires the `dpm` toolchain (Daml SDK 3.5.1, declared in every `daml.yaml`)
-and a JDK. All three packages build against the vendored core and CIP-0056
+and a JDK. Both packages build against the vendored core and CIP-0056
 interface DARs; core is never rebuilt here.
 
 ```sh
