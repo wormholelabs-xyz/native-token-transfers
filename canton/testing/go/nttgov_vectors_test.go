@@ -200,6 +200,37 @@ func TestReproduceAcceptAdminHappyVAA(t *testing.T) {
 	require.Equal(t, want, got, "encoder/signer no longer reproduces the pinned acceptAdminHappyVAA fixture")
 }
 
+// coreModuleBytes is "Core" (0x436f7265) left-padded to 32 bytes --
+// Wormhole.Core.Governance.coreModule.
+func coreModuleBytes() []byte {
+	m := make([]byte, 32)
+	copy(m[28:], []byte{0x43, 0x6f, 0x72, 0x65})
+	return m
+}
+
+// encodeSetMessageFeePayload mirrors Wormhole.Core.Governance's SetMessageFee
+// wire format: module ‖ action(1)=3 ‖ chain(2) ‖ fee(32) -- 67 bytes.
+func encodeSetMessageFeePayload(chain uint16, fee uint64) []byte {
+	p := coreModuleBytes()
+	p = append(p, 0x03)
+	p = append(p, be16(chain)...)
+	feeBytes := make([]byte, 32)
+	binary.BigEndian.PutUint64(feeBytes[24:], fee)
+	return append(p, feeBytes...)
+}
+
+// TestReproduceGovSetFeeVAA regenerates Test.TestCore's govSetFeeVAA
+// byte-for-byte: SetMessageFee(chain=75, fee=1000) for wormhole-core 0.5.0's
+// cantonChainId. If it fails, this encoder has drifted from the wire format
+// -- fix here, not the Daml constant.
+func TestReproduceGovSetFeeVAA(t *testing.T) {
+	payload := encodeSetMessageFeePayload(75, 1000)
+	body := buildGovernanceVAABody(govEmitterChain, govEmitterAddress(), 1, payload)
+	got := hex.EncodeToString(signGovernanceVAA(t, body))
+	want := "01000000000100797d5065f8fef799fdfb8e1042eccc143a77b35a4d9d2689474cdbf8500bffe46678c27b114d015c45f175fb5bd687cff92c4238d31035bacb65ddf8ae99b6f8006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000010000000000000000000000000000000000000000000000000000000000436f726503004b00000000000000000000000000000000000000000000000000000000000003e8"
+	require.Equal(t, want, got, "encoder/signer no longer reproduces the pinned govSetFeeVAA fixture")
+}
+
 // TestPinnedRegisterBurnMintManagerPayload pins the action-2 payload encoding
 // -- ground truth for Test.TestNtt's codec round-trip and registerHappyVAA below.
 func TestPinnedRegisterBurnMintManagerPayload(t *testing.T) {
