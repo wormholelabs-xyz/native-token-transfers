@@ -49,10 +49,13 @@ matches it against the allow-list and forwards the qualified name upstream.
 The service re-reads `--access-token-file` on each upstream request. An
 operator can rotate the token file's contents without a restart.
 
-`--disclosing-party` names the disclosing party: the party as which the
-service reads the ledger. Every served blob is a contract this party sees.
-The disclosing party is the source of the disclosures; the submitter that
-attaches them is a different party.
+`--disclosing-party` names the disclosing parties, comma-separated: the
+parties as which the service reads the ledger. Every served blob is a
+contract at least one of them sees. The access token must grant readAs for
+each party, and one participant must host them all. One service with the
+full party list replaces one service per party. The disclosing parties are
+the source of the disclosures; the submitter that attaches them is a
+different party.
 
 Build and run the service:
 
@@ -60,6 +63,21 @@ Build and run the service:
 2. Build the binary. Run `go build -o disclosure-service .`.
 3. Start the service. Run `./disclosure-service --json-api <url>
    --disclosing-party <party> [--access-token-file <jwt-file>]`.
+
+## Container
+
+`service/Dockerfile` builds a static binary on a distroless base. Build and
+run:
+
+1. Build the image. Run `docker build -t disclosure-service canton/disclosure/service`.
+2. Start the container. Run `docker run --rm -p 127.0.0.1:7599:7599
+   -v <token-dir>:/secrets:ro disclosure-service --listen 0.0.0.0:7599
+   --json-api <url> --disclosing-party <p1,p2,...>
+   --access-token-file /secrets/token`.
+
+Inside a container, pass `--listen 0.0.0.0:7599`; the loopback default is
+unreachable through a published port. The service re-reads the token file
+per request, so an external refresher can rotate the mounted file.
 
 ## Deployment posture
 

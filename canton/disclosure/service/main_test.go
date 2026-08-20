@@ -29,7 +29,7 @@ func TestParseFlags_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1:7599", opts.listen)
 	assert.Equal(t, "http://localhost:6975", opts.jsonAPIBaseURL)
-	assert.Equal(t, "Alice", opts.disclosingParty)
+	assert.Equal(t, []string{"Alice"}, opts.disclosingParties)
 	assert.Equal(t, "", opts.accessTokenFile)
 	assert.Equal(t, "", opts.allowListPath)
 	assert.Equal(t, 1000, opts.maxContractsPerTemplate)
@@ -288,7 +288,7 @@ func acsContractJSON(templateID, contractID, blob, synchronizerID string) string
 
 func newTestServer(t *testing.T, upstream *httptest.Server, party string, allowList []string) *server {
 	t.Helper()
-	opts := &options{disclosingParty: party, jsonAPIBaseURL: upstream.URL, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
+	opts := &options{disclosingParties: []string{party}, jsonAPIBaseURL: upstream.URL, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
 	acs := newHTTPACSClient(upstream.URL, "")
 	return newServer(opts, allowList, acs)
 }
@@ -520,7 +520,7 @@ func TestHandleHealthz(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	var got healthzResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	assert.Equal(t, "Alice", got.DisclosingParty)
+	assert.Equal(t, []string{"Alice"}, got.DisclosingParties)
 	assert.Equal(t, 2, got.Templates)
 	assert.Equal(t, int64(42), got.LedgerEnd) // from the fake's fixed ledger-end offset
 }
@@ -546,7 +546,7 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, tokenPath)
-	_, err = client.ActiveContracts(context.Background(), "Alice", template, 42)
+	_, err = client.ActiveContracts(context.Background(), []string{"Alice"}, template, 42)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
 }
@@ -566,13 +566,13 @@ func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, tokenPath)
-	_, err := client.ActiveContracts(context.Background(), "Alice", template, 42)
+	_, err := client.ActiveContracts(context.Background(), []string{"Alice"}, template, 42)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer first-token", capture.get())
 
 	require.NoError(t, os.WriteFile(tokenPath, []byte("second-token\n"), 0o600))
 
-	_, err = client.ActiveContracts(context.Background(), "Alice", template, 42)
+	_, err = client.ActiveContracts(context.Background(), []string{"Alice"}, template, 42)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer second-token", capture.get())
 }
@@ -620,7 +620,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 	opts := &options{
 		listen:                  "127.0.0.1:0",
 		jsonAPIBaseURL:          upstream.URL,
-		disclosingParty:         "Alice",
+		disclosingParties:       []string{"Alice"},
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
 	}
 
