@@ -1,13 +1,13 @@
 # canton/disclosure
 
-This directory holds the two disclosure parts. The `ntt-disclosure` Daml
-package defines the disclosure set for each NTT flow. The `service/` Go
-module serves the sets' createdEventBlobs over HTTP.
+This directory holds the `service/` Go module: the production disclosure
+service. It serves each NTT flow's createdEventBlobs over HTTP.
 
-## Daml library
-
-The module header of `daml/Wormhole/Ntt/Disclosure.daml` lists each flow and
-its disclosure set. Read that table for the current set contents.
+The executable specification of the sets lives in the test package:
+`canton/test/daml/Wormhole/Ntt/Disclosure.daml`. Its module header lists
+each flow and its set, and `Test.TestDisclosure` proves each set sufficient
+and minimal against the real NTT choices. The specification runs only in
+tests; this service is the production artifact.
 
 ## Service
 
@@ -37,7 +37,7 @@ The service exposes three endpoints:
   createdEventBlob, synchronizerId) and a `missing` array naming set members
   the disclosing party cannot see (owner-only contracts such as
   `AdminTransferProposal` and `TransferPreapproval`); the client supplies
-  those itself. `canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml`'s
+  those itself. `canton/test/daml/Wormhole/Ntt/Disclosure.daml`'s
   module header is the canonical definition of each flow's set; this
   service mirrors its table.
 
