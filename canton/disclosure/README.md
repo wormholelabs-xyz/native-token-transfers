@@ -3,11 +3,10 @@
 This directory holds the `service/` Go module: the production disclosure
 service. It serves each NTT flow's createdEventBlobs over HTTP.
 
-The executable specification of the sets lives in the test package:
-`canton/test/daml/Wormhole/Ntt/Disclosure.daml`. Its module header lists
-each flow and its set, and `Test.TestDisclosure` proves each set sufficient
-and minimal against the real NTT choices. The specification runs only in
-tests; this service is the production artifact.
+Each flow's set is derived from its choice body in
+`canton/ntt/daml/Wormhole/Ntt/Manager.daml`: the set holds exactly the
+contracts the choice fetches that a non-stakeholder submitter cannot see.
+The per-flow endpoint table below lists the sets.
 
 ## Service
 
@@ -37,9 +36,7 @@ The service exposes three endpoints:
   createdEventBlob, synchronizerId) and a `missing` array naming set members
   the disclosing party cannot see (owner-only contracts such as
   `AdminTransferProposal` and `TransferPreapproval`); the client supplies
-  those itself. `canton/test/daml/Wormhole/Ntt/Disclosure.daml`'s
-  module header is the canonical definition of each flow's set; this
-  service mirrors its table.
+  those itself.
 
 A template not on the allow-list gets a 403 response. The allow-list uses
 package-qualified names, for example `#ntt:Wormhole.Ntt.Manager:NttManager`.

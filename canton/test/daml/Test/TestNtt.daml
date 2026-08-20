@@ -59,11 +59,10 @@ import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Governance
 import Test.MockToken (mintAndAllocate, mockBalance)
-import Test.TestReplay (registerReplayRoot)
+import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 import Test.TestCore
   ( setup, setupWithInstrument
   , govSetFeeVAA, devnetGuardianPubKey, devnetGuardian )
-import Wormhole.Ntt.Disclosure (releaseDisclosures, acceptAdminDisclosures, discloseConcrete, coveringDisclosure)
 
 ----------------------------------------------------------------------
 -- CIP-56 mocks: local implementations of the vendored Holding /
@@ -2468,11 +2467,13 @@ testReceiveByExecutorRecipientMismatchFails = do
   relayer <- allocateParty "Relayer"
   wrongRecipient <- allocateParty "WrongRecipient"
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest None
-    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
-    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+  Some mgr <- queryContractId operator mgrCid
+  (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
+  dMgr <- fromSome <$> queryDisclosure operator mgrCid
+  dCs  <- fromSome <$> queryDisclosure operator csId
+  dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
 
-  res <- trySubmitWithDiscs relayer discs do
+  res <- trySubmitWithDiscs relayer [dMgr, dCs, nodeDisc, dLedger] do
     exerciseCmd mgrCid Release with
       executor = relayer
       coreStateCid = csId
@@ -2498,11 +2499,13 @@ testReceiveWrongChainRejected = do
   recipient <- allocateParty "WrongChainRecipient"
   -- Same fixed deployment, but its own chain id is 99, not the fixture's 72.
   (mgrCid, _, ledgerCid) <- setupFixedManagerOn operator gg admin LockUnlock 99 csId
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest None
-    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
-    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+  Some mgr <- queryContractId operator mgrCid
+  (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
+  dMgr <- fromSome <$> queryDisclosure operator mgrCid
+  dCs  <- fromSome <$> queryDisclosure operator csId
+  dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
 
-  res <- trySubmitWithDiscs relayer discs do
+  res <- trySubmitWithDiscs relayer [dMgr, dCs, nodeDisc, dLedger] do
     exerciseCmd mgrCid Release with
       executor = relayer
       coreStateCid = csId
@@ -2548,13 +2551,13 @@ testReleaseReplayPathAfterAdminTransfer = do
   mgrAfter.guardianGovernance === mgrBefore.guardianGovernance
   mgrAfter.managerAddress === mgrBefore.managerAddress
 
-  (nodeCidCheck, _) <- coveringDisclosure operator gg mgrAfter.namespace nttTransferDigest
-  nodeCidCheck === rootBefore
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest None
-    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
-    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+  (nodeCid, nodeDisc) <- coveringDisclosure operator gg mgrAfter.namespace nttTransferDigest
+  nodeCid === rootBefore
+  dMgr <- fromSome <$> queryDisclosure operator mgrCid
+  dCs  <- fromSome <$> queryDisclosure operator csId
+  dLedger <- fromSome <$> queryDisclosure operator (fromSome ledgerCid)
 
-  res <- trySubmitWithDiscs relayer discs do
+  res <- trySubmitWithDiscs relayer [dMgr, dCs, nodeDisc, dLedger] do
     exerciseCmd mgrCid Release with
       executor = relayer
       coreStateCid = csId
@@ -2813,18 +2816,23 @@ acceptAdminFixture operator gg admin config csId = do
   pure AcceptAdminFixture with mgrCid, factory, ledgerCid, propCid, namespace = mgr.namespace
 
 -- | Disclosures a stakeholder-less @executor@ needs to relay
--- 'AcceptAdminTransferByVaa': see 'Wormhole.Ntt.Disclosure.acceptAdminDisclosures',
--- which this delegates to. Every existing caller here fixes either a
--- BurnMint deployment or a zero-balance LockUnlock one, so the pot/factory
--- discloser callbacks are never actually invoked; they still need a
--- concrete backing type, so this passes the mock templates in scope.
+-- 'AcceptAdminTransferByVaa': manager, core state, covering replay node, and
+-- the standing proposal (queried as @admin@ — @operator@ is not a
+-- stakeholder of 'AdminTransferProposal'), plus the ledger for lock/unlock.
 acceptAdminDiscs
   : Party -> Party -> Party -> ContractId CoreState -> AcceptAdminFixture -> Text
   -> Script (ContractId ReplayNode, [Disclosure])
-acceptAdminDiscs operator gg admin csId fx digest =
-  acceptAdminDisclosures operator gg admin fx.mgrCid csId fx.propCid fx.ledgerCid digest
-    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
-    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+acceptAdminDiscs operator gg admin csId fx digest = do
+  dMgr <- fromSome <$> queryDisclosure operator fx.mgrCid
+  dCs <- fromSome <$> queryDisclosure operator csId
+  (nodeCid, dNode) <- coveringDisclosure operator gg fx.namespace digest
+  dProp <- fromSome <$> queryDisclosure admin fx.propCid
+  ledgerDiscs <- case fx.ledgerCid of
+    Some lcid -> do
+      d <- fromSome <$> queryDisclosure operator lcid
+      pure [d]
+    None -> pure []
+  pure (nodeCid, [dMgr, dCs, dNode, dProp] <> ledgerDiscs)
 
 -- | The 'AcceptAdminTransferByVaa' exercise command against an
 -- 'AcceptAdminFixture'.
