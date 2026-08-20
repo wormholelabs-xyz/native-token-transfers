@@ -2468,7 +2468,7 @@ testReceiveByExecutorRecipientMismatchFails = do
   relayer <- allocateParty "Relayer"
   wrongRecipient <- allocateParty "WrongRecipient"
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest
+  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest None
     (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
     (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
 
@@ -2498,7 +2498,7 @@ testReceiveWrongChainRejected = do
   recipient <- allocateParty "WrongChainRecipient"
   -- Same fixed deployment, but its own chain id is 99, not the fixture's 72.
   (mgrCid, _, ledgerCid) <- setupFixedManagerOn operator gg admin LockUnlock 99 csId
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest
+  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest None
     (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
     (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
 
@@ -2550,7 +2550,7 @@ testReleaseReplayPathAfterAdminTransfer = do
 
   (nodeCidCheck, _) <- coveringDisclosure operator gg mgrAfter.namespace nttTransferDigest
   nodeCidCheck === rootBefore
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest
+  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId (fromSome ledgerCid) nttTransferDigest None
     (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
     (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
 

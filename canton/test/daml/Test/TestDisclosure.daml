@@ -21,7 +21,9 @@
 --     two are pinned through 'AcceptAdminTransferByVaa' on a LockUnlock
 --     deployment with a nonzero pot instead. 'TransferAdmin' runs the same
 --     'sumCustodyHoldings' and 'requireTransferFactory' pair, and its VAA
---     binds to a fixed manager address, not to a party hash.
+--     binds to a fixed manager address. The optional recipient
+--     'TransferPreapproval' leg is pinned by set shape only, like the
+--     custodian leg on 'transferDisclosures'.
 --   * Mint fetches 'DepositPreapproval' and the committed 'BurnMintFactory'
 --     after the recipient check, and no other choice fetches them under a
 --     deterministic VAA. Both stay in 'mintDisclosures' (a real relayer
@@ -94,7 +96,7 @@ testReleaseDisclosuresReachablePrefix = do
   wrongRecipient <- allocateParty "RelDiscWrongRecipient"
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   let lcid = fromSome ledgerCid
-  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId lcid nttTransferDigest
+  (nodeCid, discs) <- releaseDisclosures operator gg mgrCid csId lcid nttTransferDigest None
     (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
     (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
   length discs === 5
@@ -198,6 +200,30 @@ testReleaseDisclosuresPotAndFactoryLegs = do
   mgrDone.admin === gg
   Some ledgerDone <- queryContractId operator (fromSome ledgerCid')
   ledgerDone.balance === 0.01
+
+-- | The recipient TransferPreapproval leg, mirroring the custodian leg on
+-- 'transferDisclosures': owner-only-signed, so a real one is created
+-- directly. The pin is set-shape only -- the live settle path needs a
+-- preapproval-settling registry; see the module header's known limits.
+testReleaseDisclosuresRecipientPreapproval : Script ()
+testReleaseDisclosuresRecipientPreapproval = do
+  (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "RelDiscPreAdmin"
+  recipient <- allocateParty "RelDiscPreRecipient"
+  (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
+  let lcid = fromSome ledgerCid
+  Some mgr <- queryContractId operator mgrCid
+  preapprovalCid <- submit recipient do
+    createCmd TransferPreapproval with owner = recipient, instrumentId = mgr.instrumentId
+
+  (_, discsWithout) <- releaseDisclosures operator gg mgrCid csId lcid nttTransferDigest None
+    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
+    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+  (_, discsWith) <- releaseDisclosures operator gg mgrCid csId lcid nttTransferDigest (Some (recipient, preapprovalCid))
+    (discloseConcrete @Cip56MockHolding gg "custody pot Holding")
+    (discloseConcrete @MockTransferFactory gg "committed TransferFactory")
+
+  length discsWith === length discsWithout + 1
 
 ----------------------------------------------------------------------
 -- mintDisclosures
