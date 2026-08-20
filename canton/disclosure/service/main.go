@@ -25,8 +25,13 @@ import (
 const (
 	defaultListen                  = "127.0.0.1:7599"
 	defaultMaxContractsPerTemplate = 1000
-	httpClientTimeout              = 30 * time.Second
-	shutdownTimeout                = 5 * time.Second
+	// Bounds this service's load on the shared participant independently of inbound volume.
+	defaultMaxUpstreamConcurrency = 8
+	// Short enough that a caller rarely sees an archived contract, long enough to collapse
+	// a burst of identical requests into one upstream read.
+	defaultCacheTTL   = 5 * time.Second
+	httpClientTimeout = 30 * time.Second
+	shutdownTimeout   = 5 * time.Second
 	// maxUpstreamResponseBytes caps every upstream response body. The per-template contract cap
 	// fires only after parsing, so this byte ceiling is the earlier bound.
 	maxUpstreamResponseBytes = 64 << 20
@@ -47,6 +52,8 @@ type options struct {
 	accessTokenFile         string
 	allowListPath           string
 	maxContractsPerTemplate int
+	maxUpstreamConcurrency  int
+	cacheTTL                time.Duration
 	verbose                 bool
 }
 
@@ -63,6 +70,8 @@ func parseFlags(args []string) (*options, error) {
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
 	allowList := fs.String("allow-list", "", "path to a JSON array of package-qualified \"#name:Module:Entity\" template names, overriding the built-in allow-list")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
+	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries; excess requests wait briefly, then get a 503")
+	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long; 0 disables the cache")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -100,6 +109,8 @@ func parseFlags(args []string) (*options, error) {
 		accessTokenFile:         *tokenFile,
 		allowListPath:           *allowList,
 		maxContractsPerTemplate: *maxContracts,
+		maxUpstreamConcurrency:  *maxUpstream,
+		cacheTTL:                *cacheTTL,
 		verbose:                 *verbose,
 	}, nil
 }
@@ -128,7 +139,13 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		}
 	}
 
-	acs := newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile)
+	var acs acsClient = newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile)
+	if opts.maxUpstreamConcurrency > 0 {
+		acs = newBoundedACS(acs, opts.maxUpstreamConcurrency)
+	}
+	if opts.cacheTTL > 0 {
+		acs = newCachingACS(acs, opts.cacheTTL)
+	}
 	srv := newServer(opts, allowList, acs)
 
 	ln, err := net.Listen("tcp", opts.listen)

@@ -188,7 +188,7 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 	// One offset for the whole request: a multi-template response is one consistent snapshot.
 	offset, err := s.acs.LedgerEnd(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), upstreamErrorStatus(err))
 		return
 	}
 
@@ -196,7 +196,7 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 	for _, t := range resolved {
 		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParties, t, offset)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), http.StatusBadGateway)
+			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), upstreamErrorStatus(err))
 			return
 		}
 		if msg := s.contractCapError(t, len(entries)); msg != "" {

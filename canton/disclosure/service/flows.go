@@ -329,7 +329,7 @@ func (s *server) fetchEntries(ctx context.Context, tail string, offset int64) ([
 	}
 	entries, err := s.acs.ActiveContracts(ctx, s.opts.disclosingParties, canonical, offset)
 	if err != nil {
-		return nil, newFlowError(http.StatusBadGateway, "query %s: %v", canonical, err)
+		return nil, newFlowError(upstreamErrorStatus(err), "query %s: %v", canonical, err)
 	}
 	if msg := s.contractCapError(canonical, len(entries)); msg != "" {
 		return nil, newFlowError(http.StatusBadGateway, "%s", msg)
@@ -979,7 +979,7 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 
 	offset, err := s.acs.LedgerEnd(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), upstreamErrorStatus(err))
 		return
 	}
 

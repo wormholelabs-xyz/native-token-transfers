@@ -46,6 +46,22 @@ matches it against the allow-list and forwards the qualified name upstream.
 The service re-reads `--access-token-file` on each upstream request. An
 operator can rotate the token file's contents without a restart.
 
+## Load on the participant
+
+One request can query every allow-listed template plus the ledger end, so
+inbound traffic reaches the participant amplified. Two flags bound this:
+
+- `--cache-ttl` (default 5s) serves repeat ledger reads from memory. The
+  cached ledger end makes the contract cache effective: inside one window
+  every request resolves the same offset, so their reads share a key. A
+  caller can get a set up to one TTL old. Set `0` to disable the cache.
+- `--max-upstream-concurrency` (default 8) caps in-flight upstream queries.
+  A request that waits more than 2 seconds for a slot gets a 503, which
+  tells the caller to retry. This cap holds the service's load on the
+  participant steady, whatever the inbound rate.
+
+A 502 means the upstream failed. A 503 means this service shed the call.
+
 `--disclosing-party` names the disclosing parties, comma-separated: the
 parties as which the service reads the ledger. Every served blob is a
 contract at least one of them sees. The access token must grant readAs for
