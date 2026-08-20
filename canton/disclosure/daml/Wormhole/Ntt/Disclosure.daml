@@ -14,7 +14,10 @@
 --
 --   * releaseDisclosures      -- NttManager, CoreState, covering ReplayNode,
 --                                LockedLedger, custody-pot Holding (if any),
---                                committed TransferFactory
+--                                committed TransferFactory, and (if
+--                                supplied) the recipient TransferPreapproval
+--                                (registries that settle via preapproval,
+--                                e.g. token-cip0056)
 --   * mintDisclosures         -- NttManager, CoreState, covering ReplayNode,
 --                                DepositPreapproval, committed BurnMintFactory
 --   * acceptAdminDisclosures  -- NttManager, CoreState, covering ReplayNode,
@@ -147,14 +150,19 @@ requireBurnMintFactoryCid = \case
 -- stakeholder of nothing. The custody-pot 'Holding' is included only when
 -- the ledger's hint names one. The committed 'TransferFactory' is always
 -- included: 'Release' spends through it for every funding source.
+-- @recipientPreapproval@, when supplied, is disclosed as its owner party --
+-- the recipient and the 'TransferPreapproval' signatory. It serves
+-- registries (e.g. token-cip0056) that settle a receiver-authority-absent
+-- unlock via a standing preapproval rather than a pending instruction.
 -- @discloseHolding@ and @discloseFactory@ resolve the two interface
 -- members -- see the module header.
 releaseDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId LockedLedger -> Text
+  -> Optional (Party, ContractId TransferPreapproval)
   -> (ContractId Holding -> Script Disclosure)
   -> (ContractId TIV1.TransferFactory -> Script Disclosure)
   -> Script (ContractId ReplayNode, [Disclosure])
-releaseDisclosures operator gg mgrCid csId ledgerCid digest discloseHolding discloseFactory = do
+releaseDisclosures operator gg mgrCid csId ledgerCid digest recipientPreapproval discloseHolding discloseFactory = do
   mgr <- requireContract operator mgrCid "NttManager"
   assertMsg "releaseDisclosures: deployment is not lock/unlock" (mgr.tokenConfig == LockUnlock)
   dMgr <- requireDisclosure operator mgrCid "NttManager"
@@ -167,7 +175,10 @@ releaseDisclosures operator gg mgrCid csId ledgerCid digest discloseHolding disc
     None -> pure []
   factoryCid <- requireTransferFactoryCid mgr.factory
   dFactory <- discloseFactory factoryCid
-  let discs = [dMgr, dCs, dNode, dLedger] <> potDiscs <> [dFactory]
+  preapprovalDiscs <- case recipientPreapproval of
+    Some (recipient, preCid) -> (\d -> [d]) <$> requireDisclosure recipient preCid "recipient TransferPreapproval"
+    None -> pure []
+  let discs = [dMgr, dCs, dNode, dLedger] <> potDiscs <> [dFactory] <> preapprovalDiscs
   assertMsg "releaseDisclosures: disclosure set must not be empty" (not (null discs))
   pure (nodeCid, discs)
 
