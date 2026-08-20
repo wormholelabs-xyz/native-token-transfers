@@ -51,7 +51,6 @@
 module Wormhole.Ntt.Disclosure where
 
 import Daml.Script
-import DA.Optional (fromSome)
 import DA.Text qualified as T
 
 import Splice.Api.Token.HoldingV1 (Holding)
@@ -90,17 +89,16 @@ coveringNode consumer namespace digest = do
 coveringDisclosure : Party -> Party -> Text -> Text -> Script (ContractId ReplayNode, Disclosure)
 coveringDisclosure reader consumer namespace digest = do
   (cid, _) <- coveringNode consumer namespace digest
-  disc <- fromSome <$> queryDisclosure reader cid
+  disc <- requireDisclosure reader cid "covering ReplayNode"
   pure (cid, disc)
 
 ----------------------------------------------------------------------
 -- Shared lookups
 ----------------------------------------------------------------------
 
--- | 'queryDisclosure', or an abort that names what @reader@ could not see.
--- A missing disclosure fails here with a specific message, not later as an
--- opaque submission error. Do not call this on an interface contract id --
--- use 'discloseConcrete'.
+-- | 'queryDisclosure' for a concrete template contract id, or an abort that
+-- names what @reader@ could not see. For an interface contract id, call
+-- 'discloseConcrete'.
 requireDisclosure : Template t => Party -> ContractId t -> Text -> Script Disclosure
 requireDisclosure reader cid label =
   queryDisclosure reader cid >>= \case
@@ -108,8 +106,8 @@ requireDisclosure reader cid label =
     None -> abort ("disclosure: " <> label <> " not visible to " <> show reader)
 
 -- | 'queryContractId', or an abort that names what could not be resolved.
--- Reads a deployment's own committed fields (namespace, factory, token
--- config); callers never pass copies of those fields.
+-- Reads a deployment's own committed fields: namespace, factory, token
+-- config.
 requireContract : (Template t, HasEnsure t) => Party -> ContractId t -> Text -> Script t
 requireContract reader cid label =
   queryContractId reader cid >>= \case
@@ -178,9 +176,8 @@ releaseDisclosures operator gg mgrCid csId ledgerCid digest discloseHolding disc
 ----------------------------------------------------------------------
 
 -- | The disclosure set for 'Mint', for an @executor@ that is a stakeholder
--- of nothing. 'DepositPreapproval' is queried as @gg@, its observer;
--- @operator@ is not a stakeholder of it. @discloseFactory@ resolves the
--- committed 'BurnMintFactory' member.
+-- of nothing. 'DepositPreapproval' is queried as @gg@, its observer.
+-- @discloseFactory@ resolves the committed 'BurnMintFactory' member.
 mintDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId DepositPreapproval -> Text
   -> (ContractId BurnMintFactory -> Script Disclosure)
@@ -204,7 +201,7 @@ mintDisclosures operator gg mgrCid csId preapprovalCid digest discloseFactory = 
 
 -- | The disclosure set for 'AcceptAdminTransferByVaa', for an @executor@
 -- that is a stakeholder of nothing. 'AdminTransferProposal' is queried as
--- @admin@, the proposing party; @operator@ is not a stakeholder of it. For
+-- @admin@, the proposing party and its sole signatory. For
 -- LockUnlock the 'LockedLedger' is always included, because its observer
 -- changes hands. The pot 'Holding' and committed 'TransferFactory' are
 -- included only when the ledger names a pot to move. This matches
@@ -246,7 +243,7 @@ acceptAdminDisclosures operator gg admin mgrCid csId propCid ledgerCid digest di
 
 -- | The disclosure set for 'SetPeerByVaa', for an @executor@ that is a
 -- stakeholder of nothing. The 'Emitter' serves the nested 'SetPeer'
--- broadcast. 'Emitter' is a plain template, so no callback is needed here.
+-- broadcast.
 setPeerByVaaDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId CoreState -> ContractId Emitter -> Text
   -> Script (ContractId ReplayNode, [Disclosure])
@@ -316,7 +313,6 @@ transferDisclosures operator gg mgrCid emitterCid csId ledgerCid custodianPreapp
 -- hosted away from the bootstrap roots. Pass @Some coinFactoryCid@ for the
 -- ByVaa variant: 'RegisterManagerByVaa' also reaches
 -- 'requireCanonicalFactory', so it also needs the canonical 'CoinFactory'.
--- 'CoinFactory' is a plain, concrete template, so no callback is needed.
 registerDisclosures
   : Party -> Party -> ContractId NttGovernance -> ContractId EmitterRegistry -> ContractId ReplayRootRegistry
   -> ContractId CoreState -> Optional (ContractId CoinFactory)
