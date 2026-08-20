@@ -917,9 +917,9 @@ func TestFindGuardianAnchor(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "cid-gg1", m.entry.ContractID)
 	})
-	t.Run("gg given, zero matches is 500", func(t *testing.T) {
+	t.Run("gg given, zero matches is 404", func(t *testing.T) {
 		_, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{mk("gg2")}, "gg1", "CoreState")
-		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
+		requireFlowErrorStatus(t, err, http.StatusNotFound)
 	})
 	t.Run("gg empty, sole entry", func(t *testing.T) {
 		m, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{mk("gg1")}, "", "CoreState")
