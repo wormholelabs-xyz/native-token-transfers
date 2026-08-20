@@ -501,11 +501,8 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), http.StatusBadGateway)
 			return
 		}
-		if len(entries) > s.maxContracts {
-			http.Error(w, fmt.Sprintf(
-				"disclosure-service: template %s: %d contracts exceeds cap %d -- refusing rather than truncating",
-				t, len(entries), s.maxContracts,
-			), http.StatusBadGateway)
+		if msg := s.contractCapError(t, len(entries)); msg != "" {
+			http.Error(w, "disclosure-service: "+msg, http.StatusBadGateway)
 			return
 		}
 		for _, e := range entries {
@@ -821,6 +818,9 @@ func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int
 	if err != nil {
 		return nil, newFlowError(http.StatusBadGateway, "query %s: %v", canonical, err)
 	}
+	if msg := s.contractCapError(canonical, len(entries)); msg != "" {
+		return nil, newFlowError(http.StatusBadGateway, "%s", msg)
+	}
 	out := make([]decodedEntry[T], 0, len(entries))
 	for _, e := range entries {
 		var v T
@@ -857,9 +857,17 @@ func findManager(entries []decodedEntry[daNttManager], manager string) (decodedE
 // Serves CoreState, NttGovernance, EmitterRegistry, and ReplayRootRegistry.
 func findGuardianAnchor(entries []decodedEntry[daGuardianAnchor], gg, label string) (decodedEntry[daGuardianAnchor], error) {
 	if gg != "" {
-		return exactlyOne(entries, label, func(e decodedEntry[daGuardianAnchor]) bool {
+		m, n := matchOne(entries, func(e decodedEntry[daGuardianAnchor]) bool {
 			return e.value.GuardianGovernance == gg
 		})
+		switch {
+		case n == 1:
+			return m, nil
+		case n == 0:
+			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusNotFound, "no %s for gg %s", label, gg)
+		default:
+			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusInternalServerError, "found %d %s for gg %s, expected exactly 1", n, label, gg)
+		}
 	}
 	m, n := matchOne(entries, func(decodedEntry[daGuardianAnchor]) bool { return true })
 	switch {
@@ -1506,6 +1514,13 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) contractCapError(template string, count int) string {
+	if count > s.maxContracts {
+		return fmt.Sprintf("template %s: %d contracts exceeds cap %d -- refusing rather than truncating", template, count, s.maxContracts)
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
