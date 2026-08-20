@@ -61,6 +61,80 @@ func TestParseFlags_MaxContractsPerTemplate_RejectsNonPositive(t *testing.T) {
 	}
 }
 
+func TestParseFlags_MultiPartyList(t *testing.T) {
+	opts, err := parseFlags([]string{
+		"--json-api", "http://localhost:6975",
+		"--disclosing-party", "Operator, GuardianGovernance,Alice",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Operator", "GuardianGovernance", "Alice"}, opts.disclosingParties)
+}
+
+func TestParseFlags_RejectsBadPartyLists(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"duplicate", "Alice,Alice", "twice"},
+		{"duplicate after trim", "Alice, Alice", "twice"},
+		{"empty entry", "Alice,,Bob", "empty entry"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseFlags([]string{"--json-api", "http://localhost:6975", "--disclosing-party", tc.value})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestActiveContracts_MultiPartyFilter(t *testing.T) {
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
+	var gotBody []byte
+	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	})
+
+	client := newHTTPACSClient(upstream.URL, "")
+	_, err := client.ActiveContracts(context.Background(), []string{"Alice", "Bob"}, template, 42)
+	require.NoError(t, err)
+
+	var req activeContractsRequest
+	require.NoError(t, json.Unmarshal(gotBody, &req))
+	require.Len(t, req.EventFormat.FiltersByParty, 2)
+	for _, party := range []string{"Alice", "Bob"} {
+		filter, ok := req.EventFormat.FiltersByParty[party]
+		require.True(t, ok, "missing filter for %s", party)
+		require.Len(t, filter.Cumulative, 1)
+		assert.Equal(t, template, filter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.TemplateID)
+		assert.True(t, filter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob)
+	}
+}
+
+// TestActiveContracts_DedupsSharedContracts pins the union-view invariant: a contract visible
+// to more than one disclosing party is served once.
+func TestActiveContracts_DedupsSharedContracts(t *testing.T) {
+	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
+	shared := `{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":"00shared","templateId":"pkg:Wormhole.Ntt.Manager:NttManager","createdEventBlob":"AAA="},"synchronizerId":"sync"}}}`
+	only := `{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":"00only","templateId":"pkg:Wormhole.Ntt.Manager:NttManager","createdEventBlob":"BBB="},"synchronizerId":"sync"}}}`
+	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[" + shared + "," + shared + "," + only + "]"))
+	})
+
+	client := newHTTPACSClient(upstream.URL, "")
+	entries, err := client.ActiveContracts(context.Background(), []string{"Alice", "Bob"}, template, 42)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "00shared", entries[0].ContractID)
+	assert.Equal(t, "00only", entries[1].ContractID)
+}
+
 func TestParseFlags_MissingRequired(t *testing.T) {
 	cases := []struct {
 		name       string
