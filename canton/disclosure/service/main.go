@@ -31,6 +31,12 @@ const (
 	defaultMaxContractsPerTemplate = 1000
 	httpClientTimeout              = 30 * time.Second
 	shutdownTimeout                = 5 * time.Second
+	// maxUpstreamResponseBytes caps every upstream response body. The per-template contract cap
+	// fires only after parsing, so this byte ceiling is the earlier bound.
+	maxUpstreamResponseBytes = 64 << 20
+	serverReadHeaderTimeout  = 10 * time.Second
+	serverReadTimeout        = 30 * time.Second
+	serverIdleTimeout        = 2 * time.Minute
 )
 
 // ---------------------------------------------------------------------------
@@ -122,8 +128,11 @@ func defaultAllowList() []string {
 
 // loadAllowList reads a JSON array of template names from path. This overrides defaultAllowList.
 // Entries must be package-qualified ("#name:Module:Entity"), matching defaultAllowList's
-// convention. loadAllowList rejects an empty array: a genuinely empty override is most likely a
-// mistake. An operator who wants to serve nothing should stop the service instead.
+// convention: the upstream rejects unqualified filters, and allowListByTail keeps one qualified
+// name per "Module:Entity" tail, so an unqualified or duplicate entry is a startup error rather
+// than a template that silently stops being served. loadAllowList rejects an empty array: a
+// genuinely empty override is most likely a mistake. An operator who wants to serve nothing
+// should stop the service instead.
 func loadAllowList(path string) ([]string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -135,6 +144,17 @@ func loadAllowList(path string) ([]string, error) {
 	}
 	if len(list) == 0 {
 		return nil, fmt.Errorf("disclosure-service: allow-list %s must not be empty", path)
+	}
+	seen := make(map[string]string, len(list))
+	for _, t := range list {
+		if !strings.HasPrefix(t, "#") || len(strings.Split(t, ":")) != 3 {
+			return nil, fmt.Errorf("disclosure-service: allow-list %s: entry %q must be package-qualified \"#name:Module:Entity\"", path, t)
+		}
+		tail := templateTail(t)
+		if prev, dup := seen[tail]; dup {
+			return nil, fmt.Errorf("disclosure-service: allow-list %s: entries %q and %q share the tail %q", path, prev, t, tail)
+		}
+		seen[tail] = t
 	}
 	return list, nil
 }
@@ -173,21 +193,17 @@ type acsEntry struct {
 
 // acsClient is the minimal seam between the HTTP handlers and the upstream participant. Tests
 // can fake it in place of a real JSON Ledger API. httpACSClient is the only production
-// implementation.
+// implementation. The handler resolves one LedgerEnd offset per request and passes it to every
+// ActiveContracts call, so a multi-template response is one consistent snapshot.
 type acsClient interface {
-	ActiveContracts(ctx context.Context, party, template string) ([]acsEntry, error)
-}
-
-// ledgerEnder is an optional capability that an acsClient may provide. The service uses it only
-// to enrich /v1/healthz. When the client lacks it, healthz omits the field.
-type ledgerEnder interface {
 	LedgerEnd(ctx context.Context) (int64, error)
+	ActiveContracts(ctx context.Context, party, template string, activeAtOffset int64) ([]acsEntry, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
 // request body. It has one filtersByParty entry for the disclosing party, one cumulative
 // template filter per call, and includeCreatedEventBlob:true. This shape is confirmed live
-// against a real participant (see canton/disclosure-service-port's internal/disclosure/acs.go).
+// against a real participant.
 type activeContractsRequest struct {
 	ActiveAtOffset int64 `json:"activeAtOffset"`
 	EventFormat    struct {
@@ -260,10 +276,21 @@ func (c *httpACSClient) authHeader(req *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("disclosure-service: reload access token: %w", err)
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
+}
+
+// readBounded reads a response body of at most maxUpstreamResponseBytes. A larger body is an
+// error.
+func readBounded(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxUpstreamResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxUpstreamResponseBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxUpstreamResponseBytes)
+	}
+	return body, nil
 }
 
 // LedgerEnd calls GET /v2/state/ledger-end. This pins ActiveContracts' activeAtOffset.
@@ -282,7 +309,7 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("disclosure-service: ledger-end request: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return 0, fmt.Errorf("disclosure-service: read ledger-end response: %w", err)
 	}
@@ -298,17 +325,12 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 	return out.Offset, nil
 }
 
-// ActiveContracts queries template as party, at the current ledger end, with
+// ActiveContracts queries template as party, at activeAtOffset, with
 // includeCreatedEventBlob:true. An empty result is a valid answer. A template can have zero
 // live contracts for this reader.
-func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template string) ([]acsEntry, error) {
-	offset, err := c.LedgerEnd(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("disclosure-service: active-contracts: %w", err)
-	}
-
+func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template string, activeAtOffset int64) ([]acsEntry, error) {
 	var reqBody activeContractsRequest
-	reqBody.ActiveAtOffset = offset
+	reqBody.ActiveAtOffset = activeAtOffset
 	var cf acsCumulativeFilter
 	cf.IdentifierFilter.TemplateFilter.Value.TemplateID = template
 	cf.IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob = true
@@ -336,7 +358,7 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 		return nil, fmt.Errorf("disclosure-service: active-contracts request: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("disclosure-service: read active-contracts response: %w", err)
 	}
@@ -415,12 +437,10 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		DisclosingParty: s.opts.disclosingParty,
 		Templates:       len(s.allowListOrdered),
 	}
-	if le, ok := s.acs.(ledgerEnder); ok {
-		if offset, err := le.LedgerEnd(r.Context()); err == nil {
-			resp.LedgerEnd = offset
-		} else if s.opts.verbose {
-			log.Printf("disclosure-service: healthz: ledger-end: %v", err)
-		}
+	if offset, err := s.acs.LedgerEnd(r.Context()); err == nil {
+		resp.LedgerEnd = offset
+	} else if s.opts.verbose {
+		log.Printf("disclosure-service: healthz: ledger-end: %v", err)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -459,9 +479,16 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 		resolved[i] = canonical
 	}
 
+	// One offset for the whole request: a multi-template response is one consistent snapshot.
+	offset, err := s.acs.LedgerEnd(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), http.StatusBadGateway)
+		return
+	}
+
 	out := make([]discloseEntry, 0)
 	for _, t := range resolved {
-		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParty, t)
+		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParty, t, offset)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), http.StatusBadGateway)
 			return
@@ -506,13 +533,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // readAccessToken reads and trims the bearer token file. It is separate from run() so the
 // trim-whitespace behavior is independently testable. A file saved with a trailing newline is
-// the common case.
+// the common case. A file that trims to nothing is an error: it would send an empty bearer
+// token upstream.
 func readAccessToken(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("disclosure-service: read access token file %s: %w", path, err)
 	}
-	return strings.TrimSpace(string(raw)), nil
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("disclosure-service: access token file %s is empty", path)
+	}
+	return token, nil
 }
 
 // run builds and serves the service until ctx is canceled, then shuts down gracefully. It
@@ -552,7 +584,15 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 
-	httpSrv := &http.Server{Handler: srv}
+	httpSrv := &http.Server{
+		Handler:           srv,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		// The no-param default queries every allow-listed template plus one ledger-end call, each
+		// bounded by httpClientTimeout, so the write timeout scales with the allow-list.
+		WriteTimeout: time.Duration(len(allowList)+1) * httpClientTimeout,
+		IdleTimeout:  serverIdleTimeout,
+	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.Serve(ln) }()
 

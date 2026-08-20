@@ -145,10 +145,24 @@ func TestLoadAllowList(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		p := filepath.Join(dir, "valid.json")
-		require.NoError(t, os.WriteFile(p, []byte(`["A.B:C", "D.E:F"]`), 0o600))
+		require.NoError(t, os.WriteFile(p, []byte(`["#p:A.B:C", "#q:D.E:F"]`), 0o600))
 		list, err := loadAllowList(p)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"A.B:C", "D.E:F"}, list)
+		assert.Equal(t, []string{"#p:A.B:C", "#q:D.E:F"}, list)
+	})
+
+	t.Run("unqualified entry rejected", func(t *testing.T) {
+		p := filepath.Join(dir, "unqualified.json")
+		require.NoError(t, os.WriteFile(p, []byte(`["A.B:C"]`), 0o600))
+		_, err := loadAllowList(p)
+		require.ErrorContains(t, err, "package-qualified")
+	})
+
+	t.Run("duplicate tail rejected", func(t *testing.T) {
+		p := filepath.Join(dir, "dup.json")
+		require.NoError(t, os.WriteFile(p, []byte(`["#p:A.B:C", "#q:A.B:C"]`), 0o600))
+		_, err := loadAllowList(p)
+		require.ErrorContains(t, err, "share the tail")
 	})
 
 	t.Run("missing file", func(t *testing.T) {
@@ -531,13 +545,13 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, tokenPath)
-	_, err = client.ActiveContracts(context.Background(), "Alice", template)
+	_, err = client.ActiveContracts(context.Background(), "Alice", template, 42)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
 }
 
-// TestBearerTokenRereadOnEveryRequest pins FIX 4. Each upstream request reads the token file
-// fresh, so a rotated token takes effect on the next request.
+// TestBearerTokenRereadOnEveryRequest pins the rotation behavior: each upstream request reads
+// the token file fresh, so a rotated token takes effect on the next request.
 func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
@@ -551,13 +565,13 @@ func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, tokenPath)
-	_, err := client.ActiveContracts(context.Background(), "Alice", template)
+	_, err := client.ActiveContracts(context.Background(), "Alice", template, 42)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer first-token", capture.get())
 
 	require.NoError(t, os.WriteFile(tokenPath, []byte("second-token\n"), 0o600))
 
-	_, err = client.ActiveContracts(context.Background(), "Alice", template)
+	_, err = client.ActiveContracts(context.Background(), "Alice", template, 42)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer second-token", capture.get())
 }
