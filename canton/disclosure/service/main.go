@@ -1,11 +1,12 @@
-// Command disclosure-service is a thin, production-runnable HTTP endpoint that serves
-// createdEventBlobs for a hardcoded allow-list of Daml templates, read from one stakeholder
-// participant's ACS over the JSON Ledger API v2. It is the transport half: the canonical
-// per-flow disclosure SETS live in the Daml library (Wormhole.Ntt.Disclosure); this binary
-// serves the flat union of templates that library names.
+// Command disclosure-service is a production-runnable HTTP endpoint. It serves createdEventBlobs
+// for a hardcoded allow-list of Daml templates. It reads the templates from one stakeholder
+// participant's ACS over the JSON Ledger API v2. This binary is the transport half. The
+// canonical per-flow disclosure sets live in the Daml library Wormhole.Ntt.Disclosure. This
+// binary serves the flat union of templates that library names.
 //
-// Posture: unauthenticated, harness/ops-grade. Loopback by default; --access-token-file adds a
-// single shared bearer token forwarded to the upstream JSON API.
+// Posture: the service is unauthenticated and harness/ops-grade. It listens on loopback by
+// default. The --access-token-file flag adds a single shared bearer token. The service forwards
+// this token to the upstream JSON API.
 package main
 
 import (
@@ -36,7 +37,7 @@ const (
 // Flags
 // ---------------------------------------------------------------------------
 
-// options is parseFlags' pure result: no I/O happens until run() consumes it.
+// options is parseFlags' pure result. I/O happens later, when run() consumes it.
 type options struct {
 	listen                  string
 	jsonAPIBaseURL          string
@@ -47,12 +48,12 @@ type options struct {
 	verbose                 bool
 }
 
-// parseFlags parses args (normally os.Args[1:]) into options. It performs no I/O -- required
-// fields are checked here, but files named by flags are read later, in run(). Returns an
-// actionable error naming the missing flag; never calls os.Exit.
+// parseFlags parses args (normally os.Args[1:]) into options. It checks the required flags.
+// run() reads the files that flags name. parseFlags returns an actionable error that names the
+// missing flag.
 func parseFlags(args []string) (*options, error) {
 	fs := flag.NewFlagSet("disclosure-service", flag.ContinueOnError)
-	fs.SetOutput(io.Discard) // caller reports the error; avoid flag's own usage dump
+	fs.SetOutput(io.Discard) // the caller reports the error; this skips flag's own usage dump
 
 	listen := fs.String("listen", defaultListen, "address to listen on")
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
@@ -93,14 +94,14 @@ func parseFlags(args []string) (*options, error) {
 // ---------------------------------------------------------------------------
 
 // defaultAllowList is the transport-side projection of Wormhole.Ntt.Disclosure's module header
-// (canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml): the flat union of every template any
-// disclosure-set function there ever names. The canonical, flow-aware sets live in that Daml
-// module; this table only decides which templates this service may ever be asked to fetch.
+// (canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml). It is the flat union of every template
+// that a disclosure-set function there names. The canonical, flow-aware sets live in that Daml
+// module. This table only decides which templates this service may fetch.
 //
-// Entries are package-name-qualified ("#<package-name>:Module:Entity"): the JSON Ledger API v2
+// Entries are package-name-qualified ("#<package-name>:Module:Entity"). The JSON Ledger API v2
 // returns HTTP 400 for an unqualified "Module:Entity" template filter (confirmed live). The
-// package names are each DAR's own "name:" field (see canton/dars/*.conf inside the DAR, and
-// canton/ntt/daml.yaml for "ntt").
+// package name is each DAR's own "name:" field. See canton/dars/*.conf inside the DAR, and
+// canton/ntt/daml.yaml for "ntt".
 func defaultAllowList() []string {
 	return []string{
 		"#ntt:Wormhole.Ntt.Manager:NttManager",
@@ -119,11 +120,10 @@ func defaultAllowList() []string {
 	}
 }
 
-// loadAllowList reads a JSON array of template name strings from path, overriding
-// defaultAllowList. Entries should be package-qualified ("#name:Module:Entity"), matching
-// defaultAllowList's convention. An empty array is rejected -- an operator who wants "serve
-// nothing" should not run this service at all; a genuinely empty override is far more likely a
-// mistake.
+// loadAllowList reads a JSON array of template names from path. This overrides defaultAllowList.
+// Entries must be package-qualified ("#name:Module:Entity"), matching defaultAllowList's
+// convention. loadAllowList rejects an empty array: a genuinely empty override is most likely a
+// mistake. An operator who wants to serve nothing should stop the service instead.
 func loadAllowList(path string) ([]string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -139,9 +139,9 @@ func loadAllowList(path string) ([]string, error) {
 	return list, nil
 }
 
-// templateTail returns the trailing "Module:Entity" segment of a template id, stripping any
-// package qualifier ("#name:" or a hex package id). A value with no qualifier (already exactly
-// "Module:Entity") is returned unchanged. Module names never contain ':', so the tail is always
+// templateTail returns the trailing "Module:Entity" segment of a template id. It strips any
+// package qualifier ("#name:" or a hex package id). An unqualified value (already exactly
+// "Module:Entity") is returned unchanged. Module names always exclude ':', so the tail is always
 // exactly the last two ':'-separated segments.
 func templateTail(templateID string) string {
 	parts := strings.Split(templateID, ":")
@@ -151,10 +151,9 @@ func templateTail(templateID string) string {
 	return strings.Join(parts[len(parts)-2:], ":")
 }
 
-// templateIDMatches reports whether two template ids name the same "Module:Entity", regardless
-// of how each is qualified: bare, "#name:"-qualified, or package-ID-qualified (as the ACS
-// returns them). Comparing tails lets a package-name-qualified allow-list entry match a
-// package-ID-qualified upstream response.
+// templateIDMatches reports whether two template ids name the same "Module:Entity". Each id may
+// be bare, "#name:"-qualified, or package-ID-qualified, as the ACS returns them. Comparing tails
+// lets a package-name-qualified allow-list entry match a package-ID-qualified upstream response.
 func templateIDMatches(a, b string) bool {
 	return templateTail(a) == templateTail(b)
 }
@@ -163,8 +162,8 @@ func templateIDMatches(a, b string) bool {
 // ACS client
 // ---------------------------------------------------------------------------
 
-// acsEntry is one active contract as this service needs it: enough to build a Ledger API
-// DisclosedContract client-side.
+// acsEntry is one active contract, as this service needs it. It holds enough data to build a
+// Ledger API DisclosedContract client-side.
 type acsEntry struct {
 	TemplateID       string
 	ContractID       string
@@ -172,23 +171,23 @@ type acsEntry struct {
 	SynchronizerID   string
 }
 
-// acsClient is the minimal seam between the HTTP handlers and the upstream participant, so
-// tests can fake it without a real JSON Ledger API. httpACSClient is the only production
+// acsClient is the minimal seam between the HTTP handlers and the upstream participant. Tests
+// can fake it in place of a real JSON Ledger API. httpACSClient is the only production
 // implementation.
 type acsClient interface {
 	ActiveContracts(ctx context.Context, party, template string) ([]acsEntry, error)
 }
 
-// ledgerEnder is an optional capability an acsClient may additionally provide -- used only to
-// enrich /v1/healthz. Absence is not an error; healthz just omits the field.
+// ledgerEnder is an optional capability that an acsClient may provide. The service uses it only
+// to enrich /v1/healthz. When the client lacks it, healthz omits the field.
 type ledgerEnder interface {
 	LedgerEnd(ctx context.Context) (int64, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
-// request body: one filtersByParty entry for the disclosing party, one cumulative template filter
-// per call, includeCreatedEventBlob:true. Shape confirmed live against a real participant (see
-// canton/disclosure-service-port's internal/disclosure/acs.go).
+// request body. It has one filtersByParty entry for the disclosing party, one cumulative
+// template filter per call, and includeCreatedEventBlob:true. This shape is confirmed live
+// against a real participant (see canton/disclosure-service-port's internal/disclosure/acs.go).
 type activeContractsRequest struct {
 	ActiveAtOffset int64 `json:"activeAtOffset"`
 	EventFormat    struct {
@@ -226,7 +225,7 @@ type acsActiveContract struct {
 	SynchronizerID string           `json:"synchronizerId"`
 }
 
-// acsContractEntry is a Daml-JSON sum type; only JsActiveContract carries a createdEvent. Other
+// acsContractEntry is a Daml-JSON sum type. Only JsActiveContract carries a createdEvent. Other
 // variants (e.g. an incomplete-reassignment marker) decode with a nil field and are skipped.
 type acsContractEntry struct {
 	JsActiveContract *acsActiveContract `json:"JsActiveContract"`
@@ -236,10 +235,10 @@ type acsResponseEntry struct {
 	ContractEntry acsContractEntry `json:"contractEntry"`
 }
 
-// httpACSClient is the production acsClient, talking to one participant's JSON Ledger API v2.
+// httpACSClient is the production acsClient. It talks to one participant's JSON Ledger API v2.
 type httpACSClient struct {
 	baseURL   string
-	tokenFile string // path to the bearer token file; empty sends no Authorization header
+	tokenFile string // path to the bearer token file; when set, every upstream request carries its bearer token
 	client    *http.Client
 }
 
@@ -251,8 +250,8 @@ func newHTTPACSClient(baseURL, tokenFile string) *httpACSClient {
 	}
 }
 
-// authHeader sets Authorization by re-reading tokenFile on every call, so an operator can
-// rotate the token file's contents and have the next request pick it up without a restart.
+// authHeader sets Authorization. It re-reads tokenFile on every call. An operator can rotate the
+// token file's contents, and the next request picks up the change immediately.
 func (c *httpACSClient) authHeader(req *http.Request) error {
 	if c.tokenFile == "" {
 		return nil
@@ -267,7 +266,7 @@ func (c *httpACSClient) authHeader(req *http.Request) error {
 	return nil
 }
 
-// LedgerEnd calls GET /v2/state/ledger-end, pinning ActiveContracts' activeAtOffset.
+// LedgerEnd calls GET /v2/state/ledger-end. This pins ActiveContracts' activeAtOffset.
 func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v2/state/ledger-end", nil)
 	if err != nil {
@@ -300,8 +299,8 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 }
 
 // ActiveContracts queries template as party, at the current ledger end, with
-// includeCreatedEventBlob:true. Empty results are not an error -- a template with no live
-// contracts for this reader is a perfectly valid answer.
+// includeCreatedEventBlob:true. An empty result is a valid answer. A template can have zero
+// live contracts for this reader.
 func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template string) ([]acsEntry, error) {
 	offset, err := c.LedgerEnd(ctx)
 	if err != nil {
@@ -354,7 +353,7 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 	for _, e := range entries {
 		ac := e.ContractEntry.JsActiveContract
 		if ac == nil || ac.CreatedEvent == nil {
-			continue // non-active-contract oneOf variant; not an error
+			continue // other contractEntry variant; skip it
 		}
 		out = append(out, acsEntry{
 			TemplateID:       ac.CreatedEvent.TemplateID,
@@ -370,8 +369,7 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 // HTTP server
 // ---------------------------------------------------------------------------
 
-// server is the disclosure-service's http.Handler. Stateless and query-on-demand: no contract
-// id is ever cached across requests.
+// server is the disclosure-service's http.Handler. It is stateless: it queries per request.
 type server struct {
 	opts             *options
 	allowListByTail  map[string]string // "Module:Entity" tail -> configured qualified name, for the 403 gate
@@ -447,10 +445,10 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve every requested template to its configured, qualified allow-list entry before
-	// querying any of them: a bad request must not have partial upstream side effects. The
-	// server-side list is authoritative; a client asking for something outside it (by
-	// Module:Entity tail) is refused outright, naming the offender. A matched request is
-	// forwarded upstream using the CONFIGURED spelling, never the client's own.
+	// querying any of them. This keeps a bad request free of partial upstream side effects. The
+	// server-side list is authoritative. A client that asks for something outside it (by
+	// Module:Entity tail) is refused outright, and the error names the offender. A matched
+	// request goes upstream under its configured, qualified spelling.
 	resolved := make([]string, len(requested))
 	for i, t := range requested {
 		canonical, ok := s.allowListByTail[templateTail(t)]
@@ -476,8 +474,8 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, e := range entries {
-			// Defense in depth: even though the query itself was filtered to t, do not
-			// trust the upstream's echoed templateId blindly before serving it onward.
+			// Defense in depth: the query was filtered to t, but the handler still verifies
+			// the upstream's echoed templateId before serving it onward.
 			if !templateIDMatches(e.TemplateID, t) {
 				http.Error(w, fmt.Sprintf(
 					"disclosure-service: upstream returned mismatched templateId %q for requested %q",
@@ -506,9 +504,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // run / main
 // ---------------------------------------------------------------------------
 
-// readAccessToken reads and trims the bearer token file. Separated from run() so the
-// trim-whitespace behavior (a file saved with a trailing newline is the common case) is
-// independently testable.
+// readAccessToken reads and trims the bearer token file. It is separate from run() so the
+// trim-whitespace behavior is independently testable. A file saved with a trailing newline is
+// the common case.
 func readAccessToken(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -517,8 +515,8 @@ func readAccessToken(path string) (string, error) {
 	return strings.TrimSpace(string(raw)), nil
 }
 
-// run builds and serves the service until ctx is canceled, then shuts down gracefully. Returns
-// nil on a clean shutdown (including http.ErrServerClosed); any other error is real.
+// run builds and serves the service until ctx is canceled, then shuts down gracefully. It
+// returns nil on a clean shutdown, including http.ErrServerClosed. Any other error is real.
 func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	allowList := defaultAllowList()
 	if opts.allowListPath != "" {
@@ -529,8 +527,8 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		}
 	}
 
-	// Fail fast at startup if the token file is missing or unreadable. The path, not this
-	// read's value, is what httpACSClient keeps -- see readAccessToken's call in authHeader.
+	// Fail fast at startup when the token file is missing or unreadable. httpACSClient keeps
+	// only the path; see readAccessToken's call in authHeader.
 	if opts.accessTokenFile != "" {
 		if _, err := readAccessToken(opts.accessTokenFile); err != nil {
 			return err
