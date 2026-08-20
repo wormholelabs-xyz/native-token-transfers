@@ -25,7 +25,10 @@
 --                                covering ReplayNode
 --   * transferDisclosures     -- NttManager, transceiver Emitter, CoreState;
 --                                LockUnlock adds LockedLedger (+ pot, if
---                                any) and the committed TransferFactory;
+--                                any), the committed TransferFactory, and
+--                                (if supplied) the custodian
+--                                TransferPreapproval (registries that settle
+--                                via preapproval, e.g. token-cip0056);
 --                                BurnMint adds the committed BurnMintFactory
 --   * registerDisclosures     -- NttGovernance, EmitterRegistry,
 --                                ReplayRootRegistry, CoreState; the ByVaa
@@ -55,6 +58,7 @@ import Splice.Api.Token.HoldingV1 (Holding)
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Token.CIP0056.CoinFactory (CoinFactory)
+import Token.CIP0056.CoinTransfer (TransferPreapproval)
 
 import Wormhole.Core.Bytes (normalizeHex)
 import Wormhole.Core.Replay (ReplayNode)
@@ -266,15 +270,20 @@ setPeerByVaaDisclosures operator gg mgrCid csId emitterCid digest = do
 -- the deployment's contracts. LockUnlock includes the committed
 -- 'TransferFactory', plus the pot 'Holding' when a pot exists to merge.
 -- BurnMint includes the committed 'BurnMintFactory'. Only the callback for
--- the deployment's own mode runs.
+-- the deployment's own mode runs. @custodianPreapprovalCid@, when supplied,
+-- is disclosed as the manager's current @admin@ -- the lock/unlock custodian
+-- and 'TransferPreapproval's signatory. It serves registries (e.g.
+-- token-cip0056) that settle a receiver-authority-absent transfer via a
+-- standing preapproval rather than a pending instruction.
 transferDisclosures
   : Party -> Party -> ContractId NttManager -> ContractId Emitter -> ContractId CoreState
   -> Optional (ContractId LockedLedger)
+  -> Optional (ContractId TransferPreapproval)
   -> (ContractId Holding -> Script Disclosure)
   -> (ContractId TIV1.TransferFactory -> Script Disclosure)
   -> (ContractId BurnMintFactory -> Script Disclosure)
   -> Script [Disclosure]
-transferDisclosures operator gg mgrCid emitterCid csId ledgerCid discloseHolding discloseTransferFactory discloseBurnMintFactory = do
+transferDisclosures operator gg mgrCid emitterCid csId ledgerCid custodianPreapprovalCid discloseHolding discloseTransferFactory discloseBurnMintFactory = do
   mgr <- requireContract operator mgrCid "NttManager"
   dMgr <- requireDisclosure operator mgrCid "NttManager"
   dEmitter <- requireDisclosure operator emitterCid "transceiver Emitter"
@@ -292,7 +301,10 @@ transferDisclosures operator gg mgrCid emitterCid csId ledgerCid discloseHolding
       dFactory <- discloseBurnMintFactory factoryCid
       pure [dFactory]
     _ -> abort "transferDisclosures: token config, committed factory, and ledger cid are inconsistent"
-  let discs = [dMgr, dEmitter, dCs] <> extra
+  preapprovalDiscs <- case custodianPreapprovalCid of
+    Some preCid -> (\d -> [d]) <$> requireDisclosure mgr.admin preCid "custodian TransferPreapproval"
+    None -> pure []
+  let discs = [dMgr, dEmitter, dCs] <> extra <> preapprovalDiscs
   assertMsg "transferDisclosures: disclosure set must not be empty" (not (null discs))
   pure discs
 
