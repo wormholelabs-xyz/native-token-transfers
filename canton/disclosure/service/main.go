@@ -50,7 +50,7 @@ const (
 type options struct {
 	listen                  string
 	jsonAPIBaseURL          string
-	disclosingParty         string
+	disclosingParties       []string
 	accessTokenFile         string
 	allowListPath           string
 	maxContractsPerTemplate int
@@ -66,7 +66,7 @@ func parseFlags(args []string) (*options, error) {
 
 	listen := fs.String("listen", defaultListen, "address to listen on")
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
-	disclosingParty := fs.String("disclosing-party", "", "the disclosing party: the party as which the service reads the ledger; every served disclosure is a contract this party sees (required)")
+	disclosingParty := fs.String("disclosing-party", "", "comma-separated disclosing parties: the parties as which the service reads the ledger; every served disclosure is a contract at least one of them sees; the access token must grant readAs for each (required)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
 	allowList := fs.String("allow-list", "", "path to a JSON array of package-qualified \"#name:Module:Entity\" template names, overriding the built-in allow-list")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
@@ -79,7 +79,20 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://localhost:6975)")
 	}
 	if *disclosingParty == "" {
-		return nil, fmt.Errorf("disclosure-service: --disclosing-party is required (the party as which the service reads the ledger)")
+		return nil, fmt.Errorf("disclosure-service: --disclosing-party is required (the party or comma-separated parties as which the service reads the ledger)")
+	}
+	parties := make([]string, 0, 4)
+	seenParty := make(map[string]bool, 4)
+	for _, p := range strings.Split(*disclosingParty, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, fmt.Errorf("disclosure-service: --disclosing-party has an empty entry")
+		}
+		if seenParty[p] {
+			return nil, fmt.Errorf("disclosure-service: --disclosing-party lists %s twice", p)
+		}
+		seenParty[p] = true
+		parties = append(parties, p)
 	}
 	if *listen == "" {
 		return nil, fmt.Errorf("disclosure-service: --listen must not be empty")
@@ -90,7 +103,7 @@ func parseFlags(args []string) (*options, error) {
 	return &options{
 		listen:                  *listen,
 		jsonAPIBaseURL:          *jsonAPI,
-		disclosingParty:         *disclosingParty,
+		disclosingParties:       parties,
 		accessTokenFile:         *tokenFile,
 		allowListPath:           *allowList,
 		maxContractsPerTemplate: *maxContracts,
@@ -201,7 +214,7 @@ type acsEntry struct {
 // ActiveContracts call, so a multi-template response is one consistent snapshot.
 type acsClient interface {
 	LedgerEnd(ctx context.Context) (int64, error)
-	ActiveContracts(ctx context.Context, party, template string, activeAtOffset int64) ([]acsEntry, error)
+	ActiveContracts(ctx context.Context, parties []string, template string, activeAtOffset int64) ([]acsEntry, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
@@ -330,17 +343,21 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 	return out.Offset, nil
 }
 
-// ActiveContracts queries template as party, at activeAtOffset, with
-// includeCreatedEventBlob:true. An empty result is a valid answer. A template can have zero
-// live contracts for this reader.
-func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template string, activeAtOffset int64) ([]acsEntry, error) {
+// ActiveContracts queries template as the union of parties, at activeAtOffset, with
+// includeCreatedEventBlob:true. A contract two parties both see is returned once. An empty
+// result is a valid answer. A template can have zero live contracts for these readers.
+func (c *httpACSClient) ActiveContracts(ctx context.Context, parties []string, template string, activeAtOffset int64) ([]acsEntry, error) {
+	if len(parties) == 0 {
+		return nil, fmt.Errorf("disclosure-service: active-contracts: at least one disclosing party is required")
+	}
 	var reqBody activeContractsRequest
 	reqBody.ActiveAtOffset = activeAtOffset
 	var cf acsCumulativeFilter
 	cf.IdentifierFilter.TemplateFilter.Value.TemplateID = template
 	cf.IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob = true
-	reqBody.EventFormat.FiltersByParty = map[string]acsPartyFilter{
-		party: {Cumulative: []acsCumulativeFilter{cf}},
+	reqBody.EventFormat.FiltersByParty = make(map[string]acsPartyFilter, len(parties))
+	for _, p := range parties {
+		reqBody.EventFormat.FiltersByParty[p] = acsPartyFilter{Cumulative: []acsCumulativeFilter{cf}}
 	}
 	// verbose:true so createArgument carries field labels; the /v1/flows/{flow} selectors decode it.
 	reqBody.EventFormat.Verbose = true
@@ -378,11 +395,16 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, party, template str
 	}
 
 	out := make([]acsEntry, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		ac := e.ContractEntry.JsActiveContract
 		if ac == nil || ac.CreatedEvent == nil {
 			continue // other contractEntry variant; skip it
 		}
+		if seen[ac.CreatedEvent.ContractID] {
+			continue // visible to more than one disclosing party; serve it once
+		}
+		seen[ac.CreatedEvent.ContractID] = true
 		out = append(out, acsEntry{
 			TemplateID:       ac.CreatedEvent.TemplateID,
 			ContractID:       ac.CreatedEvent.ContractID,
@@ -431,9 +453,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type healthzResponse struct {
-	DisclosingParty string `json:"disclosingParty"`
-	Templates       int    `json:"templates"`
-	LedgerEnd       int64  `json:"ledgerEnd,omitempty"`
+	DisclosingParties []string `json:"disclosingParties"`
+	Templates         int      `json:"templates"`
+	LedgerEnd         int64    `json:"ledgerEnd,omitempty"`
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -442,8 +464,8 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := healthzResponse{
-		DisclosingParty: s.opts.disclosingParty,
-		Templates:       len(s.allowListOrdered),
+		DisclosingParties: s.opts.disclosingParties,
+		Templates:         len(s.allowListOrdered),
 	}
 	if offset, err := s.acs.LedgerEnd(r.Context()); err == nil {
 		resp.LedgerEnd = offset
@@ -496,7 +518,7 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]discloseEntry, 0)
 	for _, t := range resolved {
-		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParty, t, offset)
+		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParties, t, offset)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), http.StatusBadGateway)
 			return
@@ -814,7 +836,7 @@ func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int
 	if !ok {
 		return nil, newFlowError(http.StatusInternalServerError, "template %q is not in the allow-list", tail)
 	}
-	entries, err := s.acs.ActiveContracts(ctx, s.opts.disclosingParty, canonical, offset)
+	entries, err := s.acs.ActiveContracts(ctx, s.opts.disclosingParties, canonical, offset)
 	if err != nil {
 		return nil, newFlowError(http.StatusBadGateway, "query %s: %v", canonical, err)
 	}
@@ -1577,7 +1599,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
 
-	fmt.Fprintf(stderr, "disclosure-service: disclosing party %s, %d allow-listed template(s)\n", opts.disclosingParty, len(allowList))
+	fmt.Fprintf(stderr, "disclosure-service: disclosing parties %s, %d allow-listed template(s)\n", strings.Join(opts.disclosingParties, ", "), len(allowList))
 	fmt.Fprintln(stderr, "disclosure-service: WARNING unauthenticated harness/ops-grade service -- do not expose beyond a trusted network")
 	if host, _, splitErr := net.SplitHostPort(ln.Addr().String()); splitErr == nil {
 		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
