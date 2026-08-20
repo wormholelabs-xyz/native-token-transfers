@@ -96,8 +96,8 @@ func TestParseFlags_MissingRequired(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultAllowList(t *testing.T) {
-	// Package-qualified: the JSON Ledger API v2 returns HTTP 400 for
-	// unqualified "Module:Entity" template filters (confirmed live).
+	// This list is package-qualified. The JSON Ledger API v2 returns HTTP 400 for unqualified
+	// "Module:Entity" template filters (confirmed live).
 	want := []string{
 		"#ntt:Wormhole.Ntt.Manager:NttManager",
 		"#ntt:Wormhole.Ntt.Manager:AdminTransferProposal",
@@ -175,10 +175,10 @@ func TestLoadAllowList(t *testing.T) {
 // Fake upstream JSON Ledger API v2
 // ---------------------------------------------------------------------------
 
-// newFakeJSONAPI starts an httptest server standing in for the JSON Ledger API v2. It always
-// answers /v2/state/ledger-end with a fixed offset and routes /v2/state/active-contracts to
-// acHandler. lastAuth captures the most recently seen Authorization header (both endpoints),
-// for the bearer-token test.
+// newFakeJSONAPI starts an httptest server that stands in for the JSON Ledger API v2. It answers
+// /v2/state/ledger-end with a fixed offset and routes /v2/state/active-contracts to acHandler.
+// The returned capture holds the most recent Authorization header from both endpoints, for the
+// bearer-token test.
 func newFakeJSONAPI(t *testing.T, acHandler http.HandlerFunc) (*httptest.Server, *authCapture) {
 	t.Helper()
 	capture := &authCapture{}
@@ -196,10 +196,9 @@ func newFakeJSONAPI(t *testing.T, acHandler http.HandlerFunc) (*httptest.Server,
 		}
 		capture.set(r.Header.Get("Authorization"))
 
-		// Real participant behavior: unqualified "Module:Entity" template
-		// filters get HTTP 400. Only "#name:Module:Entity" or
-		// "packageId:Module:Entity" are accepted. Re-buffer the body so
-		// acHandler can still decode it.
+		// Real participant behavior: unqualified "Module:Entity" template filters get HTTP
+		// 400. Only "#name:Module:Entity" or "packageId:Module:Entity" are accepted.
+		// Re-buffer the body so acHandler can decode it too.
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -240,7 +239,7 @@ func (a *authCapture) get() string {
 }
 
 // decodeRequestedTemplate pulls the single requested templateId (and disclosing party) out of an
-// active-contracts request body, matching activeContractsRequest's shape in main.go.
+// active-contracts request body. It matches activeContractsRequest's shape in main.go.
 func decodeRequestedTemplate(t *testing.T, r *http.Request) (party, template string) {
 	t.Helper()
 	body, err := io.ReadAll(r.Body)
@@ -257,11 +256,10 @@ func decodeRequestedTemplate(t *testing.T, r *http.Request) (party, template str
 	return party, template
 }
 
-// acsContractJSON renders one active-contracts response element in the JSON Ledger API v2
-// wire shape (contractEntry.JsActiveContract{createdEvent, synchronizerId, ...}), independent
-// of main.go's internal decode types, so the test pins the actual wire contract rather than a
-// struct's shape. synchronizerId is a SIBLING of createdEvent, not nested inside it (confirmed
-// live).
+// acsContractJSON renders one active-contracts response element in the JSON Ledger API v2 wire
+// shape (contractEntry.JsActiveContract{createdEvent, synchronizerId, ...}). It is independent
+// of main.go's internal decode types, so the test pins the actual wire contract as ground truth.
+// synchronizerId sits beside createdEvent, at the same level (confirmed live).
 func acsContractJSON(templateID, contractID, blob, synchronizerID string) string {
 	return fmt.Sprintf(
 		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"createdEventBlob":%q},"synchronizerId":%q}}}`,
@@ -295,7 +293,7 @@ func TestHandleDisclosures_RejectsUnknownTemplate(t *testing.T) {
 }
 
 // TestHandleDisclosures_TailOnlyClientRequestForwardedQualified pins the 403 gate's matching
-// rule: a client may ask by bare "Module:Entity" tail. The gate matches it against the
+// rule. A client may ask by bare "Module:Entity" tail. The gate matches it against the
 // allow-list by tail and forwards the CONFIGURED, package-qualified name upstream.
 func TestHandleDisclosures_TailOnlyClientRequestForwardedQualified(t *testing.T) {
 	const tail = "Wormhole.Ntt.Manager:NttManager"
@@ -426,7 +424,7 @@ func TestHandleDisclosures_OverflowCapRejectsRatherThanTruncates(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/disclosures?template="+template, nil)
 	srv.ServeHTTP(rr, req)
 
-	// Must reject outright, not silently truncate to the cap.
+	// The server rejects the request outright with 502 when the count exceeds the cap.
 	assert.NotEqual(t, http.StatusOK, rr.Code)
 	assert.Equal(t, http.StatusBadGateway, rr.Code)
 }
@@ -451,8 +449,8 @@ func TestHandleDisclosures_EmptyResultIsValid(t *testing.T) {
 func TestHandleDisclosures_MismatchedUpstreamTemplateRejected(t *testing.T) {
 	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		// Upstream returns a contract under a completely different template -- must not be
-		// trusted blindly even though it came back on the requested-template query.
+		// Upstream returns a contract under a completely different template, even though it
+		// came back on the requested-template query. The handler still verifies it.
 		body := "[" + acsContractJSON("pkg1:Some.Other:Thing", "cid1", "Yg==", "") + "]"
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -538,7 +536,7 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
 }
 
-// TestBearerTokenRereadOnEveryRequest pins FIX 4: each upstream request reads the token file
+// TestBearerTokenRereadOnEveryRequest pins FIX 4. Each upstream request reads the token file
 // fresh, so a rotated token takes effect on the next request.
 func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 	dir := t.TempDir()
@@ -585,8 +583,8 @@ func (s *syncBuffer) String() string {
 	return s.buf.String()
 }
 
-// listeningURL scans stderr output for the banner's final line and returns the URL it names,
-// or "" if the line has not appeared yet.
+// listeningURL scans stderr output for the banner's final line and returns the URL it names. It
+// returns "" until that line appears.
 func listeningURL(s string) string {
 	const prefix = "disclosure-service: listening on "
 	for _, line := range strings.Split(s, "\n") {
