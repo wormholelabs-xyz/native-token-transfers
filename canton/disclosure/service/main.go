@@ -116,7 +116,7 @@ func parseFlags(args []string) (*options, error) {
 // ---------------------------------------------------------------------------
 
 // defaultAllowList is the transport-side projection of Wormhole.Ntt.Disclosure's module header
-// (canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml). It is the flat union of every template
+// (canton/test/daml/Wormhole/Ntt/Disclosure.daml). It is the flat union of every template
 // that a disclosure-set function there names. The canonical, flow-aware sets live in that Daml
 // module. This table only decides which templates this service may fetch.
 //
@@ -554,7 +554,7 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 //
 // /v1/flows/{flow} assembles one NTT flow's disclosure set natively in Go, selecting over
 // decoded createArgument payloads instead of running a Daml interpreter.
-// canton/disclosure/daml/Wormhole/Ntt/Disclosure.daml is the canonical definition of each flow's
+// canton/test/daml/Wormhole/Ntt/Disclosure.daml is the canonical definition of each flow's
 // set; this section mirrors its table and reuses its role labels 1:1. Keep the two in step when
 // a flow's set changes.
 

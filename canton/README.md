@@ -26,8 +26,8 @@ trie, disclosed-cid submission, the trust model) is in the core
 | Directory (Daml package) | Contents |
 | --- | --- |
 | `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
-| `disclosure` (`ntt-disclosure`) | `Wormhole.Ntt.Disclosure`, the canonical per-flow disclosure-set library a relayer or disclosure service reads to submit NTT choices as a non-stakeholder. Built on `ntt`; daml-script-bearing, so kept out of the uploadable production DAR. `disclosure/service` is the Go binary that serves these sets over HTTP; see [`disclosure/README.md`](disclosure/README.md). |
-| `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
+| `disclosure/service` | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md). |
+| `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. Also holds `Wormhole.Ntt.Disclosure`, the executable specification of the per-flow disclosure sets, proven by `Test.TestDisclosure`. |
 | `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
@@ -44,7 +44,7 @@ interface DARs; core is never rebuilt here.
 
 ```sh
 # from this directory
-dpm build --all        # builds ntt, then disclosure, then test (in dep order)
+dpm build --all        # builds ntt, then test (in dep order)
 cd test && dpm test    # runs the Daml Script suite
 ```
 
