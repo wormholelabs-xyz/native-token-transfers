@@ -1,14 +1,11 @@
-# Ops-grade disclosure-set library: 'Wormhole.Ntt.Disclosure' is the
-# canonical allow-list a relayer or disclosure service reads to submit NTT
-# choices as a non-stakeholder (see the module header). It carries no
-# templates and no daml-script-bearing test code of its own, but it does use
-# 'Daml.Script' (queryDisclosure/queryContractId), so daml-script is a
-# regular dependency here, not a test-only one.
+# Disclosure-set library: 'Wormhole.Ntt.Disclosure' is the canonical
+# allow-list a relayer or disclosure service reads to submit NTT choices as a
+# non-stakeholder (see the module header). It uses 'Daml.Script'
+# (queryDisclosure/queryContractId), so daml-script is a regular dependency.
 #
 # It data-depends on the vendored wormhole-core DAR, the CIP-56 interface
-# DARs, and the locally built ntt DAR. The root multi-package.yaml ensures
-# those are built first. `dpm build --all` packs their DALFs into this DAR
-# too.
+# DARs, and the locally built ntt DAR. The root multi-package.yaml builds
+# those first; `dpm build --all` packs their DALFs into this DAR.
 sdk-version: 3.5.1
 name: ntt-disclosure
 version: 0.1.0
