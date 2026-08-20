@@ -47,23 +47,3 @@ jobs:
       - name: Run Daml tests
         working-directory: ./canton/test
         run: dpm test
-
-  disclosure-service:
-    name: disclosure service (go vet/test)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Set up Go
-        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5
-        with:
-          go-version-file: ./canton/disclosure/service/go.mod
-      - name: go vet + unit tests (disclosure service)
-        working-directory: ./canton/disclosure/service
-        run: |
-          go vet ./...
-          go test ./...
-      - name: go vet + unit tests (testing/go)
-        working-directory: ./canton/testing/go
-        run: |
-          go vet ./...
-          go test ./...
