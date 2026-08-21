@@ -6,7 +6,7 @@ stakeholder of; it must attach the contract as a disclosure. This service
 serves those disclosures over HTTP. Each flow's set comes from its choice
 body in `canton/ntt/daml/Wormhole/Ntt/Manager.daml`.
 
-Testnet base URL: `https://canton-disclosure.labsapis.com`.
+Mainnet base URL: `https://canton-disclosure.labsapis.com`.
 
 ## Endpoints
 
