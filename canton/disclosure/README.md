@@ -43,6 +43,26 @@ package-qualified names, for example `#ntt:Wormhole.Ntt.Manager:NttManager`.
 A `template` query value can give just the `Module:Entity` tail; the service
 matches it against the allow-list and forwards the qualified name upstream.
 
+`template` examples (`Module` is the Daml module, `Entity` the template name):
+
+```
+# One template, by its Module:Entity tail.
+curl 'http://127.0.0.1:7599/v1/disclosures?template=Token.CIP0056.CoinFactory:CoinFactory'
+
+# The package-qualified spelling works too and hits the same allow-list entry.
+curl 'http://127.0.0.1:7599/v1/disclosures?template=%23token-cip0056:Token.CIP0056.CoinFactory:CoinFactory'
+
+# Several templates: repeat the parameter.
+curl 'http://127.0.0.1:7599/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager&template=Wormhole.Core.State:CoreState'
+
+# No parameter: every allow-listed template.
+curl 'http://127.0.0.1:7599/v1/disclosures'
+```
+
+The `#` in a package-qualified value must be URL-encoded as `%23`; the bare
+tail form avoids that. `template=CoinFactory` alone gets a 403: the value
+needs both segments, joined by `:`.
+
 The service re-reads `--access-token-file` on each upstream request. An
 operator can rotate the token file's contents without a restart.
 
