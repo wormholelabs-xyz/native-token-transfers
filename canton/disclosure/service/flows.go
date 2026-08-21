@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -93,10 +94,13 @@ type daNttManager struct {
 	GuardianGovernance   string         `json:"guardianGovernance"`
 	Namespace            string         `json:"namespace"`
 	ManagerAddress       string         `json:"managerAddress"`
+	ChainId              json.Number    `json:"chainId"`
+	ManagerId            json.Number    `json:"managerId"`
 	TransceiverEmitterId json.Number    `json:"transceiverEmitterId"`
 	InstrumentId         daInstrumentId `json:"instrumentId"`
 	TokenConfig          string         `json:"tokenConfig"`
 	Factory              daNttFactory   `json:"factory"`
+	Paused               bool           `json:"paused"`
 }
 
 type daLockedLedger struct {
@@ -1024,3 +1028,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // ---------------------------------------------------------------------------
+
+// managerEntry is one visible NTT deployment, over the wire.
+type managerEntry struct {
+	ManagerAddress string         `json:"managerAddress"`
+	ContractID     string         `json:"contractId"`
+	ChainId        json.Number    `json:"chainId"`
+	ManagerId      json.Number    `json:"managerId"`
+	TokenConfig    string         `json:"tokenConfig"`
+	InstrumentId   daInstrumentId `json:"instrumentId"`
+	Paused         bool           `json:"paused"`
+}
+
+// handleManagers serves GET /v1/managers: every NttManager the disclosing parties see. Clients
+// read the managerAddress here to fill the flow endpoints' manager param.
+func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	offset, err := s.acs.LedgerEnd(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), upstreamErrorStatus(err))
+		return
+	}
+	mgrs, err := fetchDecoded[daNttManager](r.Context(), s, tailNttManager, offset)
+	if err != nil {
+		writeFlowError(w, err)
+		return
+	}
+	out := make([]managerEntry, 0, len(mgrs))
+	for _, m := range mgrs {
+		out = append(out, managerEntry{
+			ManagerAddress: m.value.ManagerAddress,
+			ContractID:     m.entry.ContractID,
+			ChainId:        m.value.ChainId,
+			ManagerId:      m.value.ManagerId,
+			TokenConfig:    m.value.TokenConfig,
+			InstrumentId:   m.value.InstrumentId,
+			Paused:         m.value.Paused,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ManagerAddress < out[j].ManagerAddress })
+	writeJSON(w, http.StatusOK, map[string]any{"managers": out})
+}

@@ -13,10 +13,9 @@ import (
 // Allow-list
 // ---------------------------------------------------------------------------
 
-// defaultAllowList is the transport-side projection of Wormhole.Ntt.Disclosure's module header
-// (canton/test/daml/Wormhole/Ntt/Disclosure.daml). It is the flat union of every template
-// that a disclosure-set function there names. The canonical, flow-aware sets live in that Daml
-// module. This table only decides which templates this service may fetch.
+// defaultAllowList is the flat union of every template the per-flow sets (flows.go) name; each
+// set comes from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml. This table only
+// decides which templates this service may fetch.
 //
 // Entries are package-name-qualified ("#<package-name>:Module:Entity"). The JSON Ledger API v2
 // returns HTTP 400 for an unqualified "Module:Entity" template filter (confirmed live). The
@@ -118,7 +117,9 @@ func newServer(opts *options, allowList []string, acs acsClient) *server {
 		s.allowListByTail[templateTail(t)] = t
 	}
 	s.mux = http.NewServeMux()
+	s.mux.HandleFunc("/v1", s.handleIndex)
 	s.mux.HandleFunc("/v1/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/v1/managers", s.handleManagers)
 	s.mux.HandleFunc("/v1/disclosures", s.handleDisclosures)
 	s.mux.HandleFunc("/v1/flows/{flow}", s.handleFlows)
 	return s
@@ -222,4 +223,32 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// apiIndex is /v1's static payload: every endpoint and its parameters.
+var apiIndex = map[string]any{
+	"service": "disclosure-service",
+	"endpoints": []map[string]any{
+		{"method": "GET", "path": "/v1", "about": "this index"},
+		{"method": "GET", "path": "/v1/healthz", "about": "liveness: disclosing parties, template count, ledger end"},
+		{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
+		{"method": "GET", "path": "/v1/disclosures", "params": []string{"template (Module:Entity, repeatable; empty = whole allow-list)"}, "about": "raw createdEventBlobs for allow-listed templates"},
+		{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
+			"release":      {"manager", "digest", "recipient (optional)"},
+			"mint":         {"manager", "digest", "recipient"},
+			"set-peer":     {"manager", "digest"},
+			"accept-admin": {"manager", "digest"},
+			"transfer":     {"manager"},
+			"register":     {"gg (optional)", "by-vaa (optional bool)"},
+			"consolidate":  {"manager"},
+		}},
+	},
+}
+
+func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiIndex)
 }

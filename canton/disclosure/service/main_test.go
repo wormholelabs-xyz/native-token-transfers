@@ -1623,3 +1623,35 @@ func TestHandleFlows_BadHexParam_400(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleIndex(t *testing.T) {
+	srv := newServer(&options{disclosingParties: []string{"Alice"}, maxContractsPerTemplate: 10}, defaultAllowList(), nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), "/v1/managers")
+	assert.Contains(t, rr.Body.String(), "/v1/flows/{flow}")
+	assert.Contains(t, rr.Body.String(), "accept-admin")
+}
+
+func TestHandleManagers(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	second := acsContractJSONWithArg("pkg:"+tailNttManager, "mgr-cid-2", "bWdy", "sync1",
+		nttManagerArg("Bob", b.gg, "ns2", strings.Repeat("b", 64), 8, b.gg, "otherCoin", tokenConfigBurnMint, factoryTagBurnMint, "cid-f2"))
+	fixtures := map[string]string{
+		tailNttManager: jsonArray(b.managerJSON(), second),
+	}
+	srv := newFlowTestServer(t, fixtures, "Alice")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var got struct {
+		Managers []managerEntry `json:"managers"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	require.Len(t, got.Managers, 2)
+	assert.Equal(t, b.managerAddr, got.Managers[0].ManagerAddress)
+	assert.Equal(t, strings.Repeat("b", 64), got.Managers[1].ManagerAddress)
+	assert.Equal(t, tokenConfigBurnMint, got.Managers[1].TokenConfig)
+	assert.Equal(t, "otherCoin", got.Managers[1].InstrumentId.Id)
+}
