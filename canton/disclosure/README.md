@@ -3,7 +3,7 @@
 This directory holds the `service/` Go module: the production disclosure
 service. It serves each NTT flow's createdEventBlobs over HTTP.
 
-Each flow's set is derived from its choice body in
+Each flow's set comes from its choice body in
 `canton/ntt/daml/Wormhole/Ntt/Manager.daml`: the set holds exactly the
 contracts the choice fetches that a non-stakeholder submitter cannot see.
 The per-flow endpoint table below lists the sets.
