@@ -1,25 +1,18 @@
 # canton/disclosure
 
 This directory holds the `service/` Go module: the production disclosure
-service. It serves each NTT flow's createdEventBlobs over HTTP.
+service. On Canton, a submitter cannot fetch a contract it is not a
+stakeholder of; it must attach the contract as a disclosure. This service
+serves those disclosures over HTTP. Each flow's set comes from its choice
+body in `canton/ntt/daml/Wormhole/Ntt/Manager.daml`.
 
-Each flow's set comes from its choice body in
-`canton/ntt/daml/Wormhole/Ntt/Manager.daml`: the set holds exactly the
-contracts the choice fetches that a non-stakeholder submitter cannot see.
-The per-flow endpoint table below lists the sets.
+Testnet base URL: `https://canton-disclosure.labsapis.com`.
 
-## Service
+## Endpoints
 
-The service exposes three endpoints:
-
-- `GET /v1/healthz` — a liveness check.
-- `GET /v1/disclosures?template=Module:Entity` — the active contracts for
-  an allow-listed template, with each contract's createdEventBlob. The
-  service reads these contracts from the JSON Ledger API v2.
-- `GET /v1/flows/{flow}` — one NTT flow's assembled disclosure set, each
-  contract labeled by its role. The service selects natively in Go over
-  decoded `createArgument` payloads; it runs no Daml interpreter. `flow` and
-  its query parameters:
+- `GET /v1/healthz` — liveness: disclosing parties, template count, ledger end.
+- `GET /v1/flows/{flow}` — one flow's assembled disclosure set, each contract
+  labeled by its role. Parameters per flow:
 
   | Flow | Params |
   |---|---|
@@ -31,90 +24,66 @@ The service exposes three endpoints:
   | `register` | `gg` (optional), `by-vaa` (bool, optional) |
   | `consolidate` | `manager` |
 
-  `manager` and `digest` are hex strings, 64 characters (32 bytes) each.
-  The response carries a `disclosures` array (role, templateId, contractId,
-  createdEventBlob, synchronizerId) and a `missing` array naming set members
-  the disclosing party cannot see (owner-only contracts such as
-  `AdminTransferProposal` and `TransferPreapproval`); the client supplies
-  those itself.
+- `GET /v1/disclosures?template=Module:Entity` — raw blobs for one
+  allow-listed template. Repeat `template=` for several. With no parameter,
+  it returns every allow-listed template.
 
-A template not on the allow-list gets a 403 response. The allow-list uses
-package-qualified names, for example `#ntt:Wormhole.Ntt.Manager:NttManager`.
-A `template` query value can give just the `Module:Entity` tail; the service
-matches it against the allow-list and forwards the qualified name upstream.
+`manager` and `digest` are hex strings, 64 characters each: the manager
+address and the VAA hash. A flow response carries a `disclosures` array
+(role, templateId, contractId, createdEventBlob, synchronizerId) and a
+`missing` array. `missing` names owner-only set members (proposals,
+preapprovals) the disclosing parties cannot see; the client supplies those.
+Attach each `disclosures` entry to the command submission as a
+`DisclosedContract`, and read each role's `contractId` for the choice
+arguments.
 
-`template` examples (`Module` is the Daml module, `Entity` the template name):
+## Examples
 
 ```
-# One template, by its Module:Entity tail.
-curl 'http://127.0.0.1:7599/v1/disclosures?template=Token.CIP0056.CoinFactory:CoinFactory'
+# One flow's whole set.
+curl 'https://canton-disclosure.labsapis.com/v1/flows/release?manager=<hex64>&digest=<hex64>'
 
-# The package-qualified spelling works too and hits the same allow-list entry.
-curl 'http://127.0.0.1:7599/v1/disclosures?template=%23token-cip0056:Token.CIP0056.CoinFactory:CoinFactory'
+# One template, by its Module:Entity tail.
+curl 'https://canton-disclosure.labsapis.com/v1/disclosures?template=Token.CIP0056.CoinFactory:CoinFactory'
 
 # Several templates: repeat the parameter.
-curl 'http://127.0.0.1:7599/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager&template=Wormhole.Core.State:CoreState'
-
-# No parameter: every allow-listed template.
-curl 'http://127.0.0.1:7599/v1/disclosures'
+curl 'https://canton-disclosure.labsapis.com/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager&template=Wormhole.Core.State:CoreState'
 ```
 
-The `#` in a package-qualified value must be URL-encoded as `%23`; the bare
-tail form avoids that. `template=CoinFactory` alone gets a 403: the value
-needs both segments, joined by `:`.
+A `template` value needs both segments, joined by `:`; `Module` is the Daml
+module, `Entity` the template name. A package-qualified value
+(`#token-cip0056:Token.CIP0056.CoinFactory:CoinFactory`) hits the same
+allow-list entry; URL-encode its `#` as `%23`. A template outside the
+allow-list gets a 403.
 
-The service re-reads `--access-token-file` on each upstream request. An
-operator can rotate the token file's contents without a restart.
+## Flags
 
-## Load on the participant
+- `--json-api` (required) — base URL of the JSON Ledger API v2.
+- `--disclosing-party` (required) — comma-separated parties as which the
+  service reads the ledger. The token must grant readAs for each, and one
+  participant must host them all. One service replaces one service per party.
+- `--access-token-file` — bearer token for the upstream; re-read on every
+  request, so an operator rotates it without a restart.
+- `--allow-list` — JSON array of package-qualified names, overriding the
+  built-in list.
+- `--max-contracts-per-template`, `--max-upstream-concurrency`, `--cache-ttl`
+  — load bounds: per-template result cap, in-flight upstream query cap, and
+  a short read cache.
+- `--listen` — bind address; defaults to loopback.
 
-One request can query every allow-listed template plus the ledger end, so
-inbound traffic reaches the participant amplified. Two flags bound this:
+## Build and run
 
-- `--cache-ttl` (default 5s) serves repeat ledger reads from memory. The
-  cached ledger end makes the contract cache effective: inside one window
-  every request resolves the same offset, so their reads share a key. A
-  caller can get a set up to one TTL old. Set `0` to disable the cache.
-- `--max-upstream-concurrency` (default 8) caps in-flight upstream queries.
-  A request that waits more than 2 seconds for a slot gets a 503, which
-  tells the caller to retry. This cap holds the service's load on the
-  participant steady, whatever the inbound rate.
+1. Run `cd canton/disclosure/service && go build -o disclosure-service .`.
+2. Run `./disclosure-service --json-api <url> --disclosing-party <p1,p2,...>
+   [--access-token-file <jwt-file>]`.
 
-A 502 means the upstream failed. A 503 means this service shed the call.
-
-`--disclosing-party` names the disclosing parties, comma-separated: the
-parties as which the service reads the ledger. Every served blob is a
-contract at least one of them sees. The access token must grant readAs for
-each party, and one participant must host them all. One service with the
-full party list replaces one service per party. The disclosing parties are
-the source of the disclosures; the submitter that attaches them is a
-different party.
-
-Build and run the service:
-
-1. Go to the service directory. Run `cd canton/disclosure/service`.
-2. Build the binary. Run `go build -o disclosure-service .`.
-3. Start the service. Run `./disclosure-service --json-api <url>
-   --disclosing-party <party> [--access-token-file <jwt-file>]`.
-
-## Container
-
-`service/Dockerfile` builds a static binary on a distroless base. Build and
-run:
-
-1. Build the image. Run `docker build -t disclosure-service canton/disclosure/service`.
-2. Start the container. Run `docker run --rm -p 127.0.0.1:7599:7599
-   -v <token-dir>:/secrets:ro disclosure-service --listen 0.0.0.0:7599
-   --json-api <url> --disclosing-party <p1,p2,...>
-   --access-token-file /secrets/token`.
-
-Inside a container, pass `--listen 0.0.0.0:7599`; the loopback default is
-unreachable through a published port. The service re-reads the token file
-per request, so an external refresher can rotate the mounted file.
+Container: `docker build -t disclosure-service canton/disclosure/service`,
+then run it with `--listen 0.0.0.0:7599` and the token file mounted
+read-only; the loopback default is unreachable through a published port.
 
 ## Deployment posture
 
-By design, the service does not authenticate requests. Bind it to loopback. As an
-alternative, place it behind the deployment layer's network boundary. This
-boundary can be a sidecar, a mesh, or a TLS-terminating proxy.
+By design, the service does not authenticate requests. Bind it to loopback,
+or place it behind the deployment layer's network boundary (a tunnel, a
+mesh, or a TLS-terminating proxy) with access control at that boundary.
 `--access-token-file` holds its only upstream credential.
