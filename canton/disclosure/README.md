@@ -10,7 +10,11 @@ Mainnet base URL: `https://canton-disclosure.labsapis.com`.
 
 ## Endpoints
 
+- `GET /v1` — this endpoint list, as JSON.
 - `GET /v1/healthz` — liveness: disclosing parties, template count, ledger end.
+- `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
+  `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
+  `paused`. Read `managerAddress` here for the flow endpoints' `manager` param.
 - `GET /v1/flows/{flow}` — one flow's assembled disclosure set, each contract
   labeled by its role. Parameters per flow:
 
