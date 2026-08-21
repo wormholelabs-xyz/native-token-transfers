@@ -80,10 +80,3 @@ allow-list gets a 403.
 Container: `docker build -t disclosure-service canton/disclosure/service`,
 then run it with `--listen 0.0.0.0:7599` and the token file mounted
 read-only; the loopback default is unreachable through a published port.
-
-## Deployment posture
-
-By design, the service does not authenticate requests. Bind it to loopback,
-or place it behind the deployment layer's network boundary (a tunnel, a
-mesh, or a TLS-terminating proxy) with access control at that boundary.
-`--access-token-file` holds its only upstream credential.
