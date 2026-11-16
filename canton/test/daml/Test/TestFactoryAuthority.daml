@@ -30,6 +30,7 @@ module Test.TestFactoryAuthority where
 import Daml.Script
 import DA.Foldable (forA_)
 import DA.Optional (fromSome)
+import DA.Text (isInfixOf)
 import DA.Time (hours, addRelTime)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
@@ -42,7 +43,7 @@ import Wormhole.Ntt.Governance (NttGovernance, RegisterManager (..))
 import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Ntt.Manager qualified as M
 import Test.TestNtt
-  ( Deployment (..), MockBurnMintFactory (..)
+  ( MockBurnMintFactory (..)
   , nttSetup, nttCoinFactorySetup, coreRegistries, cantonChainId, deploy, expectAbort )
 
 -- | A contract signed by @victim@. If an attacker-authored factory can create
@@ -299,38 +300,58 @@ testAttackerCannotRegisterGgMintedManagerWithRealFactory = do
     (toInterfaceContractId @BurnMintFactory factoryCid) csId
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
--- | A non-canonical burn/mint factory and the abort committing it must raise.
+-- | Assert a rejected submission whose error text contains @needle@: an
+-- assertion abort or a ledger authorization failure.
+expectSubmissionRejected : Text -> Either SubmitError a -> Script ()
+expectSubmissionRejected needle = \case
+  Left (FailureStatusError failure) -> checkErrorText failure.message
+  Left err -> checkErrorText (show err)
+  Right _ -> abort ("submission succeeded; expected rejection containing '" <> needle <> "'")
+  where
+    checkErrorText errorText =
+      assertMsg ("expected rejection containing '" <> needle <> "', got: " <> errorText)
+        (needle `isInfixOf` errorText)
+
+-- | A non-canonical burn/mint factory and the rejection committing it must raise.
 data NonCanonicalFactoryCase = NonCanonicalFactoryCase with
     factoryCid    : ContractId BurnMintFactory
     factoryDisc   : Disclosure
-    expectedAbort : Text
+    expectedRejection : Text
 
 -- | Every non-canonical factory shape: a gg-signed look-alike template, a
--- genuine 'CoinFactory' administered by another party, and an attacker's
--- factory whose view claims gg.
-nonCanonicalFactoryCases : Party -> Party -> Script [NonCanonicalFactoryCase]
-nonCanonicalFactoryCases gg outsider = do
+-- genuine 'CoinFactory' administered by the deployment admin, one
+-- administered by an outsider, and the admin's own factory whose view claims
+-- gg. The outsider's 'CoinFactory' fails the fetch's authorization before the
+-- admin check, since no submitter is its stakeholder.
+nonCanonicalFactoryCases : Party -> Party -> Party -> Script [NonCanonicalFactoryCase]
+nonCanonicalFactoryCases gg admin outsider = do
   lookAlikeCid <- submit gg do
     createCmd MockBurnMintFactory with admin = gg, instrument = InstrumentId with admin = gg, id = "LOOKALIKE"
   lookAlikeDisc <- fromSome <$> queryDisclosure gg lookAlikeCid
-  foreignCoinFactoryCid <- submit outsider do createCmd CoinFactory with admin = outsider
-  foreignCoinFactoryDisc <- fromSome <$> queryDisclosure outsider foreignCoinFactoryCid
-  evilCid <- submit outsider do
-    createCmd EvilBurnMintFactory with thief = outsider, viewAdmin = gg, attemptForge = True
-  evilDisc <- fromSome <$> queryDisclosure outsider evilCid
+  adminCoinFactoryCid <- submit admin do createCmd CoinFactory with admin
+  adminCoinFactoryDisc <- fromSome <$> queryDisclosure admin adminCoinFactoryCid
+  outsiderCoinFactoryCid <- submit outsider do createCmd CoinFactory with admin = outsider
+  outsiderCoinFactoryDisc <- fromSome <$> queryDisclosure outsider outsiderCoinFactoryCid
+  evilCid <- submit admin do
+    createCmd EvilBurnMintFactory with thief = admin, viewAdmin = gg, attemptForge = True
+  evilDisc <- fromSome <$> queryDisclosure admin evilCid
   pure
     [ NonCanonicalFactoryCase with
         factoryCid = toInterfaceContractId @BurnMintFactory lookAlikeCid
         factoryDisc = lookAlikeDisc
-        expectedAbort = "factory is not the canonical CoinFactory"
+        expectedRejection = "factory is not the canonical CoinFactory"
     , NonCanonicalFactoryCase with
-        factoryCid = toInterfaceContractId @BurnMintFactory foreignCoinFactoryCid
-        factoryDisc = foreignCoinFactoryDisc
-        expectedAbort = "factory's admin does not match this deployment's guardianGovernance"
+        factoryCid = toInterfaceContractId @BurnMintFactory adminCoinFactoryCid
+        factoryDisc = adminCoinFactoryDisc
+        expectedRejection = "factory's admin does not match this deployment's guardianGovernance"
+    , NonCanonicalFactoryCase with
+        factoryCid = toInterfaceContractId @BurnMintFactory outsiderCoinFactoryCid
+        factoryDisc = outsiderCoinFactoryDisc
+        expectedRejection = "requires one of the stakeholders"
     , NonCanonicalFactoryCase with
         factoryCid = toInterfaceContractId @BurnMintFactory evilCid
         factoryDisc = evilDisc
-        expectedAbort = "factory is not the canonical CoinFactory"
+        expectedRejection = "factory is not the canonical CoinFactory"
     ]
 
 -- | Live-signed burn/mint registration commits only the canonical factory,
@@ -338,14 +359,14 @@ nonCanonicalFactoryCases gg outsider = do
 testRegisterBurnMintRejectsNonCanonicalFactory : Script ()
 testRegisterBurnMintRejectsNonCanonicalFactory = do
   (operator, gg, csId) <- nttSetup
+  admin <- allocateParty "NonCanonicalRegisterAdmin"
   outsider <- allocateParty "NonCanonicalRegisterOutsider"
-  cases <- nonCanonicalFactoryCases gg outsider
-  forA_ (zip [0 .. length cases - 1] cases) \(caseIndex, factoryCase) -> do
-    admin <- allocateParty ("NonCanonicalRegisterAdmin" <> show caseIndex)
-    let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor admin 0
+  cases <- nonCanonicalFactoryCases gg admin outsider
+  let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor admin 0
+  forA_ cases \factoryCase -> do
     (discs, register) <- registerBurnMint operator admin inst factoryCase.factoryCid csId
     res <- trySubmit (actAs admin <> actAs gg <> mconcat (map disclose (factoryCase.factoryDisc :: discs))) register
-    expectAbort factoryCase.expectedAbort res
+    expectSubmissionRejected factoryCase.expectedRejection res
 
 -- | Live-signed burn/mint factory rotation commits only the canonical
 -- factory, even with gg co-signing.
@@ -355,12 +376,12 @@ testSetFactoryBurnMintRejectsNonCanonicalFactory = do
   admin <- allocateParty "NonCanonicalRotateAdmin"
   outsider <- allocateParty "NonCanonicalRotateOutsider"
   deployment <- deploy operator gg admin M.BurnMint csId
-  cases <- nonCanonicalFactoryCases gg outsider
+  cases <- nonCanonicalFactoryCases gg admin outsider
   forA_ cases \factoryCase -> do
     res <- trySubmit (actAs admin <> actAs gg <> disclose factoryCase.factoryDisc) do
       exerciseCmd deployment.mgrCid M.SetFactory with
         newFactory = M.BurnMintFactoryCid factoryCase.factoryCid
-    expectAbort factoryCase.expectedAbort res
+    expectSubmissionRejected factoryCase.expectedRejection res
 
 -- | gg is the only minter: a burn/mint instrument administered by another
 -- party is rejected even when that party, the admin, and gg all co-sign.

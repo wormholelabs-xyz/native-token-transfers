@@ -72,11 +72,12 @@ template NttGovernance
     -- permissionless without ever pooling an unvetted deployment's custody
     -- with anyone else's.
     --
-    -- For burn/mint, two rules make the mint capability sound: the
-    -- instrument's admin — the party whose mint authority the deployment
-    -- borrows — must co-sign the registration (see the controller note
-    -- below), and the instrument id must be hash-committed to the registering
-    -- admin via 'nttInstrumentIdFor' — see there for why this keeps a bridged
+    -- For burn/mint, four rules make the mint capability sound: gg must
+    -- administer the instrument (gg is the only minter), gg must co-sign the
+    -- registration (see the controller note below), the factory must be the
+    -- canonical 'CoinFactory' ('requireCanonicalFactory'), and the instrument
+    -- id must be hash-committed to the registering admin via
+    -- 'nttInstrumentIdFor' — see there for why this keeps a bridged
     -- instrument exclusive to one deployment.
     --
     -- @coreStateCid@/@emitterFeeAllocation@/@claimFeeAllocation@ fund the
@@ -107,14 +108,11 @@ template NttGovernance
         emitterFeeAllocation  : Optional (ContractId Allocation, ExtraArgs)
         claimFeeAllocation    : Optional (ContractId Allocation, ExtraArgs)
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- the TransceiverInit message fee
-      -- For burn/mint, the instrument's admin (the minter) co-signs, because
-      -- it is lending its mint authority to this deployment. An external
-      -- minter simply consents, so registration stays permissionless; when
-      -- the minter is gg, the co-signature makes registration a governance
-      -- action, so an attacker cannot stand up a gg-minted deployment behind
-      -- a factory it controls. Lock/unlock has no minter and stays
-      -- @admin@-only.
-      controller admin :: (if tokenConfig == BurnMint then [instrumentId.admin] else [])
+      -- For burn/mint, gg co-signs because it lends its mint authority to
+      -- this deployment, which makes registration a governance action
+      -- ('RegisterManagerByVaa' is the VAA-gated form). Lock/unlock has no
+      -- minter and stays @admin@-only.
+      controller admin :: (if tokenConfig == BurnMint then [guardianGovernance] else [])
       do
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
           operator guardianGovernance nextId admin chainId
@@ -195,7 +193,7 @@ template NttGovernance
         assertMsg "ntt governance: registration binding does not match"
           (normalizeHex registrationBinding == nttRegistrationBindingFor operator admin instrumentNonce)
 
-        -- 8. Factory template-pin.
+        -- 8. Factory template-pin, ahead of the shared body's identical check.
         requireCanonicalFactory guardianGovernance factory
 
         let instrumentId = InstrumentId with
@@ -254,16 +252,18 @@ registerManagerBody
     -- one-shot init has no re-broadcast path.
     assertMsg "ntt: consistency level must be a uint8"
       (consistencyLevel >= 0 && consistencyLevel <= 255)
-    case tokenConfig of
-      BurnMint ->
-        -- The instrument's admin co-signs via the controller, so no on-ledger
-        -- consent check is needed; the id binding keeps the instrument
-        -- exclusive to one deployment (see 'nttInstrumentIdFor').
-        assertMsg "ntt: burn/mint instrument id is not bound to the registering admin"
-          (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
-      LockUnlock -> pure ()
     assertMsg "ntt: factory type does not match the token config"
       (factoryMatchesConfig tokenConfig factory)
+    case tokenConfig of
+      BurnMint -> do
+        assertMsg "ntt: burn/mint instrument is not administered by guardianGovernance"
+          (instrumentId.admin == guardianGovernance)
+        -- The id binding keeps the instrument exclusive to one deployment
+        -- (see 'nttInstrumentIdFor').
+        assertMsg "ntt: burn/mint instrument id is not bound to the registering admin"
+          (instrumentId.id == nttInstrumentIdFor admin instrumentNonce)
+        requireCanonicalFactory guardianGovernance factory
+      LockUnlock -> pure ()
 
     -- Mint the deployment's transceiver: gg's requester authority is
     -- inherited from the calling choice's own signatories; @admin@ pays.
@@ -314,13 +314,6 @@ registerManagerBody
       paused = False
       factoryEpoch = 0
       peerEpoch = 0
-      -- An external minter (instrument admin ≠ gg) becomes a manager
-      -- signatory so the burn/mint paths run on its authority, not gg's;
-      -- gg-minted deployments carry None and mint on gg's inherited
-      -- signature.
-      minter = case tokenConfig of
-        BurnMint | instrumentId.admin /= guardianGovernance -> Some instrumentId.admin
-        _ -> None
     ledger <- case tokenConfig of
       LockUnlock -> Some <$> create LockedLedger with
         operator

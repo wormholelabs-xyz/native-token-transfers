@@ -118,8 +118,9 @@ onboarding fees so `gg` is never made to fund a deployment's registration. For
 lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
 with the reserve starting admin-owned (see "Custody follows the admin"
 below). For burn/mint it checks the mint capability: `gg` must administer the
-instrument, and the instrument id must be bound to the registering admin (see
-"Instrument binding" below).
+instrument and co-sign the registration, the factory must be the canonical
+`CoinFactory` (see "gg is the only minter" below), and the instrument id must
+be bound to the registering admin (see "Instrument binding" below).
 
 Two key-derived identities, both bound to the REGISTERING admin — present as a
 controller at registration, and whose signature co-signs the created manager —
@@ -400,6 +401,17 @@ governance action. The other residual is liveness: if the registry rotates its
 factory before the committed cid is refreshed, transfers pause (they never
 mis-settle).
 
+**gg is the only minter.** A burn/mint deployment mints only instruments that
+`gg` administers, through the canonical `Token.CIP0056.CoinFactory` (vendored
+in `dars/`). Every path that commits a burn/mint factory (`RegisterManager`,
+`RegisterManagerByVaa`, `SetFactory`, `SetFactoryByVaa`) pins it to that
+template with admin `gg` (`requireCanonicalFactory`), and `gg` co-signs each
+live-signed path. External minters are not supported. The manager publishes a
+value-bearing VAA after each burn, so it must be able to verify the burn. A
+factory from another minter is code that NTT cannot verify: it can report a
+burn that did not occur. To bridge a token that `gg` does not administer, use
+lock/unlock.
+
 **Custody follows the admin.** A deployment registers with its reserve owned
 by its own `admin`: fully operational and explicitly custodial — the admin
 owns the reserve outright, so users trust it the way they would a custodial
@@ -436,7 +448,7 @@ appearing in the controller list) and rotating the committed factory
 (`NttManager.SetFactoryByVaa`). Both are VAA-gated the same way as the admin
 handoff — current-guardian-set-only verification, the deployment's own replay
 trie, and a factory template-pin to the canonical, gg-administered
-`NttCoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
+`CoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
 ever commit the one factory `gg` deployed at genesis) — so a gg-minted
 deployment needs no live `gg` signature at any point after the genesis
 `NttGovernance` ceremony: register, set peers, and hand admin to `gg` all flow

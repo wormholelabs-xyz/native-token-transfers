@@ -2454,7 +2454,6 @@ setupFixedManagerOn operator gg admin config chainId csId = do
       paused = False
       factoryEpoch = 0
       peerEpoch = 0
-      minter = None
   csDisc <- fromSome <$> queryDisclosure operator csId
   emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
   (mgrCid, _) <- submit (actAs admin <> disclose csDisc <> disclose emitterDisc) do
@@ -4003,7 +4002,6 @@ integrationRegisterByVaa input = do
   Some mgr <- queryContractId input.operator mgrCid
   mgr.admin === input.admin
   mgr.tokenConfig === BurnMint
-  mgr.minter === None
   mgr.factoryEpoch === 0
   mgr.factory === factory
   mgr.instrumentId === InstrumentId with

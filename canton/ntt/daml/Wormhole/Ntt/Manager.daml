@@ -19,10 +19,10 @@
 --     reserve is quorum-owned and its admin operations are governance actions.
 --   * @operator@ ties the deployment to its core bridge instance.
 --
--- A burn/mint deployment whose instrument an external party administers
--- carries that party as a fourth signatory, @minter@; the burn and mint paths
--- then run on its authority instead of gg's (see 'effectiveMinter' and
--- 'BurnMintMinterProxy').
+-- gg is the only minter. A burn/mint deployment bridges a gg-administered
+-- instrument through the canonical 'Token.CIP0056.CoinFactory.CoinFactory'
+-- ('requireCanonicalFactory'). External minters are not supported: NTT cannot
+-- verify that a foreign factory's burn happened.
 --
 -- The deployment's stable identity is no longer a co-signing party — it is a
 -- derived @namespace : Text@ (see 'nttNamespaceFor'), committed at
@@ -80,14 +80,14 @@
 -- commitment is typed by mode ('NttFactory'), matched against 'NttTokenConfig'
 -- at registration and rotation, so no call site coerces a contract id. @admin@
 -- refreshes it with 'SetFactory' on the rare occasion the registry is
--- upgraded; for burn/mint the 'effectiveMinter' co-signs that rotation, so
--- the committed factory stays minter-vetted for the deployment's whole life.
+-- upgraded; for burn/mint gg co-signs that rotation and the new factory must
+-- be the canonical 'CoinFactory', for the deployment's whole life.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
 import DA.Map (Map)
 import DA.Map qualified as Map
-import DA.Optional (fromSomeNote, fromOptional, optionalToList)
+import DA.Optional (fromSomeNote)
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
@@ -148,11 +148,11 @@ requireBurnMintFactory = \case
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
 -- | Pin a caller-supplied 'NttFactory' to the canonical, gg-administered
--- 'Token.CIP0056.CoinFactory.CoinFactory' — the only factory a VAA-gated
--- choice may ever commit, since a VAA cannot name a contract id and so cannot
--- vet an arbitrary factory. Checks the cid is genuinely backed by the
--- 'CoinFactory' template (not merely an interface implementer) and that its
--- @admin@ matches this deployment's guardianGovernance.
+-- 'Token.CIP0056.CoinFactory.CoinFactory' — the only burn/mint factory any
+-- path may commit. NTT cannot verify another factory's burn, and a VAA cannot
+-- name a contract id. Checks the cid is genuinely backed by the 'CoinFactory'
+-- template (not merely an interface implementer) and that its @admin@ matches
+-- this deployment's guardianGovernance.
 requireCanonicalFactory : Party -> NttFactory -> Update ()
 requireCanonicalFactory guardianGovernance factory = do
   bmCid <- requireBurnMintFactory factory
@@ -175,61 +175,6 @@ requireCommittedCoreState operator guardianGovernance coreStateCid = do
   assertMsg "ntt: core state operator mismatch"
     (cs.operator == operator)
   pure cs
-
--- | The party that administers this deployment's burn/mint instrument and
--- therefore authorizes minting/burning: the external @minter@ when present,
--- otherwise gg (the gg-minted case). Equal to @instrumentId.admin@ by
--- construction (see 'Wormhole.Ntt.Governance.RegisterManager'). It is always a
--- signatory of the manager, so the manager can drive the factory on its
--- authority.
-effectiveMinter : NttManager -> Party
-effectiveMinter mgr = fromOptional mgr.guardianGovernance mgr.minter
-
--- | A privilege-de-escalation proxy for the outbound burn.
---
--- The manager must not exercise a caller-committed 'BurnMintFactory'
--- directly. Its choice bodies always carry gg (a lifetime signatory), and
--- 'BurnMintFactory_BurnMint' is controlled by the factory's own interface
--- view admin — a value the implementation is free to report as gg. A direct
--- call would therefore hand gg's authority to arbitrary factory code.
---
--- Routing the burn through this @minter@-signed proxy resets the authority
--- at the choice boundary to @{minter, user}@. gg does not cross it, so a
--- lying @view.admin = gg@ controller can no longer be satisfied. For an
--- external minter this fully firewalls gg. For a gg-minted deployment
--- (@minter@ = gg) the proxy still carries gg — necessarily, since gg is the
--- real mint authority — which is why a gg-minted deployment can only ever
--- commit a gg-vetted factory (gg co-signs both
--- 'Wormhole.Ntt.Governance.RegisterManager' and every later 'SetFactory'
--- rotation).
---
--- Created and consumed inside 'NttManager.Transfer'; never persisted.
-template BurnMintMinterProxy
-  with
-    minter : Party
-  where
-    signatory minter
-
-    choice ProxyBurnMint : ()
-      with
-        factoryCid       : ContractId BurnMintFactory
-        instrumentId     : InstrumentId
-        inputHoldingCids : [ContractId Holding]
-        outputs          : [BurnMintOutput]
-        user             : Party
-        extraArgs        : ExtraArgs
-      -- Both the minter (mint authority) and the token owner authorize; gg is
-      -- deliberately absent from this body.
-      controller minter, user
-      do
-        _ <- exercise factoryCid BurnMintFactory_BurnMint with
-          expectedAdmin = minter
-          instrumentId
-          inputHoldingCids
-          outputs
-          extraActors = [user]
-          extraArgs
-        pure ()
 
 -- | A peer NTT deployment on another chain: its manager address (the
 -- @recipientManager@/@sourceManager@ in the transceiver message), its
@@ -496,22 +441,12 @@ template NttManager
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
     factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa': 'SetFactory' bumps this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
     peerEpoch            : Int             -- freshness pin for 'SetPeerByVaa': every 'SetPeer' bumps this deployment-wide counter, so a withheld/superseded peer VAA can never reinstate a since-replaced peer
-    minter               : Optional Party  -- external burn/mint minter (Some) — see 'effectiveMinter'; None when gg mints
   where
     -- See the module header for what each signature contributes. All three
-    -- base signatures are inherited from the NttGovernance root at
-    -- registration (admin from the registering caller); no signatory acts per
-    -- transfer. @namespace@ is derived data, not a party.
-    --
-    -- @minter@, when present, co-signs too: it is the external party that
-    -- administers a burn/mint instrument (@instrumentId.admin@) and thereby
-    -- lends its mint authority to this deployment. It is committed at
-    -- registration and never mutated, so a conditional signatory over it is
-    -- stable across every re-creating choice, and it survives 'TransferAdmin'
-    -- (which changes @admin@, not @minter@). Making it a signatory is what lets
-    -- the manager drive burn/mint on the minter's authority instead of gg's —
-    -- see 'effectiveMinter' and the de-escalation in the burn/'Mint' paths.
-    signatory (operator :: admin :: guardianGovernance :: optionalToList minter)
+    -- signatures are inherited from the NttGovernance root at registration
+    -- (admin from the registering caller); no signatory acts per transfer.
+    -- @namespace@ is derived data, not a party.
+    signatory operator, admin, guardianGovernance
 
     -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
     -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
@@ -587,25 +522,25 @@ template NttManager
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
     -- the new cid from the registry and commits it here.
     --
-    -- For burn/mint the 'effectiveMinter' — the party whose mint authority
-    -- the factory wields — co-signs the rotation, mirroring the co-signature
-    -- 'Wormhole.Ntt.Governance.RegisterManager' requires when the factory is
-    -- first committed. Without it a mutable @admin@ could later swap in a
-    -- look-alike factory; on a gg-minted deployment, where gg reaches the
-    -- factory body directly, that would re-open the authority leak the
-    -- de-escalation closes. The committed factory must stay minter-vetted
-    -- for the life of the deployment, not just at registration. Lock/unlock's
-    -- transfer factory never wields gg, so it stays @admin@-only.
+    -- For burn/mint gg — the party whose mint authority the factory wields —
+    -- co-signs the rotation, mirroring 'Wormhole.Ntt.Governance.RegisterManager',
+    -- and the new factory must be the canonical 'CoinFactory'. Without both, a
+    -- mutable @admin@ could later swap in a look-alike factory that captures
+    -- gg's authority. Lock/unlock's transfer factory never wields gg, so it
+    -- stays @admin@-only.
     --
     -- Every rotation bumps @factoryEpoch@, invalidating any
     -- 'AcceptAdminTransferByVaa' VAA signed against the superseded factory.
     choice SetFactory : ContractId NttManager
       with
         newFactory : NttFactory
-      controller admin :: (if tokenConfig == BurnMint then [effectiveMinter this] else [])
+      controller admin :: (if tokenConfig == BurnMint then [guardianGovernance] else [])
       do
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig newFactory)
+        case tokenConfig of
+          BurnMint -> requireCanonicalFactory guardianGovernance newFactory
+          LockUnlock -> pure ()
         create this with factory = newFactory, factoryEpoch = factoryEpoch + 1
 
     -- | Hand the operational role — and, for lock/unlock, the reserve it owns —
@@ -798,13 +733,11 @@ template NttManager
           RegisterBurnMintManager {} -> abort "ntt governance: wrong action for SetPeerByVaa"
           RotateToCanonicalFactory {} -> abort "ntt governance: wrong action for SetPeerByVaa"
 
-    -- | Governance-VAA-gated factory rotation for gg-minted burn/mint
-    -- deployments: the guardian quorum vets a specific (chain, managerAddress,
-    -- factoryEpoch) rotation off-chain, and @admin@ relays it with no live gg
-    -- signature needed, mirroring 'AcceptAdminTransferByVaa'. Restricted to
-    -- gg-minted deployments (@tokenConfig == BurnMint && minter == None@);
-    -- an external minter rotates via a live-co-signed plain 'SetFactory'
-    -- instead, and lock/unlock's transfer factory never wields gg.
+    -- | Governance-VAA-gated factory rotation for burn/mint deployments: the
+    -- guardian quorum vets a specific (chain, managerAddress, factoryEpoch)
+    -- rotation off-chain, and @admin@ relays it with no live gg signature
+    -- needed, mirroring 'AcceptAdminTransferByVaa'. Lock/unlock's transfer
+    -- factory never wields gg, so it rotates via plain 'SetFactory'.
     choice SetFactoryByVaa : ContractId NttManager
       with
         newFactory    : NttFactory
@@ -816,7 +749,7 @@ template NttManager
       controller admin
       do
         assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
-          (tokenConfig == BurnMint && minter == None)
+          (tokenConfig == BurnMint)
 
         cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
 
@@ -950,17 +883,17 @@ template NttManager
                   if change == 0.0
                     then []
                     else [ BurnMintOutput with owner = user, amount = change, context = extraArgs.context ]
-            -- Drive the factory through a minter-signed de-escalation proxy so
-            -- gg (a lifetime manager signatory) never crosses into the
-            -- caller-committed factory. The proxy carries only {minter, user}.
-            proxyCid <- create BurnMintMinterProxy with minter = effectiveMinter this
-            exercise proxyCid ProxyBurnMint with
-              factoryCid = burnMintFactoryCid
+            -- The choice's controllers are the factory's view admin plus
+            -- @extraActors@; the committed canonical 'CoinFactory' pins the
+            -- view admin to gg, so the factory body carries exactly {gg, user}.
+            _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
+              expectedAdmin = guardianGovernance
               instrumentId
               inputHoldingCids
               outputs
-              user
+              extraActors = [user]
               extraArgs
+            pure ()
         let ntt = NativeTokenTransfer with
               decimals = trimmed.decimals
               amount = trimmed.amount
