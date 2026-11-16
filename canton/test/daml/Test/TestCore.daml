@@ -32,8 +32,8 @@ govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479
 
 -- | Bootstrap a devnet 'CoreState' (co-signed by @operator@ + @guardianGovernance@,
 -- so genesis needs both), the 'EmitterRegistry', and the 'ReplayRootRegistry'.
--- Allocates the read-only @guardianObserver@ and threads it through. @operator@ is
--- returned FIRST so bootstrap.sh's first-party extraction yields it.
+-- Returns @(operator, guardianGovernance, coreState)@; @operator@ stays FIRST
+-- for bootstrap.sh's party extraction.
 setup : Script (Party, Party, ContractId CoreState)
 setup = setupWithInstrument None
 
@@ -44,15 +44,14 @@ setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId 
 setupWithInstrument mInstrument = do
   operator <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
-  guardianObserver <- allocateParty "GuardianObserver"
   let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
   csId <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] guardianObserver
+                 defaultGovernanceContract [devnetGuardian]
                  feeInstrument guardianGovernance)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance guardianObserver 0)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
-  pure (operator, guardianObserver, csId)
+  pure (operator, guardianGovernance, csId)
 
 -- | Register an emitter for @owner@ the production way: the requester submits
 -- alone against the disclosed 'EmitterRegistry' (operator co-signature inherited
@@ -146,7 +145,7 @@ testAddressVector =
 -- produce a different owner, which derives a different address.
 testImpersonationBlocked : Script ()
 testImpersonationBlocked = do
-  (operator, guardianObserver, _) <- setup
+  (operator, _, _) <- setup
   alice <- allocateParty "VictimAlice"
   mallory <- allocateParty "Mallory"
   aliceEm <- registerEmitter operator alice
@@ -156,14 +155,14 @@ testImpersonationBlocked = do
   submitMustFail operator do
     createCmd Emitter with
       operator, guardianGovernance = a.guardianGovernance, owner = alice
-      guardianObserver, emitterId = 0
+      emitterId = 0
       emitterAddress = a.emitterAddress, sequence = 0
 
   -- (b) Operator + Mallory can create a same-id emitter, but its address differs.
   malloryEm <- submit (actAs operator <> actAs mallory) do
     createCmd Emitter with
       operator, guardianGovernance = a.guardianGovernance, owner = mallory
-      guardianObserver, emitterId = 0
+      emitterId = 0
       emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
   Some m <- queryContractId mallory malloryEm
   assert (m.emitterAddress /= a.emitterAddress)

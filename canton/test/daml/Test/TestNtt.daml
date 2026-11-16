@@ -754,7 +754,6 @@ testRegistrationRejectsForeignRegistries = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "ForeignRegAdmin"
   rogue <- allocateParty "RogueOperator"
-  rogueObserver <- allocateParty "RogueRegObserver"
   fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
   let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
   [(govCid, _)] <- query @NttGovernance operator
@@ -763,7 +762,7 @@ testRegistrationRejectsForeignRegistries = do
   csDisc <- fromSome <$> queryDisclosure operator csId
 
   shadowEmReg <- submit rogue do
-    createCmd (mkInitialEmitterRegistry rogue gg rogueObserver 0)
+    createCmd (mkInitialEmitterRegistry rogue gg 0)
   shadowEmRegDisc <- fromSome <$> queryDisclosure rogue shadowEmReg
   res <- trySubmit (actAs admin <> disclose govDisc <> disclose shadowEmRegDisc <> disclose rrRegDisc <> disclose csDisc) do
     exerciseCmd govCid RegisterManager with
@@ -2425,13 +2424,11 @@ setupFixedManagerOn operator gg admin config chainId csId = do
       pure (TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   -- A fixed-address deployment bypasses 'RegisterManager', so it needs its own
   -- directly-created transceiver Emitter for SetPeer's broadcast leg.
-  observer <- allocateParty "FixedMgrEmitterObserver"
   emitterCid <- submit (actAs operator <> actAs gg) do
     createCmd Emitter with
       operator
       guardianGovernance = gg
       owner = gg
-      guardianObserver = observer
       emitterId = 999
       emitterAddress = b32 "cc"
       sequence = 0
@@ -2602,11 +2599,10 @@ testReceivePinsGuardianGovernance = do
   admin <- allocateParty "PinAdmin"
   recipient <- allocateParty "PinRecipient"
   rogueGov <- allocateParty "RogueGovernance"
-  rogueObserver <- allocateParty "RogueObserver"
   let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
+                 ["1111111111111111111111111111111111111111"] rogueInst rogueGov)
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
@@ -3141,11 +3137,10 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptPinAdmin"
   rogueGov <- allocateParty "AcceptPinRogueGovernance"
-  rogueObserver <- allocateParty "AcceptPinRogueObserver"
   let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 ["1111111111111111111111111111111111111111"] rogueObserver rogueInst rogueGov)
+                 ["1111111111111111111111111111111111111111"] rogueInst rogueGov)
   fx <- acceptAdminFixture operator gg admin BurnMint csId
   (nodeCid, _) <- coveringDisclosure operator gg fx.namespace (parseVAA acceptAdminHappyVAA).hash
   dProp <- fromSome <$> queryDisclosure admin fx.propCid
