@@ -10,38 +10,19 @@ import Daml.Script
 import DA.Assert ((===))
 import DA.Optional (fromSome)
 
-import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding)
-import Splice.Api.Token.BurnMintV1
-  ( BurnMintFactory, BurnMintFactory_BurnMint(..)
-  , BurnMintOutput(..)
-  )
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Token.CIP0056.Coin
 import Token.CIP0056.CoinFactory
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Ntt.Deposit (DepositPreapproval(..), Deposit(..))
 import Wormhole.Ntt.Manager
-import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32, resolveEmitter)
+import Test.TestNtt (nttSetup, nttCoinFactorySetup, b32, resolveEmitter, mintCoin)
 import Test.TestFactoryAuthority (registerBurnMint)
 
 -- | The interface-typed handle tests exercise choices on.
 asBurnMintFactory : ContractId CoinFactory -> ContractId BurnMintFactory
 asBurnMintFactory = toInterfaceContractId @BurnMintFactory
-
--- | Mint one coin directly against the factory — the only way to seed an
--- initial balance on a burn/mint chain outside of a real inbound transfer.
-mintCoin : ContractId CoinFactory -> Party -> InstrumentId -> Party -> Decimal -> Script (ContractId Holding)
-mintCoin factoryCid gg instrumentId owner amount = do
-  res <- submit (actAs gg <> actAs owner) do
-    exerciseCmd (asBurnMintFactory factoryCid) BurnMintFactory_BurnMint with
-      expectedAdmin = gg
-      instrumentId
-      inputHoldingCids = []
-      outputs = [BurnMintOutput with owner, amount, context = emptyExtraArgs.context]
-      extraActors = [owner]
-      extraArgs = emptyExtraArgs
-  case res.outputCids of
-    [cid] -> pure cid
-    _ -> abort ("expected exactly one minted coin, got: " <> show res.outputCids)
 
 ----------------------------------------------------------------------
 -- Canonical sharing across unrelated deployments
@@ -100,7 +81,7 @@ testNttCoinEndToEndRoundTrip = do
   Some mgr' <- queryContractId operator mgrCid'
   emitterCid <- resolveEmitter gg mgr'.transceiverEmitterId   -- SetPeer's own broadcast churned it
 
-  coinCid <- mintCoin factoryCid gg instrumentId alice 0.01
+  coinCid <- mintCoin (asBurnMintFactory factoryCid) gg instrumentId alice 0.01
 
   csDisc <- fromSome <$> queryDisclosure operator csId
   emitterDisc <- fromSome <$> queryDisclosure operator emitterCid

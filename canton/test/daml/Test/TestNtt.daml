@@ -3,8 +3,10 @@
 -- outbound sends (lock accounting, burn cover and change, the message fee),
 -- the recipient deposit pre-approval, and the inbound gate ('Release'/'Mint').
 --
--- The bridged token is the CIP-56 mock harness below ('Cip56MockHolding' over
--- 'MockBurnMintFactory' / 'MockTransferFactory'), which the manager drives
+-- Burn/mint deployments commit the canonical gg-administered 'CoinFactory'
+-- and burn 'Coin' holdings, since registration rejects any other factory.
+-- Lock/unlock deployments use the CIP-56 mock harness below
+-- ('Cip56MockHolding' over 'MockTransferFactory'), which the manager drives
 -- through the standard interfaces exactly as it would a real registry. One
 -- simplification: the mock factory cannot model a real registry's receiver
 -- pre-approval, so it can only create a receiver holding when the receiver's
@@ -35,7 +37,8 @@ import DA.Text qualified as T
 import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding, HoldingView(..))
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.BurnMintV1
-  (BurnMintFactory, BurnMintFactory_BurnMintResult(..), BurnMintFactoryView(..))
+  ( BurnMintFactory, BurnMintFactory_BurnMint(..), BurnMintFactory_BurnMintResult(..)
+  , BurnMintFactoryView(..), BurnMintOutput(..) )
 import Splice.Api.Token.TransferInstructionV1
   ( TransferFactory, TransferFactoryView(..)
   , TransferInstruction, TransferInstructionView(..), TransferInstructionStatus(..)
@@ -51,6 +54,7 @@ import Wormhole.Core.State
   ( Emitter(..), CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
 import Wormhole.Core.VAA (parseVAA)
+import Token.CIP0056.Coin (Coin(..))
 import Token.CIP0056.CoinFactory
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Payload
@@ -229,12 +233,33 @@ cip56HoldingsOwnedBy admin owner = do
   hs <- query @Cip56MockHolding admin
   pure [ (cid, h) | (cid, h) <- hs, h.owner == owner ]
 
--- | Disclose the gg-signed burn/mint factory so a non-gg submitter can drive
--- the nested BurnMintFactory_BurnMint.
-discloseBurnMintFactory : Party -> Script Disclosure
-discloseBurnMintFactory gg = do
-  [(cid, _)] <- query @MockBurnMintFactory gg
-  fromSome <$> queryDisclosure gg cid
+-- | Disclose a gg-signed 'CoinFactory' so a non-gg submitter can drive the
+-- nested BurnMintFactory_BurnMint.
+discloseCoinFactory : Party -> ContractId BurnMintFactory -> Script Disclosure
+discloseCoinFactory gg factoryCid =
+  fromSome <$> queryDisclosure gg (fromInterfaceContractId @CoinFactory factoryCid)
+
+-- | Mint one 'Coin' through @factoryCid@, the only way to seed a burn/mint
+-- balance outside an inbound transfer.
+mintCoin : ContractId BurnMintFactory -> Party -> InstrumentId -> Party -> Decimal -> Script (ContractId Holding)
+mintCoin factoryCid gg instrumentId owner amount = do
+  res <- submit (actAs gg <> actAs owner) do
+    exerciseCmd factoryCid BurnMintFactory_BurnMint with
+      expectedAdmin = gg
+      instrumentId
+      inputHoldingCids = []
+      outputs = [BurnMintOutput with owner, amount, context = emptyExtraArgs.context]
+      extraActors = [owner]
+      extraArgs = emptyExtraArgs
+  case res.outputCids of
+    [cid] -> pure cid
+    _ -> abort ("expected exactly one minted coin, got: " <> show res.outputCids)
+
+-- | The 'Coin's currently owned by @owner@, as seen by the instrument admin @gg@.
+coinsOwnedBy : Party -> Party -> Script [(ContractId Coin, Coin)]
+coinsOwnedBy gg owner = do
+  coins <- query @Coin gg
+  pure [ (cid, coin) | (cid, coin) <- coins, coin.owner == owner ]
 
 -- | Disclose the gg-signed transfer factory so a non-gg submitter can drive
 -- the nested TransferFactory_Transfer.
@@ -414,7 +439,8 @@ coreRegistries operator = do
   rrRegDisc <- fromSome <$> queryDisclosure operator rrReg
   pure (emReg, emRegDisc, rrReg, rrRegDisc)
 
--- | Create the gg-signed mock registry factory and register the manager
+-- | Create the registry factory (a fresh canonical 'CoinFactory' for
+-- burn/mint, the gg-signed mock for lock/unlock) and register the manager
 -- through the shared 'NttGovernance' root — which atomically mints the
 -- gg-owned transceiver 'Emitter', claims the gg-scoped replay root, and
 -- broadcasts the deployment's 'TransceiverInit' through that emitter, so no
@@ -426,7 +452,7 @@ deploy operator gg admin config csId = do
   (instrumentId, factory) <- case config of
     BurnMint -> do
       let inst = InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
-      fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = inst
+      fc <- nttCoinFactorySetup gg
       pure (inst, BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
       fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
@@ -435,13 +461,13 @@ deploy operator gg admin config csId = do
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
   csDisc <- fromSome <$> queryDisclosure operator csId
-  -- Burn/mint registration is co-signed by the instrument's minter (here gg);
-  -- lock/unlock is admin-only.
-  let minterActAs = case config of
+  -- Burn/mint registration is co-signed by gg, the only minter; lock/unlock is
+  -- admin-only.
+  let ggActAs = case config of
         BurnMint -> actAs gg
         LockUnlock -> mempty
   (_, mgrCid, emitterCid, ledgerCid, initMsg) <-
-    submit (actAs admin <> minterActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+    submit (actAs admin <> ggActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
       exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
@@ -557,7 +583,7 @@ testBurnMintRegistrationRequiresBoundInstrument = do
 -- own manager for an instrument that alice already bridges, aiming to mint it
 -- against VAAs from a peer she controls. Even with the instrument admin (gg)
 -- co-signing, the id is bound to alice, so mallory's registration fails no
--- matter what nonce she picks — a second defense behind the required minter
+-- matter what nonce she picks — a second defense behind the required gg
 -- co-signature.
 testBurnMintInstrumentIsExclusiveToItsAdmin : Script ()
 testBurnMintInstrumentIsExclusiveToItsAdmin = do
@@ -602,9 +628,8 @@ testRegistrationBounds = do
   csDisc <- fromSome <$> queryDisclosure operator csId
   let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc
 
-  -- A burn/mint instrument's minter must co-sign registration (it lends its
-  -- mint authority). Here the external minter @outsider@ does not co-sign, so
-  -- the registration is unauthorized.
+  -- Burn/mint registration requires gg's co-signature, which @admin@ alone
+  -- cannot supply.
   submitMustFail (actAs admin <> discs) do
     exerciseCmd govCid RegisterManager with
       admin
@@ -1173,7 +1198,7 @@ sendScaffold operator gg admin config csId = do
   emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
   emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
   factoryDisc <- case config of
-    BurnMint -> discloseBurnMintFactory gg
+    BurnMint -> discloseCoinFactory gg (theBurnMintFactory d.factory)
     LockUnlock -> discloseTransferFactory gg
   ledgerDiscs <- case d.ledgerCid of
     Some lcid -> do
@@ -1597,15 +1622,14 @@ testSetFactory = do
 -- | Rotating a gg-minted deployment's factory is gg-gated: the admin alone
 -- cannot repoint it (that would let a mutable admin swap in a look-alike
 -- factory that the gg-signed manager would then mint through), but the admin
--- together with gg — the party whose mint authority the factory wields — can.
--- This keeps the committed factory gg-vetted for the life of the deployment,
--- not just at registration.
+-- together with gg — the party whose mint authority the factory wields — can
+-- rotate to another canonical 'CoinFactory'.
 testSetFactoryGgMintedRequiresGg : Script ()
 testSetFactoryGgMintedRequiresGg = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "SFGgAdmin"
   d <- deploy operator gg admin BurnMint csId
-  freshFc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = d.instrumentId
+  freshFc <- nttCoinFactorySetup gg
   let freshFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory freshFc)
   -- Admin alone cannot rotate a gg-minted factory.
   submitMustFail admin do exerciseCmd d.mgrCid SetFactory with newFactory = freshFactory
@@ -2053,7 +2077,7 @@ testBurnUnderBurnRejected = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "BurnUnderAlice"
   (d, discs) <- sendScaffold operator gg alice BurnMint csId
-  holdingCid <- mkHolding gg alice d.instrumentId 0.004
+  holdingCid <- mintCoin (theBurnMintFactory d.factory) gg d.instrumentId alice 0.004
 
   res <- trySubmitWithDiscs alice discs do sendTransfer alice d csId [holdingCid]
   expectAbort "do not cover" res
@@ -2065,12 +2089,12 @@ testBurnReturnsChange = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "BurnChangeAlice"
   (d, discs) <- sendScaffold operator gg alice BurnMint csId
-  hold1 <- mkHolding gg alice d.instrumentId 0.01
-  hold2 <- mkHolding gg alice d.instrumentId 0.005
+  hold1 <- mintCoin (theBurnMintFactory d.factory) gg d.instrumentId alice 0.01
+  hold2 <- mintCoin (theBurnMintFactory d.factory) gg d.instrumentId alice 0.005
 
   _ <- submitWithDiscs alice discs do sendTransfer alice d csId [hold1, hold2]
 
-  remaining <- cip56HoldingsOwnedBy gg alice
+  remaining <- coinsOwnedBy gg alice
   case remaining of
     [(_, h)] -> h.amount === 0.005
     _ -> abort ("expected exactly one change holding, got: " <> show remaining)
@@ -2081,11 +2105,11 @@ testBurnExactCoverNoChange = do
   (operator, gg, csId) <- nttSetup
   alice <- allocateParty "BurnExactAlice"
   (d, discs) <- sendScaffold operator gg alice BurnMint csId
-  holdingCid <- mkHolding gg alice d.instrumentId 0.01
+  holdingCid <- mintCoin (theBurnMintFactory d.factory) gg d.instrumentId alice 0.01
 
   _ <- submitWithDiscs alice discs do sendTransfer alice d csId [holdingCid]
 
-  remaining <- cip56HoldingsOwnedBy gg alice
+  remaining <- coinsOwnedBy gg alice
   remaining === []
 
 -- | A burn input owned by someone other than the sender is rejected, even
@@ -2096,8 +2120,8 @@ testBurnWrongOwnerRejected = do
   alice <- allocateParty "BurnWrongOwnerAlice"
   bob <- allocateParty "BurnWrongOwnerBob"
   (d, discs) <- sendScaffold operator gg alice BurnMint csId
-  holdingCid <- mkHolding gg bob d.instrumentId 0.01
-  holdingDisc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Cip56MockHolding holdingCid)
+  holdingCid <- mintCoin (theBurnMintFactory d.factory) gg d.instrumentId bob 0.01
+  holdingDisc <- fromSome <$> queryDisclosure gg (fromInterfaceContractId @Coin holdingCid)
 
   res <- trySubmitWithDiscs alice (holdingDisc :: discs) do sendTransfer alice d csId [holdingCid]
   expectAbort "not owned by sender" res
@@ -2135,7 +2159,7 @@ testDepositMintSucceeds = do
       factoryCid = theBurnMintFactory d.factory
       extraArgs = emptyExtraArgs
 
-  holdings <- cip56HoldingsOwnedBy gg alice
+  holdings <- coinsOwnedBy gg alice
   case holdings of
     [(_, h)] -> h.amount === 0.01
     _ -> abort ("expected exactly one holding minted to alice, got: " <> show holdings)
@@ -3013,11 +3037,8 @@ testAcceptAdminByVaaEpochBindsFactory = do
   relayer <- allocateParty "AcceptEpochRelayer"
   fx <- acceptAdminFixture operator gg admin BurnMint csId
 
-  freshFc <- submit gg do
-    createCmd MockBurnMintFactory with admin = gg, instrument = bridgedInstrument gg
-  -- Migrate difference: on this branch, 'SetFactory' for a BurnMint deployment
-  -- is co-controlled by 'effectiveMinter' (here gg, since 'setupFixedManager'
-  -- always leaves @minter = None@), not by @admin@ alone.
+  freshFc <- nttCoinFactorySetup gg
+  -- 'SetFactory' on a burn/mint deployment is co-controlled by gg.
   mgrCid <- submit (actAs admin <> actAs gg) do
     exerciseCmd fx.mgrCid SetFactory with
       newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory freshFc)
@@ -3876,47 +3897,6 @@ testSetFactoryByVaaRejectsLockUnlock = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RotateLockUnlockAdmin"
   (mgrCid, _, _) <- setupFixedManager operator gg admin LockUnlock csId
-  csDisc <- fromSome <$> queryDisclosure operator csId
-  realFactoryCid <- nttCoinFactorySetup gg
-  let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
-  res <- trySubmit (actAs admin <> disclose csDisc) do
-    rotateByVaaCmd mgrCid newFactory csId (coerceContractId mgrCid) rotateHappyVAA
-  expectAbort "only for gg-minted burn/mint deployments" res
-
--- | Same restriction, external-minter case: a BurnMint deployment whose
--- instrument is administered by a party other than gg (@minter = Some
--- external@) is likewise rejected — its factory rotation runs through the
--- LIVE, minter-co-signed 'SetFactory' instead.
-testSetFactoryByVaaRejectsExternalMinter : Script ()
-testSetFactoryByVaaRejectsExternalMinter = do
-  (operator, gg, csId) <- nttSetup
-  admin <- allocateParty "RotateExternalMinterAdmin"
-  external <- allocateParty "RotateExternalMinter"
-  let instrumentId = InstrumentId with admin = external, id = "EXTMINT"
-      namespace = nttNamespaceFor instrumentId admin 998
-  fc <- submit external do createCmd MockBurnMintFactory with admin = external, instrument = instrumentId
-  let factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc)
-  mgrCid <- submit (actAs operator <> actAs admin <> actAs gg <> actAs external) do
-    createCmd NttManager with
-      operator
-      namespace
-      admin
-      guardianGovernance = gg
-      chainId = cantonChainId
-      managerId = 998
-      managerAddress = b32 "aa"
-      transceiverEmitterId = 998
-      instrumentId
-      tokenConfig = BurnMint
-      tokenDecimals = 8
-      tokenAddress = nttTokenAddressFor instrumentId
-      peers = Map.empty
-      factory
-      paused = False
-      factoryEpoch = 0
-      peerEpoch = 0
-      minter = Some external
-  _ <- registerReplayRoot operator gg namespace defaultSplitThreshold
   csDisc <- fromSome <$> queryDisclosure operator csId
   realFactoryCid <- nttCoinFactorySetup gg
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
