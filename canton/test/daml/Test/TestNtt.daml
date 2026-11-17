@@ -793,6 +793,27 @@ testRegistrationRejectsForeignRegistries = do
       feeAllocation = None
   expectAbort "emitter registry is not this bridge instance's" res
 
+  rogueGgEmReg <- submit rogue do
+    createCmd (mkInitialEmitterRegistry rogue rogue 0)
+  rogueGgEmRegDisc <- fromSome <$> queryDisclosure rogue rogueGgEmReg
+  res <- trySubmit (actAs admin <> disclose govDisc <> disclose rogueGgEmRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+    exerciseCmd govCid RegisterManager with
+      admin
+      chainId = cantonChainId
+      emitterRegistryCid = rogueGgEmReg
+      replayRootRegistryCid = rrReg
+      instrumentId = bridgedInstrument gg
+      instrumentNonce = 0
+      tokenConfig = LockUnlock
+      tokenDecimals = 8
+      factory
+      coreStateCid = csId
+      consistencyLevel = 0
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+      feeAllocation = None
+  expectAbort "registry guardianGovernance mismatch" res
+
   shadowRrReg <- submit rogue do
     createCmd (mkInitialReplayRootRegistry rogue gg 0)
   shadowRrRegDisc <- fromSome <$> queryDisclosure rogue shadowRrReg

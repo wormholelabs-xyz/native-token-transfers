@@ -67,6 +67,7 @@ registerEmitter operator owner = do
       payer = owner    -- direct registration: own payer, controller set collapses
       coreStateCid = None
       feeAllocation = None
+      expectedGuardianGovernance = None
   pure emCid
 
 -- | Publish with the 'CoreState' disclosed (fee read on every publish; at fee 0 no

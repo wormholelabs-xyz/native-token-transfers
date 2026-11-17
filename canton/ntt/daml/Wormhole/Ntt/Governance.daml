@@ -271,9 +271,8 @@ registerManagerBody
       payer = admin
       coreStateCid = Some coreStateCid
       feeAllocation = emitterFeeAllocation
+      expectedGuardianGovernance = Some guardianGovernance
     emitter <- fetch emitterCid
-    -- operator is an Emitter signatory; guardianGovernance is a plain field,
-    -- vouched for instead by the nested 'RegisterEmitter' exercise above.
     assertMsg "ntt: emitter registry is not this bridge instance's"
       (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
 
