@@ -59,12 +59,12 @@
 -- ('nttInstrumentIdFor'), so no second deployment can register against an
 -- instrument that is already bridged.
 --
--- The ledger cap is wire-level accounting, not physical solvency. On a
--- registry that charges the sender fees or ages holdings, every release and
--- consolidation pays those costs out of the reserve, so the pot drifts below
--- the ledger balance over time. The custodian covers the drift by passing
--- extra holdings of its own to 'ConsolidateCustody', and 'TransferAdmin'
--- refuses to hand over a reserve that no longer covers the balance.
+-- The ledger cap is wire-level accounting; the reserve can fall below it.
+-- Lock merges and consolidations pay registry sender fees from the reserve;
+-- 'Release' aborts on them ('SenderOutflowEqualsAmount'). Amulet's DSO can
+-- archive a holding once its accrued holding fee reaches its amount. The
+-- custodian tops up or refreshes the pot with 'ConsolidateCustody', and
+-- 'TransferAdmin' rejects a reserve that no longer covers the balance.
 --
 -- Because every choice body carries all of the manager's signatures, custody
 -- paths must never rely on ambient authority: 'sumCustodyHoldings' checks

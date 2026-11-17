@@ -28,6 +28,8 @@ Burn/mint deployments use the canonical gg `CoinFactory`.
 | N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow` | Held |
 | N3 | Outbound transfer with fields that the guardians cannot deliver | `testRedTeamTransferRejectsUndeliverableMessage` | Fixed (F3) |
 | N3a | Each wire field one step outside its range, and each boundary value | `testRedTeamTransferWireFieldBounds` | Held |
+| N4 | A third-party relayer releases Canton Coin from an aged custody pot | LocalNet, `NTT_RELEASE_AFTER_ROUNDS=5 ntt_lock_unlock.sh` | Held |
+| N5 | The DSO expires an idle custody pot of Canton Coin as dust | Splice 0.10.2 source | Open (F4) |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.
@@ -167,6 +169,79 @@ Submit `Transfer` with each value below. Each transfer locks the value and publi
 
 `SetPeer` and registration use the same helpers.
 A failed assertion aborts the transaction. Thus no value moves and the manager publishes no message.
+
+## N4: a release from an aged Canton Coin pot
+
+Result: held. The F2 check accepts each release from an aged custody pot.
+
+### Question
+
+Canton Coin (Amulet) has a holding fee for each round.
+If a transfer charges this fee to old inputs, the custodian gives up more than the release amount.
+Then `SenderOutflowEqualsAmount` rejects each release from an aged pot.
+
+### Facts from the Splice 0.10.2 source
+
+The source is `canton-network/splice` at tag `0.10.2`, directory `daml/splice-amulet/daml/Splice`.
+
+- The `HoldingV1` view of an `Amulet` reports `initialAmount` (`Amulet.daml:193`).
+- A transfer adds `initialAmount` for each input amulet (`AmuletRules.daml:1415`).
+- The holding fee applies only in `Amulet_Expire` (`AmuletRules.daml:1421`).
+- `summarizeTransfer` requires that the holding fees are zero (`AmuletRules.daml:1617`).
+- Each output fee is zero (`AmuletRules.daml:1609`).
+- The change is the input total less the outputs (`AmuletRules.daml:1638`).
+- `validTransferConfig` requires a zero create fee, transfer fee, and lock holder fee (`AmuletConfig.daml:192-196`).
+- The direct path and the `TransferPreapproval_SendV2` path use the same transfer code (`ExternalPartyAmuletRules.daml:447`, `:487`).
+- Release 0.4.17 removed the holding fees from transfers, as CIP-78 specifies.
+- Release 0.5.16 stopped all fees in `AmuletConfig`, as CIP-107 specifies.
+
+Thus the input view total less the change is equal to the release amount for each pot age.
+
+### Live result
+
+LocalNet ran Splice 0.10.2 with ntt package `8b9c3ee1`.
+The open round was 21.
+The rate per round of the pot was 0.00380518 CC.
+
+1. The locker locked 5.0 CC. The new pot was 5.0 CC from round 0.
+2. A relayer on `sv` released 2.0 CC through the recipient `TransferPreapproval`.
+3. The change was 3.0 CC from round 0. The recipient balance went from 2000.0 to 2002.0.
+4. The ledger balance went from 5.0 to 3.0. `Release` succeeded.
+
+The holding fee that the pot accrued by round 21 is 0.0799 CC.
+The transfer did not take this fee.
+
+NOTE: Token-standard transfers use the round of `ExternalPartyConfigState`.
+The DSO updates this round one time each 24 hours.
+On this LocalNet, the round was 0 for each transfer.
+
+## F4: an idle custody pot of Canton Coin can expire as dust
+
+Severity: Low.
+Status: open. Operations can prevent it.
+The attack needs a deployment with a small pot and no lock or release for a long time.
+
+### Cause
+
+- `Amulet_ExpireV2` has the controller `dso` (`Amulet.daml:173-187`).
+- The choice archives an amulet when the accrued holding fee is equal to or more than `initialAmount` (`Expiry.daml:124-149`).
+- The pot is an amulet that the custodian owns. Thus the DSO can archive the pot.
+- After this, the custody reserve is less than the ledger balance.
+- `Release` cannot fetch the pot. The custodian must restore the reserve.
+
+The pot expires at `createdAt + ceil(initialAmount / ratePerRound)`.
+On LocalNet, the 3.0 CC pot expires at round 789.
+
+### Mitigation
+
+Each lock merge and each release makes a new pot from the current round.
+Thus only an idle pot ages.
+
+1. Monitor the expiry round of each pot.
+2. Before that round, run `ConsolidateCustody` with the pot and one more custodian holding.
+3. The merge makes a new pot from the current round.
+
+A call with only the pot does not refresh it, because that call does not make a transfer.
 
 ## Observations with no finding
 
