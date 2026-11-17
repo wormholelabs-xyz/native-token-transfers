@@ -88,6 +88,7 @@ import DA.Crypto.Text (keccak256, toHex)
 import DA.Map (Map)
 import DA.Map qualified as Map
 import DA.Optional (fromSomeNote)
+import DA.Text qualified as T
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
@@ -201,10 +202,11 @@ isZeroAddress b =
   normalizeHex (leftPadTo 32 b)
     == "0000000000000000000000000000000000000000000000000000000000000000"
 
--- | Exactly 32 bytes of lowercase hex. 'leftPadTo' is the identity above 32
--- bytes, so an oversized address would reach the wire unchanged.
+-- | Exactly 64 lowercase hex characters. 'leftPadTo' is the identity at or
+-- above 32 bytes and 'byteLength' truncates a half byte, so a 65-character
+-- address would otherwise reach the wire unchanged.
 isLowerHexBytes32 : Bytes32 -> Bool
-isLowerHexBytes32 address = byteLength address == 32 && isLowerHex address
+isLowerHexBytes32 address = T.length address == 64 && isLowerHex address
 
 isUint8 : Int -> Bool
 isUint8 wireField = wireField >= 0 && wireField <= 255

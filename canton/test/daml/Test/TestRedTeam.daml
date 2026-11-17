@@ -1209,6 +1209,12 @@ testRedTeamTransferWireFieldBounds = do
         outbound with recipientAddress = "01" <> b32 "ee"
     , rejectedWith "31-byte recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
         outbound with recipientAddress = T.drop 2 (b32 "ee")
+    , rejectedWith "65-character recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
+        outbound with recipientAddress = "0" <> b32 "ee"
+    , rejectedWith "63-character recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
+        outbound with recipientAddress = T.drop 1 (b32 "ee")
+    , rejectedWith "65-character zero recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
+        outbound with recipientAddress = "0" <> b32 "00"
     , rejectedWith "uppercase recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
         outbound with recipientAddress = T.drop 2 (b32 "01") <> "EE"
     , rejectedWith "zero recipient address" "recipient address must be non-zero" \outbound ->

@@ -37,3 +37,15 @@ testShortCircuitsOnFirstFailure : Script ()
 testShortCircuitsOnFirstFailure =
   runGet (abort "first failure" >>= \_ -> pure "shouldNeverAppear") "aabb"
     === Left "first failure"
+
+-- | 'runGet' rejects a buffer with a trailing half byte or a non-hex
+-- character, even when the parser consumes every whole byte.
+testRunGetRejectsMalformedHex : Script ()
+testRunGetRejectsMalformedHex = do
+  case runGet (getBytes 2) "aabbc" of
+    Right _ -> abort "expected runGet to reject an odd-length buffer"
+    Left e -> assertMsg ("expected a malformed-hex message, got: " <> e) ("not whole bytes of hex" `isInfixOf` e)
+  case runGet (getBytes 2) "aazz" of
+    Right _ -> abort "expected runGet to reject a non-hex buffer"
+    Left e -> assertMsg ("expected a malformed-hex message, got: " <> e) ("not whole bytes of hex" `isInfixOf` e)
+  runGet (getBytes 2) "AABB" === Right "aabb"

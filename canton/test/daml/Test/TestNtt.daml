@@ -736,6 +736,16 @@ testSetPeerGuards = do
     setPeerCmd 2 (Peer with managerAddress = b32 "", transceiverAddress = b32 "cc", decimals = 8)
   expectAbort "manager address must be non-zero" res
 
+  forA_
+    [ ((goodPeer with managerAddress = "0" <> b32 "bb"), "peer manager address must be 32 bytes of lowercase hex")
+    , ((goodPeer with managerAddress = T.drop 1 (b32 "bb")), "peer manager address must be 32 bytes of lowercase hex")
+    , ((goodPeer with managerAddress = "0" <> b32 ""), "peer manager address must be 32 bytes of lowercase hex")
+    , ((goodPeer with transceiverAddress = "0" <> b32 "cc"), "peer transceiver address must be 32 bytes of lowercase hex")
+    , ((goodPeer with transceiverAddress = T.drop 1 (b32 "cc")), "peer transceiver address must be 32 bytes of lowercase hex")
+    ] \(malformedPeer, expectedRejection) -> do
+      res <- trySubmitWithDiscs admin discs do setPeerCmd 2 malformedPeer
+      expectAbort expectedRejection res
+
   res <- trySubmitWithDiscs admin discs do
     setPeerCmd 2 (Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 0)
   expectAbort "peer decimals must be a positive uint8" res
