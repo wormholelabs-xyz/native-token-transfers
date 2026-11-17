@@ -32,7 +32,7 @@ import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.Setup
   ( GenesisGuardianSet (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
   , solanaGovernanceChainId, defaultGovernanceContract )
-import Wormhole.Core.State (CoreState, Emitter, PublishMessage (..))
+import Wormhole.Core.State (CoreState, Emitter (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA, addressFromPubKey, spkiPrefixSecp256k1)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Governance
@@ -1040,6 +1040,175 @@ testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument = do
   minted <- coinBalance env.gg registryAdmin managerC.instrumentId
   assertMsg ("registry admin minted " <> show minted <> " of a gg-administered bridged instrument")
     (minted == 0.0)
+
+-- | The registry's view of the quorum's hand-off: a relayer completes
+-- 'AcceptAdminTransferByVaa' for @mgrCid@ with a guardian-signed VAA.
+acceptQuorumCustody : RedTeamEnv -> Party -> ContractId NttManager -> Int -> Script (ContractId NttManager)
+acceptQuorumCustody env relayer mgrCid sequence = do
+  mgr <- managerOf env mgrCid
+  proposalCid <- submit mgr.admin do
+    createCmd AdminTransferProposal with
+      admin = mgr.admin, newAdmin = env.gg, managerAddress = mgr.managerAddress
+  acceptVaa <- governanceVaa env sequence AcceptAdminToGovernance with
+    chain = cantonChainId, managerAddress = mgr.managerAddress, factoryEpoch = mgr.factoryEpoch
+  replayNodeCid <- replayNodeFor env mgr (inboundCallBy env relayer relayer) acceptVaa
+  (ledgerCid, _) <- ledgerOf env mgr.managerAddress
+  (mgrCid', _) <- submit (withReads env [relayer] [mgr.admin]) do
+    exerciseCmd mgrCid AcceptAdminTransferByVaa with
+      executor = relayer
+      proposalCid
+      coreStateCid = env.coreStateCid
+      replayNodeCid
+      vaaBytes = acceptVaa
+      pubKeys = [(0, env.guardianKey.publicKey)]
+      ledgerCid = Some ledgerCid
+      extraArgs = emptyExtraArgs
+  pure mgrCid'
+
+-- | The party that owns a deployment's lock/unlock reserve.
+reserveOwnerOf : NttManager -> Party
+reserveOwnerOf mgr = mgr.admin
+
+forgedEmitterContextKey : Text
+forgedEmitterContextKey = "redteam:forged-emitter"
+
+forgedPayloadContextKey : Text
+forgedPayloadContextKey = "redteam:forged-payload"
+
+coreStateContextKey : Text
+coreStateContextKey = "redteam:core-state"
+
+hijackedManagerContextKey : Text
+hijackedManagerContextKey = "redteam:hijacked-manager"
+
+hijackedEmitterContextKey : Text
+hijackedEmitterContextKey = "redteam:hijacked-emitter"
+
+-- | A lock/unlock registry that settles honestly, then uses the sender's
+-- authority on contracts the caller discloses through @extraArgs@: it
+-- publishes a caller-chosen payload from a transceiver 'Emitter', and sets a
+-- peer on a manager.
+template SenderAuthorityGovernanceRegistryFactory
+  with
+    registryAdmin : Party
+  where
+    signatory registryAdmin
+
+    interface instance TransferFactory for SenderAuthorityGovernanceRegistryFactory where
+      view = TransferFactoryView with admin = registryAdmin, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+            contextValue key = TextMap.lookup key arg.extraArgs.context.values
+            contextCid key = case contextValue key of
+              Some (AV_ContractId cid) -> Some cid
+              _ -> None
+            coreStateCid = coerceContractId (fromSome (contextCid coreStateContextKey))
+        forA_ (contextCid forgedEmitterContextKey) \emitterCid -> do
+          forgedPayload <- case contextValue forgedPayloadContextKey of
+            Some (AV_Text payload) -> pure payload
+            _ -> abort "redteam: forged payload missing"
+          _ <- exercise (coerceContractId emitterCid : ContractId Emitter) PublishMessage with
+            payload = forgedPayload
+            nonce = 0
+            consistencyLevel = 0
+            coreStateCid
+            payer = registryAdmin
+            feeAllocation = None
+          pure ()
+        forA_ (contextCid hijackedManagerContextKey) \mgrCid -> do
+          let hijackedMgrCid = coerceContractId mgrCid : ContractId NttManager
+          _ <- exercise hijackedMgrCid SetPeer with
+            chainId = 9
+            peer = Peer with managerAddress = b32 "e1", transceiverAddress = b32 "e2", decimals = 8
+            transceiverEmitterCid = coerceContractId (fromSome (contextCid hijackedEmitterContextKey))
+            coreStateCid
+            consistencyLevel = 0
+            payer = registryAdmin
+            feeAllocation = None
+          pure ()
+        forA_ transfer.inputHoldingCids archive
+        receiverHoldingCid <- toInterfaceContractId @Holding <$> create RegistryHolding with
+          registryAdmin
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = [receiverHoldingCid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = registryAdmin, meta = emptyMetadata
+
+-- | After the quorum accepts custody of a lock/unlock deployment, its
+-- registry runs as the custody sender. With caller-supplied contract ids it
+-- must not publish from another deployment's transceiver, and must not set a
+-- peer on another quorum-adminned manager.
+testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority : Script ()
+testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority = do
+  env <- redTeamSetup
+  victimAdmin <- allocateParty "RtForgeVictimAdmin"
+  registryAdmin <- allocateParty "RtForgeRegistryAdmin"
+  relayer <- allocateParty "RtForgeRelayer"
+  victimLock <- deployLockUnlock env victimAdmin >>= \mgrCid -> acceptQuorumCustody env relayer mgrCid 1
+  victim <- managerOf env victimLock
+  victim.admin === env.gg
+
+  let registryInstrument = InstrumentId with admin = registryAdmin, id = "REG"
+  registryFactoryCid <- submit registryAdmin do
+    createCmd SenderAuthorityGovernanceRegistryFactory with registryAdmin
+  registryLock <- registerManagerAs env registryAdmin [] registryInstrument LockUnlock
+      (TransferFactoryCid (toInterfaceContractId @TransferFactory registryFactoryCid))
+    >>= \mgrCid -> acceptQuorumCustody env relayer mgrCid 2
+  registryManager <- managerOf env registryLock
+
+  let forgedTransfer = encodeWormholeTransceiverMessage WormholeTransceiverMessage with
+        sourceManager = victim.managerAddress
+        recipientManager = testPeerManagerAddress
+        managerPayload = encodeNttManagerMessage NttManagerMessage with
+          id = b32 "ff"
+          sender = b32 "01"
+          payload = encodeNativeTokenTransfer NativeTokenTransfer with
+            decimals = 8
+            amount = 1000000000000000
+            sourceToken = victim.tokenAddress
+            recipientAddress = b32 "ee"
+            recipientChain = peerChainId
+            additionalPayload = ""
+        transceiverPayload = ""
+      consolidateWithContext contextValues = do
+        custodyHoldings <- forA [1.0, 2.0] \amount -> toInterfaceContractId @Holding <$> submit registryAdmin do
+          createCmd RegistryHolding with
+            registryAdmin, owner = reserveOwnerOf registryManager, instrumentId = registryInstrument, amount
+        (ledgerCid, _) <- ledgerOf env registryManager.managerAddress
+        victimEmitterCid <- resolveEmitter env.gg victim.transceiverEmitterId
+        fmap (const ()) <$> trySubmit (withReads env [registryAdmin] []) do
+          exerciseCmd registryLock ConsolidateCustody with
+            caller = registryAdmin
+            ledgerCid
+            custodyHoldingCids = custodyHoldings
+            extraArgs = ExtraArgs with
+              context = ChoiceContext with
+                values = TextMap.fromList
+                  ((coreStateContextKey, AV_ContractId (coerceContractId env.coreStateCid))
+                    :: contextValues victimEmitterCid)
+              meta = emptyMetadata
+  victimEmitterBefore <- resolveEmitter env.gg victim.transceiverEmitterId >>= queryContractId env.gg
+  checkAttacksRejected
+    [ AttackCase "registry publishes a forged transfer from another deployment's transceiver" "requires authorizers" $
+        consolidateWithContext \victimEmitterCid ->
+          [ (forgedEmitterContextKey, AV_ContractId (coerceContractId victimEmitterCid))
+          , (forgedPayloadContextKey, AV_Text forgedTransfer) ]
+    , AttackCase "registry sets a peer on another quorum-adminned manager" "requires authorizers" $
+        consolidateWithContext \victimEmitterCid ->
+          [ (hijackedManagerContextKey, AV_ContractId (coerceContractId victimLock))
+          , (hijackedEmitterContextKey, AV_ContractId (coerceContractId victimEmitterCid)) ]
+    ]
+  victimEmitterAfter <- resolveEmitter env.gg victim.transceiverEmitterId >>= queryContractId env.gg
+  ((.sequence) <$> victimEmitterAfter) === ((.sequence) <$> victimEmitterBefore)
+  (victimAfter : NttManager) <- managerOf env victimLock
+  victimAfter.peers === victim.peers
 
 ----------------------------------------------------------------------
 -- Finding: third-party relaying of a release on a production registry
