@@ -18,7 +18,7 @@ import DA.Set qualified as Set
 import DA.Text qualified as T
 import DA.TextMap qualified as TextMap
 
-import Splice.Api.Token.HoldingV1 (InstrumentId (..), Holding, HoldingView (..))
+import Splice.Api.Token.HoldingV1 (InstrumentId (..), Holding, HoldingView (..), Lock (..))
 import Splice.Api.Token.MetadataV1 (AnyValue (..), ChoiceContext (..), ExtraArgs (..), emptyMetadata)
 import Splice.Api.Token.BurnMintV1
   (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
@@ -1186,6 +1186,152 @@ testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow = do
   -- Control: the same registry with exact settlement accepts a third-party release.
   exactFactory <- misreportingFactory 0.0 None
   releaseThrough exactFactory byRelayer >>= expectAccepted "exact third-party release"
+
+-- | How 'FlawedSettlementFactory' misreports a settlement.
+data SettlementFlaw
+  = ReceiverHoldingFlaw HoldingFlaw
+  | ReceiverHoldingListedTwice
+  | ChangeHoldingFlaw HoldingFlaw
+  | ChangeListedTwice
+  | ChangeReusesFirstInput
+  deriving (Eq, Show)
+
+-- | The defect of one reported holding.
+data HoldingFlaw
+  = OwnedBy Party
+  | OfInstrument InstrumentId
+  | LockedByIssuer
+  | SignedBySenderOnly
+  deriving (Eq, Show)
+
+-- | A registry that settles synchronously with the exact amounts but reports
+-- one defective holding, or a defective change list.
+template FlawedSettlementFactory
+  with
+    issuer         : Party
+    settlementFlaw : SettlementFlaw
+  where
+    signatory issuer
+
+    interface instance TransferFactory for FlawedSettlementFactory where
+      view = TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+            createReportedHolding owner amount holdingFlaw =
+              toInterfaceContractId @Holding <$> create FlawedHolding with
+                signer = if holdingFlaw == Some SignedBySenderOnly then transfer.sender else issuer
+                owner = case holdingFlaw of
+                  Some (OwnedBy flawedOwner) -> flawedOwner
+                  _ -> owner
+                viewers = [transfer.sender, transfer.receiver]
+                instrumentId = case holdingFlaw of
+                  Some (OfInstrument flawedInstrument) -> flawedInstrument
+                  _ -> transfer.instrumentId
+                amount
+                locked = holdingFlaw == Some LockedByIssuer
+            receiverFlaw = case settlementFlaw of
+              ReceiverHoldingFlaw holdingFlaw -> Some holdingFlaw
+              _ -> None
+            changeFlaw = case settlementFlaw of
+              ChangeHoldingFlaw holdingFlaw -> Some holdingFlaw
+              _ -> None
+        inputTotal <- sum <$> forA transfer.inputHoldingCids \cid -> (.amount) . view <$> fetch cid
+        when (settlementFlaw /= ChangeReusesFirstInput) (forA_ transfer.inputHoldingCids archive)
+        receiverHoldingCid <- createReportedHolding transfer.receiver transfer.amount receiverFlaw
+        let changeAmount = inputTotal - transfer.amount
+        senderChangeCids <- case settlementFlaw of
+          ChangeReusesFirstInput -> pure (take 1 transfer.inputHoldingCids)
+          ChangeListedTwice -> do
+            changeCid <- createReportedHolding transfer.sender changeAmount None
+            pure [changeCid, changeCid]
+          _ | changeAmount == 0.0 -> pure []
+            | otherwise -> (\changeCid -> [changeCid]) <$> createReportedHolding transfer.sender changeAmount changeFlaw
+        let receiverHoldingCids =
+              if settlementFlaw == ReceiverHoldingListedTwice
+                then [receiverHoldingCid, receiverHoldingCid]
+                else [receiverHoldingCid]
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids
+          senderChangeCids
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+template FlawedHolding
+  with
+    signer       : Party
+    owner        : Party
+    viewers      : [Party]
+    instrumentId : InstrumentId
+    amount       : Decimal
+    locked       : Bool
+  where
+    signatory signer
+    observer owner, viewers
+
+    interface instance Holding for FlawedHolding where
+      view = HoldingView with
+        owner, instrumentId, amount
+        lock = if locked
+          then Some Lock with holders = [signer], expiresAt = None, expiresAfter = None, context = None
+          else None
+        meta = emptyMetadata
+
+-- | Every holding a registry reports back is validated: a lock deposit that
+-- becomes the custody pot, and the change of a release that becomes the new
+-- pot, must be the custodian's own, of the instrument, unlocked, and signed
+-- by the instrument admin.
+testRedTeamRegistryMisreportedHoldingsRejected : Script ()
+testRedTeamRegistryMisreportedHoldingsRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtFlawAdmin"
+  alice <- allocateParty "RtFlawAlice"
+  bob <- allocateParty "RtFlawBob"
+  stranger <- allocateParty "RtFlawStranger"
+  relayer <- allocateParty "RtFlawRelayer"
+  let otherInstrument = InstrumentId with admin = env.issuer, id = "OTHER"
+      flawedFactory settlementFlaw = do
+        factoryCid <- submit env.issuer do
+          createCmd FlawedSettlementFactory with issuer = env.issuer, settlementFlaw
+        pure (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))
+      firstLockThrough settlementFlaw = do
+        lockA <- deployLockUnlock env admin
+        factory <- flawedFactory settlementFlaw
+        lockA' <- submit admin do exerciseCmd lockA SetFactory with newFactory = factory
+        coinCid <- mintIssuerCoin env alice 1.0
+        transferAttempt env alice lockA' (outboundTransferOf 100000000 [coinCid])
+      releaseThrough settlementFlaw = do
+        lockA <- deployLockUnlock env admin
+        lockFrom env alice lockA 100000000
+        factory <- flawedFactory settlementFlaw
+        lockA' <- submit admin do exerciseCmd lockA SetFactory with newFactory = factory
+        managerA <- managerOf env lockA'
+        releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 40000000)
+        releaseAttempt env lockA' (inboundCallBy env relayer bob) releaseVaa
+  checkAttacksRejected
+    [ AttackCase "lock deposit delivered to a stranger" "receiver holding is not owned by the receiver" $
+        firstLockThrough (ReceiverHoldingFlaw (OwnedBy stranger))
+    , AttackCase "lock deposit of another instrument" "receiver holding instrument mismatch" $
+        firstLockThrough (ReceiverHoldingFlaw (OfInstrument otherInstrument))
+    , AttackCase "lock deposit locked by the issuer" "receiver holding is locked" $
+        firstLockThrough (ReceiverHoldingFlaw LockedByIssuer)
+    , AttackCase "lock deposit the instrument admin did not sign" "receiver holding not signed by the instrument admin" $
+        firstLockThrough (ReceiverHoldingFlaw SignedBySenderOnly)
+    , AttackCase "lock deposit listed twice" "duplicate receiver holding" $
+        firstLockThrough ReceiverHoldingListedTwice
+    , AttackCase "release change locked by the issuer" "sender holding is locked" $
+        releaseThrough (ChangeHoldingFlaw LockedByIssuer)
+    , AttackCase "release change the instrument admin did not sign" "sender holding not signed by the instrument admin" $
+        releaseThrough (ChangeHoldingFlaw SignedBySenderOnly)
+    , AttackCase "release change of another instrument" "sender holding instrument mismatch" $
+        releaseThrough (ChangeHoldingFlaw (OfInstrument otherInstrument))
+    , AttackCase "release change listed twice" "duplicate sender change holding" $
+        releaseThrough ChangeListedTwice
+    , AttackCase "release change reuses the custody pot" "sender change reuses an input holding" $
+        releaseThrough ChangeReusesFirstInput
+    ]
 
 -- | 'Transfer' wire-field bounds: each out-of-range value is rejected by its
 -- own check, and each boundary value is accepted.

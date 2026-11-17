@@ -348,31 +348,15 @@ resolveLedger mgr ledgerCid = do
   assertMsg "ntt: ledger admin observer out of sync" (ledger.admin == mgr.admin)
   pure ledger
 
--- | Validate one custody holding — owned by the deployment's current @admin@
--- (the custodian), this deployment's instrument, unlocked, and signed by the
--- instrument admin, which a template-computed view cannot forge — and return
--- its amount. Run over every custody holding the manager spends or points at:
--- the choice bodies carry all four signatures, so without this a caller could
+-- | Fetch and sum custody holdings, each validated as the deployment's
+-- current @admin@'s own (the custodian), of this deployment's instrument,
+-- unlocked, and signed by the instrument admin ('validateSettledHolding').
+-- Run over every custody holding the manager spends or points at: the
+-- choice bodies carry all three signatures, so without this a caller could
 -- steer a choice into spending another signatory's holdings on ambient
 -- authority alone.
-validateCustodyHolding : NttManager -> Holding -> Either Text Decimal
-validateCustodyHolding mgr holding = do
-  let hv = view holding
-  assertMsg "ntt: custody holding is not owned by the custodian"
-    (hv.owner == mgr.admin)
-  assertMsg "ntt: custody holding instrument mismatch"
-    (hv.instrumentId == mgr.instrumentId)
-  assertMsg "ntt: custody holding is locked" (hv.lock == None)
-  assertMsg "ntt: custody holding not signed by the instrument admin"
-    (mgr.instrumentId.admin `elem` signatory holding)
-  pure hv.amount
-
 sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
-sumCustodyHoldings mgr cids = do
-  amounts <- forA cids \cid -> do
-    holding <- fetch cid
-    either assertFail pure (validateCustodyHolding mgr holding)
-  pure (sum amounts)
+sumCustodyHoldings mgr = sumSettledHoldings CustodyHolding mgr.admin mgr.instrumentId
 
 -- | The hint stored back on the ledger after an operation: the single
 -- resulting holding, or 'None' when the registry returned zero or several
@@ -871,7 +855,9 @@ template NttManager
                   None -> depositCids
             newHint <- case potCids of
               -- Already a single holding (first lock, or an empty pot).
-              [single] -> pure (Some single)
+              [single] -> do
+                _ <- sumCustodyHoldings this [single]
+                pure (Some single)
               _ -> do
                 total <- sumCustodyHoldings this potCids
                 (mergedCids, _) <- executeSyncTransfer transferFactoryCid
