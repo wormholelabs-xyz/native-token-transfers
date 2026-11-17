@@ -27,7 +27,7 @@ trie, disclosed-cid submission, the trust model) is in the core
 | --- | --- |
 | `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
 | `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
-| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
+| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR, the CIP-0056 interface DARs, and the previous `ntt` release (the `upgrades:` baseline). Provenance and sha256 in [`dars/README.md`](dars/README.md). |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
 `TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
@@ -50,6 +50,30 @@ cd test && dpm test    # runs the Daml Script suite
 A live-sandbox Go integration harness (the recipient-binding match test) lives
 in [`testing/go/`](testing/go/); see its build tag and comments to run it
 against a `dpm sandbox`.
+
+## Versions and upgrades
+
+The `upgrades:` field in `ntt/daml.yaml` points to the last released `ntt`
+DAR in `dars/`. `damlc` compares each build with that DAR. The build fails
+when the new package is not upgrade-compatible with it.
+
+For each release, do these steps:
+
+1. Increase the `version:` field in `ntt/daml.yaml`.
+2. Build the release DAR.
+3. Copy the release DAR into `dars/`.
+4. Record its commit, package id, and sha256 in `dars/README.md`.
+5. Set the `upgrades:` field to the new DAR.
+
+One version number identifies one build. Do not use a version number again
+for a different build. Participants use the package name and version to put
+the upgrades of a package in order.
+
+The current baseline is `ntt-0.2.0.dar` (package id `8b9c3ee1...`) from
+commit `1db4b3c`. An older 0.2.0 build (package id `36a58282...`) has the
+`minter` field. A later commit removed this field, thus that build is not
+upgrade-compatible with the baseline. A deployment of that build needs a
+migration to a new deployment.
 
 ## Parties and the trust model
 

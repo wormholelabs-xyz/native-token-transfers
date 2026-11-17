@@ -15,6 +15,9 @@ sdk-version: 3.5.1
 name: ntt
 version: 0.3.0
 source: daml
+# Compile-time SCU check against the previous release (package id and
+# provenance in ../dars/README.md).
+upgrades: ../dars/ntt-0.2.0.dar
 dependencies:
   - daml-prim
   - daml-stdlib

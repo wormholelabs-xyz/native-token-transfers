@@ -72,10 +72,28 @@ Provenance: built from `wormholelabs-xyz/CantonExamples` branch `dev` at
 commit `b448589d8742ef5983ec8dc7c6ddd275ceccd1b7` — package `token-cip0056`
 version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
+## Previous `ntt` release (upgrade baseline)
+
+`ntt-0.2.0.dar` is the baseline for the compile-time smart contract upgrade
+(SCU) check. `ntt/daml.yaml` references it in its `upgrades:` field. `damlc`
+rejects an `ntt` build that is not upgrade-compatible with it.
+
+- Source: this repo, commit `1db4b3cf1caca05af7028e1585d6a99c859cc910`,
+  `canton/ntt`, built with SDK 3.5.1.
+- Main package id:
+  `8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a`. This
+  is the build on the LocalNet rehearsal.
+
+To check the package id, run
+`dpm damlc inspect-dar --json dars/ntt-0.2.0.dar` and read
+`main_package_id`. The DAR file hash is not reproducible across builds; the
+package id is reproducible.
+
 ## sha256
 
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
+| `ntt-0.2.0.dar` | `ntt` (`upgrades:`) | `12910821c7147b3b1702c82d473a027b73e1568b0fbb725477f18b09e08f6aec` |
 | `wormhole-core-0.7.0.dar` | `ntt`, `ntt-test` | `9a35f688c18ad4b08ece537ccdc0e260814aede4a937d136d86e6fe8e7fbf69c` |
 | `token-cip0056-0.2.0.dar` | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
