@@ -601,6 +601,7 @@ template NttManager
                     receiver = newAdmin
                     amount = total
                     instrumentId
+                  ReceiverHoldingsSumToAmount
                   [pot]
                   extraArgs
                 exercise lcid SetCustodyHint with
@@ -845,6 +846,7 @@ template NttManager
                 receiver = custodian
                 amount
                 instrumentId
+              ReceiverHoldingsSumToAmount
               inputHoldingCids
               extraArgs
             let potCids = case ledger.custodyHoldingCid of
@@ -861,6 +863,7 @@ template NttManager
                     receiver = custodian
                     amount = total
                     instrumentId
+                  ReceiverHoldingsSumToAmount
                   potCids
                   extraArgs
                 pure (custodyHintFrom mergedCids)
@@ -927,6 +930,10 @@ template NttManager
     -- anything above the balance, so this deployment can never pay out more
     -- than it locked. Returns the successor ledger cid and the decoded
     -- transfer.
+    --
+    -- The settled amount is checked on the custodian side
+    -- ('SenderOutflowEqualsAmount'): only the recipient and the registry can
+    -- fetch the recipient's new holding.
     nonconsuming choice Release : (ContractId LockedLedger, NativeTokenTransfer)
       with
         executor         : Party
@@ -967,6 +974,7 @@ template NttManager
             receiver = recipient
             amount = releaseAmount
             instrumentId
+          SenderOutflowEqualsAmount
           inputs
           extraArgs
         ledgerCid' <- exercise ledgerCid Debit with
@@ -1018,6 +1026,7 @@ template NttManager
                 receiver = custodian
                 amount = total
                 instrumentId
+              ReceiverHoldingsSumToAmount
               custodyHoldingCids
               extraArgs
             exercise ledgerCid SetCustodyHint with

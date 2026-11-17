@@ -39,7 +39,7 @@ import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload
-import Test.TestNtt (ForgedHolding (..), b32, cantonChainId, coreRegistries, resolveEmitter)
+import Test.TestNtt (ForgedHolding (..), MockTransferFactory (..), b32, cantonChainId, coreRegistries, resolveEmitter)
 import Test.TestReplay (coveringNode)
 
 ----------------------------------------------------------------------
@@ -1083,3 +1083,106 @@ testRedTeamThirdPartyRelayerReleasesOnCoinRegistry = do
   releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 40000000)
   releaseAttempt env lockA (inboundCallBy env relayer bob) releaseVaa >>= expectAccepted "third-party release"
   coinBalance env.issuer bob (issuerInstrument env) >>= (=== 0.4)
+
+-- | An issuer-signed registry that settles synchronously but misreports the
+-- custodian side: it takes @custodianSurcharge@ beyond the amount from the
+-- sender (negative: returns more change than due), and pays the change to
+-- @changeOwner@ when set.
+template SenderSideMisreportingFactory
+  with
+    issuer             : Party
+    custodianSurcharge : Decimal
+    changeOwner        : Optional Party
+  where
+    signatory issuer
+
+    interface instance TransferFactory for SenderSideMisreportingFactory where
+      view = TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+        inputTotal <- sum <$> forA transfer.inputHoldingCids \cid -> (.amount) . view <$> fetch cid
+        forA_ transfer.inputHoldingCids archive
+        receiverHoldingCid <- toInterfaceContractId @Holding <$> create RegistryHolding with
+          registryAdmin = issuer
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+        changeHoldingCid <- toInterfaceContractId @Holding <$> create MisroutedChangeHolding with
+          issuer
+          owner = optional transfer.sender identity changeOwner
+          custodian = transfer.sender
+          instrumentId = transfer.instrumentId
+          amount = inputTotal - transfer.amount - custodianSurcharge
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = [receiverHoldingCid]
+          senderChangeCids = [changeHoldingCid]
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+-- | Change holding that the custodian can fetch whoever its owner is.
+template MisroutedChangeHolding
+  with
+    issuer       : Party
+    owner        : Party
+    custodian    : Party
+    instrumentId : InstrumentId
+    amount       : Decimal
+  where
+    signatory issuer
+    observer owner, custodian
+
+    interface instance Holding for MisroutedChangeHolding where
+      view = HoldingView with
+        owner, instrumentId, amount
+        lock = None
+        meta = emptyMetadata
+
+-- | The custodian-side check of a third-party 'Release' rejects every
+-- settlement in which the custodian does not give up exactly the release
+-- amount, and a registry that does not settle synchronously.
+testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow : Script ()
+testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtOutflowAdmin"
+  alice <- allocateParty "RtOutflowAlice"
+  bob <- allocateParty "RtOutflowBob"
+  stranger <- allocateParty "RtOutflowStranger"
+  relayer <- allocateParty "RtOutflowRelayer"
+  let releaseThrough newFactory call = do
+        lockA <- deployLockUnlock env admin
+        lockFrom env alice lockA 100000000
+        lockA' <- case newFactory of
+          None -> pure lockA
+          Some factory -> submit admin do exerciseCmd lockA SetFactory with newFactory = factory
+        managerA <- managerOf env lockA'
+        potA <- custodyPotOf env lockA'
+        releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 40000000)
+        releaseAttempt env lockA' (call potA) releaseVaa
+      misreportingFactory custodianSurcharge changeOwner = do
+        factoryCid <- submit env.issuer do
+          createCmd SenderSideMisreportingFactory with issuer = env.issuer, custodianSurcharge, changeOwner
+        pure (Some (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid)))
+      byRelayer _ = inboundCallBy env relayer bob
+  checkAttacksRejected
+    [ AttackCase "registry charges the custodian on top of the release" "did not take the exact transfer amount from the sender" do
+        factory <- misreportingFactory 0.01 None
+        releaseThrough factory byRelayer
+    , AttackCase "registry takes less than the release from the custodian" "did not take the exact transfer amount from the sender" do
+        factory <- misreportingFactory (-0.01) None
+        releaseThrough factory byRelayer
+    , AttackCase "registry pays the change to a stranger" "sender holding is not owned by the sender" do
+        factory <- misreportingFactory 0.0 (Some stranger)
+        releaseThrough factory byRelayer
+    , AttackCase "registry answers Pending" "did not settle synchronously" do
+        factoryCid <- submit env.issuer do
+          createCmd MockTransferFactory with admin = env.issuer, pending = True, skim = 0.0
+        releaseThrough (Some (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))) byRelayer
+    , AttackCase "custody pot listed twice" "duplicate input holding" $
+        releaseThrough None \potA -> (inboundCallBy env relayer bob) with explicitInputs = [potA, potA]
+    ]
+  -- Control: the same registry with exact settlement accepts a third-party release.
+  exactFactory <- misreportingFactory 0.0 None
+  releaseThrough exactFactory byRelayer >>= expectAccepted "exact third-party release"
