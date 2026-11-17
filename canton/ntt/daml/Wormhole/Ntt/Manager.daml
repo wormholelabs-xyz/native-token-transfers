@@ -6,18 +6,24 @@
 -- 'TIV1.TransferFactory', 'BurnMintFactory') directly, so any conforming token
 -- works without a per-token wrapper contract.
 --
--- Three parties sign every manager, and each signature has one job:
+-- Four parties sign every manager, and each signature has one job:
 --
---   * @admin@ is the operational role: it maintains the peer table, rotates
---     the committed factory, and owns the lock/unlock reserve. It is
---     transferable ('TransferAdmin'); transferring it to gg is the guardian
---     quorum's custody opt-in.
+--   * @admin@ is the operational role: it maintains the peer table and
+--     rotates the committed factory. It is transferable ('TransferAdmin');
+--     transferring it to gg is the guardian quorum's custody opt-in.
 --   * @guardianGovernance@ (gg), the guardians' k-of-n threshold party, is the
 --     mint authority for gg-administered burn/mint instruments, the owner of
 --     the deployment's transceiver 'Emitter', the replay-scope consumer, and
 --     the quorum end-state of 'TransferAdmin': a gg-adminned deployment's
---     reserve is quorum-owned and its admin operations are governance actions.
+--     admin operations are governance actions.
+--   * @nttCustody@, a second quorum party, owns the lock/unlock reserve of
+--     each gg-adminned deployment. gg never owns a reserve: the reserve owner
+--     is the CIP-56 transfer sender, and the sender's authority runs in
+--     registry code (REDTEAM.md F1).
 --   * @operator@ ties the deployment to its core bridge instance.
+--
+-- @reserveCustodian@ owns the lock/unlock reserve: @admin@ while @admin@ is
+-- not gg, @nttCustody@ while it is ('reserveCustodianFor').
 --
 -- gg is the only minter. A burn/mint deployment bridges a gg-administered
 -- instrument through the canonical 'Token.CIP0056.CoinFactory.CoinFactory'
@@ -35,22 +41,22 @@
 -- likewise bound to the registering admin at creation time and stored, so
 -- they too survive 'TransferAdmin' untouched (see 'nttManagerAddressFor').
 --
--- gg signs actively only once, at the ceremony that creates the
--- 'Wormhole.Ntt.Governance.NttGovernance' root; every manager inherits gg's
--- signature from that root, including for the transceiver 'Emitter' minted
+-- gg and @nttCustody@ sign actively only once, at the ceremony that creates
+-- the 'Wormhole.Ntt.Governance.NttGovernance' root; every manager inherits
+-- both signatures from that root, including for the transceiver 'Emitter' minted
 -- atomically inside 'Wormhole.Ntt.Governance.RegisterManager'. Value can only
 -- move inside the manager's fixed choice bodies, and both inbound choices
 -- verify and consume a VAA first, so no signatory can move bridged value
 -- alone, and relaying stays permissionless: any executor may submit, but only
 -- the VAA-bound transfer can happen.
 --
--- Lock/unlock custody is owned by the current @admin@. A deployment registers
+-- Lock/unlock custody is owned by @reserveCustodian@. A deployment registers
 -- fully operational and explicitly custodial — the admin owns the reserve and
 -- its users trust it, like a custodial bridge. The guardian quorum can later
--- opt in via 'TransferAdmin' to gg, after which the reserve is quorum-owned
--- and every inbound movement is gated only by VAA verification. Isolation
--- between deployments follows from ownership: reserves of distinct admins
--- cannot mix, and the gg-owned pool is shared only among deployments the
+-- opt in via 'TransferAdmin' to gg, which moves the reserve to @nttCustody@;
+-- every inbound movement is then gated only by VAA verification. Isolation
+-- between deployments follows from ownership: reserves of distinct custodians
+-- cannot mix, and the @nttCustody@ pool is shared only among deployments the
 -- quorum accepted. Ownership survives any registry-side reorganization of
 -- holdings, which is why the partition is by owner and not by holding
 -- topology. Each lock/unlock deployment also keeps a 'LockedLedger' and can
@@ -69,7 +75,7 @@
 -- Because every choice body carries all of the manager's signatures, custody
 -- paths must never rely on ambient authority: 'sumCustodyHoldings' checks
 -- that each custody holding the manager spends is owned by the deployment's
--- own current @admin@, so one deployment's choices can never spend another
+-- own @reserveCustodian@, so one deployment's choices can never spend another
 -- custodian's holdings even when that party's authority is in scope.
 --
 -- The registry factory is deployment config, not per-call input. The token's
@@ -331,6 +337,14 @@ nttNamespaceFor : InstrumentId -> Party -> Int -> Text
 nttNamespaceFor inst admin managerId =
   nttNamespaceFromText (partyToText inst.admin) inst.id (partyToText admin) managerId
 
+-- | The owner of a lock/unlock reserve under @admin@: @nttCustody@ when the
+-- quorum holds the admin role, else @admin@. gg is never the result, because
+-- the reserve owner is the CIP-56 transfer sender and registry code runs
+-- with its authority.
+reserveCustodianFor : Party -> Party -> Party -> Party
+reserveCustodianFor guardianGovernance nttCustody admin =
+  if admin == guardianGovernance then nttCustody else admin
+
 -- | Check that a caller-supplied 'LockedLedger' is this deployment's own, and
 -- return its payload. Only 'Wormhole.Ntt.Governance.RegisterManager' can
 -- create a ledger (it needs the root's signatures), and it creates exactly one
@@ -350,14 +364,14 @@ resolveLedger mgr ledgerCid = do
   pure ledger
 
 -- | Fetch and sum custody holdings, each validated as the deployment's
--- current @admin@'s own (the custodian), of this deployment's instrument,
+-- @reserveCustodian@'s own, of this deployment's instrument,
 -- unlocked, and signed by the instrument admin ('validateSettledHolding').
 -- Run over every custody holding the manager spends or points at: the
 -- choice bodies carry all three signatures, so without this a caller could
 -- steer a choice into spending another signatory's holdings on ambient
 -- authority alone.
 sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
-sumCustodyHoldings mgr = sumSettledHoldings CustodyHolding mgr.admin mgr.instrumentId
+sumCustodyHoldings mgr = sumSettledHoldings CustodyHolding mgr.reserveCustodian mgr.instrumentId
 
 -- | The hint stored back on the ledger after an operation: the single
 -- resulting holding, or 'None' when the registry returned zero or several
@@ -424,8 +438,10 @@ template NttManager
   with
     operator             : Party
     namespace            : Text            -- derived replay-trie sub-scope under gg; nttNamespaceFor at registration
-    admin                : Party           -- operational role and lock/unlock custodian; transferable
+    admin                : Party           -- operational role; transferable
     guardianGovernance   : Party           -- gg: mint authority, transceiver owner, replay consumer, trust anchor
+    nttCustody           : Party           -- owns the reserve while gg is admin
+    reserveCustodian     : Party           -- owns the lock/unlock reserve; reserveCustodianFor guardianGovernance nttCustody admin
     chainId              : Int             -- this deployment's own Wormhole chain id (uint16)
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
     managerAddress       : Bytes32         -- nttManagerAddressFor operator <registering admin> managerId
@@ -440,11 +456,17 @@ template NttManager
     factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa': 'SetFactory' bumps this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
     peerEpoch            : Int             -- freshness pin for 'SetPeerByVaa': every 'SetPeer' bumps this deployment-wide counter, so a withheld/superseded peer VAA can never reinstate a since-replaced peer
   where
-    -- See the module header for what each signature contributes. All three
+    -- See the module header for what each signature contributes. All four
     -- signatures are inherited from the NttGovernance root at registration
     -- (admin from the registering caller); no signatory acts per transfer.
-    -- @namespace@ is derived data, not a party.
-    signatory operator, admin, guardianGovernance
+    -- @namespace@ is derived data, not a party. @reserveCustodian@ is always
+    -- @admin@ or @nttCustody@, so its signature is already in this set.
+    signatory operator, admin, guardianGovernance, nttCustody
+    ensure
+      reserveCustodian == reserveCustodianFor guardianGovernance nttCustody admin
+        && reserveCustodian /= guardianGovernance
+        && admin /= nttCustody
+        && nttCustody /= guardianGovernance
 
     -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
     -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
@@ -521,10 +543,10 @@ template NttManager
     -- co-signs the rotation, mirroring 'Wormhole.Ntt.Governance.RegisterManager',
     -- and the new factory must be the canonical 'CoinFactory'. Without both, a
     -- mutable @admin@ could later swap in a look-alike factory that captures
-    -- gg's authority. Lock/unlock's transfer factory receives the custodian's
-    -- authority as transfer sender, so it stays @admin@-only; on a
-    -- gg-adminned deployment the custodian is gg, and this rotation is a
-    -- governance action (REDTEAM.md F1).
+    -- gg's authority. Lock/unlock's transfer factory receives
+    -- @reserveCustodian@'s authority as transfer sender, so it stays
+    -- @admin@-only; on a gg-adminned deployment the custodian is
+    -- @nttCustody@, and this rotation is a governance action (REDTEAM.md F1).
     --
     -- Every rotation bumps @factoryEpoch@, invalidating any
     -- 'AcceptAdminTransferByVaa' VAA signed against the superseded factory.
@@ -540,17 +562,18 @@ template NttManager
           LockUnlock -> pure ()
         create this with factory = newFactory, factoryEpoch = factoryEpoch + 1
 
-    -- | Hand the operational role — and, for lock/unlock, the reserve it owns —
-    -- to @newAdmin@. Both admins authorize: the old admin resigns, and the new
-    -- admin accepts what it is inheriting, naming the committed factory it
-    -- vetted (@vettedFactory@ must match). In practice the handoff runs as
+    -- | Hand the operational role to @newAdmin@ and, for lock/unlock, the
+    -- reserve to @reserveCustodianFor guardianGovernance nttCustody newAdmin@.
+    -- Both admins authorize: the old admin resigns, and the new admin accepts
+    -- what it is inheriting, naming the committed factory it vetted
+    -- (@vettedFactory@ must match). In practice the handoff runs as
     -- propose-accept ('AdminTransferProposal' carries the old admin's standing
     -- consent and its 'AcceptAdminTransfer' nests this choice), so the parties
     -- need not act in one submission; exercising this directly with both
-    -- authorities works too. The pot is transferred to @newAdmin@ and the
-    -- ledger's hint repointed. The pot must cover the ledger balance:
+    -- authorities works too. The pot is transferred to the new custodian and
+    -- the ledger's hint repointed. The pot must cover the ledger balance:
     -- custody the hint does not track — untracked fragments, or a reserve
-    -- eroded by registry fees — would stay with the old admin, out of the
+    -- eroded by registry fees — would stay with the old custodian, out of the
     -- deployment's reach once the role changes hands. If the coverage check
     -- fails, run 'ConsolidateCustody' first; the outgoing admin can include
     -- extra holdings of its own there to cover a shortfall. The deployment's
@@ -561,10 +584,11 @@ template NttManager
     -- observership to @newAdmin@ ('SetAdmin').
     --
     -- Transferring to @guardianGovernance@ is the quorum's custody opt-in: the
-    -- reserve becomes quorum-owned and every admin operation ('SetPeer',
+    -- reserve moves to @nttCustody@ and every admin operation ('SetPeer',
     -- 'SetFactory', a further transfer) becomes a governance action. The same
     -- choice serves admin succession between ordinary parties, and lets gg
-    -- hand the role back (demotion).
+    -- hand the role back (demotion), which moves the reserve from
+    -- @nttCustody@ to the new admin.
     choice TransferAdmin : (ContractId NttManager, Optional (ContractId LockedLedger))
       with
         newAdmin      : Party
@@ -574,8 +598,12 @@ template NttManager
       controller admin, newAdmin
       do
         assertMsg "ntt: admin transfer to the current admin" (newAdmin /= admin)
+        assertMsg "ntt: the custody party cannot hold the admin role" (newAdmin /= nttCustody)
         assertMsg "ntt: committed factory is not the one the new admin vetted"
           (factory == vettedFactory)
+        let newReserveCustodian = reserveCustodianFor guardianGovernance nttCustody newAdmin
+        assertMsg "ntt: guardianGovernance cannot own a lock/unlock reserve"
+          (newReserveCustodian /= guardianGovernance)
         ledgerCid' <- case tokenConfig of
           BurnMint -> pure None
           LockUnlock -> do
@@ -594,8 +622,8 @@ template NttManager
                 transferFactoryCid <- requireTransferFactory factory
                 (movedCids, _) <- executeSyncTransfer transferFactoryCid
                   SyncTransfer with
-                    sender = admin
-                    receiver = newAdmin
+                    sender = reserveCustodian
+                    receiver = newReserveCustodian
                     amount = total
                     instrumentId
                   ReceiverHoldingsSumToAmount
@@ -605,7 +633,7 @@ template NttManager
                   newCustodyHint = custodyHintFrom movedCids
             -- Hand the ledger observership to the incoming admin atomically.
             Some <$> exercise lcid' SetAdmin with newAdmin
-        mgrCid' <- create this with admin = newAdmin
+        mgrCid' <- create this with admin = newAdmin, reserveCustodian = newReserveCustodian
         pure (mgrCid', ledgerCid')
 
     -- | Governance-VAA-gated admin acceptance: any @executor@ permissionlessly
@@ -841,7 +869,7 @@ template NttManager
           LockUnlock -> do
             let lcid = fromSomeNote
                   "ntt: ledger cid required for a lock/unlock transfer" ledgerCid
-                custodian = admin
+                custodian = reserveCustodian
             transferFactoryCid <- requireTransferFactory factory
             ledger <- resolveLedger this lcid
             (depositCids, _) <- executeSyncTransfer transferFactoryCid
@@ -971,13 +999,13 @@ template NttManager
           ([], None) -> abort "ntt: no custody hint on the ledger; supply explicit holdings"
           (cids, _) -> pure cids
         -- The body carries every signatory's authority, so validate that the
-        -- holdings being spent are the current admin's own — a caller must not
-        -- be able to steer the release into another signatory's holdings.
+        -- holdings being spent are the reserve custodian's own — a caller must
+        -- not be able to steer the release into another signatory's holdings.
         _ <- sumCustodyHoldings this inputs
         transferFactoryCid <- requireTransferFactory factory
         (_, changeCids) <- executeSyncTransfer transferFactoryCid
           SyncTransfer with
-            sender = admin
+            sender = reserveCustodian
             receiver = recipient
             amount = releaseAmount
             instrumentId
@@ -996,14 +1024,14 @@ template NttManager
     -- repoints the hint, with no registry transfer; two or more are merged
     -- through the factory. This is also the custodian's top-up path: the
     -- holdings are only checked to be the custodian's own of this
-    -- instrument, so the admin can pass extra holdings to restore a reserve
-    -- eroded by registry fees.
+    -- instrument, so the custodian can pass extra holdings to restore a
+    -- reserve eroded by registry fees.
     --
     -- Permissionless, so relayer tooling can run it opportunistically. On a
     -- registry that charges the sender fees the merge itself costs the
     -- reserve money, but a stranger cannot grind it down for free: the
     -- single-holding call moves nothing, and a merge needs a second
-    -- admin-owned holding, which the stranger must donate. The holdings
+    -- custodian-owned holding, which the stranger must donate. The holdings
     -- carry no deployment tag, so callers should pass this deployment's own
     -- fragments; merging another deployment's pot is value-neutral but
     -- stales that deployment's hint, which it can repair the same way.
@@ -1025,7 +1053,7 @@ template NttManager
             exercise ledgerCid SetCustodyHint with newCustodyHint = Some single
           _ -> do
             total <- sumCustodyHoldings this custodyHoldingCids
-            let custodian = admin
+            let custodian = reserveCustodian
             transferFactoryCid <- requireTransferFactory factory
             (mergedCids, _) <- executeSyncTransfer transferFactoryCid
               SyncTransfer with

@@ -2,17 +2,18 @@
 --
 -- 'NttGovernance' is created once per operator by a guardian quorum ceremony —
 -- the same k-of-n external-signing flow that creates the genesis @CoreState@.
--- That ceremony is the only time @guardianGovernance@ (gg) actively signs for
--- NTT. Afterwards, 'RegisterManager' lends the root's inherited signatures to
--- create a fully co-signed 'NttManager' per deployment, so deployment stays
--- permissionless and crankless: any admin with a disclosure of this root can
--- register (for burn/mint, co-signed by the instrument's admin — see
--- 'RegisterManager'), and no fresh quorum runs per manager. This is the same
--- signed-anchor pattern the core uses for @EmitterRegistry@.
+-- That ceremony is the only time @guardianGovernance@ (gg) and @nttCustody@
+-- actively sign for NTT. Afterwards, 'RegisterManager' lends the root's
+-- inherited signatures to create a fully co-signed 'NttManager' per
+-- deployment, so deployment stays permissionless and crankless: any admin
+-- with a disclosure of this root can register (for burn/mint, co-signed by
+-- the instrument's admin — see 'RegisterManager'), and no fresh quorum runs
+-- per manager. This is the same signed-anchor pattern the core uses for
+-- @EmitterRegistry@.
 --
--- Lending gg's signature this way is safe because 'RegisterManager' only ever
+-- Lending these signatures is safe because 'RegisterManager' only ever
 -- creates the fixed 'NttManager' (and 'LockedLedger') templates, whose choices
--- gate every movement of gg's value behind VAA verification, plus (now) a
+-- gate every movement of quorum-held value behind VAA verification, plus a
 -- fresh gg-owned transceiver 'Emitter' and a gg-scoped replay-trie root — both
 -- minted atomically in the same registration transaction, contending on the
 -- core's 'EmitterRegistry' and 'ReplayRootRegistry' anchors in addition to
@@ -41,12 +42,14 @@ template NttGovernance
   with
     operator           : Party
     guardianGovernance : Party
+    nttCustody         : Party  -- owns quorum-held lock/unlock reserves; see 'Wormhole.Ntt.Manager.reserveCustodianFor'
     nextId             : Int
     consumedGovernance : Set Bytes32  -- Replay protection for RegisterManagerByVaa
                                       -- (by VAA digest); mirrors CoreState.consumedGovernance,
                                       -- untouched by plain RegisterManager.
   where
-    signatory guardianGovernance, operator
+    signatory guardianGovernance, operator, nttCustody
+    ensure nttCustody /= guardianGovernance && nttCustody /= operator
 
     -- | Stand up a deployment, atomically: allocate the next manager id, mint
     -- the deployment's gg-owned transceiver 'Emitter' and claim its gg-scoped
@@ -68,9 +71,9 @@ template NttGovernance
     --
     -- A lock/unlock reserve is owned by the registering @admin@ (explicitly
     -- custodial) until the role is handed to the guardian quorum with
-    -- 'Wormhole.Ntt.Manager.TransferAdmin'. That keeps registration
-    -- permissionless without ever pooling an unvetted deployment's custody
-    -- with anyone else's.
+    -- 'Wormhole.Ntt.Manager.TransferAdmin', which moves the reserve to
+    -- @nttCustody@. That keeps registration permissionless without ever
+    -- pooling an unvetted deployment's custody with anyone else's.
     --
     -- For burn/mint, four rules make the mint capability sound: gg must
     -- administer the instrument (gg is the only minter), gg must co-sign the
@@ -115,7 +118,7 @@ template NttGovernance
       controller admin :: (if tokenConfig == BurnMint then [guardianGovernance] else [])
       do
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
-          operator guardianGovernance nextId admin chainId
+          operator guardianGovernance nttCustody nextId admin chainId
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce tokenConfig tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
@@ -202,7 +205,7 @@ template NttGovernance
 
         -- 9. Run the shared registration body; recreate the root once.
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
-          operator guardianGovernance nextId admin chainId
+          operator guardianGovernance nttCustody nextId admin chainId
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce BurnMint tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
@@ -221,6 +224,7 @@ template NttGovernance
 registerManagerBody
   : Party                          -- operator
   -> Party                          -- guardianGovernance
+  -> Party                          -- nttCustody
   -> Int                            -- nextId (this deployment's managerId)
   -> Party                          -- admin (the registering admin)
   -> Int                            -- chainId
@@ -238,7 +242,7 @@ registerManagerBody
   -> Optional (ContractId Allocation, ExtraArgs)  -- feeAllocation (TransceiverInit message fee)
   -> Update (ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
 registerManagerBody
-  operator guardianGovernance nextId admin chainId
+  operator guardianGovernance nttCustody nextId admin chainId
   emitterRegistryCid replayRootRegistryCid
   instrumentId instrumentNonce tokenConfig tokenDecimals factory
   coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation = do
@@ -294,11 +298,17 @@ registerManagerBody
     assertMsg "ntt: replay root registry is not this bridge instance's"
       (root.operator == operator)
 
+    let reserveCustodian = reserveCustodianFor guardianGovernance nttCustody admin
+    assertMsg "ntt: the custody party cannot hold the admin role" (admin /= nttCustody)
+    assertMsg "ntt: guardianGovernance cannot own a lock/unlock reserve"
+      (reserveCustodian /= guardianGovernance)
     mgr <- create NttManager with
       operator
       namespace
       admin
       guardianGovernance
+      nttCustody
+      reserveCustodian
       chainId
       managerId = nextId
       managerAddress
