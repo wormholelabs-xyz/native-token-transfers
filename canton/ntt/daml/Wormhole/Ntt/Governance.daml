@@ -250,8 +250,7 @@ registerManagerBody
       (chainId > 0 && chainId <= 65535)
     -- Uint8 on the wire; the watcher drops out-of-range messages, and this
     -- one-shot init has no re-broadcast path.
-    assertMsg "ntt: consistency level must be a uint8"
-      (consistencyLevel >= 0 && consistencyLevel <= 255)
+    assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
     assertMsg "ntt: factory type does not match the token config"
       (factoryMatchesConfig tokenConfig factory)
     case tokenConfig of

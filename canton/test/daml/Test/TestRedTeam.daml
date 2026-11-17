@@ -1186,3 +1186,34 @@ testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow = do
   -- Control: the same registry with exact settlement accepts a third-party release.
   exactFactory <- misreportingFactory 0.0 None
   releaseThrough exactFactory byRelayer >>= expectAccepted "exact third-party release"
+
+-- | 'Transfer' wire-field bounds: each out-of-range value is rejected by its
+-- own check, and each boundary value is accepted.
+testRedTeamTransferWireFieldBounds : Script ()
+testRedTeamTransferWireFieldBounds = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtBoundsAdmin"
+  alice <- allocateParty "RtBoundsAlice"
+  lockA <- deployLockUnlock env admin
+  let attemptWith overrideTransfer = do
+        coinCid <- mintIssuerCoin env alice 1.0
+        transferAttempt env alice lockA (overrideTransfer (outboundTransferOf 100000000 [coinCid]))
+      rejectedWith label expectedRejection overrideTransfer =
+        AttackCase label expectedRejection (attemptWith overrideTransfer)
+  checkAttacksRejected
+    [ rejectedWith "consistency level 256" "consistency level must be a uint8" \outbound -> outbound with consistencyLevel = 256
+    , rejectedWith "consistency level -1" "consistency level must be a uint8" \outbound -> outbound with consistencyLevel = -1
+    , rejectedWith "nonce 2^32" "nonce must be a uint32" \outbound -> outbound with nonce = 4294967296
+    , rejectedWith "nonce -1" "nonce must be a uint32" \outbound -> outbound with nonce = -1
+    , rejectedWith "33-byte recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
+        outbound with recipientAddress = "01" <> b32 "ee"
+    , rejectedWith "31-byte recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
+        outbound with recipientAddress = T.drop 2 (b32 "ee")
+    , rejectedWith "uppercase recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
+        outbound with recipientAddress = T.drop 2 (b32 "01") <> "EE"
+    , rejectedWith "zero recipient address" "recipient address must be non-zero" \outbound ->
+        outbound with recipientAddress = b32 "00"
+    ]
+  attemptWith (\outbound -> outbound with consistencyLevel = 255) >>= expectAccepted "consistency level 255"
+  attemptWith (\outbound -> outbound with nonce = 4294967295) >>= expectAccepted "nonce 2^32 - 1"
+  attemptWith (\outbound -> outbound with recipientAddress = b32 "01") >>= expectAccepted "recipient address 0x00..01"

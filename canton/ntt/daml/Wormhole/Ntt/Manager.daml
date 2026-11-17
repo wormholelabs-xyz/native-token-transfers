@@ -201,6 +201,17 @@ isZeroAddress b =
   normalizeHex (leftPadTo 32 b)
     == "0000000000000000000000000000000000000000000000000000000000000000"
 
+-- | Exactly 32 bytes of lowercase hex. 'leftPadTo' is the identity above 32
+-- bytes, so an oversized address would reach the wire unchanged.
+isLowerHexBytes32 : Bytes32 -> Bool
+isLowerHexBytes32 address = byteLength address == 32 && isLowerHex address
+
+isUint8 : Int -> Bool
+isUint8 wireField = wireField >= 0 && wireField <= 255
+
+isUint32 : Int -> Bool
+isUint32 wireField = wireField >= 0 && wireField <= 4294967295
+
 -- | Domain-separation tag for NTT manager addresses.
 nttManagerAddressTag : Text
 nttManagerAddressTag = "wormhole:ntt-manager:v1"
@@ -472,20 +483,17 @@ template NttManager
           (chainId /= this.chainId)
         assertMsg "ntt: peer decimals must be a positive uint8"
           (peer.decimals > 0 && peer.decimals <= 255)
-        -- 'leftPadTo' is the identity above 32 bytes, so an unchecked oversized
-        -- address would publish a malformed registration. Pre-normalization,
-        -- so uppercase hex is rejected rather than lowercased.
+        -- Pre-normalization, so uppercase hex is rejected rather than lowercased.
         assertMsg "ntt: peer manager address must be 32 bytes of lowercase hex"
-          (byteLength peer.managerAddress == 32 && isLowerHex peer.managerAddress)
+          (isLowerHexBytes32 peer.managerAddress)
         assertMsg "ntt: peer transceiver address must be 32 bytes of lowercase hex"
-          (byteLength peer.transceiverAddress == 32 && isLowerHex peer.transceiverAddress)
+          (isLowerHexBytes32 peer.transceiverAddress)
         assertMsg "ntt: peer manager address must be non-zero"
           (not (isZeroAddress peer.managerAddress))
         assertMsg "ntt: peer transceiver address must be non-zero"
           (not (isZeroAddress peer.transceiverAddress))
         -- Uint8 on the wire; the watcher drops out-of-range messages.
-        assertMsg "ntt: consistency level must be a uint8"
-          (consistencyLevel >= 0 && consistencyLevel <= 255)
+        assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
         let peer' = normalizePeer peer
         newMgrCid <- create this with peers = Map.insert chainId peer' peers, peerEpoch = peerEpoch + 1
         transceiver <- fetch transceiverEmitterCid
@@ -814,6 +822,13 @@ template NttManager
       controller user
       do
         assertMsg "ntt: deployment is paused" (not paused)
+        -- Uint8 and uint32 on the wire; the watcher drops out-of-range messages.
+        assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
+        assertMsg "ntt: nonce must be a uint32" (isUint32 nonce)
+        assertMsg "ntt: recipient address must be 32 bytes of lowercase hex"
+          (isLowerHexBytes32 recipientAddress)
+        assertMsg "ntt: recipient address must be non-zero"
+          (not (isZeroAddress recipientAddress))
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
                      (Map.lookup recipientChain peers)
             trimmed = trimAmountTo rawAmount tokenDecimals peer.decimals
