@@ -24,8 +24,10 @@ Burn/mint deployments use the canonical gg `CoinFactory`.
 | A12 | Governance VAAs with a wrong emitter chain, emitter address, guardian set, epoch, manager, chain, or action; replay; stale epoch after a rotation | `testRedTeamGovernanceForgeriesRejected` | Held |
 | A13 | Operator, relayer, gg alone, or a stranger moves the admin role, a peer, the ledger, or custody | `testRedTeamUnauthorizedMovesRejected` | Held |
 | N1 | Registry code uses gg authority after the quorum accepts custody | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument` | Broken (F1) |
-| N2 | A third-party relayer delivers a release on a production registry | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry` | Broken (F2) |
-| N3 | Outbound transfer with fields that the guardians cannot deliver | `testRedTeamTransferRejectsUndeliverableMessage` | Broken (F3) |
+| N2 | A third-party relayer delivers a release on a production registry | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry` | Fixed (F2) |
+| N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow` | Held |
+| N3 | Outbound transfer with fields that the guardians cannot deliver | `testRedTeamTransferRejectsUndeliverableMessage` | Fixed (F3) |
+| N3a | Each wire field one step outside its range, and each boundary value | `testRedTeamTransferWireFieldBounds` | Held |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.
@@ -78,7 +80,8 @@ Also correct the `SetFactory` comment at `Manager.daml:528`.
 ## F2: a third-party relayer cannot deliver a release
 
 Severity: Medium.
-Value stays safe. Inbound unlocks to ordinary recipients need the recipient to submit.
+Status: fixed in commit `17bcd79`.
+Before the fix, value stayed safe, but an inbound unlock needed the recipient to submit.
 
 ### Cause
 
@@ -97,16 +100,43 @@ Value stays safe. Inbound unlocks to ordinary recipients need the recipient to s
 5. Result: the ledger rejects the fetch of B's new holding with an authorization failure.
 6. The same release succeeds when B is the executor.
 
-### Proposed fix
+### Fix
 
-Check conservation on the sender side, which the custodian authority can fetch.
-Compare the input total, less the change total, with the release amount.
-Alternatively, require a recipient consent contract that the recipient signs, as `DepositPreapproval` does for `Mint`.
+`executeSyncTransfer` takes a `SettledAmountCheck`.
+Each call site selects the side whose holdings the transaction can fetch.
+
+- `Release` uses `SenderOutflowEqualsAmount`.
+- The lock deposit and the lock merge in `Transfer` use `ReceiverHoldingsSumToAmount`.
+- `ConsolidateCustody` and `TransferAdmin` use `ReceiverHoldingsSumToAmount`.
+- In these four transfers, the receiver is the custodian or the new admin. Thus the receiver is an authorizer, and these checks did not change.
+
+`SenderOutflowEqualsAmount` does these steps:
+
+1. It rejects an input list that contains a holding two times.
+2. Before the registry call, it fetches each input holding. Each input must have `owner = sender` and the transfer instrument.
+3. It calls the registry. A `Pending` or `Failed` result aborts the transaction.
+4. It rejects a change list that contains a holding two times, or that contains an input holding.
+5. It fetches each change holding. Each change holding must have `owner = sender` and the transfer instrument.
+6. It asserts that the input total, less the change total, is equal to the release amount.
+
+The custodian is a signatory of the manager. Thus the custodian can fetch the inputs and the change.
+
+### Why the check is sound
+
+- The ledger debit is equal to the release amount.
+- The check proves that the custodian gave up exactly the release amount.
+- Thus the custody pot and the ledger balance decrease by the same value.
+- A registry that takes more from the custodian, for example a fee, fails the check. Thus a release cannot erode the reserve below the ledger balance.
+- A registry that takes less from the custodian also fails the check.
+- A registry that pays the change to a different party fails the ownership check.
+- Synchronous settlement does not change. `Pending` and `Failed` results abort, so the bridge cannot debit the ledger when no value moved.
+- The check does not prove that the recipient received the amount. The registry owns the instrument and controls its holdings. The old receiver check also trusted holdings that the registry made.
 
 ## F3: outbound transfer accepts fields that the guardians cannot deliver
 
 Severity: Low.
-A wrong client input burns or locks value, and no peer can redeem it.
+Status: fixed in commit `0c48f58`.
+Before the fix, a wrong client input burned or locked value, and no peer could redeem it.
 
 ### Cause
 
@@ -126,14 +156,17 @@ Submit `Transfer` with each value below. Each transfer locks the value and publi
 - `recipientAddress = "01" <> 32 bytes`
 - `recipientAddress = 32 zero bytes`
 
-### Proposed fix
+### Fix
 
-Add these assertions at the start of `Transfer`:
+`Transfer` asserts these conditions before it moves value:
 
-1. `0 <= consistencyLevel <= 255`
-2. `0 <= nonce <= 4294967295`
-3. `byteLength recipientAddress == 32` and `isLowerHex recipientAddress`
+1. `isUint8 consistencyLevel`
+2. `isUint32 nonce`
+3. `isLowerHexBytes32 recipientAddress`. This asserts `byteLength recipientAddress == 32` and `isLowerHex recipientAddress`.
 4. `not (isZeroAddress recipientAddress)`
+
+`SetPeer` and registration use the same helpers.
+A failed assertion aborts the transaction. Thus no value moves and the manager publishes no message.
 
 ## Observations with no finding
 
