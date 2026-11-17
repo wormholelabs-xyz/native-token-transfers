@@ -70,7 +70,9 @@ for a different build. Participants use the package name and version to put
 the upgrades of a package in order.
 
 The current baseline is `ntt-0.2.0.dar` (package id `8b9c3ee1...`) from
-commit `1db4b3c`. An older 0.2.0 build (package id `36a58282...`) has the
+commit `1db4b3c`. The LocalNet rehearsals vetted an ntt 0.3.0 build (package
+id `291fcf92...`) before the `upgrades:` field existed. The field changes the
+package id, thus the source is now version 0.3.1. An older 0.2.0 build (package id `36a58282...`) has the
 `minter` field. A later commit removed this field, thus that build is not
 upgrade-compatible with the baseline. A deployment of that build needs a
 migration to a new deployment.
