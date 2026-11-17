@@ -19,11 +19,17 @@ in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
 Provenance: built from `wormholelabs-xyz/wormhole` branch
-`canton/gg-observes-emitters` (PR #68, version 0.6.0) at commit
-`926e553101d0f7ee3612af466c9d697d394069a3` — the `guardianObserver` party is
-removed and `guardianGovernance` observes every `Emitter`;
-`mkInitialCoreState` and `mkInitialEmitterRegistry` no longer take an observer
-argument.
+`canton/overnight-core` (version 0.7.0) at commit
+`c9d44e11b3adbbf80b8ca4c7d08b10514818e566`. The main package id is
+`7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb`. Version
+0.7.0 is a smart-contract upgrade of 0.6.0
+(`701a57c8...`). `PublishMessage` rejects a payload that is not lowercase
+hex or has an odd hex length, a nonce outside uint32, and a consistency level
+outside uint8, before the fee charge.
+
+`ntt` data-depends on `wormhole-core` by package id, so each NTT call into
+core runs the code of this exact package id. Do not vendor a core version
+older than the one that the guardians observe.
 
 ## Splice token-standard interfaces (CIP-0056 — Token Standard V1)
 
@@ -70,7 +76,7 @@ version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
-| `wormhole-core-0.6.0.dar` | `ntt`, `ntt-test` | `82399aea609d7f5706c2a9872d76f3e0d70f27b29ce77299d8a6c2f4f826d1fd` |
+| `wormhole-core-0.7.0.dar` | `ntt`, `ntt-test` | `9a35f688c18ad4b08ece537ccdc0e260814aede4a937d136d86e6fe8e7fbf69c` |
 | `token-cip0056-0.2.0.dar` | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar` | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
