@@ -190,7 +190,10 @@ to change each manager whose admin is `gg`.
 as `gg`. The guardians control both parties with the same threshold. A
 rotation of the namespace owner keys applies to both parties. Each party has
 its own signing-key update in the same rotation script. A LocalNet rehearsal
-must confirm this procedure before a production root ceremony.
+on three participants confirmed this procedure (wormhole PR #76). A rotation
+is three topology changes. Until all apply, a removed key can still sign for a
+party that is not yet updated. Rotate `nttCustody` first, then finish the
+rotation at once.
 
 `nttCustody` signs every manager, also burn/mint managers and managers that
 an ordinary admin holds. The reasons are:
