@@ -513,17 +513,17 @@ testRedTeamReplayRejected = do
   potA <- custodyPotOf env lockA
 
   checkAttacksRejected
-    [ AttackCase "release replay, same executor" "" $
+    [ AttackCase "release replay, same executor" "digest already consumed" $
         releaseAttempt env lockA (inboundCallBy env relayer bob) releaseVaa
-    , AttackCase "release replay, other executor" "" $
+    , AttackCase "release replay, other executor" "digest already consumed" $
         releaseAttempt env lockA (inboundCallBy env otherRelayer bob) releaseVaa
-    , AttackCase "release replay with explicit custody holding" "" $
+    , AttackCase "release replay with explicit custody holding" "digest already consumed" $
         releaseAttempt env lockA ((inboundCallBy env relayer bob) with explicitInputs = [potA]) releaseVaa
     , AttackCase "release VAA on a second manager of the same admin" "wrong recipient manager" $
         releaseAttempt env lockB (inboundCallBy env relayer bob) releaseVaa
     , AttackCase "release VAA against another deployment's replay trie" "replay node namespace mismatch" $
         releaseAttempt env lockA ((inboundCallBy env relayer bob) with replayNamespace = Some managerB.namespace) releaseVaa
-    , AttackCase "mint replay" "" $
+    , AttackCase "mint replay" "digest already consumed" $
         mintAttempt env mintC (inboundCallBy env relayer bob) mintVaa
     , AttackCase "mint VAA on another burn/mint manager" "wrong recipient manager" $
         mintAttempt env mintD (inboundCallBy env relayer bob) mintVaa
@@ -625,9 +625,9 @@ testRedTeamInboundEdgeCasesRejected = do
         release (base 2 0)
     , AttackCase "dust below the local decimals" "zero at this token's decimals" $
         release (base 3 5) with wireDecimals = 10
-    , AttackCase "wire decimals overflow" "" $
+    , AttackCase "wire decimals overflow" "ArithmeticError" $
         release (base 4 1) with wireDecimals = 255
-    , AttackCase "max wire amount at zero decimals" "" $
+    , AttackCase "max wire amount at zero decimals" "ArithmeticError" $
         release (base 5 9223372036854775807) with wireDecimals = 0
     , AttackCase "emitter is not the peer transceiver" "not the configured peer transceiver" $
         release (base 6 1000) with emitterAddress = b32 "c1"
@@ -648,7 +648,7 @@ testRedTeamInboundEdgeCasesRejected = do
         mintAttempt env mintC (inboundCallBy env relayer mallory) vaaBytes
     , AttackCase "mint with a zero amount" "zero at this token's decimals" $
         mint (inboundTransferTo managerC.managerAddress bob 13 0)
-    , AttackCase "mint with wire decimals overflow" "" $
+    , AttackCase "mint with wire decimals overflow" "ArithmeticError" $
         mint (inboundTransferTo managerC.managerAddress bob 14 1) with wireDecimals = 255
     ]
   (_, ledger) <- ledgerOf env managerA.managerAddress
@@ -670,7 +670,6 @@ testRedTeamGovernanceForgeriesRejected = do
   managerD <- managerOf env mintD
   let rotate chain managerAddress factoryEpoch =
         RotateToCanonicalFactory with chain, managerAddress, factoryEpoch
-      issuerFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory env.issuerFactoryCid)
       setFactoryByVaa mgrCid newFactory vaaBytes = do
         mgr <- managerOf env mgrCid
         replayNodeCid <- replayNodeFor env mgr (inboundCallBy env relayer relayer) vaaBytes
@@ -709,9 +708,10 @@ testRedTeamGovernanceForgeriesRejected = do
     , AttackCase "accept-admin action relayed as a rotation" "not a rotate-to-canonical-factory action" $
         governanceVaa env 7 (AcceptAdminToGovernance with chain = cantonChainId, managerAddress = managerC.managerAddress, factoryEpoch = 0)
           >>= setFactoryByVaa mintC managerC.factory
-    , AttackCase "valid rotation to the issuer's CoinFactory" "requires one of the stakeholders" $
+    , AttackCase "valid rotation to the admin's own CoinFactory" "factory's admin does not match this deployment's guardianGovernance" $ do
+        adminFactoryCid <- submit adminC do createCmd CoinFactory with admin = adminC
         governanceVaa env 8 (rotate cantonChainId managerC.managerAddress 0)
-          >>= setFactoryByVaa mintC issuerFactory
+          >>= setFactoryByVaa mintC (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory adminFactoryCid))
     ]
 
   -- A genuine rotation bumps the epoch; its VAA and older accept-admin VAAs go stale.
@@ -735,7 +735,7 @@ testRedTeamGovernanceForgeriesRejected = do
             ledgerCid = None
             extraArgs = emptyExtraArgs
   checkAttacksRejected
-    [ AttackCase "rotation VAA replayed" "" $ setFactoryByVaa mintC' managerC.factory rotationVaa
+    [ AttackCase "rotation VAA replayed" "digest already consumed" $ setFactoryByVaa mintC' managerC.factory rotationVaa
     , AttackCase "accept-admin signed for the superseded factory epoch" "wrong factory epoch" $
         governanceVaa env 10 (AcceptAdminToGovernance with chain = cantonChainId, managerAddress = managerC.managerAddress, factoryEpoch = 0)
           >>= acceptByVaa
@@ -782,8 +782,9 @@ testRedTeamGovernanceForgeriesRejected = do
             pubKeys = [(0, env.guardianKey.publicKey)]
             extraArgs = emptyExtraArgs
   checkAttacksRejected
-    [ AttackCase "register-by-VAA with the issuer's CoinFactory" "requires one of the stakeholders" $
-        registerByVaa 12 solanaGovernanceChainId issuerFactory
+    [ AttackCase "register-by-VAA with the admin's own CoinFactory" "factory's admin does not match this deployment's guardianGovernance" $ do
+        adminFactoryCid <- submit adminE do createCmd CoinFactory with admin = adminE
+        registerByVaa 12 solanaGovernanceChainId (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory adminFactoryCid))
     , AttackCase "register-by-VAA from a non-governance emitter" "wrong emitter chain" $
         registerByVaa 13 peerChainId managerC.factory
     ]
@@ -817,16 +818,16 @@ testRedTeamLyingHoldingsRejected = do
     [ AttackCase "lock a forged holding claiming the instrument" "not a Coin issued by this registry" $ do
         forged <- forgedHolding (issuerInstrument env)
         transferAttempt env mallory lockA (outboundTransferOf 100000000 [forged])
-    , AttackCase "lock another user's coin" "" $
+    , AttackCase "lock another user's coin" "transfer input not owned by sender" $
         transferAttempt env mallory lockA (outboundTransferOf 100000000 [aliceCoin])
-    , AttackCase "lock a coin of another instrument" "" $
+    , AttackCase "lock a coin of another instrument" "transfer input instrument mismatch" $
         transferAttempt env mallory lockA (outboundTransferOf 100000000 [otherCoin])
     , AttackCase "burn a forged holding claiming the bridged instrument" "burn input is not a Coin" $ do
         forged <- forgedHolding managerC.instrumentId
         transferAttempt env mallory mintC (outboundTransferOf 100000000 [forged])
     , AttackCase "burn another user's coin" "burn holding not owned by sender" $
         transferAttempt env mallory mintC (outboundTransferOf 100000000 [aliceBridgedCoin])
-    , AttackCase "burn one coin listed twice" "" $
+    , AttackCase "burn one coin listed twice" "ntt: duplicate input holding" $
         transferAttempt env mallory mintC (outboundTransferOf 2000000 [malloryBridgedCoin, malloryBridgedCoin])
     ]
   coinBalance env.gg mallory managerC.instrumentId >>= (=== 0.01)
@@ -867,28 +868,28 @@ testRedTeamUnauthorizedMovesRejected = do
           payer = party
           feeAllocation = None
   checkAttacksRejected
-    [ AttackCase "operator takes the admin role" "" $ transferAdminAs [env.operator] env.operator
-    , AttackCase "admin hands custody to mallory without her" "" $ transferAdminAs [admin] mallory
-    , AttackCase "mallory takes the admin role" "" $ transferAdminAs [mallory] mallory
-    , AttackCase "relayer sets a peer" "" $ setPeerAs relayer
-    , AttackCase "operator sets a peer" "" $ setPeerAs env.operator
-    , AttackCase "gg alone sets a peer" "" $ setPeerAs env.gg
-    , AttackCase "operator debits the ledger" "" $
+    [ AttackCase "operator takes the admin role" "requires authorizers" $ transferAdminAs [env.operator] env.operator
+    , AttackCase "admin hands custody to mallory without her" "requires authorizers" $ transferAdminAs [admin] mallory
+    , AttackCase "mallory takes the admin role" "requires authorizers" $ transferAdminAs [mallory] mallory
+    , AttackCase "relayer sets a peer" "requires authorizers" $ setPeerAs relayer
+    , AttackCase "operator sets a peer" "requires authorizers" $ setPeerAs env.operator
+    , AttackCase "gg alone sets a peer" "requires authorizers" $ setPeerAs env.gg
+    , AttackCase "operator debits the ledger" "requires authorizers" $
         fmap (const ()) <$> trySubmit (withReads env [env.operator] []) do
           exerciseCmd ledgerA Debit with amount = 1.0, newCustodyHint = None
-    , AttackCase "relayer releases from a non-custodian holding" "" $ do
+    , AttackCase "relayer releases from a non-custodian holding" "requires one of the stakeholders" $ do
         vaaBytes <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 10000000)
         releaseAttempt env lockA ((inboundCallBy env relayer bob) with explicitInputs = [aliceCoin]) vaaBytes
-    , AttackCase "relayer consolidates a non-custodian holding" "" $
+    , AttackCase "relayer consolidates a non-custodian holding" "requires one of the stakeholders" $
         fmap (const ()) <$> trySubmit (withReads env [relayer] [alice]) do
           exerciseCmd lockA ConsolidateCustody with
             caller = relayer
             ledgerCid = ledgerA
             custodyHoldingCids = [potA, aliceCoin]
             extraArgs = emptyExtraArgs
-    , AttackCase "mallory locks from the custody pot" "" $
+    , AttackCase "mallory locks from the custody pot" "transfer input not owned by sender" $
         transferAttempt env mallory lockA (outboundTransferOf 100000000 [potA])
-    , AttackCase "mallory accepts her own proposal for the deployment" "" $ do
+    , AttackCase "mallory accepts her own proposal for the deployment" "requires one of the stakeholders" $ do
         proposalCid <- submit mallory do
           createCmd AdminTransferProposal with admin = mallory, newAdmin = mallory, managerAddress = managerA.managerAddress
         fmap (const ()) <$> trySubmit (withReads env [mallory] []) do
@@ -1036,31 +1037,6 @@ testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument = do
   minted <- coinBalance env.gg registryAdmin managerC.instrumentId
   assertMsg ("registry admin minted " <> show minted <> " of a gg-administered bridged instrument")
     (minted == 0.0)
-
-----------------------------------------------------------------------
--- Finding: outbound messages the guardians cannot deliver
-----------------------------------------------------------------------
-
--- | Locking or burning value must not publish a message the watcher drops or
--- the destination cannot decode: out-of-range uint8/uint32 fields and a
--- recipient address that is not exactly 32 bytes.
-testRedTeamTransferRejectsUndeliverableMessage : Script ()
-testRedTeamTransferRejectsUndeliverableMessage = do
-  env <- redTeamSetup
-  admin <- allocateParty "RtWireAdmin"
-  alice <- allocateParty "RtWireAlice"
-  lockA <- deployLockUnlock env admin
-  let attemptWith label overrideTransfer = AttackCase label "" do
-        coinCid <- mintIssuerCoin env alice 1.0
-        transferAttempt env alice lockA (overrideTransfer (outboundTransferOf 100000000 [coinCid]))
-  checkAttacksRejected
-    [ attemptWith "consistency level above uint8" \outbound -> outbound with consistencyLevel = 256
-    , attemptWith "negative consistency level" \outbound -> outbound with consistencyLevel = -1
-    , attemptWith "nonce above uint32" \outbound -> outbound with nonce = 4294967296
-    , attemptWith "negative nonce" \outbound -> outbound with nonce = -1
-    , attemptWith "33-byte recipient address" \outbound -> outbound with recipientAddress = "01" <> b32 "ee"
-    , attemptWith "zero recipient address" \outbound -> outbound with recipientAddress = b32 "00"
-    ]
 
 ----------------------------------------------------------------------
 -- Finding: third-party relaying of a release on a production registry

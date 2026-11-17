@@ -86,6 +86,7 @@ module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
 import DA.Map (Map)
+import DA.List (unique)
 import DA.Map qualified as Map
 import DA.Optional (fromSomeNote)
 import DA.Text qualified as T
@@ -876,6 +877,7 @@ template NttManager
           -- return the rest as change.
           BurnMint -> do
             burnMintFactoryCid <- requireBurnMintFactory factory
+            assertMsg "ntt: duplicate input holding" (unique inputHoldingCids)
             holdingAmounts <- forA inputHoldingCids \cid -> do
               hv <- view <$> fetch cid
               assertMsg "ntt: burn holding not owned by sender" (hv.owner == user)
