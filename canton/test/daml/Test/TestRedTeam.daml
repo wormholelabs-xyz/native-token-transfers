@@ -113,7 +113,8 @@ redTeamSetup = do
     createCmd (mkInitialCoreState operator gg solanaGovernanceChainId defaultGovernanceContract
                  [addressFromPubKey guardianKey.publicKey]
                  (InstrumentId with admin = gg, id = "UNUSED") gg)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator gg 0)
+  _ <- submit (actAs operator <> actAs gg) do
+    createCmd (mkInitialEmitterRegistry operator gg 0)
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator gg 0)
   _ <- submit (actAs operator <> actAs gg) do
     createCmd NttGovernance with operator, guardianGovernance = gg, nextId = 0, consumedGovernance = Set.empty

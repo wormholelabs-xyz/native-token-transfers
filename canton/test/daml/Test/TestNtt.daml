@@ -771,7 +771,8 @@ testRegistrationRejectsForeignRegistries = do
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
   csDisc <- fromSome <$> queryDisclosure operator csId
 
-  shadowEmReg <- submit rogue do
+  submitMustFail rogue do createCmd (mkInitialEmitterRegistry rogue gg 0)
+  shadowEmReg <- submit (actAs rogue <> actAs gg) do
     createCmd (mkInitialEmitterRegistry rogue gg 0)
   shadowEmRegDisc <- fromSome <$> queryDisclosure rogue shadowEmReg
   res <- trySubmit (actAs admin <> disclose govDisc <> disclose shadowEmRegDisc <> disclose rrRegDisc <> disclose csDisc) do

@@ -49,7 +49,8 @@ setupWithInstrument mInstrument = do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                  defaultGovernanceContract [devnetGuardian]
                  feeInstrument guardianGovernance)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
+  _ <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
   pure (operator, guardianGovernance, csId)
 
@@ -141,8 +142,9 @@ testAddressVector =
 
 -- | A compromised operator can't forge an existing emitter's address. The address
 -- includes @owner@ and the 'Emitter' is owner-co-signed, so: (a) operator alone
--- can't create a contract with the owner's address; (b) colluding, it can only
--- produce a different owner, which derives a different address.
+-- can't create a contract with the owner's address; (b) with a colluding owner it
+-- still needs guardianGovernance; (c) with all three, a different owner derives a
+-- different address.
 testImpersonationBlocked : Script ()
 testImpersonationBlocked = do
   (operator, _, _) <- setup
@@ -158,8 +160,15 @@ testImpersonationBlocked = do
       emitterId = 0
       emitterAddress = a.emitterAddress, sequence = 0
 
-  -- (b) Operator + Mallory can create a same-id emitter, but its address differs.
-  malloryEm <- submit (actAs operator <> actAs mallory) do
+  -- (b) Operator + Mallory without guardianGovernance cannot create an emitter.
+  submitMustFail (actAs operator <> actAs mallory) do
+    createCmd Emitter with
+      operator, guardianGovernance = a.guardianGovernance, owner = mallory
+      emitterId = 0
+      emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
+
+  -- (c) With guardianGovernance, a same-id emitter for Mallory has a different address.
+  malloryEm <- submit (actAs operator <> actAs mallory <> actAs a.guardianGovernance) do
     createCmd Emitter with
       operator, guardianGovernance = a.guardianGovernance, owner = mallory
       emitterId = 0
@@ -299,8 +308,11 @@ testArchives = do
   submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
   bob <- allocateParty "ArchBob"
   emId <- registerEmitter operator bob
-  -- Emitter now has two signatories (operator + owner), so both must authorize.
-  submit (actAs operator <> actAs bob) do archiveCmd emId   -- Archive Emitter
+  -- Emitter is signed by operator, owner, and guardianGovernance; all three must authorize.
+  submitMustFail (actAs operator <> actAs bob) do archiveCmd emId
+  submit (actAs operator <> actAs bob <> actAs cs.guardianGovernance) do archiveCmd emId
   [(regId, _)] <- query @EmitterRegistry operator
-  submit operator do archiveCmd regId           -- Archive EmitterRegistry
+  -- EmitterRegistry is co-signed, so archiving needs operator + guardianGovernance.
+  submitMustFail operator do archiveCmd regId
+  submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd regId
   pure ()
