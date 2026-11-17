@@ -412,6 +412,15 @@ factory from another minter is code that NTT cannot verify: it can report a
 burn that did not occur. To bridge a token that `gg` does not administer, use
 lock/unlock.
 
+The canonical-factory pin uses the package name, not the package ID. Canton
+resolves a template by package name across upgrades, so
+`requireCanonicalFactory` accepts a `CoinFactory` of each vetted
+`token-cip0056` version. An interface choice runs the code of the vetted
+version that the submitter prefers. Thus, on each participant that hosts
+`gg`, the vetting of a new `token-cip0056` version is a decision about the
+`gg` mint authority. Vet a new version only after a review of its
+`CoinFactory` and `Coin` code.
+
 **Custody follows the admin.** A deployment registers with its reserve owned
 by its own `admin`: fully operational and explicitly custodial — the admin
 owns the reserve outright, so users trust it the way they would a custodial
@@ -468,7 +477,7 @@ the one partition a registry cannot churn away: registries reorganize holdings
 out from under the bridge (Canton Coin's rounds merge, expire, and recreate
 contracts), which erases any partition built out of specific contract ids — a
 pinned pot cid, an escrow — but never changes who owns the value. Finally,
-because every choice body carries all four signatures, the manager checks that
+because every choice body carries all three signatures, the manager checks that
 each custody holding it spends is owned by the deployment's own current
 `admin`, so the ambient `gg` authority in another deployment's choices can
 never reach the `gg` pool.
@@ -504,10 +513,23 @@ holding cids as an override (validated the same way); and the permissionless
 `ConsolidateCustody` choice re-merges fragments and repoints the hint after a
 registry-side reorganization (registries may restructure their holdings
 without us, which is why the cid can go stale and why storing it is safe only
-as a hint). One open consideration for real registries: transfer fees charged
-out of custody inputs would bleed the physical pot below the ledger sum, so a
-fee-charging registry needs a per-registry answer (fee waivers, top-ups, or
-debiting fees from the ledger).
+as a hint). The manager also validates each holding that the registry reports
+back. Each receiver holding, release input, and release change holding must
+be the expected party's own, of this instrument, unlocked, and signed by the
+instrument admin. The first lock deposit, which becomes the pot, gets the
+custody validation too.
+
+**Zero sender fees (lock/unlock).** A lock/unlock deployment
+needs a registry that charges the sender zero fees on a transfer.
+`Release` asserts that the custodian gives up exactly the release amount
+(`SenderOutflowEqualsAmount`). A lock admits a sender fee, because its check
+reads only the custodian's new holdings. Thus, on a registry that charges
+the sender a fee, each lock succeeds and each `Release` aborts. The locked
+value then stays in custody with no release path. Canton Coin charges zero
+sender fees in Splice 0.10.2. Release 0.4.17 removed holding fees from
+transfers (CIP-78). Release 0.5.16 set all `AmuletConfig` fees to zero
+(CIP-107). `REDTEAM.md` (N4) records the source references and a LocalNet
+release from an aged pot.
 
 **Instrument binding (burn/mint exclusivity).** Burn/mint deployments are
 isolated by instrument: a manager only ever mints its own `instrumentId`. That

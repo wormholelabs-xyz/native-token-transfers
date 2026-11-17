@@ -521,8 +521,10 @@ template NttManager
     -- co-signs the rotation, mirroring 'Wormhole.Ntt.Governance.RegisterManager',
     -- and the new factory must be the canonical 'CoinFactory'. Without both, a
     -- mutable @admin@ could later swap in a look-alike factory that captures
-    -- gg's authority. Lock/unlock's transfer factory never wields gg, so it
-    -- stays @admin@-only.
+    -- gg's authority. Lock/unlock's transfer factory receives the custodian's
+    -- authority as transfer sender, so it stays @admin@-only; on a
+    -- gg-adminned deployment the custodian is gg, and this rotation is a
+    -- governance action (REDTEAM.md F1).
     --
     -- Every rotation bumps @factoryEpoch@, invalidating any
     -- 'AcceptAdminTransferByVaa' VAA signed against the superseded factory.
@@ -732,8 +734,8 @@ template NttManager
     -- | Governance-VAA-gated factory rotation for burn/mint deployments: the
     -- guardian quorum vets a specific (chain, managerAddress, factoryEpoch)
     -- rotation off-chain, and @admin@ relays it with no live gg signature
-    -- needed, mirroring 'AcceptAdminTransferByVaa'. Lock/unlock's transfer
-    -- factory never wields gg, so it rotates via plain 'SetFactory'.
+    -- needed, mirroring 'AcceptAdminTransferByVaa'. Lock/unlock rotates via
+    -- plain 'SetFactory', controlled by the current custodian.
     choice SetFactoryByVaa : ContractId NttManager
       with
         newFactory    : NttFactory

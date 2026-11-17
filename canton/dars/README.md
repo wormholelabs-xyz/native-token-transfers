@@ -50,9 +50,14 @@ our packages target LF 2.3, which may data-depend on lower LF 2.x versions.
 `CoinAllocation`/`CoinTransferInstruction` templates that back the manager's
 burn/mint deployments. `requireCanonicalFactory` in `Wormhole.Ntt.Manager`
 pins the caller-supplied factory to the `Token.CIP0056.CoinFactory` template
-from this exact DAR via `fetchFromInterface`, so its package-id is part of the
-canonical-factory identity: re-vendoring a different build changes what
-counts as "the" factory.
+with `fetchFromInterface`.
+
+The pin uses the package name, not the package ID. Canton resolves a template
+by package name across upgrades, so the check accepts a `CoinFactory` of each
+vetted `token-cip0056` version. An interface choice runs the code of the
+vetted version that the submitter prefers. Thus, on each participant that
+hosts gg, the vetting of a new `token-cip0056` version is a decision about
+the gg mint authority.
 
 It is developed in `wormholelabs-xyz/CantonExamples` under `tokens/cip0056`
 and is consumed as a pinned artifact, exactly as `wormhole-core` above.

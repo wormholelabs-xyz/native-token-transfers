@@ -26,13 +26,18 @@ Burn/mint deployments use the canonical gg `CoinFactory`.
 | N1 | Registry code uses gg authority after the quorum accepts custody | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument` | Broken (F1) |
 | N2 | A third-party relayer delivers a release on a production registry | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry` | Fixed (F2) |
 | N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow` | Held |
-| N3 | Outbound transfer with fields that the guardians cannot deliver | `testRedTeamTransferRejectsUndeliverableMessage` | Fixed (F3) |
-| N3a | Each wire field one step outside its range, and each boundary value | `testRedTeamTransferWireFieldBounds` | Held |
+| N2b | Registry reports a bad deposit or change: wrong owner or instrument, locked, unsigned, duplicate, or an input | `testRedTeamRegistryMisreportedHoldingsRejected` | Held |
+| N3 | Outbound wire fields one step outside the range, 63-character or 65-character addresses, and boundary values | `testRedTeamTransferWireFieldBounds` | Fixed (F3) |
 | N4 | A third-party relayer releases Canton Coin from an aged custody pot | LocalNet, `NTT_RELEASE_AFTER_ROUNDS=5 ntt_lock_unlock.sh` | Held |
 | N5 | The DSO expires an idle custody pot of Canton Coin as dust | Splice 0.10.2 source | Open (F4) |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.
+
+A4 note: the canonical-factory pin uses the package name, not the package ID.
+`requireCanonicalFactory` accepts a `CoinFactory` of each vetted `token-cip0056` version.
+An interface choice runs the code of the vetted version that the submitter prefers.
+Thus each new `token-cip0056` version that a gg host vets is a decision about the gg mint authority.
 
 ## F1: quorum custody gives gg authority to registry code
 
@@ -44,15 +49,15 @@ After that, the registry can mint each burn/mint instrument with no limit.
 
 - `TransferFactory_Transfer` has the controller `transfer.sender`.
 - After `AcceptAdminTransferByVaa`, the custodian is gg.
-- `ConsolidateCustody`, `Release`, `TransferAdmin`, and the lock merge in `Transfer` send with `sender = admin`, which is gg (`ntt/daml/Wormhole/Ntt/Manager.daml:598`, `:858`, `:964`, `:1015`).
+- `ConsolidateCustody`, `Release`, `TransferAdmin`, and the lock merge in `Transfer` send with `sender = admin`, which is gg (`ntt/daml/Wormhole/Ntt/Manager.daml:597`, `:868`, `:980`, `:1032`).
 - Thus the body of the registry choice has the authority of gg.
 - The canonical `CoinFactory` has gg as its only signatory. `BurnMintFactory_BurnMint` needs only gg and the extra actors.
 - `TransferPreapproval_Receive` in `token-cip0056` needs only the instrument admin, which is gg.
-- `validateCustodyHolding` accepts a holding that the instrument admin signs alone (`Manager.daml:345`). Thus the registry admin can make holdings with `owner = gg` without gg.
+- `validateSettledHolding` accepts a holding that the instrument admin signs alone (`Cip56.daml:139`). Thus the registry admin can make holdings with `owner = gg` without gg.
 - `ConsolidateCustody` is permissionless. Thus the registry admin can start the merge at any time.
 
-The `SetFactory` comment states that the lock/unlock factory never wields gg (`Manager.daml:528`).
-This statement is false after the quorum accepts custody.
+The `SetFactory` comment stated that the lock/unlock factory never wields gg.
+This statement was false after the quorum accepts custody. The comment is now correct.
 
 ### Reproduction
 
@@ -76,8 +81,6 @@ Possible changes:
 1. Give quorum custody to a dedicated custody party, separate from the gg mint authority.
 2. Make the mint authority a separate party, or make `CoinFactory` co-signed by the operator.
 3. Accept quorum custody only for registry templates on an allowlist, as `requireCanonicalFactory` does for burn/mint.
-
-Also correct the `SetFactory` comment at `Manager.daml:528`.
 
 ## F2: a third-party relayer cannot deliver a release
 
@@ -115,24 +118,35 @@ Each call site selects the side whose holdings the transaction can fetch.
 `SenderOutflowEqualsAmount` does these steps:
 
 1. It rejects an input list that contains a holding two times.
-2. Before the registry call, it fetches each input holding. Each input must have `owner = sender` and the transfer instrument.
+2. Before the registry call, it fetches each input holding. Each input must have `owner = sender`, the transfer instrument, no lock, and the instrument admin as a signatory.
 3. It calls the registry. A `Pending` or `Failed` result aborts the transaction.
 4. It rejects a change list that contains a holding two times, or that contains an input holding.
-5. It fetches each change holding. Each change holding must have `owner = sender` and the transfer instrument.
+5. It fetches each change holding. Each change holding must pass the same four checks as an input.
 6. It asserts that the input total, less the change total, is equal to the release amount.
+
+`ReceiverHoldingsSumToAmount` applies the same four checks to each receiver holding, with `owner = receiver`.
+It also rejects a receiver list that contains a holding two times.
+`Transfer` also validates the first lock deposit as a custody holding before the ledger records it as the pot.
 
 The custodian is a signatory of the manager. Thus the custodian can fetch the inputs and the change.
 
 ### Why the check is sound
 
 - The ledger debit is equal to the release amount.
-- The check proves that the custodian gave up exactly the release amount.
+- The check proves that the custodian gave up exactly the release amount, if each change holding is new.
 - Thus the custody pot and the ledger balance decrease by the same value.
 - A registry that takes more from the custodian, for example a fee, fails the check. Thus a release cannot erode the reserve below the ledger balance.
 - A registry that takes less from the custodian also fails the check.
 - A registry that pays the change to a different party fails the ownership check.
 - Synchronous settlement does not change. `Pending` and `Failed` results abort, so the bridge cannot debit the ledger when no value moved.
 - The check does not prove that the recipient received the amount. The registry owns the instrument and controls its holdings. The old receiver check also trusted holdings that the registry made.
+
+Residual: the check cannot detect change that existed before the transaction.
+A holding has no marker of the transaction that created it.
+A registry can report an earlier custodian holding as change, for example the pot of a sibling deployment.
+Then the check passes, but the custodian gave up more than the release amount, and the ledger hint points to the earlier holding.
+Only the registry can do this, because the instrument admin must sign the change.
+The registry is the instrument admin, so it can already move each holding of its instrument.
 
 ## F3: outbound transfer accepts fields that the guardians cannot deliver
 
@@ -164,11 +178,25 @@ Submit `Transfer` with each value below. Each transfer locks the value and publi
 
 1. `isUint8 consistencyLevel`
 2. `isUint32 nonce`
-3. `isLowerHexBytes32 recipientAddress`. This asserts `byteLength recipientAddress == 32` and `isLowerHex recipientAddress`.
+3. `isLowerHexBytes32 recipientAddress`. This asserts `T.length recipientAddress == 64` and `isLowerHex recipientAddress`.
 4. `not (isZeroAddress recipientAddress)`
 
 `SetPeer` and registration use the same helpers.
 A failed assertion aborts the transaction. Thus no value moves and the manager publishes no message.
+
+### Follow-up: half bytes
+
+The first fix asserted `byteLength recipientAddress == 32`.
+`byteLength` divides the character count by 2 and drops the remainder.
+Thus a 65-character address passed, and `leftPadTo 32` kept it.
+65 zero characters also passed `isZeroAddress`.
+The check now asserts exactly 64 characters.
+
+The same follow-up applies these checks to the payload codec:
+
+- `runGet` rejects a buffer that is not whole bytes of hex.
+- `encodeLengthPrefixed` rejects a field that is not whole bytes of hex.
+- Each 32-byte field goes through `encodeBytes32`, which rejects a result that is not exactly 64 hex characters.
 
 ## N4: a release from an aged Canton Coin pot
 
