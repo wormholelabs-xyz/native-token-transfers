@@ -30,6 +30,7 @@ Burn/mint deployments use the canonical gg `CoinFactory`.
 | N3 | Outbound wire fields one step outside the range, 63-character or 65-character addresses, and boundary values | `testRedTeamTransferWireFieldBounds` | Fixed (F3) |
 | N4 | A third-party relayer releases Canton Coin from an aged custody pot | LocalNet, `NTT_RELEASE_AFTER_ROUNDS=5 ntt_lock_unlock.sh` | Held |
 | N5 | The DSO expires an idle custody pot of Canton Coin as dust | Splice 0.10.2 source | Open (F4) |
+| N6 | A lock/unlock admin alone publishes on its gg-owned `Emitter`, sets a burn/mint factory, hands the admin role to gg, or registers a burn/mint deployment | `testRedTeamLockUnlockAdminCannotUseGgAuthority` | Held |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.

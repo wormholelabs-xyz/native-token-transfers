@@ -95,6 +95,11 @@ Three parties sign every `NttManager`, and each signature has one job:
   was handed to it has a quorum-owned reserve and governance-run admin
   operations.
 
+The transceiver `Emitter` of each deployment has the owner `gg`, also for an
+admin-only lock/unlock registration. This owner does not show that the
+guardian quorum approved the deployment. Peer chains decide which Canton
+deployment to trust.
+
 The deployment's stable identity is no longer a co-signing party. It is a
 derived `namespace : Text`, computed once at registration and stored on the
 manager:

@@ -32,7 +32,7 @@ import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.Setup
   ( mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
   , solanaGovernanceChainId, defaultGovernanceContract )
-import Wormhole.Core.State (CoreState)
+import Wormhole.Core.State (CoreState, Emitter, PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA, addressFromPubKey, spkiPrefixSecp256k1)
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Governance
@@ -1346,3 +1346,71 @@ testRedTeamTransferWireFieldBounds = do
   attemptWith (\outbound -> outbound with consistencyLevel = 255) >>= expectAccepted "consistency level 255"
   attemptWith (\outbound -> outbound with nonce = 4294967295) >>= expectAccepted "nonce 2^32 - 1"
   attemptWith (\outbound -> outbound with recipientAddress = b32 "01") >>= expectAccepted "recipient address 0x00..01"
+
+----------------------------------------------------------------------
+-- Lock/unlock admin and gg authority
+----------------------------------------------------------------------
+
+-- | An admin registers a lock/unlock deployment alone and gets a gg-owned
+-- transceiver 'Emitter'. The admin alone must not publish on it, move the
+-- deployment to burn/mint, hand the admin role to gg, or register a burn/mint
+-- deployment.
+testRedTeamLockUnlockAdminCannotUseGgAuthority : Script ()
+testRedTeamLockUnlockAdminCannotUseGgAuthority = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtLockUnlockAdmin"
+  let lockUnlockFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory env.issuerFactoryCid)
+  mgrCid <- registerManagerAs env admin [] (issuerInstrument env) LockUnlock lockUnlockFactory
+  mgr <- managerOf env mgrCid
+  mgr.admin === admin
+  mgr.tokenConfig === LockUnlock
+  transceiverEmitterCid <- resolveEmitter env.gg mgr.transceiverEmitterId
+  Some transceiverEmitter <- queryContractId env.gg transceiverEmitterCid
+  transceiverEmitter.owner === env.gg
+  transceiverEmitter.guardianGovernance === env.gg
+
+  canonicalCoinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
+  let burnMintFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory canonicalCoinFactoryCid)
+  (ledgerCid, ledger) <- ledgerOf env mgr.managerAddress
+  [(govCid, _)] <- query @NttGovernance env.operator
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.operator
+  ledger.balance === 0.0
+
+  checkAttacksRejected
+    [ AttackCase "publish an arbitrary payload on the gg-owned emitter" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd transceiverEmitterCid PublishMessage with
+            nonce = 0
+            payload = "deadbeef"
+            consistencyLevel = 0
+            coreStateCid = env.coreStateCid
+            payer = admin
+            feeAllocation = None
+    , AttackCase "move the deployment to burn/mint" "factory type does not match the token config" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd mgrCid SetFactory with newFactory = burnMintFactory
+    , AttackCase "hand the admin role to gg without gg" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd mgrCid TransferAdmin with
+            newAdmin = env.gg
+            ledgerCid = Some ledgerCid
+            vettedFactory = lockUnlockFactory
+            extraArgs = emptyExtraArgs
+    , AttackCase "register a burn/mint deployment alone" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd govCid RegisterManager with
+            admin
+            chainId = cantonChainId
+            emitterRegistryCid
+            replayRootRegistryCid
+            instrumentId = InstrumentId with admin = env.gg, id = nttInstrumentIdFor admin 1
+            instrumentNonce = 1
+            tokenConfig = BurnMint
+            tokenDecimals = 8
+            factory = burnMintFactory
+            coreStateCid = env.coreStateCid
+            consistencyLevel = 0
+            emitterFeeAllocation = None
+            claimFeeAllocation = None
+            feeAllocation = None
+    ]
