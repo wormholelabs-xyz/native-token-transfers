@@ -105,14 +105,18 @@ data RedTeamEnv = RedTeamEnv with
 -- | Core + NTT root under a generated guardian key, plus a foreign issuer's
 -- 'CoinFactory' for lock/unlock deployments.
 redTeamSetup : Script RedTeamEnv
-redTeamSetup = do
+redTeamSetup = redTeamSetupWithPartyHintPrefix "Rt"
+
+-- | 'redTeamSetup' with its own parties, for a script that needs more than one root.
+redTeamSetupWithPartyHintPrefix : Text -> Script RedTeamEnv
+redTeamSetupWithPartyHintPrefix partyHintPrefix = do
   guardianKey <- generateGuardianKey
-  operator <- allocateParty "RtOperator"
-  gg <- allocateParty "RtGg"
-  nttCustody <- allocateParty "RtNttCustody"
-  issuer <- allocateParty "RtIssuer"
-  feeCustody <- allocateParty "RtFeeCustody"
-  feeInstrumentAdmin <- allocateParty "RtFeeInstrumentAdmin"
+  operator <- allocateParty (partyHintPrefix <> "Operator")
+  gg <- allocateParty (partyHintPrefix <> "Gg")
+  nttCustody <- allocateParty (partyHintPrefix <> "NttCustody")
+  issuer <- allocateParty (partyHintPrefix <> "Issuer")
+  feeCustody <- allocateParty (partyHintPrefix <> "FeeCustody")
+  feeInstrumentAdmin <- allocateParty (partyHintPrefix <> "FeeInstrumentAdmin")
   coreStateCid <- submit (actAs operator <> actAs gg <> actAs feeCustody) do
     createCmd (mkInitialCoreState operator gg solanaGovernanceChainId defaultGovernanceContract
                  (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [addressFromPubKey guardianKey.publicKey])
@@ -1267,6 +1271,149 @@ testQuorumCustodyReserveLifecycleOnCoinRegistry = do
   managerAfter.admin === nextAdmin
   managerAfter.reserveCustodian === nextAdmin
   checkBalances [(nextAdmin, 1.3), (env.nttCustody, 0.0), (env.gg, 0.0)]
+
+-- | Who holds deployment A's admin role before and after its hand-off. B
+-- stays with A's old reserve custodian.
+data PooledHandOff
+  = QuorumDemotionToAdmin
+  | QuorumPromotionFromAdmin
+  | SuccessionBetweenAdmins
+  deriving (Eq, Show)
+
+-- | @admin@ and @newAdmin@ both authorize the hand-off of @mgrCid@. The extra
+-- args carry the new reserve custodian's issuer 'TransferPreapproval'.
+transferAdminAttempt
+  : RedTeamEnv -> ContractId NttManager -> Party -> NttFactory
+  -> Script (Either SubmitError (ContractId NttManager))
+transferAdminAttempt env mgrCid newAdmin vettedFactory = do
+  mgr <- managerOf env mgrCid
+  (ledgerCid, _) <- ledgerOf env mgr.managerAddress
+  let newReserveCustodian = if newAdmin == env.gg then env.nttCustody else newAdmin
+  newCustodianPreapprovalCid <- transferPreapprovalOf env newReserveCustodian
+  fmap fst <$> trySubmit (withReads env [mgr.admin, newAdmin] []) do
+    exerciseCmd mgrCid TransferAdmin with
+      newAdmin
+      ledgerCid = Some ledgerCid
+      vettedFactory
+      extraArgs = receiverPreapprovalArgs newCustodianPreapprovalCid
+
+-- | The issuer coins of @owner@.
+issuerCoinsOf : RedTeamEnv -> Party -> Script [(ContractId Coin, Coin)]
+issuerCoinsOf env owner = do
+  coins <- query @Coin env.issuer
+  pure [ entry | entry@(_, coin) <- coins, coin.owner == owner, coin.instrumentId == issuerInstrument env ]
+
+-- | Two deployments A and B share one reserve custodian, and a stranger
+-- merges their reserves into one pot under A's hint. A hand-off of A moves
+-- exactly A's ledger balance to A's new custodian. B's reserve stays with the
+-- old custodian, and B can still release its full balance. A hand-off must
+-- take exactly the balance from the old custodian and deliver exactly the
+-- balance to the new one.
+testRedTeamAdminTransferMovesOnlyTheLedgerBalance : Script ()
+testRedTeamAdminTransferMovesOnlyTheLedgerBalance = do
+  forA_ [QuorumDemotionToAdmin, QuorumPromotionFromAdmin, SuccessionBetweenAdmins] \pooledHandOff -> do
+    env <- redTeamSetupWithPartyHintPrefix ("RtPooled" <> show pooledHandOff)
+    registeringAdmin <- allocateParty ("RtPooledRegisteringAdmin" <> show pooledHandOff)
+    nextAdmin <- allocateParty ("RtPooledNextAdmin" <> show pooledHandOff)
+    alice <- allocateParty ("RtPooledAlice" <> show pooledHandOff)
+    bob <- allocateParty ("RtPooledBob" <> show pooledHandOff)
+    stranger <- allocateParty ("RtPooledStranger" <> show pooledHandOff)
+    let instrument = issuerInstrument env
+        checkBalance owner expected = coinBalance env.issuer owner instrument >>= (=== expected)
+    lockA <- deployLockUnlock env registeringAdmin
+    lockB <- deployLockUnlock env registeringAdmin
+    lockFrom env alice lockA 100000000
+    lockFrom env alice lockB 300000000
+    (lockA, lockB) <- case pooledHandOff of
+      QuorumDemotionToAdmin ->
+        (,) <$> acceptQuorumCustody env stranger lockA 1 <*> acceptQuorumCustody env stranger lockB 2
+      _ -> pure (lockA, lockB)
+    managerA <- managerOf env lockA
+    managerB <- managerOf env lockB
+    let oldCustodian = managerA.reserveCustodian
+    managerB.reserveCustodian === oldCustodian
+    let (newAdmin, newCustodian) = case pooledHandOff of
+          QuorumDemotionToAdmin -> (nextAdmin, nextAdmin)
+          QuorumPromotionFromAdmin -> (env.gg, env.nttCustody)
+          SuccessionBetweenAdmins -> (nextAdmin, nextAdmin)
+
+    potA <- custodyPotOf env lockA
+    potB <- custodyPotOf env lockB
+    oldCustodianPreapprovalCid <- transferPreapprovalOf env oldCustodian
+    (ledgerA, _) <- ledgerOf env managerA.managerAddress
+    _ <- submit (withReads env [stranger] [oldCustodian]) do
+      exerciseCmd lockA ConsolidateCustody with
+        caller = stranger
+        ledgerCid = ledgerA
+        custodyHoldingCids = [potA, potB]
+        extraArgs = receiverPreapprovalArgs oldCustodianPreapprovalCid
+    pooledPot <- custodyPotOf env lockA
+    Some pooledPotHolding <- queryInterfaceContractId oldCustodian pooledPot
+    pooledPotHolding.amount === 4.0
+
+    lockA <- transferAdminAttempt env lockA newAdmin managerA.factory
+      >>= either (\err -> abort ("hand-off failed: " <> rejectionText err)) pure
+    managerAfter <- managerOf env lockA
+    managerAfter.reserveCustodian === newCustodian
+    checkBalance newCustodian 1.0
+    checkBalance oldCustodian 3.0
+    checkBalance env.gg 0.0
+    (_, ledgerAfter) <- ledgerOf env managerA.managerAddress
+    ledgerAfter.balance === 1.0
+    Some handedOffHolding <- queryInterfaceContractId newCustodian (fromSome ledgerAfter.custodyHoldingCid)
+    handedOffHolding.owner === newCustodian
+    handedOffHolding.amount === 1.0
+
+    [(keptCoinCid, keptCoin)] <- issuerCoinsOf env oldCustodian
+    keptCoin.amount === 3.0
+    (ledgerB, _) <- ledgerOf env managerB.managerAddress
+    _ <- submit (withReads env [stranger] [oldCustodian]) do
+      exerciseCmd lockB ConsolidateCustody with
+        caller = stranger
+        ledgerCid = ledgerB
+        custodyHoldingCids = [toInterfaceContractId @Holding keptCoinCid]
+        extraArgs = emptyExtraArgs
+    releaseB <- signInboundTransfer env.guardianKey (inboundTransferTo managerB.managerAddress bob 10 300000000)
+    releaseAttempt env lockB (inboundCallBy env bob bob) releaseB >>= expectAccepted "B releases its full balance"
+    (_, ledgerBAfter) <- ledgerOf env managerB.managerAddress
+    ledgerBAfter.balance === 0.0
+    checkBalance bob 3.0
+    checkBalance oldCustodian 0.0
+
+  env <- redTeamSetupWithPartyHintPrefix "RtHandOffAttack"
+  admin <- allocateParty "RtHandOffAttackAdmin"
+  nextAdmin <- allocateParty "RtHandOffAttackNextAdmin"
+  alice <- allocateParty "RtHandOffAttackAlice"
+  let lockedDeployment = do
+        lockA <- deployLockUnlock env admin
+        lockFrom env alice lockA 100000000
+        pure lockA
+      handOffThrough newFactory = do
+        lockA <- lockedDeployment
+        lockA' <- submit admin do exerciseCmd lockA SetFactory with newFactory
+        fmap (const ()) <$> transferAdminAttempt env lockA' nextAdmin newFactory
+  checkAttacksRejected
+    [ AttackCase "hand-off with a pot below the ledger balance" "custody pot does not cover the locked balance" do
+        lockA <- lockedDeployment
+        managerA <- managerOf env lockA
+        (ledgerA, _) <- ledgerOf env managerA.managerAddress
+        smallHolding <- mintIssuerCoin env admin 0.5
+        _ <- submit (withReads env [admin] []) do
+          exerciseCmd lockA ConsolidateCustody with
+            caller = admin
+            ledgerCid = ledgerA
+            custodyHoldingCids = [smallHolding]
+            extraArgs = emptyExtraArgs
+        fmap (const ()) <$> transferAdminAttempt env lockA nextAdmin managerA.factory
+    , AttackCase "hand-off through a registry that surcharges the old custodian" "registry did not take the exact transfer amount from the sender" do
+        factoryCid <- submit env.issuer do
+          createCmd SenderSideMisreportingFactory with issuer = env.issuer, custodianSurcharge = 0.01, changeOwner = None
+        handOffThrough (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))
+    , AttackCase "hand-off through a registry that delivers less than the balance" "registry did not deliver the exact transfer amount" do
+        factoryCid <- submit (actAs env.issuer <> actAs nextAdmin) do
+          createCmd MockTransferFactory with admin = env.issuer, pending = False, skim = 0.01, preapprovedReceivers = [nextAdmin]
+        handOffThrough (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))
+    ]
 
 -- | gg is never a reserve custodian, and @nttCustody@ never holds the admin
 -- role: a root, a manager, a registration, or a hand-off that would make
