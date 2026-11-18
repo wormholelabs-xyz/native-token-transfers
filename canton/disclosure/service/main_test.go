@@ -23,66 +23,35 @@ import (
 // parseFlags
 // ---------------------------------------------------------------------------
 
+// testPartyFlags are the required reader-party flags with the test parties.
+var testPartyFlags = []string{"--guardian-governance-party", testGuardianGovernanceParty, "--ntt-custody-party", testNttCustodyParty}
+
 func TestParseFlags_Defaults(t *testing.T) {
-	opts, err := parseFlags([]string{"--json-api", "http://localhost:6975", "--disclosing-party", "Alice"})
+	opts, err := parseFlags(append([]string{"--json-api", "http://127.0.0.1:6975"}, testPartyFlags...))
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1:7599", opts.listen)
-	assert.Equal(t, "http://localhost:6975", opts.jsonAPIBaseURL)
-	assert.Equal(t, []string{"Alice"}, opts.disclosingParties)
+	assert.Equal(t, "http://127.0.0.1:6975", opts.jsonAPIBaseURL)
+	assert.Equal(t, readerPartiesByRole{guardianGovernance: testGuardianGovernanceParty, nttCustody: testNttCustodyParty}, opts.readerParties)
 	assert.Equal(t, "", opts.accessTokenFile)
 	assert.Equal(t, 1000, opts.maxContractsPerTemplate)
 	assert.False(t, opts.verbose)
 }
 
 func TestParseFlags_MaxContractsPerTemplate(t *testing.T) {
-	opts, err := parseFlags([]string{
-		"--json-api", "http://localhost:6975", "--disclosing-party", "Alice",
-		"--max-contracts-per-template", "50000",
-	})
+	opts, err := parseFlags(append([]string{"--json-api", "http://127.0.0.1:6975", "--max-contracts-per-template", "5000"}, testPartyFlags...))
 	require.NoError(t, err)
-	assert.Equal(t, 50000, opts.maxContractsPerTemplate)
+	assert.Equal(t, 5000, opts.maxContractsPerTemplate)
 
 	srv := newServer(opts, nil)
-	assert.Equal(t, 50000, srv.maxContracts)
+	assert.Equal(t, 5000, srv.maxContracts)
 }
 
 func TestParseFlags_MaxContractsPerTemplate_RejectsNonPositive(t *testing.T) {
 	for _, bad := range []string{"0", "-1"} {
 		t.Run(bad, func(t *testing.T) {
-			_, err := parseFlags([]string{
-				"--json-api", "http://localhost:6975", "--disclosing-party", "Alice",
-				"--max-contracts-per-template", bad,
-			})
+			_, err := parseFlags(append([]string{"--json-api", "http://127.0.0.1:6975", "--max-contracts-per-template", bad}, testPartyFlags...))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "--max-contracts-per-template")
-		})
-	}
-}
-
-func TestParseFlags_MultiPartyList(t *testing.T) {
-	opts, err := parseFlags([]string{
-		"--json-api", "http://localhost:6975",
-		"--disclosing-party", "Operator, GuardianGovernance,Alice",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"Operator", "GuardianGovernance", "Alice"}, opts.disclosingParties)
-}
-
-func TestParseFlags_RejectsBadPartyLists(t *testing.T) {
-	cases := []struct {
-		name  string
-		value string
-		want  string
-	}{
-		{"duplicate", "Alice,Alice", "twice"},
-		{"duplicate after trim", "Alice, Alice", "twice"},
-		{"empty entry", "Alice,,Bob", "empty entry"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseFlags([]string{"--json-api", "http://localhost:6975", "--disclosing-party", tc.value})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
 }
@@ -139,21 +108,9 @@ func TestParseFlags_MissingRequired(t *testing.T) {
 		args       []string
 		wantErrSub string
 	}{
-		{
-			name:       "missing json-api",
-			args:       []string{"--disclosing-party", "Alice"},
-			wantErrSub: "--json-api",
-		},
-		{
-			name:       "missing party",
-			args:       []string{"--json-api", "http://localhost:6975"},
-			wantErrSub: "--disclosing-party",
-		},
-		{
-			name:       "missing both",
-			args:       []string{},
-			wantErrSub: "--json-api",
-		},
+		{"missing json-api", testPartyFlags, "--json-api"},
+		{"missing parties", []string{"--json-api", "http://127.0.0.1:6975"}, "--guardian-governance-party"},
+		{"missing everything", []string{}, "--json-api"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,22 +227,26 @@ func (a *authCapture) get() string {
 	return a.last
 }
 
-// decodeRequestedTemplate pulls the single requested templateId (and disclosing party) out of an
-// active-contracts request body. It matches activeContractsRequest's shape in main.go.
-func decodeRequestedTemplate(t *testing.T, r *http.Request) (party, template string) {
+// decodeRequestedTemplate returns the reader parties and the one templateId of an
+// active-contracts request body. Every party filter must name the same template.
+func decodeRequestedTemplate(t *testing.T, r *http.Request) (parties []partyID, template string) {
 	t.Helper()
 	body, err := io.ReadAll(r.Body)
 	require.NoError(t, err)
 	var req activeContractsRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	require.Len(t, req.EventFormat.FiltersByParty, 1, "expected exactly one party filter")
-	for p, pf := range req.EventFormat.FiltersByParty {
-		party = p
-		require.Len(t, pf.Cumulative, 1, "expected exactly one cumulative filter")
-		require.True(t, pf.Cumulative[0].IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob)
-		template = pf.Cumulative[0].IdentifierFilter.TemplateFilter.Value.TemplateID
+	require.NotEmpty(t, req.EventFormat.FiltersByParty, "expected at least one party filter")
+	for party, partyFilter := range req.EventFormat.FiltersByParty {
+		parties = append(parties, partyID(party))
+		require.Len(t, partyFilter.Cumulative, 1, "expected exactly one cumulative filter")
+		require.True(t, partyFilter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob)
+		partyTemplate := partyFilter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.TemplateID
+		if template != "" {
+			require.Equal(t, template, partyTemplate, "party filters name different templates")
+		}
+		template = partyTemplate
 	}
-	return party, template
+	return parties, template
 }
 
 // acsContractJSON renders one active-contracts response element in the JSON Ledger API v2 wire
@@ -303,22 +264,32 @@ func acsContractJSON(templateID, contractID, blob, synchronizerID string) string
 // Test servers
 // ---------------------------------------------------------------------------
 
-func newTestServer(t *testing.T, upstream *httptest.Server, party string) *server {
-	t.Helper()
-	opts := &options{disclosingParties: []string{party}, jsonAPIBaseURL: upstream.URL, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
-	return newServer(opts, newHTTPACSClient(upstream.URL, ""))
+const (
+	testGuardianGovernanceParty = "gg::1"
+	testNttCustodyParty         = "nttCustody::1"
+	testOperatorParty           = "operator::1"
+)
+
+// testReaderParties holds the three test reader parties.
+func testReaderParties() readerPartiesByRole {
+	return readerPartiesByRole{guardianGovernance: testGuardianGovernanceParty, nttCustody: testNttCustodyParty, operator: testOperatorParty}
 }
 
-// newTestServerWithClient builds a server over acs with one disclosing party, "Alice".
+func newTestServer(t *testing.T, upstream *httptest.Server) *server {
+	t.Helper()
+	return newTestServerWithClient(t, newHTTPACSClient(upstream.URL, ""))
+}
+
+// newTestServerWithClient builds a server over acs with testReaderParties.
 func newTestServerWithClient(t *testing.T, acs acsClient) *server {
 	t.Helper()
-	opts := &options{disclosingParties: []string{"Alice"}, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
+	opts := &options{readerParties: testReaderParties(), maxContractsPerTemplate: defaultMaxContractsPerTemplate}
 	return newServer(opts, acs)
 }
 
 func TestUnknownPathReturns404(t *testing.T) {
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {})
-	srv := newTestServer(t, upstream, "Alice")
+	srv := newTestServer(t, upstream)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/nonsense", nil)
@@ -333,7 +304,7 @@ func TestUnknownPathReturns404(t *testing.T) {
 
 func TestHandleHealthz(t *testing.T) {
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {})
-	srv := newTestServer(t, upstream, "Alice")
+	srv := newTestServer(t, upstream)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/healthz", nil)
@@ -342,7 +313,7 @@ func TestHandleHealthz(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	var got healthzResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	assert.Equal(t, []string{"Alice"}, got.DisclosingParties)
+	assert.Equal(t, map[string]partyID{"guardianGovernance": testGuardianGovernanceParty, "nttCustody": testNttCustodyParty, "operator": testOperatorParty}, got.ReaderParties)
 	assert.Equal(t, len(flowTemplateByTail), got.Templates)
 	assert.Equal(t, int64(42), got.LedgerEnd) // from the fake's fixed ledger-end offset
 }
@@ -442,7 +413,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 	opts := &options{
 		listen:                  "127.0.0.1:0",
 		jsonAPIBaseURL:          upstream.URL,
-		disclosingParties:       []string{"Alice"},
+		readerParties:           testReaderParties(),
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
 	}
 
@@ -463,7 +434,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 	require.NotEmpty(t, addr, "run() never printed a listening banner; stderr so far:\n%s", out.String())
 
 	banner := out.String()
-	assert.Contains(t, banner, "Alice")
+	assert.Contains(t, banner, testGuardianGovernanceParty)
 	assert.Contains(t, banner, "unauthenticated")
 	assert.NotContains(t, banner, "non-loopback") // 127.0.0.1 is loopback
 
@@ -621,19 +592,21 @@ func (b baseFixtures) emitterJSON() string {
 // returns when queried for that template. A tail with no entry answers "[]".
 type flowFixtures map[string]string
 
-func newFlowTestServer(t *testing.T, fixtures flowFixtures, party string) *server {
+func newFlowTestServer(t *testing.T, fixtures flowFixtures) *server {
 	t.Helper()
-	srv, _ := newRecordingFlowTestServerAs(t, fixtures, party)
+	srv, _ := newRecordingFlowTestServer(t, fixtures)
 	return srv
 }
 
 // archivedFixtureKey marks contractID as archived for the events-by-contract-id fake.
 func archivedFixtureKey(contractID string) string { return "archived:" + contractID }
 
-// queriedTemplateRecorder records the template tail of each active-contracts query.
+// queriedTemplateRecorder records the template tail of each active-contracts query, and the
+// reader parties of each upstream read by tail.
 type queriedTemplateRecorder struct {
 	mu            sync.Mutex
 	recordedTails []string
+	readersByTail map[string][]partyID
 }
 
 func (recorder *queriedTemplateRecorder) record(tail string) {
@@ -642,25 +615,40 @@ func (recorder *queriedTemplateRecorder) record(tail string) {
 	recorder.recordedTails = append(recorder.recordedTails, tail)
 }
 
+func (recorder *queriedTemplateRecorder) recordReaders(tail string, parties []partyID) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.readersByTail == nil {
+		recorder.readersByTail = map[string][]partyID{}
+	}
+	recorder.readersByTail[tail] = append(recorder.readersByTail[tail], parties...)
+}
+
+func (recorder *queriedTemplateRecorder) readerPartiesByTail() map[string][]partyID {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	copied := make(map[string][]partyID, len(recorder.readersByTail))
+	for tail, parties := range recorder.readersByTail {
+		copied[tail] = append([]partyID(nil), parties...)
+	}
+	return copied
+}
+
 func (recorder *queriedTemplateRecorder) tails() []string {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	return append([]string(nil), recorder.recordedTails...)
 }
 
-func newRecordingFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *queriedTemplateRecorder) {
-	t.Helper()
-	return newRecordingFlowTestServerAs(t, fixtures, "Alice")
-}
-
-// newRecordingFlowTestServerAs serves fixtures for active-contracts queries. The
+// newRecordingFlowTestServer serves fixtures for active-contracts queries. The
 // events-by-contract-id fake answers with the fixture contract of that id, or a 404.
-func newRecordingFlowTestServerAs(t *testing.T, fixtures flowFixtures, party string) (*server, *queriedTemplateRecorder) {
+func newRecordingFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *queriedTemplateRecorder) {
 	t.Helper()
 	recorder := &queriedTemplateRecorder{}
 	upstream, _ := newFakeJSONAPIWithEvents(t, func(w http.ResponseWriter, r *http.Request) {
-		_, tmpl := decodeRequestedTemplate(t, r)
+		parties, tmpl := decodeRequestedTemplate(t, r)
 		recorder.record(templateTail(tmpl))
+		recorder.recordReaders(templateTail(tmpl), parties)
 		body, ok := fixtures[templateTail(tmpl)]
 		if !ok {
 			body = "[]"
@@ -672,6 +660,19 @@ func newRecordingFlowTestServerAs(t *testing.T, fixtures flowFixtures, party str
 		var request eventsByContractIDRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 		created, found := findFixtureContract(t, fixtures, request.ContractID)
+		readerParties := make([]partyID, 0, len(request.EventFormat.FiltersByParty))
+		for party := range request.EventFormat.FiltersByParty {
+			readerParties = append(readerParties, partyID(party))
+		}
+		if found {
+			var createdContract struct {
+				CreatedEvent struct {
+					TemplateID string `json:"templateId"`
+				} `json:"createdEvent"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(created), &createdContract))
+			recorder.recordReaders(templateTail(createdContract.CreatedEvent.TemplateID), readerParties)
+		}
 		if !found {
 			http.Error(w, `{"code":"CONTRACT_EVENTS_NOT_FOUND"}`, http.StatusNotFound)
 			return
@@ -683,7 +684,7 @@ func newRecordingFlowTestServerAs(t *testing.T, fixtures flowFixtures, party str
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(response + "}"))
 	})
-	return newTestServer(t, upstream, party), recorder
+	return newTestServer(t, upstream), recorder
 }
 
 // findFixtureContract returns the JsActiveContract JSON of contractID from any fixture array.
@@ -1027,7 +1028,7 @@ func TestHandleFlows_Release_HappyPath_NoPotNoRecipient(t *testing.T) {
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -1051,7 +1052,7 @@ func TestHandleFlows_Release_HappyPath_WithPotAndRecipient(t *testing.T) {
 		tailCoin:                jsonArray(acsContractJSONWithArg("pkg:"+tailCoin, potCid, "Y29pbg==", "sync1", "{}")),
 		tailTransferPreapproval: jsonArray(acsContractJSONWithArg("pkg:"+tailTransferPreapproval, "pre-cid-1", "cHJl", "sync1", preapprovalArg(testRecipient, b.instrumentAdmin, b.instrumentID))),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest+"&recipient="+testRecipient)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -1072,7 +1073,7 @@ func TestHandleFlows_Release_PotHintedNotVisible_Missing(t *testing.T) {
 		tailLockedLedger: jsonArray(b.ledgerJSON(&potCid)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -1089,7 +1090,7 @@ func TestHandleFlows_Release_RecipientPreapprovalAbsent_Missing(t *testing.T) {
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest+"&recipient="+testRecipient)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -1098,14 +1099,14 @@ func TestHandleFlows_Release_RecipientPreapprovalAbsent_Missing(t *testing.T) {
 }
 
 func TestHandleFlows_Release_UnknownManager_404(t *testing.T) {
-	srv := newFlowTestServer(t, flowFixtures{tailNttManager: "[]"}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: "[]"})
 	rr := requestFlow(t, srv, "release", "manager="+strings.Repeat("11", 32)+"&digest="+strings.Repeat("22", 32))
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestHandleFlows_Release_WrongMode_409(t *testing.T) {
 	b := newBaseFixtures(tokenConfigBurnMint)
-	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())})
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest)
 	assert.Equal(t, http.StatusConflict, rr.Code)
 	assert.Contains(t, rr.Body.String(), "BurnMint")
@@ -1119,7 +1120,7 @@ func TestHandleFlows_CoveringNode_ZeroMatches_500(t *testing.T) {
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	logged := captureServerLog(srv)
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest)
 	requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, roleCoveringReplayNode)
@@ -1137,7 +1138,7 @@ func TestHandleFlows_CoveringNode_TwoMatches_500(t *testing.T) {
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest)
 	assert.Equal(t, http.StatusInternalServerError, rr.Code)
 }
@@ -1155,7 +1156,7 @@ func TestHandleFlows_Mint_HappyPath(t *testing.T) {
 		tailDepositPreapproval: jsonArray(acsContractJSONWithArg("pkg:"+tailDepositPreapproval, "dep-cid-1", "ZGVw", "sync1", preapprovalArg(testRecipient, b.instrumentAdmin, b.instrumentID))),
 		tailCoinFactory:        jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "mint", "manager="+b.managerAddr+"&digest="+b.digest+"&recipient="+testRecipient)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1171,7 +1172,7 @@ func TestHandleFlows_Mint_DepositPreapprovalAbsent_Error(t *testing.T) {
 		tailCoreState:  jsonArray(b.coreStateJSON()),
 		tailReplayNode: jsonArray(b.replayNodeJSON("")),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "mint", "manager="+b.managerAddr+"&digest="+b.digest+"&recipient="+testRecipient)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 	assert.Contains(t, rr.Body.String(), roleDepositPreapproval)
@@ -1179,14 +1180,14 @@ func TestHandleFlows_Mint_DepositPreapprovalAbsent_Error(t *testing.T) {
 
 func TestHandleFlows_Mint_MissingRecipientParam_400(t *testing.T) {
 	b := newBaseFixtures(tokenConfigBurnMint)
-	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())})
 	rr := requestFlow(t, srv, "mint", "manager="+b.managerAddr+"&digest="+b.digest)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestHandleFlows_Mint_WrongMode_409(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
-	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())})
 	rr := requestFlow(t, srv, "mint", "manager="+b.managerAddr+"&digest="+b.digest+"&recipient="+testRecipient)
 	assert.Equal(t, http.StatusConflict, rr.Code)
 }
@@ -1203,7 +1204,7 @@ func TestHandleFlows_SetPeer_HappyPath(t *testing.T) {
 		tailEmitter:    jsonArray(b.emitterJSON()),
 		tailReplayNode: jsonArray(b.replayNodeJSON("")),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "set-peer", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1219,7 +1220,7 @@ func TestHandleFlows_SetPeer_EmitterAbsent_500(t *testing.T) {
 		tailCoreState:  jsonArray(b.coreStateJSON()),
 		tailReplayNode: jsonArray(b.replayNodeJSON("")),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "set-peer", "manager="+b.managerAddr+"&digest="+b.digest)
 	assert.Equal(t, http.StatusInternalServerError, rr.Code)
 }
@@ -1241,7 +1242,7 @@ func TestHandleFlows_AcceptAdmin_LockUnlock_WithPot(t *testing.T) {
 		tailCoinFactory:           jsonArray(b.factoryJSON()),
 		tailTransferPreapproval:   jsonArray(b.transferPreapprovalJSON(b.admin), b.transferPreapprovalJSON(b.gg), b.transferPreapprovalJSON(b.nttCustody)),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1265,7 +1266,7 @@ func TestHandleFlows_AcceptAdmin_LockUnlock_NewCustodianPreapprovalAbsent_Missin
 		tailCoinFactory:           jsonArray(b.factoryJSON()),
 		tailTransferPreapproval:   jsonArray(b.transferPreapprovalJSON(b.gg)),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1283,7 +1284,7 @@ func TestHandleFlows_AcceptAdmin_LockUnlock_EmptyPot_NoNewCustodianPreapproval(t
 		tailLockedLedger:          jsonArray(b.ledgerJSON(nil)),
 		tailTransferPreapproval:   jsonArray(b.transferPreapprovalJSON(b.nttCustody)),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1301,7 +1302,7 @@ func TestHandleFlows_AcceptAdmin_BurnMint_NoLedger(t *testing.T) {
 		tailReplayNode:            jsonArray(b.replayNodeJSON("")),
 		tailAdminTransferProposal: jsonArray(acsContractJSONWithArg("pkg:"+tailAdminTransferProposal, "prop-cid-2", "cHJvcA==", "sync1", adminTransferProposalArg(b.admin, b.gg, b.managerAddr))),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1317,7 +1318,7 @@ func TestHandleFlows_AcceptAdmin_ProposalAbsent_Missing(t *testing.T) {
 		tailCoreState:  jsonArray(b.coreStateJSON()),
 		tailReplayNode: jsonArray(b.replayNodeJSON("")),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1340,7 +1341,7 @@ func TestHandleFlows_Transfer_LockUnlock(t *testing.T) {
 		tailCoinFactory:         jsonArray(b.factoryJSON()),
 		tailTransferPreapproval: jsonArray(b.transferPreapprovalJSON(b.reserveCustodian())),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1359,7 +1360,7 @@ func TestHandleFlows_Transfer_LockUnlock_CustodianPreapprovalAbsent_Missing(t *t
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1374,7 +1375,7 @@ func TestHandleFlows_Transfer_BurnMint(t *testing.T) {
 		tailCoreState:   jsonArray(b.coreStateJSON()),
 		tailCoinFactory: jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1395,7 +1396,7 @@ func TestHandleFlows_Register_Basic(t *testing.T) {
 		tailReplayRootRegistry: jsonArray(acsContractJSONWithArg("pkg:"+tailReplayRootRegistry, "rrreg-cid-1", "cnJyZWc=", "sync1", guardianAnchorArg(gg))),
 		tailCoreState:          jsonArray(acsContractJSONWithArg("pkg:"+tailCoreState, "cs-cid-2", "Y3M=", "sync1", guardianAnchorArg(gg))),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "register", "")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1413,7 +1414,7 @@ func TestHandleFlows_Register_ByVaa(t *testing.T) {
 		tailCoreState:          jsonArray(acsContractJSONWithArg("pkg:"+tailCoreState, "cs-cid-3", "Y3M=", "sync1", guardianAnchorArg(gg))),
 		tailCoinFactory:        jsonArray(acsContractJSONWithArg("pkg:"+tailCoinFactory, "canon-factory-cid", "ZmFjdA==", "sync1", coinFactoryArg(gg))),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "register", "gg="+gg+"&by-vaa=true")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1423,7 +1424,7 @@ func TestHandleFlows_Register_ByVaa(t *testing.T) {
 }
 
 func TestHandleFlows_Register_ByVaaWithoutGG_400(t *testing.T) {
-	srv := newFlowTestServer(t, flowFixtures{}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{})
 	rr := requestFlow(t, srv, "register", "by-vaa=true")
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -1438,7 +1439,7 @@ func TestHandleFlows_Register_TwoCoreStatesNoGG_409(t *testing.T) {
 			acsContractJSONWithArg("pkg:"+tailCoreState, "cs-cid-5", "Y3M=", "sync1", guardianAnchorArg("gg::2")),
 		),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "register", "")
 	assert.Equal(t, http.StatusConflict, rr.Code)
 	assert.Contains(t, rr.Body.String(), roleCoreState)
@@ -1455,7 +1456,7 @@ func TestHandleFlows_Consolidate_HappyPath(t *testing.T) {
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
@@ -1466,14 +1467,14 @@ func TestHandleFlows_Consolidate_HappyPath(t *testing.T) {
 
 func TestHandleFlows_Consolidate_WrongMode_409(t *testing.T) {
 	b := newBaseFixtures(tokenConfigBurnMint)
-	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())})
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
 	assert.Equal(t, http.StatusConflict, rr.Code)
 }
 
 func TestHandleFlows_Consolidate_LedgerAbsent_500(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
-	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())})
 	logged := captureServerLog(srv)
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
 	requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, roleLockedLedger)
@@ -1485,7 +1486,7 @@ func TestHandleFlows_Consolidate_FactoryAbsent_500(t *testing.T) {
 		tailNttManager:   jsonArray(b.managerJSON()),
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
 	assert.Equal(t, http.StatusInternalServerError, rr.Code)
 }
@@ -1495,13 +1496,13 @@ func TestHandleFlows_Consolidate_FactoryAbsent_500(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleFlows_UnknownFlow_404(t *testing.T) {
-	srv := newFlowTestServer(t, flowFixtures{}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{})
 	rr := requestFlow(t, srv, "not-a-flow", "manager=x")
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestHandleFlows_MethodNotAllowed(t *testing.T) {
-	srv := newFlowTestServer(t, flowFixtures{}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{})
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/flows/release", nil)
 	srv.ServeHTTP(rr, req)
@@ -1509,7 +1510,7 @@ func TestHandleFlows_MethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleFlows_MissingManagerParam_400(t *testing.T) {
-	srv := newFlowTestServer(t, flowFixtures{}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{})
 	rr := requestFlow(t, srv, "release", "digest="+strings.Repeat("11", 32))
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
@@ -1525,7 +1526,7 @@ func TestHandleFlows_BadHexParam_400(t *testing.T) {
 		{"digest wrong length", "manager=" + validHex + "&digest=abcd"},
 		{"digest non-hex characters", "manager=" + validHex + "&digest=" + strings.Repeat("zz", 32)},
 	}
-	srv := newFlowTestServer(t, flowFixtures{}, "Alice")
+	srv := newFlowTestServer(t, flowFixtures{})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := requestFlow(t, srv, "release", tc.query)
@@ -1535,7 +1536,7 @@ func TestHandleFlows_BadHexParam_400(t *testing.T) {
 }
 
 func TestHandleIndex(t *testing.T) {
-	srv := newServer(&options{disclosingParties: []string{"Alice"}, maxContractsPerTemplate: 10}, nil)
+	srv := newServer(&options{readerParties: testReaderParties(), maxContractsPerTemplate: 10}, nil)
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -1552,7 +1553,7 @@ func TestHandleManagers(t *testing.T) {
 	fixtures := map[string]string{
 		tailNttManager: jsonArray(b.managerJSON(), second),
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -1638,7 +1639,7 @@ func TestHandleFlows_Transfer_LockUnlock_CustodianPreapprovalIsReserveCustodians
 				tailCoinFactory:         jsonArray(b.factoryJSON()),
 				tailTransferPreapproval: jsonArray(b.transferPreapprovalJSON(testRecipient), b.transferPreapprovalJSON(b.gg), b.transferPreapprovalJSON(b.nttCustody)),
 			}
-			srv := newFlowTestServer(t, fixtures, "Alice")
+			srv := newFlowTestServer(t, fixtures)
 			rr := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
 			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 			resp := decodeFlowResponse(t, rr)
@@ -1666,7 +1667,7 @@ func TestHandleFlows_BurnMint_CommittedFactoryNotGuardianGovernance_500(t *testi
 		{"mint", "manager=" + b.managerAddr + "&digest=" + b.digest + "&recipient=" + testRecipient},
 		{"transfer", "manager=" + b.managerAddr},
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	for _, tc := range cases {
 		t.Run(tc.flow, func(t *testing.T) {
 			logged := captureServerLog(srv)
@@ -1691,7 +1692,7 @@ func TestHandleFlows_ManagerPayloadBeforeNtt040_500(t *testing.T) {
 		{"transfer", "manager=" + b.managerAddr},
 		{"consolidate", "manager=" + b.managerAddr},
 	}
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	for _, tc := range cases {
 		t.Run(tc.flow, func(t *testing.T) {
 			logged := captureServerLog(srv)

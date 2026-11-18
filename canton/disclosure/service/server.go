@@ -83,9 +83,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type healthzResponse struct {
-	DisclosingParties []string `json:"disclosingParties"`
-	Templates         int      `json:"templates"`
-	LedgerEnd         int64    `json:"ledgerEnd,omitempty"`
+	ReaderParties map[string]partyID `json:"readerParties"`
+	Templates     int                `json:"templates"`
+	LedgerEnd     int64              `json:"ledgerEnd,omitempty"`
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -94,8 +94,8 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := healthzResponse{
-		DisclosingParties: s.opts.disclosingParties,
-		Templates:         len(flowTemplateByTail),
+		ReaderParties: s.opts.readerParties.byRoleName(),
+		Templates:     len(flowTemplateByTail),
 	}
 	if offset, err := s.acs.LedgerEnd(r.Context()); err == nil {
 		resp.LedgerEnd = offset
@@ -110,7 +110,7 @@ var apiIndex = map[string]any{
 	"service": "disclosure-service",
 	"endpoints": []map[string]any{
 		{"method": "GET", "path": "/v1", "about": "this index"},
-		{"method": "GET", "path": "/v1/healthz", "about": "liveness: disclosing parties, template count, ledger end"},
+		{"method": "GET", "path": "/v1/healthz", "about": "liveness: reader parties by role, template count, ledger end"},
 		{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
 		{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
 			"release":      {"manager", "digest", "recipient (optional)"},

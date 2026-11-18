@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -47,7 +46,7 @@ const (
 type options struct {
 	listen                  string
 	jsonAPIBaseURL          string
-	disclosingParties       []string
+	readerParties           readerPartiesByRole
 	accessTokenFile         string
 	maxContractsPerTemplate int
 	maxUpstreamConcurrency  int
@@ -64,7 +63,9 @@ func parseFlags(args []string) (*options, error) {
 
 	listen := fs.String("listen", defaultListen, "address to listen on")
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
-	disclosingParty := fs.String("disclosing-party", "", "comma-separated disclosing parties: the parties as which the service reads the ledger; every served disclosure is a contract at least one of them sees; the access token must grant readAs for each (required)")
+	guardianGovernanceParty := fs.String("guardian-governance-party", "", "gg: reads the bridge state (required)")
+	nttCustodyParty := fs.String("ntt-custody-party", "", "nttCustody: reads the custody pots and its own TransferPreapprovals (required)")
+	operatorParty := fs.String("operator-party", "", "operator: reads ReplayRootRegistry only; enables the register flow (optional)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries; excess requests wait briefly, then get a 503")
@@ -75,23 +76,11 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("disclosure-service: %w", err)
 	}
 	if *jsonAPI == "" {
-		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://localhost:6975)")
+		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://127.0.0.1:6975)")
 	}
-	if *disclosingParty == "" {
-		return nil, fmt.Errorf("disclosure-service: --disclosing-party is required (the party or comma-separated parties as which the service reads the ledger)")
-	}
-	parties := make([]string, 0, 4)
-	seenParty := make(map[string]bool, 4)
-	for _, p := range strings.Split(*disclosingParty, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			return nil, fmt.Errorf("disclosure-service: --disclosing-party has an empty entry")
-		}
-		if seenParty[p] {
-			return nil, fmt.Errorf("disclosure-service: --disclosing-party lists %s twice", p)
-		}
-		seenParty[p] = true
-		parties = append(parties, p)
+	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)
+	if err != nil {
+		return nil, err
 	}
 	if *listen == "" {
 		return nil, fmt.Errorf("disclosure-service: --listen must not be empty")
@@ -102,7 +91,7 @@ func parseFlags(args []string) (*options, error) {
 	return &options{
 		listen:                  *listen,
 		jsonAPIBaseURL:          *jsonAPI,
-		disclosingParties:       parties,
+		readerParties:           readerParties,
 		accessTokenFile:         *tokenFile,
 		maxContractsPerTemplate: *maxContracts,
 		maxUpstreamConcurrency:  *maxUpstream,
@@ -140,7 +129,8 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
 
-	fmt.Fprintf(stderr, "disclosure-service: disclosing parties %s, %d flow template(s)\n", strings.Join(opts.disclosingParties, ", "), len(flowTemplateByTail))
+	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
+		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
 	fmt.Fprintln(stderr, "disclosure-service: WARNING unauthenticated harness/ops-grade service -- do not expose beyond a trusted network")
 	if host, _, splitErr := net.SplitHostPort(ln.Addr().String()); splitErr == nil {
 		if host != "127.0.0.1" && host != "::1" && host != "localhost" {

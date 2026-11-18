@@ -41,7 +41,7 @@ func (counter *callCountingACS) totalCalls() int64 {
 // newCountedFlowTestServer is newFlowTestServer with a call counter in front of the upstream client.
 func newCountedFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *callCountingACS) {
 	t.Helper()
-	srv := newFlowTestServer(t, fixtures, "Alice")
+	srv := newFlowTestServer(t, fixtures)
 	counter := &callCountingACS{inner: srv.acs}
 	srv.acs = counter
 	return srv, counter

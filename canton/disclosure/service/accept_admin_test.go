@@ -34,7 +34,7 @@ func TestHandleFlows_AcceptAdmin_StrangerProposalIgnored(t *testing.T) {
 				tailReplayNode:            jsonArray(b.replayNodeJSON("")),
 				tailAdminTransferProposal: jsonArray(tc.proposals...),
 			}
-			srv := newFlowTestServer(t, fixtures, "Alice")
+			srv := newFlowTestServer(t, fixtures)
 			recorder := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			response := decodeFlowResponse(t, recorder)

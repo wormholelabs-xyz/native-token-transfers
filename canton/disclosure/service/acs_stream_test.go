@@ -254,7 +254,7 @@ func TestFlowsIgnoreStrangerContractsBeyondCap(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newFlowTestServer(t, tc.fixtures, "Alice")
+			srv := newFlowTestServer(t, tc.fixtures)
 			recorder := requestFlow(t, srv, tc.flow, tc.query)
 			require.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
 			if tc.wantRole == "" {

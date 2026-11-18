@@ -36,7 +36,7 @@ func TestRemovedRawEndpointServesNothing(t *testing.T) {
 }
 
 func TestParseFlags_AllowListFlagRemoved(t *testing.T) {
-	_, err := parseFlags([]string{"--json-api", "http://127.0.0.1:6975", "--disclosing-party", "Alice", "--allow-list", "list.json"})
+	_, err := parseFlags(append([]string{"--json-api", "http://127.0.0.1:6975", "--allow-list", "list.json"}, testPartyFlags...))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow-list")
 }

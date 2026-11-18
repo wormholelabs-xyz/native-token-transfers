@@ -69,9 +69,9 @@ const (
 	factoryTagBurnMint = "BurnMintFactoryCid"
 )
 
-// reasonNotVisible is every "missing" entry's reason: the disclosing party is not a stakeholder
-// of that contract, so the client must supply it.
-const reasonNotVisible = "no matching contract visible to the disclosing party"
+// reasonNotVisible is every "missing" entry's reason: no reader party is a stakeholder of that
+// contract, so the client must supply it.
+const reasonNotVisible = "no matching contract visible to the reader parties"
 
 // --- Decode shapes: the templates' Daml-JSON createArgument payloads ---
 
@@ -249,15 +249,6 @@ func digestPrefixes(digest string) []string {
 	return prefixes
 }
 
-// readerParties is the party set each query reads as.
-func (s *server) readerParties() []partyID {
-	parties := make([]partyID, 0, len(s.opts.disclosingParties))
-	for _, party := range s.opts.disclosingParties {
-		parties = append(parties, partyID(party))
-	}
-	return parties
-}
-
 // flowQuery builds a query for tail at offset, capped at maxMatchingContractsPerQuery.
 func (s *server) flowQuery(tail string, offset int64, fieldMatches ...createArgumentFieldMatch) (activeContractsQuery, error) {
 	template, ok := flowTemplateByTail[tail]
@@ -265,7 +256,7 @@ func (s *server) flowQuery(tail string, offset int64, fieldMatches ...createArgu
 		return activeContractsQuery{}, newFlowError(http.StatusInternalServerError, "template %q is not a flow template", tail)
 	}
 	return activeContractsQuery{
-		readerParties:  s.readerParties(),
+		readerParties:  s.readersFor(tail),
 		template:       template,
 		activeAtOffset: offset,
 		fieldMatches:   fieldMatches,
@@ -556,7 +547,7 @@ func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory
 	if err := requireFactoryTag(factory, wantTag); err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
-	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readerParties(), factory.Value)
+	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoinFactory), factory.Value)
 	if err != nil {
 		return decodedEntry[daCoinFactory]{}, newFlowError(upstreamErrorStatus(err), "read committed factory %s: %v", factory.Value, err)
 	}
@@ -611,7 +602,7 @@ func isCustodyPotHoldingTemplate(templateID string) bool {
 // fetchPotHolding reads the custody pot by the contract id its LockedLedger names. The read is
 // not pinned to the request offset; an archived pot gives a failed submission and a retry.
 func (s *server) fetchPotHolding(ctx context.Context, potContractID string) (acsEntry, bool, error) {
-	pot, found, err := s.acs.ActiveContractByID(ctx, s.readerParties(), potContractID)
+	pot, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoin), potContractID)
 	if err != nil {
 		return acsEntry{}, false, newFlowError(upstreamErrorStatus(err), "read custody pot %s: %v", potContractID, err)
 	}
@@ -1012,6 +1003,22 @@ func (s *server) assembleConsolidate(ctx context.Context, request consolidateReq
 	return &flowResponse{Flow: "consolidate", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
 }
 
+// checkFlowEnabled refuses register without --operator-party, and a register gg other than the
+// configured guardianGovernance party.
+func (s *server) checkFlowEnabled(request flowRequest) error {
+	register, isRegister := request.(registerRequest)
+	if !isRegister {
+		return nil
+	}
+	if s.opts.readerParties.operator == "" {
+		return newFlowError(http.StatusNotFound, "flow register not enabled: the service has no operator party")
+	}
+	if register.guardianGovernance != "" && partyID(register.guardianGovernance) != s.opts.readerParties.guardianGovernance {
+		return newFlowError(http.StatusBadRequest, "gg must be the service's guardianGovernance party")
+	}
+	return nil
+}
+
 // handleFlows serves GET /v1/flows/{flow}. It parses the query before any upstream call, resolves
 // one LedgerEnd offset, then delegates to the flow's assembler.
 func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
@@ -1021,6 +1028,10 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	}
 	request, err := parseFlowRequest(r.PathValue("flow"), r.URL.RawQuery)
 	if err != nil {
+		s.writeFlowError(w, r, err)
+		return
+	}
+	if err := s.checkFlowEnabled(request); err != nil {
 		s.writeFlowError(w, r, err)
 		return
 	}
