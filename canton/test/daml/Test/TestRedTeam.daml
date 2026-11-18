@@ -1444,6 +1444,8 @@ testRedTeamReserveCustodianIsNeverGuardianGovernance = do
         createManagerAttempt managerA with admin = env.gg
     , AttackCase "manager with nttCustody as admin" "precondition violated" $
         createManagerAttempt managerA with admin = env.nttCustody, reserveCustodian = env.nttCustody
+    , AttackCase "manager with the operator as nttCustody" "precondition violated" $
+        createManagerAttempt managerA with nttCustody = env.operator
     , AttackCase "admin role handed to nttCustody" "the custody party cannot hold the admin role" $
         fmap (const ()) <$> trySubmit (withReads env [admin, env.nttCustody] []) do
           exerciseCmd lockA TransferAdmin with
