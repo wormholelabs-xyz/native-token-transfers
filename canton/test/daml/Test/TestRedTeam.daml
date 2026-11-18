@@ -1465,6 +1465,31 @@ testRedTeamReserveCustodianIsNeverGuardianGovernance = do
   quorumManager.admin === env.gg
   quorumManager.reserveCustodian === env.nttCustody
 
+-- | The namespace of a party id is the fingerprint of @hint::fingerprint@.
+-- The IDE ledger allocates ids with no namespace, so the root ceremony, not
+-- an @ensure@, checks that @nttCustody@ and gg share a namespace.
+testPartyNamespaceFromText : Script ()
+testPartyNamespaceFromText = do
+  forA_
+    [ ("gg::1220ab", Some "1220ab")
+    , ("nttCustody::1220ab", Some "1220ab")
+    , ("nohint", None)
+    , ("::1220ab", None)
+    , ("gg::", None)
+    , ("a::b::c", None)
+    ] \(partyText, expectedNamespace) ->
+      (partyText, partyNamespaceFromText partyText) === (partyText, expectedNamespace)
+  forA_
+    [ ("gg::1220ab", "nttCustody::1220ab", True)
+    , ("gg::1220ab", "nttCustody::1220cd", False)
+    , ("gg::1220ab", "nttCustody", False)
+    , ("gg", "nttCustody", False)
+    ] \(firstPartyText, secondPartyText, expectedShared) -> do
+      let firstParty = fromSome (partyFromText firstPartyText)
+          secondParty = fromSome (partyFromText secondPartyText)
+      (firstPartyText, secondPartyText, partiesShareNamespace firstParty secondParty)
+        === (firstPartyText, secondPartyText, expectedShared)
+
 ----------------------------------------------------------------------
 -- Finding: third-party relaying of a release on a production registry
 ----------------------------------------------------------------------
