@@ -1,7 +1,6 @@
-// Command disclosure-service is a production-runnable HTTP endpoint. It serves createdEventBlobs
-// for a hardcoded allow-list of Daml templates, read from one stakeholder participant's ACS over
-// the JSON Ledger API v2. /v1/flows/{flow} assembles a whole flow's disclosure set; each set is
-// derived from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml (see flows.go).
+// Command disclosure-service is a production-runnable HTTP endpoint. /v1/flows/{flow} assembles
+// one flow's disclosure set from one stakeholder participant's ACS over the JSON Ledger API v2.
+// Each set comes from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml (see flows.go).
 //
 // Posture: the service is unauthenticated and harness/ops-grade. It listens on loopback by
 // default. The --access-token-file flag adds a single shared bearer token. The service forwards
@@ -50,7 +49,6 @@ type options struct {
 	jsonAPIBaseURL          string
 	disclosingParties       []string
 	accessTokenFile         string
-	allowListPath           string
 	maxContractsPerTemplate int
 	maxUpstreamConcurrency  int
 	cacheTTL                time.Duration
@@ -68,7 +66,6 @@ func parseFlags(args []string) (*options, error) {
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
 	disclosingParty := fs.String("disclosing-party", "", "comma-separated disclosing parties: the parties as which the service reads the ledger; every served disclosure is a contract at least one of them sees; the access token must grant readAs for each (required)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
-	allowList := fs.String("allow-list", "", "path to a JSON array of package-qualified \"#name:Module:Entity\" template names, overriding the built-in allow-list")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long; 0 disables the cache")
@@ -107,7 +104,6 @@ func parseFlags(args []string) (*options, error) {
 		jsonAPIBaseURL:          *jsonAPI,
 		disclosingParties:       parties,
 		accessTokenFile:         *tokenFile,
-		allowListPath:           *allowList,
 		maxContractsPerTemplate: *maxContracts,
 		maxUpstreamConcurrency:  *maxUpstream,
 		cacheTTL:                *cacheTTL,
@@ -122,15 +118,6 @@ func parseFlags(args []string) (*options, error) {
 // run builds and serves the service until ctx is canceled, then shuts down gracefully. It
 // returns nil on a clean shutdown, including http.ErrServerClosed. Any other error is real.
 func run(ctx context.Context, opts *options, stderr io.Writer) error {
-	allowList := defaultAllowList()
-	if opts.allowListPath != "" {
-		var err error
-		allowList, err = loadAllowList(opts.allowListPath)
-		if err != nil {
-			return err
-		}
-	}
-
 	// Fail fast at startup when the token file is missing or unreadable. httpACSClient keeps
 	// only the path; see readAccessToken's call in authHeader.
 	if opts.accessTokenFile != "" {
@@ -146,14 +133,14 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	if opts.cacheTTL > 0 {
 		acs = newCachingACS(acs, opts.cacheTTL)
 	}
-	srv := newServer(opts, allowList, acs)
+	srv := newServer(opts, acs)
 
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
 
-	fmt.Fprintf(stderr, "disclosure-service: disclosing parties %s, %d allow-listed template(s)\n", strings.Join(opts.disclosingParties, ", "), len(allowList))
+	fmt.Fprintf(stderr, "disclosure-service: disclosing parties %s, %d flow template(s)\n", strings.Join(opts.disclosingParties, ", "), len(flowTemplateByTail))
 	fmt.Fprintln(stderr, "disclosure-service: WARNING unauthenticated harness/ops-grade service -- do not expose beyond a trusted network")
 	if host, _, splitErr := net.SplitHostPort(ln.Addr().String()); splitErr == nil {
 		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
@@ -166,9 +153,8 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		Handler:           srv,
 		ReadHeaderTimeout: serverReadHeaderTimeout,
 		ReadTimeout:       serverReadTimeout,
-		// The no-param default queries every allow-listed template plus one ledger-end call, each
-		// bounded by httpClientTimeout, so the write timeout scales with the allow-list.
-		WriteTimeout: time.Duration(len(allowList)+1) * httpClientTimeout,
+		// A flow reads at most every flow template plus one ledger-end call.
+		WriteTimeout: time.Duration(len(flowTemplateByTail)+1) * httpClientTimeout,
 		IdleTimeout:  serverIdleTimeout,
 	}
 	serveErr := make(chan error, 1)

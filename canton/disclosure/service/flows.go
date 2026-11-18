@@ -21,7 +21,7 @@ import (
 // fetches that a non-stakeholder submitter cannot see. Update the flow's assembler when a
 // choice body gains or loses a fetch.
 
-// Template tails this handler fetches. Each is present in defaultAllowList.
+// Template tails this handler fetches. Each is a key of flowTemplateByTail.
 const (
 	tailNttManager            = "Wormhole.Ntt.Manager:NttManager"
 	tailAdminTransferProposal = "Wormhole.Ntt.Manager:AdminTransferProposal"
@@ -297,7 +297,7 @@ func findByContractID[T any](entries []decodedEntry[T], cid string) (decodedEntr
 	return decodedEntry[T]{}, false
 }
 
-// fetchDecoded resolves tail to its allow-listed template name, queries ActiveContracts at
+// fetchDecoded resolves tail to its flow template name, queries ActiveContracts at
 // offset, and decodes each entry's createArgument into T.
 func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int64) ([]decodedEntry[T], error) {
 	entries, err := s.fetchEntries(ctx, tail, offset)
@@ -315,12 +315,12 @@ func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int
 	return out, nil
 }
 
-// fetchEntries resolves tail to its allow-listed template name, queries ActiveContracts at
-// offset, and enforces the per-template contract cap.
+// fetchEntries resolves tail to its flow template name, queries ActiveContracts at offset, checks
+// each returned template id, and enforces the per-template contract cap.
 func (s *server) fetchEntries(ctx context.Context, tail string, offset int64) ([]acsEntry, error) {
-	canonical, ok := s.allowListByTail[tail]
+	canonical, ok := flowTemplateByTail[tail]
 	if !ok {
-		return nil, newFlowError(http.StatusInternalServerError, "template %q is not in the allow-list", tail)
+		return nil, newFlowError(http.StatusInternalServerError, "template %q is not a flow template", tail)
 	}
 	entries, err := s.acs.ActiveContracts(ctx, s.opts.disclosingParties, canonical, offset)
 	if err != nil {
@@ -328,6 +328,11 @@ func (s *server) fetchEntries(ctx context.Context, tail string, offset int64) ([
 	}
 	if msg := s.contractCapError(canonical, len(entries)); msg != "" {
 		return nil, newFlowError(http.StatusBadGateway, "%s", msg)
+	}
+	for _, entry := range entries {
+		if !templateIDMatches(entry.TemplateID, canonical) {
+			return nil, newFlowError(http.StatusBadGateway, "upstream returned templateId %q for requested %q", entry.TemplateID, canonical)
+		}
 	}
 	return entries, nil
 }
