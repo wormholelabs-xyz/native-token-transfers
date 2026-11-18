@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -664,7 +663,7 @@ func requireFlowErrorStatus(t *testing.T, err error, want int) {
 // /v1/flows/{flow}: pure selector unit tests
 // ---------------------------------------------------------------------------
 
-func TestNormalizeHex64(t *testing.T) {
+func TestParseHex64(t *testing.T) {
 	valid := strings.Repeat("ab", 32)
 	cases := []struct {
 		name    string
@@ -680,36 +679,34 @@ func TestNormalizeHex64(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := normalizeHex64(tc.raw, "manager")
+			manager, err := parseManagerAddressHex(tc.raw)
 			if tc.wantErr {
 				requireFlowErrorStatus(t, err, http.StatusBadRequest)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.want, manager.hex)
 		})
 	}
 }
 
-func TestParseByVaa(t *testing.T) {
+func TestParseByVAA(t *testing.T) {
 	cases := []struct {
 		name    string
 		raw     string
+		present bool
 		want    bool
 		wantErr bool
 	}{
-		{"absent defaults to false", "", false, false},
-		{"true", "true", true, false},
-		{"false", "false", false, false},
-		{"not a bool", "yes", false, true},
+		{"absent defaults to false", "", false, false, false},
+		{"true", "true", true, true, false},
+		{"false", "false", true, false, false},
+		{"not a bool", "yes", true, false, true},
+		{"present and empty", "", true, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			q := url.Values{}
-			if tc.raw != "" {
-				q.Set("by-vaa", tc.raw)
-			}
-			got, err := parseByVaa(q)
+			got, err := parseByVAA(tc.raw, tc.present)
 			if tc.wantErr {
 				requireFlowErrorStatus(t, err, http.StatusBadRequest)
 				return

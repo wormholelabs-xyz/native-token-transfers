@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -194,64 +192,6 @@ func (e *flowError) Error() string { return e.msg }
 
 func newFlowError(status int, format string, args ...any) error {
 	return &flowError{status: status, msg: "disclosure-service: " + fmt.Sprintf(format, args...)}
-}
-
-// --- Param parsing (pure) ---
-
-func requireParam(q url.Values, name string) (string, error) {
-	v := q.Get(name)
-	if v == "" {
-		return "", newFlowError(http.StatusBadRequest, "%s is required", name)
-	}
-	return v, nil
-}
-
-// normalizeHex64 lowercases raw and requires exactly 64 hex characters (32 bytes), matching the
-// Daml module's Bytes32/normalizeHex convention.
-func normalizeHex64(raw, param string) (string, error) {
-	v := strings.ToLower(strings.TrimSpace(raw))
-	if len(v) != 64 {
-		return "", newFlowError(http.StatusBadRequest, "%s must be exactly 64 hex characters, got %d", param, len(v))
-	}
-	for _, c := range v {
-		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
-			return "", newFlowError(http.StatusBadRequest, "%s must be hex, got %q", param, truncateForError(raw))
-		}
-	}
-	return v, nil
-}
-
-func requireHex64Param(q url.Values, name string) (string, error) {
-	raw, err := requireParam(q, name)
-	if err != nil {
-		return "", err
-	}
-	return normalizeHex64(raw, name)
-}
-
-// parseManagerDigest parses the two params every VAA-relay flow takes.
-func parseManagerDigest(q url.Values) (manager, digest string, err error) {
-	manager, err = requireHex64Param(q, "manager")
-	if err != nil {
-		return "", "", err
-	}
-	digest, err = requireHex64Param(q, "digest")
-	if err != nil {
-		return "", "", err
-	}
-	return manager, digest, nil
-}
-
-func parseByVaa(q url.Values) (bool, error) {
-	raw := q.Get("by-vaa")
-	if raw == "" {
-		return false, nil
-	}
-	v, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, newFlowError(http.StatusBadRequest, "by-vaa must be a bool, got %q", truncateForError(raw))
-	}
-	return v, nil
 }
 
 // --- Generic decode + match helpers (pure once entries are in hand) ---
@@ -619,12 +559,8 @@ func (s *server) fetchPotHolding(ctx context.Context, cid string, offset int64) 
 // --- Per-flow assemblers ---
 
 // assembleRelease mirrors releaseDisclosures.
-func (s *server) assembleRelease(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	managerHex, digest, err := parseManagerDigest(q)
-	if err != nil {
-		return nil, err
-	}
-	recipient := q.Get("recipient")
+func (s *server) assembleRelease(ctx context.Context, request releaseRequest, offset int64) (*flowResponse, error) {
+	managerHex, digest, recipient := request.manager.hex, request.digest.hex, request.recipient
 
 	mgr, err := s.fetchManager(ctx, managerHex, offset)
 	if err != nil {
@@ -683,15 +619,8 @@ func (s *server) assembleRelease(ctx context.Context, q url.Values, offset int64
 }
 
 // assembleMint mirrors mintDisclosures.
-func (s *server) assembleMint(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	managerHex, digest, err := parseManagerDigest(q)
-	if err != nil {
-		return nil, err
-	}
-	recipient, err := requireParam(q, "recipient")
-	if err != nil {
-		return nil, err
-	}
+func (s *server) assembleMint(ctx context.Context, request mintRequest, offset int64) (*flowResponse, error) {
+	managerHex, digest, recipient := request.manager.hex, request.digest.hex, request.recipient
 
 	mgr, err := s.fetchManager(ctx, managerHex, offset)
 	if err != nil {
@@ -738,11 +667,8 @@ func (s *server) assembleMint(ctx context.Context, q url.Values, offset int64) (
 }
 
 // assembleSetPeer mirrors setPeerByVaaDisclosures.
-func (s *server) assembleSetPeer(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	managerHex, digest, err := parseManagerDigest(q)
-	if err != nil {
-		return nil, err
-	}
+func (s *server) assembleSetPeer(ctx context.Context, request setPeerRequest, offset int64) (*flowResponse, error) {
+	managerHex, digest := request.manager.hex, request.digest.hex
 
 	mgr, err := s.fetchManager(ctx, managerHex, offset)
 	if err != nil {
@@ -775,11 +701,8 @@ func (s *server) assembleSetPeer(ctx context.Context, q url.Values, offset int64
 }
 
 // assembleAcceptAdmin mirrors acceptAdminDisclosures.
-func (s *server) assembleAcceptAdmin(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	managerHex, digest, err := parseManagerDigest(q)
-	if err != nil {
-		return nil, err
-	}
+func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminRequest, offset int64) (*flowResponse, error) {
+	managerHex, digest := request.manager.hex, request.digest.hex
 
 	mgr, err := s.fetchManager(ctx, managerHex, offset)
 	if err != nil {
@@ -858,11 +781,8 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, q url.Values, offset i
 }
 
 // assembleTransfer mirrors transferDisclosures.
-func (s *server) assembleTransfer(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	managerHex, err := requireHex64Param(q, "manager")
-	if err != nil {
-		return nil, err
-	}
+func (s *server) assembleTransfer(ctx context.Context, request transferRequest, offset int64) (*flowResponse, error) {
+	managerHex := request.manager.hex
 
 	mgr, err := s.fetchManager(ctx, managerHex, offset)
 	if err != nil {
@@ -934,15 +854,8 @@ func (s *server) assembleTransfer(ctx context.Context, q url.Values, offset int6
 }
 
 // assembleRegister mirrors registerDisclosures.
-func (s *server) assembleRegister(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	gg := q.Get("gg")
-	byVaa, err := parseByVaa(q)
-	if err != nil {
-		return nil, err
-	}
-	if byVaa && gg == "" {
-		return nil, newFlowError(http.StatusBadRequest, "gg is required when by-vaa=true")
-	}
+func (s *server) assembleRegister(ctx context.Context, request registerRequest, offset int64) (*flowResponse, error) {
+	gg, byVaa := request.guardianGovernance, request.byVAA
 
 	govs, err := fetchDecoded[daGuardianAnchor](ctx, s, tailNttGovernance, offset)
 	if err != nil {
@@ -1004,11 +917,8 @@ func (s *server) assembleRegister(ctx context.Context, q url.Values, offset int6
 
 // assembleConsolidate mirrors consolidateDisclosures. The caller supplies the reserve custodian's
 // holdings as choice arguments; this set covers only the manager, ledger, and factory.
-func (s *server) assembleConsolidate(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
-	managerHex, err := requireHex64Param(q, "manager")
-	if err != nil {
-		return nil, err
-	}
+func (s *server) assembleConsolidate(ctx context.Context, request consolidateRequest, offset int64) (*flowResponse, error) {
+	managerHex := request.manager.hex
 
 	mgr, err := s.fetchManager(ctx, managerHex, offset)
 	if err != nil {
@@ -1034,15 +944,18 @@ func (s *server) assembleConsolidate(ctx context.Context, q url.Values, offset i
 	return &flowResponse{Flow: "consolidate", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
 }
 
-// handleFlows serves GET /v1/flows/{flow}. It resolves one LedgerEnd offset, then delegates to
-// the named flow's assembler; every assembler fetches only its own flow's templates.
+// handleFlows serves GET /v1/flows/{flow}. It parses the query before any upstream call, resolves
+// one LedgerEnd offset, then delegates to the flow's assembler.
 func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	flow := r.PathValue("flow")
-	q := r.URL.Query()
+	request, err := parseFlowRequest(r.PathValue("flow"), r.URL.RawQuery)
+	if err != nil {
+		s.writeFlowError(w, r, err)
+		return
+	}
 
 	offset, err := s.acs.LedgerEnd(r.Context())
 	if err != nil {
@@ -1051,24 +964,23 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resp *flowResponse
-	switch flow {
-	case "release":
-		resp, err = s.assembleRelease(r.Context(), q, offset)
-	case "mint":
-		resp, err = s.assembleMint(r.Context(), q, offset)
-	case "set-peer":
-		resp, err = s.assembleSetPeer(r.Context(), q, offset)
-	case "accept-admin":
-		resp, err = s.assembleAcceptAdmin(r.Context(), q, offset)
-	case "transfer":
-		resp, err = s.assembleTransfer(r.Context(), q, offset)
-	case "register":
-		resp, err = s.assembleRegister(r.Context(), q, offset)
-	case "consolidate":
-		resp, err = s.assembleConsolidate(r.Context(), q, offset)
+	switch typedRequest := request.(type) {
+	case releaseRequest:
+		resp, err = s.assembleRelease(r.Context(), typedRequest, offset)
+	case mintRequest:
+		resp, err = s.assembleMint(r.Context(), typedRequest, offset)
+	case setPeerRequest:
+		resp, err = s.assembleSetPeer(r.Context(), typedRequest, offset)
+	case acceptAdminRequest:
+		resp, err = s.assembleAcceptAdmin(r.Context(), typedRequest, offset)
+	case transferRequest:
+		resp, err = s.assembleTransfer(r.Context(), typedRequest, offset)
+	case registerRequest:
+		resp, err = s.assembleRegister(r.Context(), typedRequest, offset)
+	case consolidateRequest:
+		resp, err = s.assembleConsolidate(r.Context(), typedRequest, offset)
 	default:
-		s.writeFlowError(w, r, newFlowError(http.StatusNotFound, "unknown flow %q", truncateForError(flow)))
-		return
+		err = newFlowError(http.StatusInternalServerError, "unhandled flow request %T", request)
 	}
 	if err != nil {
 		s.writeFlowError(w, r, err)
