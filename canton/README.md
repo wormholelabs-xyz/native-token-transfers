@@ -163,6 +163,14 @@ movement first checks and consumes a VAA, so no single signatory can move
 bridged value, and nobody has to co-sign at transfer time. That is what keeps
 both deployment and relaying permissionless.
 
+Before the root ceremony, compare the namespace of `nttCustody` with the
+namespace of `gg`. The namespace is the part of the party id after `::`. The
+two namespaces must be equal. If they are not equal, stop the ceremony. The
+contracts cannot check this rule. IDE ledger party ids have no namespace.
+Thus a template precondition with this rule rejects each test party.
+`partiesShareNamespace` in `Wormhole.Ntt.Manager` gives the rule.
+`testPartyNamespaceFromText` tests it.
+
 A rogue movement of an `nttCustody`-owned reserve takes a native spend by
 the guardian quorum, a new `nttCustody`-signed contract (also a quorum act),
 or code of a vetted registry (see "Custody party" below).
@@ -213,12 +221,21 @@ A malicious or defective registry that the quorum vetted can do these
 things with the authority of `nttCustody`:
 
 - Move each holding of `nttCustody`. This includes the reserves of other
-  quorum-held deployments, also in other instruments.
+  quorum-held deployments, also in other instruments. The `LockedLedger` cap
+  does not stop it.
 - Make holdings of its own instrument with `nttCustody` as owner.
 
-Thus the quorum-held lock/unlock reserves are one risk pool. Accept a
-hand-off only for a registry that you examined. The same registry cannot do
-these things:
+Thus the quorum-held lock/unlock reserves are one risk pool. The owner
+accepts this risk (`REDTEAM.md`, F1, "Residual risk"). The guardian quorum obeys this
+rule for each transfer registry:
+
+1. Examine the registry before you sign an `AcceptAdminToGovernance` VAA.
+2. Examine each new version of the registry before a guardian participant
+   vets it.
+3. Examine the registry again before you sign a `SetFactory` VAA for it.
+4. Do not vet a registry version that you did not examine.
+
+The same registry cannot do these things:
 
 - Publish a message from an NTT transceiver `Emitter`. The `Emitter` owner is
   `gg`.
@@ -231,6 +248,12 @@ these things:
 `TestRedTeam:testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority`
 and `TestRedTeam:testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument`
 show the rejections.
+
+The rule above is for transfer registries only. The fee registry of core
+0.8.0 runs with the authority of `gg`, because `gg` receives the message
+fees. The core-fee-custody change in `wormholelabs-xyz/wormhole` (branch
+`canton/core-fee-custody`) moves fee custody from `gg` to a separate party,
+`feeCustody`. The NTT package re-pins to that core before PR #75 merges.
 
 ## Deployment
 
@@ -557,12 +580,15 @@ owns the reserve outright, so users trust it the way they would a custodial
 bridge, and wallets must show who the admin is. `TransferAdmin` hands over the
 role, normally as propose-accept: the current admin leaves a
 standing `AdminTransferProposal`, and the new admin accepts at its own pace,
-naming the committed factory it vetted; the pot moves to the new
-`reserveCustodian`. Handing the role to `gg` is the guardian quorum's custody
-opt-in: the reserve moves to `nttCustody` — the old admin can no longer touch
+naming the committed factory it vetted. The ledger balance moves to the new
+`reserveCustodian`. The rest of the pot stays with the old custodian, because
+the pot can hold the reserves of other deployments of the same custodian
+(`ConsolidateCustody`). The registry must take exactly the balance from the
+old custodian and deliver exactly the balance to the new custodian. Handing
+the role to `gg` is the guardian quorum's custody opt-in: the reserve moves to `nttCustody` — the old admin can no longer touch
 it, every inbound movement is VAA-gated, and all admin operations (peers,
 factory rotation, a further handoff) become governance actions. A demotion
-from `gg` moves the reserve from `nttCustody` to the new admin.
+from `gg` moves the ledger balance from `nttCustody` to the new admin.
 The handoff changes nothing on the wire:
 the manager and transceiver addresses are bound to the registering admin (not
 the current one), the replay scope is the derived `namespace` under `gg` (both
@@ -629,8 +655,9 @@ from the collateral of the other deployments. Each credit is atomic with its
 deposit. Each debit is atomic with its release. Thus the sum of the balances
 never exceeds the physical holdings of `nttCustody`. The cap of each
 deployment stays satisfiable for each choice of holdings that a release
-spends. Message fees go to `gg`, not to `nttCustody`. Thus a release cannot
-spend fee holdings.
+spends. Message fees go to `gg` in core 0.8.0, and to `feeCustody` after
+the core-fee-custody change. They never go to `nttCustody`. Thus a release
+cannot spend fee holdings.
 
 **The custody pot (single-holding invariant).** Custody holdings are visible
 only to their stakeholders (the custodian and the registry admin), so an

@@ -26,7 +26,8 @@ The `NttGovernance` root has a separate custody party, `nttCustody`.
 | A13 | Operator, relayer, gg alone, or a stranger moves the admin role, a peer, the ledger, or custody | `testRedTeamUnauthorizedMovesRejected` | Held |
 | N1 | Registry code mints a gg-administered instrument after the quorum accepts custody | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument` | Fixed (F1) |
 | N1a | Under quorum custody, registry code forges a transfer from another transceiver or sets a peer on another gg-adminned manager | `testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority` | Fixed (F1) |
-| N1b | A root, a manager, a registration, or a hand-off makes gg a reserve custodian or makes `nttCustody` an admin | `testRedTeamReserveCustodianIsNeverGuardianGovernance` | Held |
+| N1b | A root, manager, registration, or hand-off makes gg a custodian, `nttCustody` an admin, or the operator `nttCustody` | `testRedTeamReserveCustodianIsNeverGuardianGovernance` | Held |
+| N1c | A hand-off moves a pooled sibling reserve; a registry takes or delivers an incorrect hand-off amount | `testRedTeamAdminTransferMovesOnlyTheLedgerBalance` | Fixed (F1 follow-up) |
 | N2 | A third-party relayer delivers a release on a production registry | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry` | Fixed (F2) |
 | N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow` | Held |
 | N2b | Registry reports a bad deposit or change: wrong owner or instrument, locked, unsigned, duplicate, or an input | `testRedTeamRegistryMisreportedHoldingsRejected` | Held |
@@ -45,11 +46,13 @@ Thus each new `token-cip0056` version that a gg host vets is a decision about th
 
 ## F1: quorum custody gives gg authority to registry code
 
-Severity: High.
-Status: fixed in commit `6de28c8`.
+Severity: Critical.
+Status: fixed in PR #75.
 The attack needs the quorum to accept custody of a lock/unlock deployment.
 Before the fix, the registry can mint each burn/mint instrument with no limit.
 It can also publish each payload from each NTT transceiver.
+A forged `PublishMessage` on a gg-owned transceiver gives a VAA with no lock or burn behind it.
+The peer chain then mints or releases value that no deposit backs.
 It can also change each manager whose admin is gg.
 
 ### Cause
@@ -78,7 +81,7 @@ It can also change each manager whose admin is gg.
 8. Result: R owns 1000000.0 of C's bridged instrument.
 
 `testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority` uses the same steps with `SenderAuthorityGovernanceRegistryFactory`.
-Before the fix, both of its attacks succeed (commit `b247626`):
+Before the fix, both of its attacks succeed (PR #75, first commit):
 
 - The registry publishes a forged `NativeTokenTransfer` of 10000000.0 tokens from the transceiver of a different gg-adminned deployment.
 - The registry sets a peer on that deployment's manager.
@@ -91,19 +94,54 @@ gg never owns a lock/unlock reserve.
 2. Each `NttManager` inherits the `nttCustody` signature from the root.
 3. The new manager field `reserveCustodian` names the reserve owner. It is `admin` while `admin` is not gg. It is `nttCustody` while `admin` is gg.
 4. Each custody transfer sends with `sender = reserveCustodian`.
-5. `TransferAdmin` to gg moves the reserve to `nttCustody`. A demotion moves it from `nttCustody` to the new admin.
+5. `TransferAdmin` to gg moves the ledger balance to `nttCustody`. A demotion moves the ledger balance from `nttCustody` to the new admin.
 6. The template precondition of `NttManager` rejects gg as `reserveCustodian` and rejects `nttCustody` as `admin`. Registration and `TransferAdmin` assert the same rules.
 
 After the fix, the registry body has the authority of the registry admin and `nttCustody`.
 Each attack above fails with an authorization error that names gg.
 
+### Follow-up: a hand-off moves only the ledger balance
+
+Severity: High.
+Status: fixed in PR #75.
+
+`ConsolidateCustody` is permissionless.
+It can merge the reserves of two deployments with the same custodian into the pot of one deployment.
+All quorum-held deployments have the same custodian, `nttCustody`.
+Before the fix, `TransferAdmin` moved the full pot to the new custodian.
+Thus a demotion of one deployment moved the reserves of the other quorum-held deployments to the new admin.
+
+After the fix, `TransferAdmin` moves exactly the ledger balance.
+The rest of the pot stays with the old custodian.
+The hand-off uses `SenderOutflowAndReceiverInflowEqualAmount`.
+The registry must take exactly the balance from the old custodian.
+The registry must also deliver exactly the balance to the new custodian.
+Thus a registry fee cannot spend the reserves of other deployments.
+
+`testRedTeamAdminTransferMovesOnlyTheLedgerBalance` runs three cases: a quorum demotion, a quorum promotion, and a succession between admins.
+In each case, the other deployment releases its full balance after the hand-off.
+
 ### Residual risk
+
+Status: accepted.
 
 A registry that the quorum vetted runs with the authority of `nttCustody`.
 It can move each holding of `nttCustody`.
-This includes the reserves of other quorum-held deployments.
-Thus accept quorum custody only for a registry that you examined.
+This includes the reserves of other quorum-held deployments, also in other instruments.
+The `LockedLedger` cap does not stop it.
+
+Rule for the guardian quorum:
+
+1. Examine the transfer registry before you sign an `AcceptAdminToGovernance` VAA.
+2. Examine each new version of that registry before a guardian participant vets it.
+3. Examine the registry again before you sign a `SetFactory` VAA for it.
+4. Do not vet a registry version that you did not examine.
+
 `README.md`, section "Custody party", lists what the registry cannot do.
+
+The fee registry of core 0.8.0 runs with the authority of `gg`, because `gg` receives the message fees.
+The core-fee-custody change (`wormholelabs-xyz/wormhole`, branch `canton/core-fee-custody`) moves fee custody to a separate party, `feeCustody`.
+The NTT package re-pins to that core before PR #75 merges.
 
 ## F2: a third-party relayer cannot deliver a release
 
