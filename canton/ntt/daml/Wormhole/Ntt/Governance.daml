@@ -298,7 +298,7 @@ registerManagerBody
     assertMsg "ntt: replay root registry is not this bridge instance's"
       (root.operator == operator)
 
-    let reserveCustodian = reserveCustodianFor guardianGovernance nttCustody admin
+    let reserveCustodian = reserveCustodianFor ReserveCustodyParties with guardianGovernance, nttCustody, admin
     assertMsg "ntt: the custody party cannot hold the admin role" (admin /= nttCustody)
     assertMsg "ntt: guardianGovernance cannot own a lock/unlock reserve"
       (reserveCustodian /= guardianGovernance)

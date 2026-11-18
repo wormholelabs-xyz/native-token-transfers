@@ -2491,7 +2491,7 @@ setupFixedManagerOn operator gg admin config chainId csId = do
       admin
       guardianGovernance = gg
       nttCustody
-      reserveCustodian = reserveCustodianFor gg nttCustody admin
+      reserveCustodian = reserveCustodianFor ReserveCustodyParties with guardianGovernance = gg, nttCustody, admin
       chainId
       managerId = 999
       managerAddress = b32 "aa"

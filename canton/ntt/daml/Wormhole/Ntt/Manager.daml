@@ -337,13 +337,21 @@ nttNamespaceFor : InstrumentId -> Party -> Int -> Text
 nttNamespaceFor inst admin managerId =
   nttNamespaceFromText (partyToText inst.admin) inst.id (partyToText admin) managerId
 
+-- | The parties that decide a reserve's owner. Named fields, so two of them
+-- cannot be swapped silently at a call site.
+data ReserveCustodyParties = ReserveCustodyParties with
+    guardianGovernance : Party
+    nttCustody         : Party
+    admin              : Party
+  deriving (Eq, Show)
+
 -- | The owner of a lock/unlock reserve under @admin@: @nttCustody@ when the
 -- quorum holds the admin role, else @admin@. gg is never the result, because
 -- the reserve owner is the CIP-56 transfer sender and registry code runs
 -- with its authority.
-reserveCustodianFor : Party -> Party -> Party -> Party
-reserveCustodianFor guardianGovernance nttCustody admin =
-  if admin == guardianGovernance then nttCustody else admin
+reserveCustodianFor : ReserveCustodyParties -> Party
+reserveCustodianFor parties =
+  if parties.admin == parties.guardianGovernance then parties.nttCustody else parties.admin
 
 -- | The namespace fingerprint of a Canton party id @hint::fingerprint@.
 -- None unless both parts are non-empty and the id has exactly one @::@.
@@ -457,7 +465,7 @@ template NttManager
     admin                : Party           -- operational role; transferable
     guardianGovernance   : Party           -- gg: mint authority, transceiver owner, replay consumer, trust anchor
     nttCustody           : Party           -- owns the reserve while gg is admin
-    reserveCustodian     : Party           -- owns the lock/unlock reserve; reserveCustodianFor guardianGovernance nttCustody admin
+    reserveCustodian     : Party           -- owns the lock/unlock reserve; reserveCustodianFor of (guardianGovernance, nttCustody, admin)
     chainId              : Int             -- this deployment's own Wormhole chain id (uint16)
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
     managerAddress       : Bytes32         -- nttManagerAddressFor operator <registering admin> managerId
@@ -479,7 +487,7 @@ template NttManager
     -- @admin@ or @nttCustody@, so its signature is already in this set.
     signatory operator, admin, guardianGovernance, nttCustody
     ensure
-      reserveCustodian == reserveCustodianFor guardianGovernance nttCustody admin
+      reserveCustodian == reserveCustodianFor ReserveCustodyParties with guardianGovernance, nttCustody, admin
         && reserveCustodian /= guardianGovernance
         && admin /= nttCustody
         && nttCustody /= guardianGovernance
@@ -580,7 +588,7 @@ template NttManager
         create this with factory = newFactory, factoryEpoch = factoryEpoch + 1
 
     -- | Hand the operational role to @newAdmin@ and, for lock/unlock, the
-    -- reserve to @reserveCustodianFor guardianGovernance nttCustody newAdmin@.
+    -- reserve to the 'reserveCustodianFor' @newAdmin@.
     -- Both admins authorize: the old admin resigns, and the new admin accepts
     -- what it is inheriting, naming the committed factory it vetted
     -- (@vettedFactory@ must match). In practice the handoff runs as
@@ -622,7 +630,8 @@ template NttManager
         assertMsg "ntt: the custody party cannot hold the admin role" (newAdmin /= nttCustody)
         assertMsg "ntt: committed factory is not the one the new admin vetted"
           (factory == vettedFactory)
-        let newReserveCustodian = reserveCustodianFor guardianGovernance nttCustody newAdmin
+        let newReserveCustodian = reserveCustodianFor ReserveCustodyParties with
+              guardianGovernance, nttCustody, admin = newAdmin
         assertMsg "ntt: guardianGovernance cannot own a lock/unlock reserve"
           (newReserveCustodian /= guardianGovernance)
         ledgerCid' <- case tokenConfig of
