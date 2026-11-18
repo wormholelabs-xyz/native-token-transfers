@@ -165,6 +165,7 @@ func (fieldMatch createArgumentFieldMatch) matchesCreateArgument(createArgument 
 type acsClient interface {
 	LedgerEnd(ctx context.Context) (int64, error)
 	ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error)
+	ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
@@ -192,6 +193,39 @@ type acsCumulativeFilter struct {
 			} `json:"value"`
 		} `json:"TemplateFilter"`
 	} `json:"identifierFilter"`
+}
+
+// eventsByContractIDRequest mirrors POST /v2/events/events-by-contract-id: one wildcard filter per
+// reader party, with includeCreatedEventBlob:true.
+type eventsByContractIDRequest struct {
+	ContractID  string `json:"contractId"`
+	EventFormat struct {
+		FiltersByParty map[string]wildcardPartyFilter `json:"filtersByParty"`
+		Verbose        bool                           `json:"verbose"`
+	} `json:"eventFormat"`
+}
+
+type wildcardPartyFilter struct {
+	Cumulative []wildcardCumulativeFilter `json:"cumulative"`
+}
+
+type wildcardCumulativeFilter struct {
+	IdentifierFilter struct {
+		WildcardFilter struct {
+			Value struct {
+				IncludeCreatedEventBlob bool `json:"includeCreatedEventBlob"`
+			} `json:"value"`
+		} `json:"WildcardFilter"`
+	} `json:"identifierFilter"`
+}
+
+// eventsByContractIDResponse is the subset of JsGetEventsByContractIdResponse this service needs.
+type eventsByContractIDResponse struct {
+	Created *struct {
+		CreatedEvent   *acsCreatedEvent `json:"createdEvent"`
+		SynchronizerID string           `json:"synchronizerId"`
+	} `json:"created"`
+	Archived json.RawMessage `json:"archived"`
 }
 
 // acsCreatedEvent is the subset of a JSON Ledger API CreatedEvent this service needs.
@@ -371,6 +405,75 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 		return nil, fmt.Errorf("disclosure-service: active-contracts %s: %w", query.template, err)
 	}
 	return entries, nil
+}
+
+// ActiveContractByID calls POST /v2/events/events-by-contract-id. found means a created event and
+// no archived event. An upstream 404 means the readers cannot see the contract: found is false.
+func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+	if len(readerParties) == 0 {
+		return acsEntry{}, false, errors.New("disclosure-service: events-by-contract-id: at least one reader party is required")
+	}
+	if contractID == "" {
+		return acsEntry{}, false, errors.New("disclosure-service: events-by-contract-id: contract id is empty")
+	}
+	var reqBody eventsByContractIDRequest
+	reqBody.ContractID = contractID
+	var wildcardFilter wildcardCumulativeFilter
+	wildcardFilter.IdentifierFilter.WildcardFilter.Value.IncludeCreatedEventBlob = true
+	reqBody.EventFormat.FiltersByParty = make(map[string]wildcardPartyFilter, len(readerParties))
+	for _, party := range readerParties {
+		reqBody.EventFormat.FiltersByParty[string(party)] = wildcardPartyFilter{Cumulative: []wildcardCumulativeFilter{wildcardFilter}}
+	}
+	reqBody.EventFormat.Verbose = true
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: marshal events-by-contract-id request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v2/events/events-by-contract-id", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: build events-by-contract-id request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.authHeader(req); err != nil {
+		return acsEntry{}, false, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: events-by-contract-id request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return acsEntry{}, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return acsEntry{}, false, newUpstreamHTTPError("events-by-contract-id", resp)
+	}
+	body, err := io.ReadAll(&boundedBodyReader{source: resp.Body, remainingBytes: c.maxResponseBytes})
+	if err != nil {
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: read events-by-contract-id response: %w", err)
+	}
+	var events eventsByContractIDResponse
+	if err := json.Unmarshal(body, &events); err != nil {
+		return acsEntry{}, false, fmt.Errorf("%w: events-by-contract-id: %v", errUpstreamResponseMalformed, err)
+	}
+	if events.Created == nil || events.Created.CreatedEvent == nil {
+		return acsEntry{}, false, nil
+	}
+	createdEvent := events.Created.CreatedEvent
+	if createdEvent.ContractID != contractID {
+		return acsEntry{}, false, fmt.Errorf("%w: events-by-contract-id returned contract %q for %q", errUpstreamResponseMalformed, createdEvent.ContractID, contractID)
+	}
+	if len(events.Archived) > 0 && !bytes.Equal(bytes.TrimSpace(events.Archived), []byte("null")) {
+		return acsEntry{}, false, nil
+	}
+	return acsEntry{
+		TemplateID:       createdEvent.TemplateID,
+		ContractID:       createdEvent.ContractID,
+		CreatedEventBlob: createdEvent.CreatedEventBlob,
+		SynchronizerID:   events.Created.SynchronizerID,
+		CreateArgument:   createdEvent.CreateArgument,
+	}, true, nil
 }
 
 // decodeActiveContractsStream reads one JSON array element at a time. It fails past

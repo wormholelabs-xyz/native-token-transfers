@@ -227,16 +227,6 @@ func exactlyOne[T any](entries []decodedEntry[T], label string, pred func(decode
 	return m, nil
 }
 
-// findByContractID returns the entry whose contractId equals cid.
-func findByContractID[T any](entries []decodedEntry[T], cid string) (decodedEntry[T], bool) {
-	for _, e := range entries {
-		if e.entry.ContractID == cid {
-			return e, true
-		}
-	}
-	return decodedEntry[T]{}, false
-}
-
 // exactFieldMatch requires the createArgument field at fieldPath to equal wantValue.
 func exactFieldMatch(wantValue string, fieldPath ...string) createArgumentFieldMatch {
 	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantValue}}
@@ -557,27 +547,33 @@ func (s *server) fetchLedger(ctx context.Context, managerAddress string, offset 
 	return findLockedLedger(entries, managerAddress)
 }
 
-// fetchCommittedFactory checks factory's tag against wantTag, then resolves it to the CoinFactory
-// contract that backs it.
-func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory, wantTag string, offset int64) (decodedEntry[daCoinFactory], error) {
+// fetchCommittedFactory checks factory's tag against wantTag, then reads the CoinFactory that
+// backs it by contract id.
+func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory, wantTag string) (decodedEntry[daCoinFactory], error) {
 	if err := requireFactoryTag(factory, wantTag); err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
-	entries, err := fetchDecoded[daCoinFactory](ctx, s, tailCoinFactory, offset)
+	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readerParties(), factory.Value)
 	if err != nil {
-		return decodedEntry[daCoinFactory]{}, err
+		return decodedEntry[daCoinFactory]{}, newFlowError(upstreamErrorStatus(err), "read committed factory %s: %v", factory.Value, err)
 	}
-	entry, ok := findByContractID(entries, factory.Value)
-	if !ok {
+	if !found {
 		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "no CoinFactory found for committed factory contractId %s", factory.Value)
 	}
-	return entry, nil
+	if !templateIDMatches(factoryEntry.TemplateID, flowTemplateByTail[tailCoinFactory]) {
+		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "committed factory %s has template %s, expected a CoinFactory", factory.Value, factoryEntry.TemplateID)
+	}
+	var coinFactory daCoinFactory
+	if err := json.Unmarshal(factoryEntry.CreateArgument, &coinFactory); err != nil {
+		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "decode committed factory %s createArgument: %v", factory.Value, err)
+	}
+	return decodedEntry[daCoinFactory]{entry: factoryEntry, value: coinFactory}, nil
 }
 
 // fetchCommittedCanonicalCoinFactory resolves a burn/mint deployment's committed factory and
 // checks that gg administers it.
 func (s *server) fetchCommittedCanonicalCoinFactory(ctx context.Context, mgr daNttManager, offset int64) (decodedEntry[daCoinFactory], error) {
-	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.Factory, factoryTagBurnMint, offset)
+	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.Factory, factoryTagBurnMint)
 	if err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
@@ -604,21 +600,26 @@ func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner s
 	return disclosures, append(missing, missingEntry(role)), nil
 }
 
-func (s *server) fetchPotHolding(ctx context.Context, cid string, offset int64) (acsEntry, bool, error) {
-	query, err := s.flowQuery(tailCoin, offset)
+// isCustodyPotHoldingTemplate reports whether templateID is a template a custody pot can have.
+func isCustodyPotHoldingTemplate(templateID string) bool {
+	return templateIDMatches(templateID, flowTemplateByTail[tailCoin])
+}
+
+// fetchPotHolding reads the custody pot by the contract id its LockedLedger names. The read is
+// not pinned to the request offset; an archived pot gives a failed submission and a retry.
+func (s *server) fetchPotHolding(ctx context.Context, potContractID string) (acsEntry, bool, error) {
+	pot, found, err := s.acs.ActiveContractByID(ctx, s.readerParties(), potContractID)
 	if err != nil {
-		return acsEntry{}, false, err
+		return acsEntry{}, false, newFlowError(upstreamErrorStatus(err), "read custody pot %s: %v", potContractID, err)
 	}
-	entries, err := s.fetchEntries(ctx, query)
-	if err != nil {
-		return acsEntry{}, false, err
+	if !found {
+		return acsEntry{}, false, nil
 	}
-	for _, e := range entries {
-		if e.ContractID == cid {
-			return e, true, nil
-		}
+	//SECURITY: the ledger names the pot; its template must be a custody holding template.
+	if !isCustodyPotHoldingTemplate(pot.TemplateID) {
+		return acsEntry{}, false, newFlowError(http.StatusBadGateway, "custody pot %s has template %s, expected a custody holding", potContractID, pot.TemplateID)
 	}
-	return acsEntry{}, false, nil
+	return pot, true, nil
 }
 
 // preapprovalFieldMatches selects the DepositPreapproval or TransferPreapproval of owner for instrumentID.
@@ -666,7 +667,7 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 	if err != nil {
 		return nil, err
 	}
-	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer, offset)
+	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
 	if err != nil {
 		return nil, err
 	}
@@ -680,7 +681,7 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 	missing := make([]flowMissingEntry, 0)
 
 	if ledger.value.CustodyHoldingCid != nil {
-		pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid, offset)
+		pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid)
 		if err != nil {
 			return nil, err
 		}
@@ -828,7 +829,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 		disclosures = append(disclosures, discloseAs(roleLockedLedger, ledger.entry))
 
 		if ledger.value.CustodyHoldingCid != nil {
-			pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid, offset)
+			pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid)
 			if err != nil {
 				return nil, err
 			}
@@ -837,7 +838,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 			} else {
 				missing = append(missing, missingEntry(roleCustodyPotHolding))
 			}
-			factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer, offset)
+			factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
 			if err != nil {
 				return nil, err
 			}
@@ -894,7 +895,7 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 		disclosures = append(disclosures, discloseAs(roleLockedLedger, ledger.entry))
 
 		if ledger.value.CustodyHoldingCid != nil {
-			pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid, offset)
+			pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid)
 			if err != nil {
 				return nil, err
 			}
@@ -905,7 +906,7 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 			}
 		}
 
-		factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer, offset)
+		factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
 		if err != nil {
 			return nil, err
 		}
@@ -989,7 +990,7 @@ func (s *server) assembleConsolidate(ctx context.Context, request consolidateReq
 	if err != nil {
 		return nil, err
 	}
-	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer, offset)
+	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ type callCountingACS struct {
 	inner                acsClient
 	ledgerEndCalls       atomic.Int64
 	activeContractsCalls atomic.Int64
+	contractByIDCalls    atomic.Int64
 }
 
 func (counter *callCountingACS) LedgerEnd(ctx context.Context) (int64, error) {
@@ -28,8 +29,13 @@ func (counter *callCountingACS) ActiveContracts(ctx context.Context, query activ
 	return counter.inner.ActiveContracts(ctx, query)
 }
 
+func (counter *callCountingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+	counter.contractByIDCalls.Add(1)
+	return counter.inner.ActiveContractByID(ctx, readerParties, contractID)
+}
+
 func (counter *callCountingACS) totalCalls() int64 {
-	return counter.ledgerEndCalls.Load() + counter.activeContractsCalls.Load()
+	return counter.ledgerEndCalls.Load() + counter.activeContractsCalls.Load() + counter.contractByIDCalls.Load()
 }
 
 // newCountedFlowTestServer is newFlowTestServer with a call counter in front of the upstream client.

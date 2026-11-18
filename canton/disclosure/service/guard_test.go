@@ -17,6 +17,7 @@ import (
 type countingACS struct {
 	ledgerCalls atomic.Int64
 	acCalls     atomic.Int64
+	byIDCalls   atomic.Int64
 	offset      int64
 
 	release  chan struct{} // when non-nil, every call waits on it before returning
@@ -64,6 +65,15 @@ func (f *countingACS) ActiveContracts(_ context.Context, query activeContractsQu
 // testQuery is an unfiltered query of template at offset, read as "Alice".
 func testQuery(template string, offset int64) activeContractsQuery {
 	return activeContractsQuery{readerParties: []partyID{"Alice"}, template: template, activeAtOffset: offset, maxMatches: maxMatchingContractsPerQuery}
+}
+
+func (f *countingACS) ActiveContractByID(_ context.Context, _ []partyID, contractID string) (acsEntry, bool, error) {
+	defer f.track()()
+	f.byIDCalls.Add(1)
+	if f.err != nil {
+		return acsEntry{}, false, f.err
+	}
+	return acsEntry{ContractID: contractID}, true, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +302,10 @@ func (scripted *scriptedLedgerEndACS) ActiveContracts(context.Context, activeCon
 	panic("scriptedLedgerEndACS: ActiveContracts is not scripted")
 }
 
+func (scripted *scriptedLedgerEndACS) ActiveContractByID(context.Context, []partyID, string) (acsEntry, bool, error) {
+	panic("scriptedLedgerEndACS: ActiveContractByID is not scripted")
+}
+
 type ledgerEndResult struct {
 	offset int64
 	err    error
@@ -415,4 +429,25 @@ func TestCachingACSInflightContext(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, tc.run)
 	}
+}
+
+func TestCachingACSContractByIDKeys(t *testing.T) {
+	inner := &countingACS{offset: 42}
+	cache := newCachingACS(inner, 5*time.Second)
+	reads := []struct {
+		readers    []partyID
+		contractID string
+	}{
+		{[]partyID{"nttCustody::1"}, "pot-1"},
+		{[]partyID{"nttCustody::1"}, "pot-1"},
+		{[]partyID{"nttCustody::1"}, "pot-2"},
+		{[]partyID{"gg::1"}, "pot-1"},
+	}
+	for _, read := range reads {
+		entry, found, err := cache.ActiveContractByID(context.Background(), read.readers, read.contractID)
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, read.contractID, entry.ContractID)
+	}
+	assert.Equal(t, int64(3), inner.byIDCalls.Load(), "a repeat read is served from memory; readers and id are both in the key")
 }

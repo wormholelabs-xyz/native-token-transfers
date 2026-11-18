@@ -198,6 +198,14 @@ func TestTemplateIDMatches(t *testing.T) {
 // bearer-token test.
 func newFakeJSONAPI(t *testing.T, acHandler http.HandlerFunc) (*httptest.Server, *authCapture) {
 	t.Helper()
+	return newFakeJSONAPIWithEvents(t, acHandler, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"code":"CONTRACT_EVENTS_NOT_FOUND"}`, http.StatusNotFound)
+	})
+}
+
+// newFakeJSONAPIWithEvents is newFakeJSONAPI plus /v2/events/events-by-contract-id, routed to eventsHandler.
+func newFakeJSONAPIWithEvents(t *testing.T, acHandler, eventsHandler http.HandlerFunc) (*httptest.Server, *authCapture) {
+	t.Helper()
 	capture := &authCapture{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v2/state/ledger-end", func(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +240,13 @@ func newFakeJSONAPI(t *testing.T, acHandler http.HandlerFunc) (*httptest.Server,
 		}
 
 		acHandler(w, r)
+	})
+	mux.HandleFunc("/v2/events/events-by-contract-id", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("fake json-api: events-by-contract-id: got method %s, want POST", r.Method)
+		}
+		capture.set(r.Header.Get("Authorization"))
+		eventsHandler(w, r)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -608,8 +623,44 @@ type flowFixtures map[string]string
 
 func newFlowTestServer(t *testing.T, fixtures flowFixtures, party string) *server {
 	t.Helper()
-	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	srv, _ := newRecordingFlowTestServerAs(t, fixtures, party)
+	return srv
+}
+
+// archivedFixtureKey marks contractID as archived for the events-by-contract-id fake.
+func archivedFixtureKey(contractID string) string { return "archived:" + contractID }
+
+// queriedTemplateRecorder records the template tail of each active-contracts query.
+type queriedTemplateRecorder struct {
+	mu            sync.Mutex
+	recordedTails []string
+}
+
+func (recorder *queriedTemplateRecorder) record(tail string) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	recorder.recordedTails = append(recorder.recordedTails, tail)
+}
+
+func (recorder *queriedTemplateRecorder) tails() []string {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return append([]string(nil), recorder.recordedTails...)
+}
+
+func newRecordingFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *queriedTemplateRecorder) {
+	t.Helper()
+	return newRecordingFlowTestServerAs(t, fixtures, "Alice")
+}
+
+// newRecordingFlowTestServerAs serves fixtures for active-contracts queries. The
+// events-by-contract-id fake answers with the fixture contract of that id, or a 404.
+func newRecordingFlowTestServerAs(t *testing.T, fixtures flowFixtures, party string) (*server, *queriedTemplateRecorder) {
+	t.Helper()
+	recorder := &queriedTemplateRecorder{}
+	upstream, _ := newFakeJSONAPIWithEvents(t, func(w http.ResponseWriter, r *http.Request) {
 		_, tmpl := decodeRequestedTemplate(t, r)
+		recorder.record(templateTail(tmpl))
 		body, ok := fixtures[templateTail(tmpl)]
 		if !ok {
 			body = "[]"
@@ -617,8 +668,50 @@ func newFlowTestServer(t *testing.T, fixtures flowFixtures, party string) *serve
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(body))
+	}, func(w http.ResponseWriter, r *http.Request) {
+		var request eventsByContractIDRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		created, found := findFixtureContract(t, fixtures, request.ContractID)
+		if !found {
+			http.Error(w, `{"code":"CONTRACT_EVENTS_NOT_FOUND"}`, http.StatusNotFound)
+			return
+		}
+		response := `{"created":` + created
+		if _, archived := fixtures[archivedFixtureKey(request.ContractID)]; archived {
+			response += fmt.Sprintf(`,"archived":{"archivedEvent":{"contractId":%q},"synchronizerId":"sync1"}`, request.ContractID)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(response + "}"))
 	})
-	return newTestServer(t, upstream, party)
+	return newTestServer(t, upstream, party), recorder
+}
+
+// findFixtureContract returns the JsActiveContract JSON of contractID from any fixture array.
+func findFixtureContract(t *testing.T, fixtures flowFixtures, contractID string) (string, bool) {
+	t.Helper()
+	for key, body := range fixtures {
+		if strings.HasPrefix(key, "archived:") {
+			continue
+		}
+		var entries []struct {
+			ContractEntry struct {
+				JsActiveContract json.RawMessage `json:"JsActiveContract"`
+			} `json:"contractEntry"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &entries))
+		for _, entry := range entries {
+			var activeContract struct {
+				CreatedEvent struct {
+					ContractID string `json:"contractId"`
+				} `json:"createdEvent"`
+			}
+			require.NoError(t, json.Unmarshal(entry.ContractEntry.JsActiveContract, &activeContract))
+			if activeContract.CreatedEvent.ContractID == contractID {
+				return string(entry.ContractEntry.JsActiveContract), true
+			}
+		}
+	}
+	return "", false
 }
 
 func requestFlow(t *testing.T, srv *server, flow, query string) *httptest.ResponseRecorder {

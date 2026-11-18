@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -93,6 +94,14 @@ func (b *boundedACS) ActiveContracts(ctx context.Context, query activeContractsQ
 	}
 	defer b.release()
 	return b.inner.ActiveContracts(ctx, query)
+}
+
+func (b *boundedACS) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+	if err := b.acquire(ctx); err != nil {
+		return acsEntry{}, false, err
+	}
+	defer b.release()
+	return b.inner.ActiveContractByID(ctx, readerParties, contractID)
 }
 
 // ---------------------------------------------------------------------------
@@ -245,4 +254,33 @@ func (c *cachingACS) ActiveContracts(ctx context.Context, query activeContractsQ
 		return nil, fmt.Errorf("disclosure-service: cached active-contracts has type %T", v)
 	}
 	return entries, nil
+}
+
+// contractByIDResult is one cached ActiveContractByID answer.
+type contractByIDResult struct {
+	entry acsEntry
+	found bool
+}
+
+func (c *cachingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+	encodedKey, err := json.Marshal(struct {
+		Kind       string
+		Readers    []partyID
+		ContractID string
+	}{"contract-by-id", readerParties, contractID})
+	if err != nil {
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: encode cache key: %w", err)
+	}
+	v, err := c.do(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
+		entry, found, err := c.inner.ActiveContractByID(fetchCtx, readerParties, contractID)
+		return contractByIDResult{entry: entry, found: found}, err
+	})
+	if err != nil {
+		return acsEntry{}, false, err
+	}
+	result, ok := v.(contractByIDResult)
+	if !ok {
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: cached contract-by-id has type %T", v)
+	}
+	return result.entry, result.found, nil
 }
