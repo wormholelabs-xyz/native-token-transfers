@@ -1,24 +1,43 @@
 # canton/disclosure
 
 This directory holds the `service/` Go module: the production disclosure
-service. On Canton, a submitter cannot fetch a contract it is not a
-stakeholder of; it must attach the contract as a disclosure. This service
-serves those disclosures over HTTP. Each flow's set comes from its choice
-body in `canton/ntt/daml/Wormhole/Ntt/Manager.daml`.
+service. On Canton, a submitter cannot fetch a contract that it is not a
+stakeholder of. The submitter must attach the contract as a disclosure. This
+service serves those disclosures over HTTP, one flow set at a time. Each
+flow set comes from its choice body in
+`canton/ntt/daml/Wormhole/Ntt/Manager.daml`.
 
 Mainnet base URL: `https://canton-disclosure.labsapis.com`.
+
+## Deployment
+
+The service has no inbound authentication. An authenticating TLS proxy in
+front of the service is mandatory.
+
+1. Keep the loopback default of `--listen` when the proxy is on the same host.
+2. Put an authenticating TLS proxy in front of the service.
+3. Set a rate limit for each client at the proxy.
+4. Set `--behind-authenticating-proxy` only after you complete steps 2 and 3.
+
+The service does not start with a `--listen` address that is not a loopback
+IP address, unless you set `--behind-authenticating-proxy`. The name
+`localhost` is not a loopback IP address for this check.
 
 ## Endpoints
 
 - `GET /v1` — this endpoint list, as JSON.
-- `GET /v1/healthz` — liveness: disclosing parties, template count, ledger end.
+- `GET /v1/healthz` — liveness. It returns 200, the reader parties by role,
+  and the template count. It does not call the upstream.
+- `GET /v1/readyz` — readiness. It returns 200 and the ledger end when the
+  upstream answers. Else it returns 503.
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
-  `reserveCustodian`, `paused`. Read `managerAddress` here for the flow endpoints' `manager` param.
-- `GET /v1/flows/{flow}` — one flow's assembled disclosure set, each contract
-  labeled by its role. Parameters per flow:
+  `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
+  parameter of a flow.
+- `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
+  contract. The parameters of each flow are:
 
-  | Flow | Params |
+  | Flow | Parameters |
   |---|---|
   | `release` | `manager`, `digest`, `recipient` (optional) |
   | `mint` | `manager`, `digest`, `recipient` |
@@ -28,77 +47,117 @@ Mainnet base URL: `https://canton-disclosure.labsapis.com`.
   | `register` | `gg` (optional), `by-vaa` (bool, optional) |
   | `consolidate` | `manager` |
 
-- `GET /v1/disclosures?template=Module:Entity` — raw blobs for one
-  allow-listed template. Repeat `template=` for several. With no parameter,
-  it returns every allow-listed template.
+`manager` is the manager address and `digest` is the VAA hash. Each is a hex
+string of 64 characters. Give each parameter one time only. The service
+rejects a repeated parameter and a parameter that the flow does not use. The
+query string is 1024 bytes or less.
 
-`manager` and `digest` are hex strings, 64 characters each: the manager
-address and the VAA hash. A flow response carries a `disclosures` array
-(role, templateId, contractId, createdEventBlob, synchronizerId) and a
-`missing` array. `missing` names owner-only set members (proposals,
-preapprovals) the disclosing parties cannot see; the client supplies those.
-Attach each `disclosures` entry to the command submission as a
-`DisclosedContract`, and read each role's `contractId` for the choice
-arguments.
+A flow response has a `disclosures` array and a `missing` array. Each
+`disclosures` entry has a role, `templateId`, `contractId`,
+`createdEventBlob`, and `synchronizerId`. All entries have the same
+synchronizer. The `missing` array names the set members that no reader party
+can see, for example a proposal or a preapproval. The client supplies them.
+
+The service does not serve a template outside a flow set. The service serves
+a `Coin` only as the custody pot that a `LockedLedger` names.
+
+## Client checks
+
+Do these checks before you submit a command with a disclosure set:
+
+1. Pin the `ntt` package id that you vetted.
+2. Reject each `templateId` that has a different package id.
+3. Get the `NttManager` contract id from a second source.
+4. Compare that contract id with the `NttManager` entry of the set.
+5. Attach each `disclosures` entry to the command as a `DisclosedContract`.
+6. Use the `contractId` of each role as the choice argument.
+
+The `ntt` package id changes with each core release. Read the id from the
+release table in [`canton/dars/README.md`](../dars/README.md). Do not copy an
+id from this file.
 
 ## Examples
 
+Each request goes through the authenticating proxy. Replace
+`<proxy-credential>` with the credential that the proxy requires.
+
 ```
-# One flow's whole set.
-curl 'https://canton-disclosure.labsapis.com/v1/flows/release?manager=<hex64>&digest=<hex64>'
+# The disclosure set of one release.
+curl -H 'Authorization: Bearer <proxy-credential>' \
+  'https://canton-disclosure.labsapis.com/v1/flows/release?manager=<hex64>&digest=<hex64>'
 
-# One template, by its Module:Entity tail.
-curl 'https://canton-disclosure.labsapis.com/v1/disclosures?template=Token.CIP0056.CoinFactory:CoinFactory'
-
-# Several templates: repeat the parameter.
-curl 'https://canton-disclosure.labsapis.com/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager&template=Wormhole.Core.State:CoreState'
+# The visible deployments.
+curl -H 'Authorization: Bearer <proxy-credential>' \
+  'https://canton-disclosure.labsapis.com/v1/managers'
 ```
 
-A `template` value needs both segments, joined by `:`; `Module` is the Daml
-module, `Entity` the template name. A package-qualified value
-(`#token-cip0056:Token.CIP0056.CoinFactory:CoinFactory`) hits the same
-allow-list entry; URL-encode its `#` as `%23`. A template outside the
-allow-list gets a 403.
+## Errors
 
-## Disclosing parties
+A 4xx response has a JSON body with an `error` message about the request.
+A 5xx response has a fixed `error` message and a `requestId`. The service
+log has the detail for that `requestId`. The response does not contain
+upstream text.
 
-The service serves only the contracts that its disclosing parties can see.
-Use these parties:
+## Reader parties
 
-| Party | Contracts that need this party |
-|---|---|
-| `gg` (`guardianGovernance`) | `NttManager`, `LockedLedger`, `CoreState`, `Emitter`, `ReplayNode`, `NttGovernance`, `EmitterRegistry`, the canonical `CoinFactory`, `DepositPreapproval`, an `AdminTransferProposal` to `gg` |
-| `nttCustody` | The custody pots of deployments whose admin is `gg`, and the `TransferPreapproval` contracts of `nttCustody` |
-| operator | `ReplayRootRegistry` (`register` flow only) |
+The service reads each template as one role only:
+
+| Role flag | Party | Templates |
+|---|---|---|
+| `--guardian-governance-party` | `gg` (`guardianGovernance`) | `NttManager`, `LockedLedger`, `CoreState`, `Emitter`, `ReplayNode`, `NttGovernance`, `EmitterRegistry`, `CoinFactory`, `DepositPreapproval`, `AdminTransferProposal`, `TransferPreapproval` |
+| `--ntt-custody-party` | `nttCustody` | The custody pots, and `TransferPreapproval` |
+| `--operator-party` | operator | `ReplayRootRegistry` (`register` flow only) |
+
+The three parties must be different. Without `--operator-party`, the
+`register` flow returns 404. The `gg` parameter of `register` must be the
+`--guardian-governance-party` value.
 
 The `reserveCustodian` of a deployment owns its lock/unlock reserve. It is
 the admin, or `nttCustody` when the admin is `gg`. The service cannot see
-the reserve of a third-party admin, unless a disclosing party is a
-stakeholder. The response then names that contract in `missing`.
+the reserve of an admin that is a third party. The response then names that
+contract in `missing`.
+
+## Bounds
+
+| Bound | Value |
+|---|---|
+| Inbound requests at one time | 64; the next request gets 503 |
+| Time for one request | 60 s |
+| Bytes of blobs and ids in one flow response | 4 MiB |
+| Query string of a flow | 1024 bytes |
+| Matching contracts for one selector | 8 |
+| Contracts scanned in one upstream response | 100 000 |
+| Bytes of one upstream response | 64 MiB |
 
 ## Flags
 
-- `--json-api` (required) — base URL of the JSON Ledger API v2.
-- `--disclosing-party` (required) — comma-separated parties as which the
-  service reads the ledger. The token must grant readAs for each, and one
-  participant must host them all. One service replaces one service per party.
-- `--access-token-file` — bearer token for the upstream; re-read on every
-  request, so an operator rotates it without a restart.
-- `--allow-list` — JSON array of package-qualified names, overriding the
-  built-in list.
-- `--max-contracts-per-template`, `--max-upstream-concurrency`, `--cache-ttl`
-  — load bounds: per-template result cap, in-flight upstream query cap, and
-  a short read cache.
-- `--listen` — bind address; defaults to loopback.
+- `--json-api` (required) — base URL of the JSON Ledger API v2. With
+  `--access-token-file`, use `https`. Plain `http` works only to a loopback
+  IP address.
+- `--guardian-governance-party`, `--ntt-custody-party` (required),
+  `--operator-party` — the reader parties. The token must grant `readAs` for
+  each. One participant must host all of them.
+- `--access-token-file` — bearer token for the upstream, 16 KiB or less. The
+  service reads the file again for each request. Thus you can replace the
+  token without a restart.
+- `--behind-authenticating-proxy` — set it only when an authenticating proxy
+  is in front. A `--listen` address that is not loopback needs it.
+- `--max-contracts-per-template` (1 to 10 000), `--max-upstream-concurrency`
+  (1 to 64), `--cache-ttl` (0 to 60 s) — load bounds. They are the
+  `/v1/managers` cap, the upstream query cap, and a short read cache.
+  `--cache-ttl 0` turns the cache off.
+- `--listen` — bind address. The default is `127.0.0.1:7599`.
 
 ## Build and run
 
 1. Run `cd canton/disclosure/service && go build -o disclosure-service .`.
-2. Run `./disclosure-service --json-api <url> --disclosing-party
-   <gg-party>,<ntt-custody-party> [--access-token-file <jwt-file>]`.
-3. To serve the `register` flow, add the operator party to the
-   `--disclosing-party` list.
+2. Run `./disclosure-service --json-api <url>
+   --guardian-governance-party <gg-party> --ntt-custody-party
+   <ntt-custody-party> [--access-token-file <jwt-file>]`.
+3. To serve the `register` flow, add `--operator-party <operator-party>`.
 
-Container: `docker build -t disclosure-service canton/disclosure/service`,
-then run it with `--listen 0.0.0.0:7599` and the token file mounted
-read-only; the loopback default is unreachable through a published port.
+Container: run `docker build -t disclosure-service canton/disclosure/service`.
+Then run the container with `--listen 0.0.0.0:7599
+--behind-authenticating-proxy`, behind the authenticating proxy. Mount the
+token file read-only. The loopback default is not reachable through a
+published port.
