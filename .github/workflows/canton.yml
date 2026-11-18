@@ -78,8 +78,10 @@ jobs:
           go vet ./...
           go test -race -count=1 ./...
 
+      # govulncheck v1.9.0 needs Go 1.26 to build. The go command fetches that pinned
+      # toolchain and checks it against sum.golang.org. The scan runs with the go.mod toolchain.
       - name: govulncheck (disclosure service)
         working-directory: ./canton/disclosure/service
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          GOTOOLCHAIN=go1.26.11 go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           "$(go env GOPATH)/bin/govulncheck" ./...
