@@ -14,7 +14,7 @@ Mainnet base URL: `https://canton-disclosure.labsapis.com`.
 - `GET /v1/healthz` — liveness: disclosing parties, template count, ledger end.
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
-  `paused`. Read `managerAddress` here for the flow endpoints' `manager` param.
+  `reserveCustodian`, `paused`. Read `managerAddress` here for the flow endpoints' `manager` param.
 - `GET /v1/flows/{flow}` — one flow's assembled disclosure set, each contract
   labeled by its role. Parameters per flow:
 
@@ -60,6 +60,22 @@ module, `Entity` the template name. A package-qualified value
 allow-list entry; URL-encode its `#` as `%23`. A template outside the
 allow-list gets a 403.
 
+## Disclosing parties
+
+The service serves only the contracts that its disclosing parties can see.
+Use these parties:
+
+| Party | Contracts that need this party |
+|---|---|
+| `gg` (`guardianGovernance`) | `NttManager`, `LockedLedger`, `CoreState`, `Emitter`, `ReplayNode`, `NttGovernance`, `EmitterRegistry`, the canonical `CoinFactory`, `DepositPreapproval`, an `AdminTransferProposal` to `gg` |
+| `nttCustody` | The custody pots of deployments whose admin is `gg`, and the `TransferPreapproval` contracts of `nttCustody` |
+| operator | `ReplayRootRegistry` (`register` flow only) |
+
+The `reserveCustodian` of a deployment owns its lock/unlock reserve. It is
+the admin, or `nttCustody` when the admin is `gg`. The service cannot see
+the reserve of a third-party admin, unless a disclosing party is a
+stakeholder. The response then names that contract in `missing`.
+
 ## Flags
 
 - `--json-api` (required) — base URL of the JSON Ledger API v2.
@@ -78,8 +94,10 @@ allow-list gets a 403.
 ## Build and run
 
 1. Run `cd canton/disclosure/service && go build -o disclosure-service .`.
-2. Run `./disclosure-service --json-api <url> --disclosing-party <p1,p2,...>
-   [--access-token-file <jwt-file>]`.
+2. Run `./disclosure-service --json-api <url> --disclosing-party
+   <gg-party>,<ntt-custody-party> [--access-token-file <jwt-file>]`.
+3. To serve the `register` flow, add the operator party to the
+   `--disclosing-party` list.
 
 Container: `docker build -t disclosure-service canton/disclosure/service`,
 then run it with `--listen 0.0.0.0:7599` and the token file mounted

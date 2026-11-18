@@ -41,22 +41,23 @@ const (
 
 // Role labels: one per set member, served to clients on each disclosure entry.
 const (
-	roleNttManager                   = "NttManager"
-	roleCoreState                    = "CoreState"
-	roleCoveringReplayNode           = "covering ReplayNode"
-	roleLockedLedger                 = "LockedLedger"
-	roleCustodyPotHolding            = "custody pot Holding"
-	roleCommittedTransferFactory     = "committed TransferFactory"
-	roleCommittedBurnMintFactory     = "committed BurnMintFactory"
-	roleRecipientTransferPreapproval = "recipient TransferPreapproval"
-	roleCustodianTransferPreapproval = "custodian TransferPreapproval"
-	roleDepositPreapproval           = "DepositPreapproval"
-	roleAdminTransferProposal        = "AdminTransferProposal"
-	roleTransceiverEmitter           = "transceiver Emitter"
-	roleNttGovernance                = "NttGovernance"
-	roleEmitterRegistry              = "EmitterRegistry"
-	roleReplayRootRegistry           = "ReplayRootRegistry"
-	roleCanonicalCoinFactory         = "canonical CoinFactory"
+	roleNttManager                      = "NttManager"
+	roleCoreState                       = "CoreState"
+	roleCoveringReplayNode              = "covering ReplayNode"
+	roleLockedLedger                    = "LockedLedger"
+	roleCustodyPotHolding               = "custody pot Holding"
+	roleCommittedTransferFactory        = "committed TransferFactory"
+	roleCommittedCanonicalCoinFactory   = "committed canonical CoinFactory"
+	roleRecipientTransferPreapproval    = "recipient TransferPreapproval"
+	roleCustodianTransferPreapproval    = "custodian TransferPreapproval"
+	roleNewCustodianTransferPreapproval = "new custodian TransferPreapproval"
+	roleDepositPreapproval              = "DepositPreapproval"
+	roleAdminTransferProposal           = "AdminTransferProposal"
+	roleTransceiverEmitter              = "transceiver Emitter"
+	roleNttGovernance                   = "NttGovernance"
+	roleEmitterRegistry                 = "EmitterRegistry"
+	roleReplayRootRegistry              = "ReplayRootRegistry"
+	roleCanonicalCoinFactory            = "canonical CoinFactory"
 )
 
 // NttTokenConfig's two constructors, decoded as plain strings.
@@ -92,6 +93,8 @@ type daNttFactory struct {
 type daNttManager struct {
 	Admin                string         `json:"admin"`
 	GuardianGovernance   string         `json:"guardianGovernance"`
+	NttCustody           string         `json:"nttCustody"`
+	ReserveCustodian     string         `json:"reserveCustodian"`
 	Namespace            string         `json:"namespace"`
 	ManagerAddress       string         `json:"managerAddress"`
 	ChainId              json.Number    `json:"chainId"`
@@ -341,6 +344,39 @@ func (s *server) fetchEntries(ctx context.Context, tail string, offset int64) ([
 	return entries, nil
 }
 
+// reserveCustodianFor mirrors Manager.daml's reserveCustodianFor: nttCustody while gg holds the
+// admin role, else admin.
+func reserveCustodianFor(guardianGovernance, nttCustody, admin string) string {
+	if admin == guardianGovernance {
+		return nttCustody
+	}
+	return admin
+}
+
+// checkReserveCustodianFollowsAdmin mirrors the NttManager template's ensure clause. A payload
+// with no nttCustody predates ntt 0.4.0.
+func checkReserveCustodianFollowsAdmin(mgr daNttManager) error {
+	if mgr.NttCustody == "" {
+		return newFlowError(http.StatusInternalServerError, "NttManager %s has no nttCustody: ntt 0.4.0 or later is required", mgr.ManagerAddress)
+	}
+	if mgr.ReserveCustodian == "" {
+		return newFlowError(http.StatusInternalServerError, "NttManager %s has no reserveCustodian: ntt 0.4.0 or later is required", mgr.ManagerAddress)
+	}
+	if want := reserveCustodianFor(mgr.GuardianGovernance, mgr.NttCustody, mgr.Admin); mgr.ReserveCustodian != want {
+		return newFlowError(http.StatusInternalServerError, "NttManager %s reserveCustodian is %s, expected %s", mgr.ManagerAddress, mgr.ReserveCustodian, want)
+	}
+	if mgr.ReserveCustodian == mgr.GuardianGovernance {
+		return newFlowError(http.StatusInternalServerError, "NttManager %s reserveCustodian is guardianGovernance", mgr.ManagerAddress)
+	}
+	if mgr.Admin == mgr.NttCustody {
+		return newFlowError(http.StatusInternalServerError, "NttManager %s admin is nttCustody", mgr.ManagerAddress)
+	}
+	if mgr.NttCustody == mgr.GuardianGovernance {
+		return newFlowError(http.StatusInternalServerError, "NttManager %s nttCustody is guardianGovernance", mgr.ManagerAddress)
+	}
+	return nil
+}
+
 // --- Role selectors: one per set member ---
 
 // findManager returns the NttManager whose managerAddress equals manager (already normalized:
@@ -419,6 +455,14 @@ func findTransceiverEmitter(entries []decodedEntry[daEmitter], emitterID json.Nu
 	})
 }
 
+// checkCoinFactoryAdminIsGuardianGovernance mirrors requireCanonicalFactory's admin check.
+func checkCoinFactoryAdminIsGuardianGovernance(factory decodedEntry[daCoinFactory], gg string) error {
+	if factory.value.Admin != gg {
+		return newFlowError(http.StatusInternalServerError, "committed CoinFactory %s has admin %s, expected guardianGovernance %s", factory.entry.ContractID, factory.value.Admin, gg)
+	}
+	return nil
+}
+
 func findCanonicalCoinFactory(entries []decodedEntry[daCoinFactory], gg string) (decodedEntry[daCoinFactory], error) {
 	return exactlyOne(entries, roleCanonicalCoinFactory, func(e decodedEntry[daCoinFactory]) bool {
 		return e.value.Admin == gg
@@ -485,7 +529,14 @@ func (s *server) fetchManager(ctx context.Context, managerHex string, offset int
 	if err != nil {
 		return decodedEntry[daNttManager]{}, err
 	}
-	return findManager(entries, managerHex)
+	mgr, err := findManager(entries, managerHex)
+	if err != nil {
+		return decodedEntry[daNttManager]{}, err
+	}
+	if err := checkReserveCustodianFollowsAdmin(mgr.value); err != nil {
+		return decodedEntry[daNttManager]{}, err
+	}
+	return mgr, nil
 }
 
 func (s *server) fetchCoreState(ctx context.Context, gg string, offset int64) (decodedEntry[daGuardianAnchor], error) {
@@ -527,6 +578,36 @@ func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory
 		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "no CoinFactory found for committed factory contractId %s", factory.Value)
 	}
 	return entry, nil
+}
+
+// fetchCommittedCanonicalCoinFactory resolves a burn/mint deployment's committed factory and
+// checks that gg administers it.
+func (s *server) fetchCommittedCanonicalCoinFactory(ctx context.Context, mgr daNttManager, offset int64) (decodedEntry[daCoinFactory], error) {
+	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.Factory, factoryTagBurnMint, offset)
+	if err != nil {
+		return decodedEntry[daCoinFactory]{}, err
+	}
+	if err := checkCoinFactoryAdminIsGuardianGovernance(factoryEntry, mgr.GuardianGovernance); err != nil {
+		return decodedEntry[daCoinFactory]{}, err
+	}
+	return factoryEntry, nil
+}
+
+// appendTransferPreapprovalOrMissing adds owner's TransferPreapproval for the deployment's instrument
+// under role, or names role as missing when the disclosing parties cannot see it.
+func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner string, instrumentID daInstrumentId, role string, offset int64, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
+	preapprovals, err := fetchDecoded[daPreapproval](ctx, s, tailTransferPreapproval, offset)
+	if err != nil {
+		return nil, nil, err
+	}
+	pre, found, err := findPreapproval(preapprovals, owner, instrumentID, role)
+	if err != nil {
+		return nil, nil, err
+	}
+	if found {
+		return append(disclosures, discloseAs(role, pre.entry)), missing, nil
+	}
+	return disclosures, append(missing, missingEntry(role)), nil
 }
 
 func (s *server) fetchPotHolding(ctx context.Context, cid string, offset int64) (acsEntry, bool, error) {
@@ -599,18 +680,9 @@ func (s *server) assembleRelease(ctx context.Context, q url.Values, offset int64
 	disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
 	if recipient != "" {
-		preapprovals, err := fetchDecoded[daPreapproval](ctx, s, tailTransferPreapproval, offset)
+		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, recipient, mgr.value.InstrumentId, roleRecipientTransferPreapproval, offset, disclosures, missing)
 		if err != nil {
 			return nil, err
-		}
-		pre, found, err := findPreapproval(preapprovals, recipient, mgr.value.InstrumentId, roleRecipientTransferPreapproval)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			disclosures = append(disclosures, discloseAs(roleRecipientTransferPreapproval, pre.entry))
-		} else {
-			missing = append(missing, missingEntry(roleRecipientTransferPreapproval))
 		}
 	}
 
@@ -657,7 +729,7 @@ func (s *server) assembleMint(ctx context.Context, q url.Values, offset int64) (
 		return nil, newFlowError(http.StatusNotFound, "no DepositPreapproval found for recipient %s and this deployment's instrument", recipient)
 	}
 
-	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagBurnMint, offset)
+	factoryEntry, err := s.fetchCommittedCanonicalCoinFactory(ctx, mgr.value, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +739,7 @@ func (s *server) assembleMint(ctx context.Context, q url.Values, offset int64) (
 		discloseAs(roleCoreState, cs.entry),
 		discloseAs(roleCoveringReplayNode, node.entry),
 		discloseAs(roleDepositPreapproval, dep.entry),
-		discloseAs(roleCommittedBurnMintFactory, factoryEntry.entry),
+		discloseAs(roleCommittedCanonicalCoinFactory, factoryEntry.entry),
 	}
 	return &flowResponse{Flow: "mint", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
 }
@@ -773,6 +845,13 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, q url.Values, offset i
 				return nil, err
 			}
 			disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
+
+			// AcceptAdminTransferByVaa requires newAdmin == gg, so the pot moves to nttCustody.
+			newCustodian := reserveCustodianFor(mgr.value.GuardianGovernance, mgr.value.NttCustody, mgr.value.GuardianGovernance)
+			disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, newCustodian, mgr.value.InstrumentId, roleNewCustodianTransferPreapproval, offset, disclosures, missing)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 	case tokenConfigBurnMint:
@@ -842,26 +921,17 @@ func (s *server) assembleTransfer(ctx context.Context, q url.Values, offset int6
 		}
 		disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
-		preapprovals, err := fetchDecoded[daPreapproval](ctx, s, tailTransferPreapproval, offset)
+		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, mgr.value.ReserveCustodian, mgr.value.InstrumentId, roleCustodianTransferPreapproval, offset, disclosures, missing)
 		if err != nil {
 			return nil, err
-		}
-		pre, found, err := findPreapproval(preapprovals, mgr.value.Admin, mgr.value.InstrumentId, roleCustodianTransferPreapproval)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			disclosures = append(disclosures, discloseAs(roleCustodianTransferPreapproval, pre.entry))
-		} else {
-			missing = append(missing, missingEntry(roleCustodianTransferPreapproval))
 		}
 
 	case tokenConfigBurnMint:
-		factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagBurnMint, offset)
+		factoryEntry, err := s.fetchCommittedCanonicalCoinFactory(ctx, mgr.value, offset)
 		if err != nil {
 			return nil, err
 		}
-		disclosures = append(disclosures, discloseAs(roleCommittedBurnMintFactory, factoryEntry.entry))
+		disclosures = append(disclosures, discloseAs(roleCommittedCanonicalCoinFactory, factoryEntry.entry))
 
 	default:
 		return nil, newFlowError(http.StatusInternalServerError, "NttManager has unknown tokenConfig %q", mgr.value.TokenConfig)
@@ -939,7 +1009,7 @@ func (s *server) assembleRegister(ctx context.Context, q url.Values, offset int6
 	return &flowResponse{Flow: "register", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
 }
 
-// assembleConsolidate mirrors consolidateDisclosures. The caller supplies its own custody
+// assembleConsolidate mirrors consolidateDisclosures. The caller supplies the reserve custodian's
 // holdings as choice arguments; this set covers only the manager, ledger, and factory.
 func (s *server) assembleConsolidate(ctx context.Context, q url.Values, offset int64) (*flowResponse, error) {
 	managerHex, err := requireHex64Param(q, "manager")
@@ -1031,13 +1101,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // managerEntry is one visible NTT deployment, over the wire.
 type managerEntry struct {
-	ManagerAddress string         `json:"managerAddress"`
-	ContractID     string         `json:"contractId"`
-	ChainId        json.Number    `json:"chainId"`
-	ManagerId      json.Number    `json:"managerId"`
-	TokenConfig    string         `json:"tokenConfig"`
-	InstrumentId   daInstrumentId `json:"instrumentId"`
-	Paused         bool           `json:"paused"`
+	ManagerAddress   string         `json:"managerAddress"`
+	ContractID       string         `json:"contractId"`
+	ChainId          json.Number    `json:"chainId"`
+	ManagerId        json.Number    `json:"managerId"`
+	TokenConfig      string         `json:"tokenConfig"`
+	InstrumentId     daInstrumentId `json:"instrumentId"`
+	ReserveCustodian string         `json:"reserveCustodian"`
+	Paused           bool           `json:"paused"`
 }
 
 // handleManagers serves GET /v1/managers: every NttManager the disclosing parties see. Clients
@@ -1060,13 +1131,14 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 	out := make([]managerEntry, 0, len(mgrs))
 	for _, m := range mgrs {
 		out = append(out, managerEntry{
-			ManagerAddress: m.value.ManagerAddress,
-			ContractID:     m.entry.ContractID,
-			ChainId:        m.value.ChainId,
-			ManagerId:      m.value.ManagerId,
-			TokenConfig:    m.value.TokenConfig,
-			InstrumentId:   m.value.InstrumentId,
-			Paused:         m.value.Paused,
+			ManagerAddress:   m.value.ManagerAddress,
+			ContractID:       m.entry.ContractID,
+			ChainId:          m.value.ChainId,
+			ManagerId:        m.value.ManagerId,
+			TokenConfig:      m.value.TokenConfig,
+			InstrumentId:     m.value.InstrumentId,
+			ReserveCustodian: m.value.ReserveCustodian,
+			Paused:           m.value.Paused,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ManagerAddress < out[j].ManagerAddress })

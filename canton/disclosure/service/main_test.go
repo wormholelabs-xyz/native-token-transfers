@@ -751,10 +751,18 @@ func jsonArray(items ...string) string {
 	return "[" + strings.Join(items, ",") + "]"
 }
 
-func nttManagerArg(admin, gg, namespace, managerAddress string, transceiverEmitterID int, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid string) string {
+func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAddress string, transceiverEmitterID int, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"namespace":%q,"managerAddress":%q,"transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
-		admin, gg, namespace, managerAddress, transceiverEmitterID, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid,
+		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":%q,"transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		admin, gg, nttCustody, reserveCustodian, namespace, managerAddress, transceiverEmitterID, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid,
+	)
+}
+
+// nttManagerArgBeforeNtt040 is an ntt 0.3.x payload: no nttCustody and no reserveCustodian.
+func nttManagerArgBeforeNtt040(admin, gg, managerAddress, tokenConfig, factoryTag, factoryCid string) string {
+	return fmt.Sprintf(
+		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":%q,"transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		admin, gg, managerAddress, gg, tokenConfig, factoryTag, factoryCid,
 	)
 }
 
@@ -793,9 +801,16 @@ func coinFactoryArg(admin string) string {
 // baseFixtures holds one deployment's identity fields, reused across a flow test's per-template
 // fixtures so every fixture agrees on the same manager, namespace, and factory.
 type baseFixtures struct {
-	admin, gg, namespace, managerAddr, digest, instrumentAdmin, instrumentID string
-	transceiverEmitterID                                                     int
-	tokenConfig, factoryTag, factoryCid                                      string
+	admin, gg, nttCustody, namespace, managerAddr, digest, instrumentAdmin, instrumentID string
+	transceiverEmitterID                                                                 int
+	tokenConfig, factoryTag, factoryCid                                                  string
+}
+
+// newBaseFixturesAdminedBy is newBaseFixtures with the admin role held by admin.
+func newBaseFixturesAdminedBy(tokenConfig, admin string) baseFixtures {
+	b := newBaseFixtures(tokenConfig)
+	b.admin = admin
+	return b
 }
 
 func newBaseFixtures(tokenConfig string) baseFixtures {
@@ -806,6 +821,7 @@ func newBaseFixtures(tokenConfig string) baseFixtures {
 	return baseFixtures{
 		admin:                testRecipient, // distinct from gg, so custodian-vs-recipient preapproval owners differ
 		gg:                   "gg::1",
+		nttCustody:           "nttCustody::1",
 		namespace:            "ntt:test-namespace",
 		managerAddr:          strings.Repeat("ab", 32),
 		digest:               strings.Repeat("cd", 32),
@@ -818,9 +834,19 @@ func newBaseFixtures(tokenConfig string) baseFixtures {
 	}
 }
 
+func (b baseFixtures) reserveCustodian() string {
+	return reserveCustodianFor(b.gg, b.nttCustody, b.admin)
+}
+
 func (b baseFixtures) managerJSON() string {
 	return acsContractJSONWithArg("pkg:"+tailNttManager, "mgr-cid-1", "bWdy", "sync1",
-		nttManagerArg(b.admin, b.gg, b.namespace, b.managerAddr, b.transceiverEmitterID, b.instrumentAdmin, b.instrumentID, b.tokenConfig, b.factoryTag, b.factoryCid))
+		nttManagerArg(b.admin, b.gg, b.nttCustody, b.reserveCustodian(), b.namespace, b.managerAddr, b.transceiverEmitterID, b.instrumentAdmin, b.instrumentID, b.tokenConfig, b.factoryTag, b.factoryCid))
+}
+
+// transferPreapprovalJSON is owner's TransferPreapproval for the deployment's instrument, with
+// contract id "pre-" + owner.
+func (b baseFixtures) transferPreapprovalJSON(owner string) string {
+	return acsContractJSONWithArg("pkg:"+tailTransferPreapproval, "pre-"+owner, "cHJl", "sync1", preapprovalArg(owner, b.instrumentAdmin, b.instrumentID))
 }
 
 func (b baseFixtures) coreStateJSON() string {
@@ -1293,7 +1319,7 @@ func TestHandleFlows_Mint_HappyPath(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
 	assert.Equal(t,
-		[]string{roleNttManager, roleCoreState, roleCoveringReplayNode, roleDepositPreapproval, roleCommittedBurnMintFactory},
+		[]string{roleNttManager, roleCoreState, roleCoveringReplayNode, roleDepositPreapproval, roleCommittedCanonicalCoinFactory},
 		rolesOf(resp.Disclosures))
 }
 
@@ -1372,13 +1398,56 @@ func TestHandleFlows_AcceptAdmin_LockUnlock_WithPot(t *testing.T) {
 		tailLockedLedger:          jsonArray(b.ledgerJSON(&potCid)),
 		tailCoin:                  jsonArray(acsContractJSONWithArg("pkg:"+tailCoin, potCid, "Y29pbg==", "sync1", "{}")),
 		tailCoinFactory:           jsonArray(b.factoryJSON()),
+		tailTransferPreapproval:   jsonArray(b.transferPreapprovalJSON(b.admin), b.transferPreapprovalJSON(b.gg), b.transferPreapprovalJSON(b.nttCustody)),
 	}
 	srv := newFlowTestServer(t, fixtures, "Alice")
 	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
 	assert.Equal(t,
-		[]string{roleNttManager, roleCoreState, roleCoveringReplayNode, roleAdminTransferProposal, roleLockedLedger, roleCustodyPotHolding, roleCommittedTransferFactory},
+		[]string{roleNttManager, roleCoreState, roleCoveringReplayNode, roleAdminTransferProposal, roleLockedLedger, roleCustodyPotHolding, roleCommittedTransferFactory, roleNewCustodianTransferPreapproval},
+		rolesOf(resp.Disclosures))
+	assert.Equal(t, "pre-"+b.nttCustody, resp.Disclosures[len(resp.Disclosures)-1].ContractID)
+	assert.Empty(t, resp.Missing)
+}
+
+func TestHandleFlows_AcceptAdmin_LockUnlock_NewCustodianPreapprovalAbsent_Missing(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	potCid := "pot-cid-4"
+	fixtures := flowFixtures{
+		tailNttManager:            jsonArray(b.managerJSON()),
+		tailCoreState:             jsonArray(b.coreStateJSON()),
+		tailReplayNode:            jsonArray(b.replayNodeJSON("")),
+		tailAdminTransferProposal: jsonArray(acsContractJSONWithArg("pkg:"+tailAdminTransferProposal, "prop-cid-3", "cHJvcA==", "sync1", adminTransferProposalArg(b.admin, b.gg, b.managerAddr))),
+		tailLockedLedger:          jsonArray(b.ledgerJSON(&potCid)),
+		tailCoin:                  jsonArray(acsContractJSONWithArg("pkg:"+tailCoin, potCid, "Y29pbg==", "sync1", "{}")),
+		tailCoinFactory:           jsonArray(b.factoryJSON()),
+		tailTransferPreapproval:   jsonArray(b.transferPreapprovalJSON(b.gg)),
+	}
+	srv := newFlowTestServer(t, fixtures, "Alice")
+	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	resp := decodeFlowResponse(t, rr)
+	assert.NotContains(t, rolesOf(resp.Disclosures), roleNewCustodianTransferPreapproval)
+	assert.Equal(t, []string{roleNewCustodianTransferPreapproval}, missingRolesOf(resp.Missing))
+}
+
+func TestHandleFlows_AcceptAdmin_LockUnlock_EmptyPot_NoNewCustodianPreapproval(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	fixtures := flowFixtures{
+		tailNttManager:            jsonArray(b.managerJSON()),
+		tailCoreState:             jsonArray(b.coreStateJSON()),
+		tailReplayNode:            jsonArray(b.replayNodeJSON("")),
+		tailAdminTransferProposal: jsonArray(acsContractJSONWithArg("pkg:"+tailAdminTransferProposal, "prop-cid-4", "cHJvcA==", "sync1", adminTransferProposalArg(b.admin, b.gg, b.managerAddr))),
+		tailLockedLedger:          jsonArray(b.ledgerJSON(nil)),
+		tailTransferPreapproval:   jsonArray(b.transferPreapprovalJSON(b.nttCustody)),
+	}
+	srv := newFlowTestServer(t, fixtures, "Alice")
+	rr := requestFlow(t, srv, "accept-admin", "manager="+b.managerAddr+"&digest="+b.digest)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	resp := decodeFlowResponse(t, rr)
+	assert.Equal(t,
+		[]string{roleNttManager, roleCoreState, roleCoveringReplayNode, roleAdminTransferProposal, roleLockedLedger},
 		rolesOf(resp.Disclosures))
 	assert.Empty(t, resp.Missing)
 }
@@ -1428,7 +1497,7 @@ func TestHandleFlows_Transfer_LockUnlock(t *testing.T) {
 		tailLockedLedger:        jsonArray(b.ledgerJSON(&potCid)),
 		tailCoin:                jsonArray(acsContractJSONWithArg("pkg:"+tailCoin, potCid, "Y29pbg==", "sync1", "{}")),
 		tailCoinFactory:         jsonArray(b.factoryJSON()),
-		tailTransferPreapproval: jsonArray(acsContractJSONWithArg("pkg:"+tailTransferPreapproval, "pre-cid-2", "cHJl", "sync1", preapprovalArg(b.admin, b.instrumentAdmin, b.instrumentID))),
+		tailTransferPreapproval: jsonArray(b.transferPreapprovalJSON(b.reserveCustodian())),
 	}
 	srv := newFlowTestServer(t, fixtures, "Alice")
 	rr := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
@@ -1469,7 +1538,7 @@ func TestHandleFlows_Transfer_BurnMint(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	resp := decodeFlowResponse(t, rr)
 	assert.Equal(t,
-		[]string{roleNttManager, roleTransceiverEmitter, roleCoreState, roleCommittedBurnMintFactory},
+		[]string{roleNttManager, roleTransceiverEmitter, roleCoreState, roleCommittedCanonicalCoinFactory},
 		rolesOf(resp.Disclosures))
 }
 
@@ -1637,7 +1706,7 @@ func TestHandleIndex(t *testing.T) {
 func TestHandleManagers(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
 	second := acsContractJSONWithArg("pkg:"+tailNttManager, "mgr-cid-2", "bWdy", "sync1",
-		nttManagerArg("Bob", b.gg, "ns2", strings.Repeat("b", 64), 8, b.gg, "otherCoin", tokenConfigBurnMint, factoryTagBurnMint, "cid-f2"))
+		nttManagerArg(b.gg, b.gg, b.nttCustody, b.nttCustody, "ns2", strings.Repeat("b", 64), 8, b.gg, "otherCoin", tokenConfigBurnMint, factoryTagBurnMint, "cid-f2"))
 	fixtures := map[string]string{
 		tailNttManager: jsonArray(b.managerJSON(), second),
 	}
@@ -1654,4 +1723,138 @@ func TestHandleManagers(t *testing.T) {
 	assert.Equal(t, strings.Repeat("b", 64), got.Managers[1].ManagerAddress)
 	assert.Equal(t, tokenConfigBurnMint, got.Managers[1].TokenConfig)
 	assert.Equal(t, "otherCoin", got.Managers[1].InstrumentId.Id)
+	assert.Equal(t, b.admin, got.Managers[0].ReserveCustodian)
+	assert.Equal(t, b.nttCustody, got.Managers[1].ReserveCustodian)
+}
+
+// ---------------------------------------------------------------------------
+// ntt 0.4.0: reserveCustodian, nttCustody, canonical CoinFactory
+// ---------------------------------------------------------------------------
+
+func TestReserveCustodianFor(t *testing.T) {
+	cases := []struct {
+		name, admin, want string
+	}{
+		{"third-party admin keeps its reserve", "admin::1", "admin::1"},
+		{"gg admin hands the reserve to nttCustody", "gg::1", "nttCustody::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, reserveCustodianFor("gg::1", "nttCustody::1", tc.admin))
+		})
+	}
+}
+
+func TestCheckReserveCustodianFollowsAdmin(t *testing.T) {
+	valid := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", NttCustody: "nttCustody::1", ReserveCustodian: "admin::1"}
+	cases := []struct {
+		name      string
+		mutate    func(*daNttManager)
+		wantError string
+	}{
+		{"third-party admin", func(*daNttManager) {}, ""},
+		{"gg admin with nttCustody reserve", func(m *daNttManager) { m.Admin, m.ReserveCustodian = "gg::1", "nttCustody::1" }, ""},
+		{"payload before ntt 0.4.0", func(m *daNttManager) { m.NttCustody, m.ReserveCustodian = "", "" }, "no nttCustody"},
+		{"reserveCustodian absent", func(m *daNttManager) { m.ReserveCustodian = "" }, "no reserveCustodian"},
+		{"reserveCustodian is not the admin", func(m *daNttManager) { m.ReserveCustodian = "nttCustody::1" }, "expected admin::1"},
+		{"gg admin keeps a gg reserve", func(m *daNttManager) { m.Admin, m.ReserveCustodian = "gg::1", "gg::1" }, "expected nttCustody::1"},
+		{"admin is nttCustody", func(m *daNttManager) { m.Admin, m.ReserveCustodian = "nttCustody::1", "nttCustody::1" }, "admin is nttCustody"},
+		{"nttCustody is gg", func(m *daNttManager) { m.NttCustody = "gg::1" }, "nttCustody is guardianGovernance"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := valid
+			tc.mutate(&mgr)
+			err := checkReserveCustodianFollowsAdmin(mgr)
+			if tc.wantError == "" {
+				require.NoError(t, err)
+				return
+			}
+			requireFlowErrorStatus(t, err, http.StatusInternalServerError)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestHandleFlows_Transfer_LockUnlock_CustodianPreapprovalIsReserveCustodians(t *testing.T) {
+	cases := []struct {
+		name               string
+		admin              string
+		wantPreapprovalCid string
+	}{
+		{"third-party admin", testRecipient, "pre-" + testRecipient},
+		{"gg admin", "gg::1", "pre-nttCustody::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBaseFixturesAdminedBy(tokenConfigLockUnlock, tc.admin)
+			fixtures := flowFixtures{
+				tailNttManager:          jsonArray(b.managerJSON()),
+				tailEmitter:             jsonArray(b.emitterJSON()),
+				tailCoreState:           jsonArray(b.coreStateJSON()),
+				tailLockedLedger:        jsonArray(b.ledgerJSON(nil)),
+				tailCoinFactory:         jsonArray(b.factoryJSON()),
+				tailTransferPreapproval: jsonArray(b.transferPreapprovalJSON(testRecipient), b.transferPreapprovalJSON(b.gg), b.transferPreapprovalJSON(b.nttCustody)),
+			}
+			srv := newFlowTestServer(t, fixtures, "Alice")
+			rr := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			resp := decodeFlowResponse(t, rr)
+			last := resp.Disclosures[len(resp.Disclosures)-1]
+			assert.Equal(t, roleCustodianTransferPreapproval, last.Role)
+			assert.Equal(t, tc.wantPreapprovalCid, last.ContractID)
+			assert.NotEqual(t, "pre-"+b.gg, last.ContractID)
+		})
+	}
+}
+
+func TestHandleFlows_BurnMint_CommittedFactoryNotGuardianGovernance_500(t *testing.T) {
+	b := newBaseFixtures(tokenConfigBurnMint)
+	fixtures := flowFixtures{
+		tailNttManager:         jsonArray(b.managerJSON()),
+		tailEmitter:            jsonArray(b.emitterJSON()),
+		tailCoreState:          jsonArray(b.coreStateJSON()),
+		tailReplayNode:         jsonArray(b.replayNodeJSON("")),
+		tailDepositPreapproval: jsonArray(acsContractJSONWithArg("pkg:"+tailDepositPreapproval, "dep-cid-2", "ZGVw", "sync1", preapprovalArg(testRecipient, b.instrumentAdmin, b.instrumentID))),
+		tailCoinFactory:        jsonArray(acsContractJSONWithArg("pkg:"+tailCoinFactory, b.factoryCid, "ZmFjdA==", "sync1", coinFactoryArg("external-minter::1"))),
+	}
+	cases := []struct {
+		flow, query string
+	}{
+		{"mint", "manager=" + b.managerAddr + "&digest=" + b.digest + "&recipient=" + testRecipient},
+		{"transfer", "manager=" + b.managerAddr},
+	}
+	srv := newFlowTestServer(t, fixtures, "Alice")
+	for _, tc := range cases {
+		t.Run(tc.flow, func(t *testing.T) {
+			rr := requestFlow(t, srv, tc.flow, tc.query)
+			assert.Equal(t, http.StatusInternalServerError, rr.Code)
+			assert.Contains(t, rr.Body.String(), "expected guardianGovernance")
+		})
+	}
+}
+
+func TestHandleFlows_ManagerPayloadBeforeNtt040_500(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	fixtures := flowFixtures{
+		tailNttManager: jsonArray(acsContractJSONWithArg("pkg:"+tailNttManager, "mgr-cid-old", "bWdy", "sync1",
+			nttManagerArgBeforeNtt040(b.admin, b.gg, b.managerAddr, tokenConfigLockUnlock, factoryTagTransfer, b.factoryCid))),
+	}
+	cases := []struct {
+		flow, query string
+	}{
+		{"release", "manager=" + b.managerAddr + "&digest=" + b.digest},
+		{"set-peer", "manager=" + b.managerAddr + "&digest=" + b.digest},
+		{"accept-admin", "manager=" + b.managerAddr + "&digest=" + b.digest},
+		{"transfer", "manager=" + b.managerAddr},
+		{"consolidate", "manager=" + b.managerAddr},
+	}
+	srv := newFlowTestServer(t, fixtures, "Alice")
+	for _, tc := range cases {
+		t.Run(tc.flow, func(t *testing.T) {
+			rr := requestFlow(t, srv, tc.flow, tc.query)
+			assert.Equal(t, http.StatusInternalServerError, rr.Code)
+			assert.Contains(t, rr.Body.String(), "ntt 0.4.0 or later is required")
+		})
+	}
 }
