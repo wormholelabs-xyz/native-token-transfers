@@ -1061,6 +1061,9 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	default:
 		err = newFlowError(http.StatusInternalServerError, "unhandled flow request %T", request)
 	}
+	if err == nil {
+		err = checkAssembledFlowResponse(resp)
+	}
 	if err != nil {
 		s.writeFlowError(w, r, err)
 		return
