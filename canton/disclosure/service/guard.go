@@ -11,7 +11,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,13 @@ import (
 
 // errUpstreamBusy reports that the concurrency bound shed this call. Handlers map it to 503.
 var errUpstreamBusy = errors.New("disclosure-service: upstream busy")
+
+// errUpstreamFetchPanicked reports a recovered panic inside a shared upstream fetch.
+var errUpstreamFetchPanicked = errors.New("disclosure-service: upstream fetch panicked")
+
+// upstreamFetchTimeout bounds one shared upstream fetch. It is above httpClientTimeout, so the
+// HTTP client times out first.
+const upstreamFetchTimeout = 35 * time.Second
 
 // upstreamErrorStatus separates load shedding (503) and a timeout (504) from an upstream fault (502).
 func upstreamErrorStatus(err error) int {
@@ -95,9 +105,10 @@ type cacheEntry struct {
 	expires time.Time
 }
 
-// inflightCall lets concurrent callers for one key share a single upstream result.
+// inflightCall lets concurrent callers for one key share a single upstream result. value and err
+// are written before done is closed.
 type inflightCall struct {
-	wg    sync.WaitGroup
+	done  chan struct{}
 	value any
 	err   error
 }
@@ -109,9 +120,11 @@ type inflightCall struct {
 // caller can therefore receive a set up to ttl old; a contract archived inside that window
 // yields a blob whose submission fails, and the caller refetches.
 type cachingACS struct {
-	inner acsClient
-	ttl   time.Duration
-	now   func() time.Time // injectable so tests advance time without sleeping
+	inner        acsClient
+	ttl          time.Duration
+	now          func() time.Time // injectable so tests advance time without sleeping
+	fetchTimeout time.Duration
+	logger       *log.Logger
 
 	mu       sync.Mutex
 	entries  map[string]cacheEntry
@@ -120,16 +133,20 @@ type cachingACS struct {
 
 func newCachingACS(inner acsClient, ttl time.Duration) *cachingACS {
 	return &cachingACS{
-		inner:    inner,
-		ttl:      ttl,
-		now:      time.Now,
-		entries:  make(map[string]cacheEntry),
-		inflight: make(map[string]*inflightCall),
+		inner:        inner,
+		ttl:          ttl,
+		now:          time.Now,
+		fetchTimeout: upstreamFetchTimeout,
+		logger:       log.New(os.Stderr, "", log.LstdFlags),
+		entries:      make(map[string]cacheEntry),
+		inflight:     make(map[string]*inflightCall),
 	}
 }
 
-// do returns key's cached value, joins the call already fetching it, or fetches it.
-func (c *cachingACS) do(key string, fetch func() (any, error)) (any, error) {
+// do returns key's cached value, joins the call already fetching it, or starts the fetch. The
+// fetch runs under a service-owned deadline, so one caller's cancel does not fail the others. Each
+// caller stops waiting when its own ctx ends.
+func (c *cachingACS) do(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
 	c.mu.Lock()
 	if e, ok := c.entries[key]; ok && c.now().Before(e.expires) {
 		c.mu.Unlock()
@@ -137,26 +154,48 @@ func (c *cachingACS) do(key string, fetch func() (any, error)) (any, error) {
 	}
 	if call, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
-		call.wg.Wait()
-		return call.value, call.err
+		return awaitInflightCall(ctx, call)
 	}
-	call := &inflightCall{}
-	call.wg.Add(1)
+	call := &inflightCall{done: make(chan struct{})}
 	c.inflight[key] = call
 	c.mu.Unlock()
 
-	call.value, call.err = fetch()
-	call.wg.Done()
+	go c.runInflightFetch(key, call, fetch)
+	return awaitInflightCall(ctx, call)
+}
 
-	c.mu.Lock()
-	delete(c.inflight, key)
-	if call.err == nil {
-		c.sweepLocked()
-		c.entries[key] = cacheEntry{value: call.value, expires: c.now().Add(c.ttl)}
+// runInflightFetch runs fetch under fetchTimeout. The deferred cleanup also runs on a panic.
+func (c *cachingACS) runInflightFetch(key string, call *inflightCall, fetch func(context.Context) (any, error)) {
+	fetchCtx, cancel := context.WithTimeout(context.Background(), c.fetchTimeout)
+	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			call.value = nil
+			call.err = fmt.Errorf("%w: %v", errUpstreamFetchPanicked, recovered)
+			c.logger.Printf("disclosure-service: upstream fetch %q panic: %v\n%s", key, recovered, debug.Stack())
+		}
+		c.mu.Lock()
+		if c.inflight[key] != call {
+			panic("disclosure-service: inflight entry replaced while its fetch ran")
+		}
+		delete(c.inflight, key)
+		if call.err == nil {
+			c.sweepLocked()
+			c.entries[key] = cacheEntry{value: call.value, expires: c.now().Add(c.ttl)}
+		}
+		c.mu.Unlock()
+		close(call.done)
+	}()
+	call.value, call.err = fetch(fetchCtx)
+}
+
+func awaitInflightCall(ctx context.Context, call *inflightCall) (any, error) {
+	select {
+	case <-call.done:
+		return call.value, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	c.mu.Unlock()
-
-	return call.value, call.err
 }
 
 // sweepLocked drops expired entries once the map reaches its cap, then drops arbitrary entries
@@ -180,7 +219,7 @@ func (c *cachingACS) sweepLocked() {
 }
 
 func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
-	v, err := c.do("ledger-end", func() (any, error) { return c.inner.LedgerEnd(ctx) })
+	v, err := c.do(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return c.inner.LedgerEnd(fetchCtx) })
 	if err != nil {
 		return 0, err
 	}
@@ -196,8 +235,8 @@ func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
 
 func (c *cachingACS) ActiveContracts(ctx context.Context, parties []string, template string, activeAtOffset int64) ([]acsEntry, error) {
 	key := fmt.Sprintf("ac\x00%d\x00%s\x00%s", activeAtOffset, template, strings.Join(parties, ","))
-	v, err := c.do(key, func() (any, error) {
-		return c.inner.ActiveContracts(ctx, parties, template, activeAtOffset)
+	v, err := c.do(ctx, key, func(fetchCtx context.Context) (any, error) {
+		return c.inner.ActiveContracts(fetchCtx, parties, template, activeAtOffset)
 	})
 	if err != nil {
 		return nil, err

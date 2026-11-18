@@ -267,3 +267,146 @@ func TestGuardsCompose(t *testing.T) {
 	}
 	assert.Equal(t, int64(1), inner.ledgerCalls.Load())
 }
+
+// ---------------------------------------------------------------------------
+// Single flight with a service-owned fetch context
+// ---------------------------------------------------------------------------
+
+// scriptedLedgerEndACS runs ledgerEnd for each LedgerEnd call and counts the calls.
+type scriptedLedgerEndACS struct {
+	ledgerEnd func(ctx context.Context, callNumber int64) (int64, error)
+	calls     atomic.Int64
+}
+
+func (scripted *scriptedLedgerEndACS) LedgerEnd(ctx context.Context) (int64, error) {
+	return scripted.ledgerEnd(ctx, scripted.calls.Add(1))
+}
+
+func (scripted *scriptedLedgerEndACS) ActiveContracts(context.Context, []string, string, int64) ([]acsEntry, error) {
+	panic("scriptedLedgerEndACS: ActiveContracts is not scripted")
+}
+
+type ledgerEndResult struct {
+	offset int64
+	err    error
+}
+
+func startLedgerEnd(cache *cachingACS, ctx context.Context) <-chan ledgerEndResult {
+	results := make(chan ledgerEndResult, 1)
+	go func() {
+		offset, err := cache.LedgerEnd(ctx)
+		results <- ledgerEndResult{offset: offset, err: err}
+	}()
+	return results
+}
+
+func receiveWithin(t *testing.T, results <-chan ledgerEndResult) ledgerEndResult {
+	t.Helper()
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(3 * time.Second):
+		t.Fatal("caller did not return within 3s")
+		return ledgerEndResult{}
+	}
+}
+
+// waitForJoinedCallers sleeps long enough for started callers to reach the inflight wait.
+func waitForJoinedCallers() { time.Sleep(30 * time.Millisecond) }
+
+func TestCachingACSInflightContext(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"first caller cancels, joined caller gets the value", func(t *testing.T) {
+			releaseFetch := make(chan struct{})
+			inner := &scriptedLedgerEndACS{ledgerEnd: func(ctx context.Context, _ int64) (int64, error) {
+				select {
+				case <-releaseFetch:
+					return 42, nil
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}}
+			cache := newCachingACS(inner, time.Second)
+			firstCtx, cancelFirst := context.WithCancel(context.Background())
+			first := startLedgerEnd(cache, firstCtx)
+			require.Eventually(t, func() bool { return inner.calls.Load() == 1 }, time.Second, time.Millisecond)
+			joined := startLedgerEnd(cache, context.Background())
+			waitForJoinedCallers()
+
+			cancelFirst()
+			assert.ErrorIs(t, receiveWithin(t, first).err, context.Canceled)
+			close(releaseFetch)
+			joinedResult := receiveWithin(t, joined)
+			require.NoError(t, joinedResult.err)
+			assert.Equal(t, int64(42), joinedResult.offset)
+			assert.Equal(t, int64(1), inner.calls.Load())
+		}},
+		{"joined caller cancels at once, the fetch completes", func(t *testing.T) {
+			releaseFetch := make(chan struct{})
+			inner := &scriptedLedgerEndACS{ledgerEnd: func(ctx context.Context, _ int64) (int64, error) {
+				<-releaseFetch
+				return 42, nil
+			}}
+			cache := newCachingACS(inner, time.Second)
+			first := startLedgerEnd(cache, context.Background())
+			require.Eventually(t, func() bool { return inner.calls.Load() == 1 }, time.Second, time.Millisecond)
+			joinedCtx, cancelJoined := context.WithCancel(context.Background())
+			joined := startLedgerEnd(cache, joinedCtx)
+			waitForJoinedCallers()
+
+			cancelJoined()
+			assert.ErrorIs(t, receiveWithin(t, joined).err, context.Canceled)
+			close(releaseFetch)
+			firstResult := receiveWithin(t, first)
+			require.NoError(t, firstResult.err)
+			assert.Equal(t, int64(42), firstResult.offset)
+		}},
+		{"fetch panics, callers get an error, the key is free again", func(t *testing.T) {
+			releaseFetch := make(chan struct{})
+			inner := &scriptedLedgerEndACS{ledgerEnd: func(ctx context.Context, callNumber int64) (int64, error) {
+				if callNumber == 1 {
+					<-releaseFetch
+					panic("upstream decoder bug")
+				}
+				return 42, nil
+			}}
+			cache := newCachingACS(inner, time.Second)
+			logger, captured := newCapturedLogger()
+			cache.logger = logger
+			first := startLedgerEnd(cache, context.Background())
+			require.Eventually(t, func() bool { return inner.calls.Load() == 1 }, time.Second, time.Millisecond)
+			joined := startLedgerEnd(cache, context.Background())
+			waitForJoinedCallers()
+
+			close(releaseFetch)
+			assert.ErrorIs(t, receiveWithin(t, first).err, errUpstreamFetchPanicked)
+			assert.ErrorIs(t, receiveWithin(t, joined).err, errUpstreamFetchPanicked)
+			assert.Contains(t, captured.String(), "upstream decoder bug")
+
+			offset, err := cache.LedgerEnd(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, int64(42), offset)
+			assert.Equal(t, int64(2), inner.calls.Load())
+		}},
+		{"fetch exceeds the service deadline, both callers time out", func(t *testing.T) {
+			inner := &scriptedLedgerEndACS{ledgerEnd: func(ctx context.Context, _ int64) (int64, error) {
+				<-ctx.Done()
+				return 0, ctx.Err()
+			}}
+			cache := newCachingACS(inner, time.Second)
+			cache.fetchTimeout = 50 * time.Millisecond
+			first := startLedgerEnd(cache, context.Background())
+			require.Eventually(t, func() bool { return inner.calls.Load() == 1 }, time.Second, time.Millisecond)
+			joined := startLedgerEnd(cache, context.Background())
+
+			assert.ErrorIs(t, receiveWithin(t, first).err, context.DeadlineExceeded)
+			assert.ErrorIs(t, receiveWithin(t, joined).err, context.DeadlineExceeded)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, tc.run)
+	}
+}
