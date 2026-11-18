@@ -47,3 +47,39 @@ jobs:
       - name: Run Daml tests
         working-directory: ./canton/test
         run: dpm test
+
+  disclosure-service:
+    name: disclosure service (go)
+    runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -mod=readonly
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: ./canton/disclosure/service/go.mod
+          cache-dependency-path: |
+            ./canton/disclosure/service/go.sum
+            ./canton/testing/go/go.sum
+
+      - name: gofmt, vet, test (disclosure service)
+        working-directory: ./canton/disclosure/service
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+
+      # Unit tests only; the integration tests need the build tag "integration".
+      - name: vet, test (testing/go)
+        working-directory: ./canton/testing/go
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: govulncheck (disclosure service)
+        working-directory: ./canton/disclosure/service
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
