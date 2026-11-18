@@ -188,6 +188,9 @@ func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
 	if !ok {
 		return 0, fmt.Errorf("disclosure-service: cached ledger-end has type %T", v)
 	}
+	if offset < 1 {
+		return 0, fmt.Errorf("%w: cached %d", errLedgerEndOffsetNotPositive, offset)
+	}
 	return offset, nil
 }
 

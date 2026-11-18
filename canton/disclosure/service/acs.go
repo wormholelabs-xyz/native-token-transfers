@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,11 @@ import (
 // ---------------------------------------------------------------------------
 // ACS client
 // ---------------------------------------------------------------------------
+
+var (
+	errLedgerEndOffsetMissing     = errors.New("disclosure-service: ledger-end response has no offset")
+	errLedgerEndOffsetNotPositive = errors.New("disclosure-service: ledger-end offset is not positive")
+)
 
 // acsEntry is one active contract, as this service needs it. It holds enough data to build a
 // Ledger API DisclosedContract client-side.
@@ -158,12 +164,18 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("disclosure-service: read ledger-end response: %w", err)
 	}
 	var out struct {
-		Offset int64 `json:"offset"`
+		Offset *int64 `json:"offset"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return 0, fmt.Errorf("disclosure-service: parse ledger-end response: %w", err)
 	}
-	return out.Offset, nil
+	if out.Offset == nil {
+		return 0, errLedgerEndOffsetMissing
+	}
+	if *out.Offset < 1 {
+		return 0, fmt.Errorf("%w: %d", errLedgerEndOffsetNotPositive, *out.Offset)
+	}
+	return *out.Offset, nil
 }
 
 // ActiveContracts queries template as the union of parties, at activeAtOffset, with
