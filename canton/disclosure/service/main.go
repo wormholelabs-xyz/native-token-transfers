@@ -53,6 +53,7 @@ type options struct {
 	jsonAPIBaseURL          string
 	readerParties           readerPartiesByRole
 	accessTokenFile         string
+	upstreamTLS             upstreamTLSFiles
 	maxContractsPerTemplate int
 	maxUpstreamConcurrency  int
 	cacheTTL                time.Duration
@@ -77,6 +78,9 @@ func parseFlags(args []string) (*options, error) {
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long, 0 to 60s; 0 turns the cache off")
 	behindEdgeProxy := fs.Bool("behind-edge-proxy", false, "state that an edge proxy terminates TLS and applies a rate limit and a WAF; required for a non-loopback --listen")
+	caFile := fs.String("json-api-ca-file", "", "PEM CA bundle that verifies the JSON Ledger API server certificate; replaces the system roots (https only)")
+	clientCertFile := fs.String("json-api-client-cert-file", "", "PEM client certificate for mutual TLS to the JSON Ledger API; needs --json-api-client-key-file (https only)")
+	clientKeyFile := fs.String("json-api-client-key-file", "", "PEM private key for --json-api-client-cert-file (https only)")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -85,7 +89,8 @@ func parseFlags(args []string) (*options, error) {
 	if *jsonAPI == "" {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://127.0.0.1:6975)")
 	}
-	if err := checkJSONAPIURL(*jsonAPI, *tokenFile != ""); err != nil {
+	upstreamTLS := upstreamTLSFiles{caFile: *caFile, clientCertFile: *clientCertFile, clientKeyFile: *clientKeyFile}
+	if err := checkJSONAPIURL(*jsonAPI, *tokenFile != "", upstreamTLS); err != nil {
 		return nil, err
 	}
 	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)
@@ -112,6 +117,7 @@ func parseFlags(args []string) (*options, error) {
 		jsonAPIBaseURL:          *jsonAPI,
 		readerParties:           readerParties,
 		accessTokenFile:         *tokenFile,
+		upstreamTLS:             upstreamTLS,
 		maxContractsPerTemplate: *maxContracts,
 		maxUpstreamConcurrency:  *maxUpstream,
 		cacheTTL:                *cacheTTL,
@@ -158,18 +164,27 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	if err := checkListenAddress(opts.listen, opts.behindEdgeProxy); err != nil {
 		return err
 	}
-	// Fail fast at startup when the token file is missing or unreadable. httpACSClient keeps
-	// only the path; see readAccessToken's call in authHeader.
+
+	// Fail fast at startup on an unreadable or invalid TLS file.
+	tlsConfig, err := loadUpstreamTLSConfig(opts.upstreamTLS, time.Now())
+	if err != nil {
+		return err
+	}
+	upstreamHTTPClient := newUpstreamHTTPClient(tlsConfig)
+
+	// Fail fast at startup when the token file is missing or unreadable.
+	var tokens bearerTokenSource
 	if opts.accessTokenFile != "" {
 		if _, err := readAccessToken(opts.accessTokenFile); err != nil {
 			return err
 		}
+		tokens = fileBearerTokenSource{path: opts.accessTokenFile}
 	}
 
 	if opts.maxUpstreamConcurrency < 1 || opts.maxUpstreamConcurrency > maxUpstreamConcurrencyLimit {
 		return fmt.Errorf("disclosure-service: upstream concurrency %d is out of bounds", opts.maxUpstreamConcurrency)
 	}
-	var acs acsClient = newBoundedACS(newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile), opts.maxUpstreamConcurrency)
+	var acs acsClient = newBoundedACS(newHTTPACSClient(opts.jsonAPIBaseURL, upstreamHTTPClient, tokens), opts.maxUpstreamConcurrency)
 	if opts.cacheTTL > 0 {
 		acs = newCachingACS(acs, opts.cacheTTL)
 	}

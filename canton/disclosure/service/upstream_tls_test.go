@@ -1,0 +1,409 @@
+package main
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"io"
+	"log"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ---------------------------------------------------------------------------
+// Test PKI
+// ---------------------------------------------------------------------------
+
+type testCertificateAuthority struct {
+	certificate *x509.Certificate
+	privateKey  *ecdsa.PrivateKey
+	pemPath     string
+}
+
+type testIssuedCertificate struct {
+	certPEMPath string
+	keyPEMPath  string
+	tlsPair     tls.Certificate
+}
+
+var testSerialNumber int64
+
+func nextTestSerialNumber() *big.Int {
+	testSerialNumber++
+	return big.NewInt(testSerialNumber)
+}
+
+func writePEMFile(t *testing.T, dir, name, blockType string, der []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: der}), 0o600))
+	return path
+}
+
+func newTestCertificateAuthority(t *testing.T, dir, name string) *testCertificateAuthority {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber:          nextTestSerialNumber(),
+		Subject:               pkix.Name{CommonName: name},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	require.NoError(t, err)
+	certificate, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return &testCertificateAuthority{
+		certificate: certificate,
+		privateKey:  privateKey,
+		pemPath:     writePEMFile(t, dir, name+"-ca.pem", "CERTIFICATE", der),
+	}
+}
+
+// issue signs a leaf for 127.0.0.1, valid over [notBefore, notAfter].
+func (ca *testCertificateAuthority) issue(t *testing.T, dir, name string, usage x509.ExtKeyUsage, notBefore, notAfter time.Time) *testIssuedCertificate {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: nextTestSerialNumber(),
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, &privateKey.PublicKey, ca.privateKey)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	require.NoError(t, err)
+	certPath := writePEMFile(t, dir, name+"-cert.pem", "CERTIFICATE", der)
+	keyPath := writePEMFile(t, dir, name+"-key.pem", "PRIVATE KEY", keyDER)
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	require.NoError(t, err)
+	return &testIssuedCertificate{certPEMPath: certPath, keyPEMPath: keyPath, tlsPair: pair}
+}
+
+type testUpstreamPKI struct {
+	dir               string
+	trustedCA         *testCertificateAuthority
+	untrustedCA       *testCertificateAuthority
+	serverCertificate *testIssuedCertificate
+	validClient       *testIssuedCertificate
+	expiredClient     *testIssuedCertificate
+}
+
+func newTestUpstreamPKI(t *testing.T) *testUpstreamPKI {
+	t.Helper()
+	dir := t.TempDir()
+	trustedCA := newTestCertificateAuthority(t, dir, "trusted")
+	now := time.Now()
+	return &testUpstreamPKI{
+		dir:               dir,
+		trustedCA:         trustedCA,
+		untrustedCA:       newTestCertificateAuthority(t, dir, "untrusted"),
+		serverCertificate: trustedCA.issue(t, dir, "server", x509.ExtKeyUsageServerAuth, now.Add(-time.Hour), now.Add(time.Hour)),
+		validClient:       trustedCA.issue(t, dir, "client", x509.ExtKeyUsageClientAuth, now.Add(-time.Hour), now.Add(time.Hour)),
+		expiredClient:     trustedCA.issue(t, dir, "expired-client", x509.ExtKeyUsageClientAuth, now.Add(-2*time.Hour), now.Add(-time.Hour)),
+	}
+}
+
+// newMutualTLSJSONAPI starts a TLS JSON Ledger API stand-in that requires a client certificate
+// signed by pki.trustedCA.
+func newMutualTLSJSONAPI(t *testing.T, pki *testUpstreamPKI) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/state/ledger-end", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]int64{"offset": 42})
+	})
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(pki.trustedCA.certificate)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{pki.serverCertificate.tlsPair},
+		ClientCAs:    clientCAs,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS12,
+	}
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// ---------------------------------------------------------------------------
+// Handshake against a mutual-TLS upstream
+// ---------------------------------------------------------------------------
+
+func TestUpstreamTLS_MutualTLSHandshake(t *testing.T) {
+	pki := newTestUpstreamPKI(t)
+	upstream := newMutualTLSJSONAPI(t, pki)
+
+	cases := []struct {
+		name string
+		// configLoadTime is the clock loadUpstreamTLSConfig checks the client certificate against.
+		configLoadTime time.Time
+		files          upstreamTLSFiles
+		wantErrSub     string
+	}{
+		{
+			name:           "trusted CA and valid client certificate",
+			configLoadTime: time.Now(),
+			files: upstreamTLSFiles{
+				caFile:         pki.trustedCA.pemPath,
+				clientCertFile: pki.validClient.certPEMPath,
+				clientKeyFile:  pki.validClient.keyPEMPath,
+			},
+		},
+		{
+			name:           "no client certificate",
+			configLoadTime: time.Now(),
+			files:          upstreamTLSFiles{caFile: pki.trustedCA.pemPath},
+			wantErrSub:     "certificate required",
+		},
+		{
+			name:           "untrusted server CA",
+			configLoadTime: time.Now(),
+			files: upstreamTLSFiles{
+				caFile:         pki.untrustedCA.pemPath,
+				clientCertFile: pki.validClient.certPEMPath,
+				clientKeyFile:  pki.validClient.keyPEMPath,
+			},
+			wantErrSub: "certificate signed by unknown authority",
+		},
+		{
+			name: "system roots only",
+			// System roots fail to verify the test CA's server certificate.
+			configLoadTime: time.Now(),
+			files: upstreamTLSFiles{
+				clientCertFile: pki.validClient.certPEMPath,
+				clientKeyFile:  pki.validClient.keyPEMPath,
+			},
+			wantErrSub: "failed to verify certificate",
+		},
+		{
+			// Loaded while still valid, so the server's check is what rejects it.
+			name:           "client certificate expired at handshake",
+			configLoadTime: time.Now().Add(-90 * time.Minute),
+			files: upstreamTLSFiles{
+				caFile:         pki.trustedCA.pemPath,
+				clientCertFile: pki.expiredClient.certPEMPath,
+				clientKeyFile:  pki.expiredClient.keyPEMPath,
+			},
+			wantErrSub: "expired certificate",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tlsConfig, err := loadUpstreamTLSConfig(tc.files, tc.configLoadTime)
+			require.NoError(t, err)
+			client := newHTTPACSClient(upstream.URL, newUpstreamHTTPClient(tlsConfig), nil)
+
+			offset, err := client.LedgerEnd(context.Background())
+			if tc.wantErrSub == "" {
+				require.NoError(t, err)
+				assert.Equal(t, int64(42), offset)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErrSub)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Startup loading
+// ---------------------------------------------------------------------------
+
+func TestLoadUpstreamTLSConfig(t *testing.T) {
+	pki := newTestUpstreamPKI(t)
+	garbagePath := filepath.Join(pki.dir, "garbage.pem")
+	require.NoError(t, os.WriteFile(garbagePath, []byte("not a pem file\n"), 0o600))
+	keyAsCAPath := pki.validClient.keyPEMPath
+	trailingGarbagePath := filepath.Join(pki.dir, "trailing.pem")
+	caPEM, err := os.ReadFile(pki.trustedCA.pemPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(trailingGarbagePath, append(caPEM, []byte("junk")...), 0o600))
+	oversizePath := filepath.Join(pki.dir, "oversize.pem")
+	require.NoError(t, os.WriteFile(oversizePath, make([]byte, maxPEMFileBytes+1), 0o600))
+	missingPath := filepath.Join(pki.dir, "missing.pem")
+
+	cases := []struct {
+		name       string
+		files      upstreamTLSFiles
+		wantErrSub string
+		wantRoots  bool
+		wantPairs  int
+	}{
+		{name: "no files: system roots", files: upstreamTLSFiles{}},
+		{name: "CA only", files: upstreamTLSFiles{caFile: pki.trustedCA.pemPath}, wantRoots: true},
+		{
+			name:      "CA and client pair",
+			files:     upstreamTLSFiles{caFile: pki.trustedCA.pemPath, clientCertFile: pki.validClient.certPEMPath, clientKeyFile: pki.validClient.keyPEMPath},
+			wantRoots: true,
+			wantPairs: 1,
+		},
+		{name: "missing CA file", files: upstreamTLSFiles{caFile: missingPath}, wantErrSub: "--json-api-ca-file"},
+		{name: "CA file without PEM", files: upstreamTLSFiles{caFile: garbagePath}, wantErrSub: "no PEM certificate"},
+		{name: "CA file holds a private key", files: upstreamTLSFiles{caFile: keyAsCAPath}, wantErrSub: "PEM block of type"},
+		{name: "CA file with trailing bytes", files: upstreamTLSFiles{caFile: trailingGarbagePath}, wantErrSub: "trailing data"},
+		{name: "CA file over the size cap", files: upstreamTLSFiles{caFile: oversizePath}, wantErrSub: "exceeds"},
+		{name: "cert without key", files: upstreamTLSFiles{clientCertFile: pki.validClient.certPEMPath}, wantErrSub: "both or neither"},
+		{name: "key without cert", files: upstreamTLSFiles{clientKeyFile: pki.validClient.keyPEMPath}, wantErrSub: "both or neither"},
+		{name: "missing client cert file", files: upstreamTLSFiles{clientCertFile: missingPath, clientKeyFile: pki.validClient.keyPEMPath}, wantErrSub: "--json-api-client-cert-file"},
+		{
+			name:       "mismatched cert and key",
+			files:      upstreamTLSFiles{clientCertFile: pki.validClient.certPEMPath, clientKeyFile: pki.expiredClient.keyPEMPath},
+			wantErrSub: "client key pair",
+		},
+		{
+			name:       "expired client certificate",
+			files:      upstreamTLSFiles{clientCertFile: pki.expiredClient.certPEMPath, clientKeyFile: pki.expiredClient.keyPEMPath},
+			wantErrSub: "expired",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tlsConfig, err := loadUpstreamTLSConfig(tc.files, time.Now())
+			if tc.wantErrSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+				assert.Nil(t, tlsConfig)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, uint16(tls.VersionTLS12), tlsConfig.MinVersion)
+			assert.Equal(t, tc.wantRoots, tlsConfig.RootCAs != nil)
+			assert.Len(t, tlsConfig.Certificates, tc.wantPairs)
+		})
+	}
+}
+
+func TestLoadUpstreamTLSConfig_RejectsNotYetValidClientCertificate(t *testing.T) {
+	pki := newTestUpstreamPKI(t)
+	files := upstreamTLSFiles{clientCertFile: pki.validClient.certPEMPath, clientKeyFile: pki.validClient.keyPEMPath}
+	_, err := loadUpstreamTLSConfig(files, time.Now().Add(-2*time.Hour))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not valid before")
+}
+
+func TestUpstreamHTTPClient_RefusesRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target was called")
+	}))
+	t.Cleanup(target.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	tlsConfig, err := loadUpstreamTLSConfig(upstreamTLSFiles{}, time.Now())
+	require.NoError(t, err)
+	client := newHTTPACSClient(redirector.URL, newUpstreamHTTPClient(tlsConfig), nil)
+	_, err = client.LedgerEnd(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP 307")
+}
+
+// ---------------------------------------------------------------------------
+// Flag validation
+// ---------------------------------------------------------------------------
+
+func TestParseFlags_UpstreamTLS(t *testing.T) {
+	base := testPartyFlags
+	cases := []struct {
+		name       string
+		args       []string
+		wantErrSub string
+		wantFiles  upstreamTLSFiles
+	}{
+		{
+			name:      "https with CA and client pair",
+			args:      []string{"--json-api", "https://participant.example:7575", "--json-api-ca-file", "ca.pem", "--json-api-client-cert-file", "c.pem", "--json-api-client-key-file", "k.pem"},
+			wantFiles: upstreamTLSFiles{caFile: "ca.pem", clientCertFile: "c.pem", clientKeyFile: "k.pem"},
+		},
+		{
+			name:      "https without TLS flags",
+			args:      []string{"--json-api", "https://participant.example:7575"},
+			wantFiles: upstreamTLSFiles{},
+		},
+		{
+			name:       "http with a CA file",
+			args:       []string{"--json-api", "http://127.0.0.1:6975", "--json-api-ca-file", "ca.pem"},
+			wantErrSub: "require an https --json-api",
+		},
+		{
+			name:       "http with a client pair",
+			args:       []string{"--json-api", "http://127.0.0.1:6975", "--json-api-client-cert-file", "c.pem", "--json-api-client-key-file", "k.pem"},
+			wantErrSub: "require an https --json-api",
+		},
+		{
+			name:       "cert without key",
+			args:       []string{"--json-api", "https://participant.example", "--json-api-client-cert-file", "c.pem"},
+			wantErrSub: "both or neither",
+		},
+		{
+			name:       "key without cert",
+			args:       []string{"--json-api", "https://participant.example", "--json-api-client-key-file", "k.pem"},
+			wantErrSub: "both or neither",
+		},
+		{
+			name:       "unsupported scheme",
+			args:       []string{"--json-api", "ftp://participant.example"},
+			wantErrSub: "http or https",
+		},
+		{
+			name:       "missing host",
+			args:       []string{"--json-api", "https://"},
+			wantErrSub: "host",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseFlags(append(append([]string{}, base...), tc.args...))
+			if tc.wantErrSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantFiles, opts.upstreamTLS)
+		})
+	}
+}
+
+func TestRun_FailsFastOnInvalidUpstreamTLSFile(t *testing.T) {
+	missingCA := filepath.Join(t.TempDir(), "missing-ca.pem")
+	opts := &options{
+		listen:                  "127.0.0.1:0",
+		jsonAPIBaseURL:          "https://127.0.0.1:1",
+		readerParties:           testReaderParties(),
+		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
+		maxUpstreamConcurrency:  defaultMaxUpstreamConcurrency,
+		upstreamTLS:             upstreamTLSFiles{caFile: missingCA},
+	}
+	var out syncBuffer
+	err := run(context.Background(), opts, &out)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--json-api-ca-file")
+	assert.Empty(t, listeningURL(out.String()))
+}

@@ -59,7 +59,7 @@ func TestActiveContractByID(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			entry, found, err := newHTTPACSClient(upstream.URL, "").ActiveContractByID(context.Background(), []partyID{"nttCustody::1"}, potContractID)
+			entry, found, err := newTestHTTPACSClient(upstream.URL, nil).ActiveContractByID(context.Background(), []partyID{"nttCustody::1"}, potContractID)
 			assert.Equal(t, potContractID, gotRequest.ContractID)
 			require.Contains(t, gotRequest.EventFormat.FiltersByParty, "nttCustody::1")
 			assert.True(t, gotRequest.EventFormat.Verbose)

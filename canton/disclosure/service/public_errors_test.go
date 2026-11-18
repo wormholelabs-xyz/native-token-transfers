@@ -118,7 +118,11 @@ func TestPublicErrorsHideUpstreamDetail(t *testing.T) {
 				require.NoError(t, os.WriteFile(tc.tokenPath, []byte("token\n"), 0o600))
 			}
 			upstreamURL := tc.upstreamURL(t)
-			srv := newTestServerWithClient(t, newHTTPACSClient(upstreamURL, tc.tokenPath))
+			var tokens bearerTokenSource
+			if tc.tokenPath != "" {
+				tokens = fileBearerTokenSource{path: tc.tokenPath}
+			}
+			srv := newTestServerWithClient(t, newTestHTTPACSClient(upstreamURL, tokens))
 			logger, captured := newCapturedLogger()
 			srv.logger = logger
 			if tc.removeTokenFile {

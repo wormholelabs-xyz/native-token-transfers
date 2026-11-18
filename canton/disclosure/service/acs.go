@@ -264,33 +264,39 @@ type acsResponseEntry struct {
 // httpACSClient is the production acsClient. It talks to one participant's JSON Ledger API v2.
 type httpACSClient struct {
 	baseURL          string
-	tokenFile        string // path to the bearer token file; when set, every upstream request carries its bearer token
+	tokens           bearerTokenSource // nil for an unauthenticated upstream
 	client           *http.Client
 	maxResponseBytes int64
 }
 
 // newHTTPACSClient panics when baseURL breaks checkJSONAPIURL; parseFlags checks it first.
-func newHTTPACSClient(baseURL, tokenFile string) *httpACSClient {
-	if err := checkJSONAPIURL(baseURL, tokenFile != ""); err != nil {
+func newHTTPACSClient(baseURL string, client *http.Client, tokens bearerTokenSource) *httpACSClient {
+	if client == nil {
+		panic("disclosure-service: newHTTPACSClient: nil http client")
+	}
+	if err := checkJSONAPIURL(baseURL, tokens != nil, upstreamTLSFiles{}); err != nil {
 		panic(err.Error())
 	}
 	return &httpACSClient{
 		baseURL:          strings.TrimRight(baseURL, "/"),
-		tokenFile:        tokenFile,
-		client:           newDirectUpstreamHTTPClient(),
+		tokens:           tokens,
+		client:           client,
 		maxResponseBytes: maxUpstreamResponseBytes,
 	}
 }
 
-// authHeader sets Authorization. It re-reads tokenFile on every call. An operator can rotate the
-// token file's contents, and the next request picks up the change immediately.
+// authHeader sets Authorization from the configured token source.
 func (c *httpACSClient) authHeader(req *http.Request) error {
-	if c.tokenFile == "" {
+	if c.tokens == nil {
 		return nil
 	}
-	token, err := readAccessToken(c.tokenFile)
+	token, err := c.tokens.BearerToken(req.Context())
 	if err != nil {
-		return fmt.Errorf("disclosure-service: reload access token: %w", err)
+		return fmt.Errorf("disclosure-service: upstream bearer token: %w", err)
+	}
+	//SECURITY: an auth mode is configured, so an empty token is an error, never an unauthenticated call.
+	if token == "" {
+		return fmt.Errorf("disclosure-service: upstream bearer token is empty")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
@@ -603,6 +609,23 @@ func wrapStreamError(err error) error {
 }
 
 // ---------------------------------------------------------------------------
+// Bearer token sources
+// ---------------------------------------------------------------------------
+
+// bearerTokenSource yields the bearer token for one upstream request.
+type bearerTokenSource interface {
+	BearerToken(ctx context.Context) (string, error)
+}
+
+// fileBearerTokenSource re-reads the token file on every call, so a rotated file takes effect on
+// the next request.
+type fileBearerTokenSource struct {
+	path string
+}
+
+func (source fileBearerTokenSource) BearerToken(context.Context) (string, error) {
+	return readAccessToken(source.path)
+}
 
 // readAccessToken reads and trims the bearer token file. It is separate from run() so the
 // trim-whitespace behavior is independently testable. A file saved with a trailing newline is

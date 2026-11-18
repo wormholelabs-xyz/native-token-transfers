@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,8 +38,8 @@ func TestCheckJSONAPIURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.rawURL, func(t *testing.T) {
-			errWithToken := checkJSONAPIURL(tc.rawURL, true)
-			errNoToken := checkJSONAPIURL(tc.rawURL, false)
+			errWithToken := checkJSONAPIURL(tc.rawURL, true, upstreamTLSFiles{})
+			errNoToken := checkJSONAPIURL(tc.rawURL, false, upstreamTLSFiles{})
 			assert.Equal(t, tc.wantErrWithToken, errWithToken != nil, "with token: %v", errWithToken)
 			assert.Equal(t, tc.wantErrNoToken, errNoToken != nil, "without token: %v", errNoToken)
 		})
@@ -53,9 +54,13 @@ func TestParseFlagsRejectsTokenOverCleartextToRemoteHost(t *testing.T) {
 }
 
 func TestNewHTTPACSClientAssertsURLRule(t *testing.T) {
-	assert.Panics(t, func() { newHTTPACSClient("http://10.0.0.5:7575", "/run/secrets/token") })
-	assert.NotPanics(t, func() { newHTTPACSClient("http://127.0.0.1:7575", "/run/secrets/token") })
-	assert.NotPanics(t, func() { newHTTPACSClient("http://10.0.0.5:7575", "") })
+	assert.Panics(t, func() {
+		newTestHTTPACSClient("http://10.0.0.5:7575", fileBearerTokenSource{path: "/run/secrets/token"})
+	})
+	assert.NotPanics(t, func() {
+		newTestHTTPACSClient("http://127.0.0.1:7575", fileBearerTokenSource{path: "/run/secrets/token"})
+	})
+	assert.NotPanics(t, func() { newTestHTTPACSClient("http://10.0.0.5:7575", nil) })
 }
 
 func TestIsLoopbackIPAddress(t *testing.T) {
@@ -78,7 +83,7 @@ func TestIsLoopbackIPAddress(t *testing.T) {
 }
 
 func TestDirectUpstreamHTTPClient(t *testing.T) {
-	client := newDirectUpstreamHTTPClient()
+	client := newUpstreamHTTPClient(&tls.Config{MinVersion: tls.VersionTLS12})
 	transport, isTransport := client.Transport.(*http.Transport)
 	require.True(t, isTransport)
 	assert.Nil(t, transport.Proxy, "the upstream client ignores HTTP_PROXY and HTTPS_PROXY")
@@ -99,7 +104,7 @@ func TestDirectUpstreamHTTPClient(t *testing.T) {
 	assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 	assert.Zero(t, redirectTargetHits.Load())
 
-	assert.NotNil(t, newHTTPACSClient("http://127.0.0.1:1", "").client.CheckRedirect, "the ACS client uses the direct client")
+	assert.NotNil(t, newTestHTTPACSClient("http://127.0.0.1:1", nil).client.CheckRedirect, "the ACS client uses the direct client")
 }
 
 func TestReadAccessTokenSize(t *testing.T) {

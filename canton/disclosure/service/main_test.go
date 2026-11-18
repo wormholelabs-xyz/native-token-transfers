@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,7 +67,7 @@ func TestActiveContracts_MultiPartyFilter(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, "")
+	client := newTestHTTPACSClient(upstream.URL, nil)
 	_, err := client.ActiveContracts(context.Background(), activeContractsQuery{readerParties: []partyID{"Alice", "Bob"}, template: template, activeAtOffset: 42, maxMatches: maxMatchingContractsPerQuery})
 	require.NoError(t, err)
 
@@ -94,7 +95,7 @@ func TestActiveContracts_DedupsSharedContracts(t *testing.T) {
 		_, _ = w.Write([]byte("[" + shared + "," + shared + "," + only + "]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, "")
+	client := newTestHTTPACSClient(upstream.URL, nil)
 	entries, err := client.ActiveContracts(context.Background(), activeContractsQuery{readerParties: []partyID{"Alice", "Bob"}, template: template, activeAtOffset: 42, maxMatches: maxMatchingContractsPerQuery})
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
@@ -166,6 +167,19 @@ func TestFlowRejectsWrongPackageName(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Fake upstream JSON Ledger API v2
 // ---------------------------------------------------------------------------
+
+// newTestUpstreamHTTPClient is the production upstream client with default TLS files.
+func newTestUpstreamHTTPClient(t *testing.T) *http.Client {
+	t.Helper()
+	tlsConfig, err := loadUpstreamTLSConfig(upstreamTLSFiles{}, time.Now())
+	require.NoError(t, err)
+	return newUpstreamHTTPClient(tlsConfig)
+}
+
+// newTestHTTPACSClient is an ACS client with the default TLS config and the given token source.
+func newTestHTTPACSClient(baseURL string, tokens bearerTokenSource) *httpACSClient {
+	return newHTTPACSClient(baseURL, newUpstreamHTTPClient(&tls.Config{MinVersion: tls.VersionTLS12}), tokens)
+}
 
 // newFakeJSONAPI starts an httptest server that stands in for the JSON Ledger API v2. It answers
 // /v2/state/ledger-end with a fixed offset and routes /v2/state/active-contracts to acHandler.
@@ -307,7 +321,7 @@ func testReaderParties() readerPartiesByRole {
 
 func newTestServer(t *testing.T, upstream *httptest.Server) *server {
 	t.Helper()
-	return newTestServerWithClient(t, newHTTPACSClient(upstream.URL, ""))
+	return newTestServerWithClient(t, newTestHTTPACSClient(upstream.URL, nil))
 }
 
 // newTestServerWithClient builds a server over acs with testReaderParties.
@@ -367,7 +381,7 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, tokenPath)
+	client := newTestHTTPACSClient(upstream.URL, fileBearerTokenSource{path: tokenPath})
 	_, err = client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
@@ -387,7 +401,7 @@ func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, tokenPath)
+	client := newTestHTTPACSClient(upstream.URL, fileBearerTokenSource{path: tokenPath})
 	_, err := client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer first-token", capture.get())

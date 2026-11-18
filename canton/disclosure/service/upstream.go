@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,8 +23,8 @@ func isLoopbackIPAddress(host string) bool {
 }
 
 // checkJSONAPIURL enforces an http(s) URL with a host and no userinfo, query, or fragment.
-// upstreamAuthConfigured needs https, or http to a loopback IP address.
-func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool) error {
+// upstreamAuthConfigured needs https, or http to a loopback IP address. TLS files need https.
+func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool, upstreamTLS upstreamTLSFiles) error {
 	jsonAPIURL, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("disclosure-service: --json-api %q: %w", rawURL, err)
@@ -47,21 +48,36 @@ func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool) error {
 	if upstreamAuthConfigured && jsonAPIURL.Scheme == "http" && !isLoopbackIPAddress(jsonAPIURL.Hostname()) {
 		return fmt.Errorf("disclosure-service: --json-api %q: an upstream token needs https, or http to a loopback IP address", rawURL)
 	}
+	if err := upstreamTLS.checkClientPairComplete(); err != nil {
+		return err
+	}
+	//SECURITY: TLS flags on an http URL would leave the operator believing the link is encrypted.
+	if upstreamTLS.anySet() && jsonAPIURL.Scheme != "https" {
+		return fmt.Errorf("disclosure-service: --json-api-ca-file, --json-api-client-cert-file and --json-api-client-key-file require an https --json-api, got %q", rawURL)
+	}
 	return nil
 }
 
-// newDirectUpstreamHTTPClient connects to the JSON API directly and ignores proxy variables. It
-// returns a redirect to the caller as the response.
-func newDirectUpstreamHTTPClient() *http.Client {
+// newUpstreamHTTPClient connects to the JSON API directly with tlsConfig and ignores proxy
+// variables. It returns a redirect to the caller as the response.
+func newUpstreamHTTPClient(tlsConfig *tls.Config) *http.Client {
+	if tlsConfig == nil {
+		panic("disclosure-service: newUpstreamHTTPClient: nil TLS config")
+	}
+	if tlsConfig.MinVersion < tls.VersionTLS12 {
+		panic("disclosure-service: newUpstreamHTTPClient: TLS minimum below 1.2")
+	}
 	defaultTransport, isTransport := http.DefaultTransport.(*http.Transport)
 	if !isTransport {
 		panic("disclosure-service: http.DefaultTransport is not an *http.Transport")
 	}
 	transport := defaultTransport.Clone()
 	transport.Proxy = nil
+	transport.TLSClientConfig = tlsConfig
 	return &http.Client{
 		Timeout:   httpClientTimeout,
 		Transport: transport,
+		//SECURITY: a 307/308 re-sends the request body to any scheme or host.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
