@@ -839,72 +839,72 @@ func TestParseByVAA(t *testing.T) {
 }
 
 func TestFindManager(t *testing.T) {
-	mk := func(addr string) decodedEntry[daNttManager] {
+	managerAt := func(addr string) decodedEntry[daNttManager] {
 		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: addr}}
 	}
 	addrA := strings.Repeat("aa", 32)
 	addrB := strings.Repeat("bb", 32)
 
 	t.Run("found", func(t *testing.T) {
-		m, err := findManager([]decodedEntry[daNttManager]{mk(addrA), mk(addrB)}, addrA)
+		match, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrB)}, managerAddressHex{hex: addrA})
 		require.NoError(t, err)
-		assert.Equal(t, "cid-"+addrA, m.entry.ContractID)
+		assert.Equal(t, "cid-"+addrA, match.entry.ContractID)
 	})
 	t.Run("not found is 404", func(t *testing.T) {
-		_, err := findManager([]decodedEntry[daNttManager]{mk(addrA)}, addrB)
+		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA)}, managerAddressHex{hex: addrB})
 		requireFlowErrorStatus(t, err, http.StatusNotFound)
 	})
 	t.Run("duplicate is 500", func(t *testing.T) {
-		_, err := findManager([]decodedEntry[daNttManager]{mk(addrA), mk(addrA)}, addrA)
+		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrA)}, managerAddressHex{hex: addrA})
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }
 
 func TestFindGuardianAnchor(t *testing.T) {
-	mk := func(gg string) decodedEntry[daGuardianAnchor] {
+	anchorOf := func(gg string) decodedEntry[daGuardianAnchor] {
 		return decodedEntry[daGuardianAnchor]{entry: acsEntry{ContractID: "cid-" + gg}, value: daGuardianAnchor{GuardianGovernance: gg}}
 	}
 	t.Run("gg given, exactly one match", func(t *testing.T) {
-		m, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{mk("gg1"), mk("gg2")}, "gg1", "CoreState")
+		match, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{anchorOf("gg1"), anchorOf("gg2")}, "gg1", "CoreState")
 		require.NoError(t, err)
-		assert.Equal(t, "cid-gg1", m.entry.ContractID)
+		assert.Equal(t, "cid-gg1", match.entry.ContractID)
 	})
 	t.Run("gg given, zero matches is 404", func(t *testing.T) {
-		_, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{mk("gg2")}, "gg1", "CoreState")
+		_, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{anchorOf("gg2")}, "gg1", "CoreState")
 		requireFlowErrorStatus(t, err, http.StatusNotFound)
 	})
 	t.Run("gg empty, sole entry", func(t *testing.T) {
-		m, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{mk("gg1")}, "", "CoreState")
+		match, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{anchorOf("gg1")}, "", "CoreState")
 		require.NoError(t, err)
-		assert.Equal(t, "cid-gg1", m.entry.ContractID)
+		assert.Equal(t, "cid-gg1", match.entry.ContractID)
 	})
 	t.Run("gg empty, zero entries is 500", func(t *testing.T) {
 		_, err := findGuardianAnchor(nil, "", "CoreState")
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 	t.Run("gg empty, two entries is 409", func(t *testing.T) {
-		_, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{mk("gg1"), mk("gg2")}, "", "CoreState")
+		_, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{anchorOf("gg1"), anchorOf("gg2")}, "", "CoreState")
 		requireFlowErrorStatus(t, err, http.StatusConflict)
 	})
 }
 
 func TestCoveringReplayNode(t *testing.T) {
-	mk := func(consumer, namespace, prefix string) decodedEntry[daReplayNode] {
+	replayNode := func(consumer, namespace, prefix string) decodedEntry[daReplayNode] {
 		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: consumer, Namespace: namespace, Prefix: prefix}}
 	}
-	digest := strings.Repeat("cd", 32)
+	digest := vaaDigestHex{hex: strings.Repeat("cd", 32)}
 
 	t.Run("found by prefix", func(t *testing.T) {
-		m, err := coveringReplayNode([]decodedEntry[daReplayNode]{mk("gg1", "ns1", "cd")}, "gg1", "ns1", digest)
+		match, err := coveringReplayNode([]decodedEntry[daReplayNode]{replayNode("gg1", "ns1", "cd")}, "gg1", "ns1", digest)
 		require.NoError(t, err)
-		assert.Equal(t, "cid-cd", m.entry.ContractID)
+		assert.Equal(t, "cid-cd", match.entry.ContractID)
 	})
 	t.Run("zero covering nodes is 500", func(t *testing.T) {
-		_, err := coveringReplayNode([]decodedEntry[daReplayNode]{mk("gg1", "ns1", "ff")}, "gg1", "ns1", digest)
+		_, err := coveringReplayNode([]decodedEntry[daReplayNode]{replayNode("gg1", "ns1", "ff")}, "gg1", "ns1", digest)
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 	t.Run("two covering nodes is 500", func(t *testing.T) {
-		entries := []decodedEntry[daReplayNode]{mk("gg1", "ns1", ""), mk("gg1", "ns1", "cd")}
+		entries := []decodedEntry[daReplayNode]{replayNode("gg1", "ns1", ""), replayNode("gg1", "ns1", "cd")}
 		_, err := coveringReplayNode(entries, "gg1", "ns1", digest)
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
@@ -912,58 +912,59 @@ func TestCoveringReplayNode(t *testing.T) {
 
 func TestFindLockedLedger(t *testing.T) {
 	addr := strings.Repeat("aa", 32)
-	mk := func() decodedEntry[daLockedLedger] {
+	manager := managerAddressHex{hex: addr}
+	ledgerOfManager := func() decodedEntry[daLockedLedger] {
 		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: addr}}
 	}
 	t.Run("found", func(t *testing.T) {
-		m, err := findLockedLedger([]decodedEntry[daLockedLedger]{mk()}, addr)
+		match, err := findLockedLedger([]decodedEntry[daLockedLedger]{ledgerOfManager()}, manager)
 		require.NoError(t, err)
-		assert.Equal(t, "cid-"+addr, m.entry.ContractID)
+		assert.Equal(t, "cid-"+addr, match.entry.ContractID)
 	})
 	t.Run("not found is 500", func(t *testing.T) {
-		_, err := findLockedLedger(nil, addr)
+		_, err := findLockedLedger(nil, manager)
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 	t.Run("duplicate is 500", func(t *testing.T) {
-		_, err := findLockedLedger([]decodedEntry[daLockedLedger]{mk(), mk()}, addr)
+		_, err := findLockedLedger([]decodedEntry[daLockedLedger]{ledgerOfManager(), ledgerOfManager()}, manager)
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }
 
 func TestFindTransceiverEmitter(t *testing.T) {
-	mk := func(owner string, id json.Number) decodedEntry[daEmitter] {
+	emitterOf := func(owner string, id json.Number) decodedEntry[daEmitter] {
 		return decodedEntry[daEmitter]{entry: acsEntry{ContractID: "emitter-cid"}, value: daEmitter{Owner: owner, EmitterId: id}}
 	}
 	t.Run("found, numeric emitterId", func(t *testing.T) {
-		m, err := findTransceiverEmitter([]decodedEntry[daEmitter]{mk("gg1", json.Number("7"))}, json.Number("7"), "gg1")
+		match, err := findTransceiverEmitter([]decodedEntry[daEmitter]{emitterOf("gg1", json.Number("7"))}, json.Number("7"), "gg1")
 		require.NoError(t, err)
-		assert.Equal(t, "emitter-cid", m.entry.ContractID)
+		assert.Equal(t, "emitter-cid", match.entry.ContractID)
 	})
 	t.Run("found, string emitterId", func(t *testing.T) {
-		_, err := findTransceiverEmitter([]decodedEntry[daEmitter]{mk("gg1", json.Number("7"))}, json.Number("7"), "gg1")
+		_, err := findTransceiverEmitter([]decodedEntry[daEmitter]{emitterOf("gg1", json.Number("7"))}, json.Number("7"), "gg1")
 		require.NoError(t, err)
 	})
 	t.Run("owner mismatch is 500", func(t *testing.T) {
-		_, err := findTransceiverEmitter([]decodedEntry[daEmitter]{mk("gg2", json.Number("7"))}, json.Number("7"), "gg1")
+		_, err := findTransceiverEmitter([]decodedEntry[daEmitter]{emitterOf("gg2", json.Number("7"))}, json.Number("7"), "gg1")
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 	t.Run("id mismatch is 500", func(t *testing.T) {
-		_, err := findTransceiverEmitter([]decodedEntry[daEmitter]{mk("gg1", json.Number("8"))}, json.Number("7"), "gg1")
+		_, err := findTransceiverEmitter([]decodedEntry[daEmitter]{emitterOf("gg1", json.Number("8"))}, json.Number("7"), "gg1")
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }
 
 func TestFindCanonicalCoinFactory(t *testing.T) {
-	mk := func(admin string) decodedEntry[daCoinFactory] {
+	factoryAdminedBy := func(admin string) decodedEntry[daCoinFactory] {
 		return decodedEntry[daCoinFactory]{entry: acsEntry{ContractID: "cid-" + admin}, value: daCoinFactory{Admin: admin}}
 	}
 	t.Run("found", func(t *testing.T) {
-		m, err := findCanonicalCoinFactory([]decodedEntry[daCoinFactory]{mk("gg1")}, "gg1")
+		match, err := findCanonicalCoinFactory([]decodedEntry[daCoinFactory]{factoryAdminedBy("gg1")}, "gg1")
 		require.NoError(t, err)
-		assert.Equal(t, "cid-gg1", m.entry.ContractID)
+		assert.Equal(t, "cid-gg1", match.entry.ContractID)
 	})
 	t.Run("not found is 500", func(t *testing.T) {
-		_, err := findCanonicalCoinFactory([]decodedEntry[daCoinFactory]{mk("gg2")}, "gg1")
+		_, err := findCanonicalCoinFactory([]decodedEntry[daCoinFactory]{factoryAdminedBy("gg2")}, "gg1")
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }
@@ -983,14 +984,14 @@ func TestRequireTokenConfig(t *testing.T) {
 
 func TestFindPreapproval(t *testing.T) {
 	inst := daInstrumentId{Admin: "gg1", Id: "instr-1"}
-	mk := func(owner string) decodedEntry[daPreapproval] {
+	preapprovalOf := func(owner string) decodedEntry[daPreapproval] {
 		return decodedEntry[daPreapproval]{entry: acsEntry{ContractID: "cid-" + owner}, value: daPreapproval{Owner: owner, InstrumentId: inst}}
 	}
 	t.Run("found", func(t *testing.T) {
-		m, found, err := findPreapproval([]decodedEntry[daPreapproval]{mk("alice")}, "alice", inst, "TransferPreapproval")
+		match, found, err := findPreapproval([]decodedEntry[daPreapproval]{preapprovalOf("alice")}, "alice", inst, "TransferPreapproval")
 		require.NoError(t, err)
 		assert.True(t, found)
-		assert.Equal(t, "cid-alice", m.entry.ContractID)
+		assert.Equal(t, "cid-alice", match.entry.ContractID)
 	})
 	t.Run("absent is not an error", func(t *testing.T) {
 		_, found, err := findPreapproval(nil, "alice", inst, "TransferPreapproval")
@@ -998,7 +999,7 @@ func TestFindPreapproval(t *testing.T) {
 		assert.False(t, found)
 	})
 	t.Run("duplicate is 500", func(t *testing.T) {
-		_, _, err := findPreapproval([]decodedEntry[daPreapproval]{mk("alice"), mk("alice")}, "alice", inst, "TransferPreapproval")
+		_, _, err := findPreapproval([]decodedEntry[daPreapproval]{preapprovalOf("alice"), preapprovalOf("alice")}, "alice", inst, "TransferPreapproval")
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }

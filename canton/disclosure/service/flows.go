@@ -153,7 +153,7 @@ type flowDisclosureEntry struct {
 	SynchronizerID   string `json:"synchronizerId,omitempty"`
 }
 
-// flowMissingEntry names a set member the disclosing party cannot see; the client supplies it.
+// flowMissingEntry names a set member no reader party can see; the client supplies it.
 type flowMissingEntry struct {
 	Role   string `json:"role"`
 	Reason string `json:"reason"`
@@ -165,13 +165,13 @@ type flowResponse struct {
 	Missing     []flowMissingEntry    `json:"missing"`
 }
 
-func discloseAs(role string, e acsEntry) flowDisclosureEntry {
+func discloseAs(role string, entry acsEntry) flowDisclosureEntry {
 	return flowDisclosureEntry{
 		Role:             role,
-		TemplateID:       e.TemplateID,
-		ContractID:       e.ContractID,
-		CreatedEventBlob: e.CreatedEventBlob,
-		SynchronizerID:   e.SynchronizerID,
+		TemplateID:       entry.TemplateID,
+		ContractID:       entry.ContractID,
+		CreatedEventBlob: entry.CreatedEventBlob,
+		SynchronizerID:   entry.SynchronizerID,
 	}
 }
 
@@ -189,7 +189,7 @@ type flowError struct {
 	msg    string
 }
 
-func (e *flowError) Error() string { return e.msg }
+func (flowErr *flowError) Error() string { return flowErr.msg }
 
 func newFlowError(status int, format string, args ...any) error {
 	return &flowError{status: status, msg: "disclosure-service: " + fmt.Sprintf(format, args...)}
@@ -207,11 +207,11 @@ type decodedEntry[T any] struct {
 func matchOne[T any](entries []decodedEntry[T], pred func(decodedEntry[T]) bool) (decodedEntry[T], int) {
 	var match decodedEntry[T]
 	count := 0
-	for _, e := range entries {
-		if pred(e) {
+	for _, entry := range entries {
+		if pred(entry) {
 			count++
 			if count == 1 {
-				match = e
+				match = entry
 			}
 		}
 	}
@@ -221,11 +221,11 @@ func matchOne[T any](entries []decodedEntry[T], pred func(decodedEntry[T]) bool)
 // exactlyOne requires exactly one match; both zero and multiple matches are the same class of
 // invariant violation for a selection-critical role.
 func exactlyOne[T any](entries []decodedEntry[T], label string, pred func(decodedEntry[T]) bool) (decodedEntry[T], error) {
-	m, n := matchOne(entries, pred)
-	if n != 1 {
-		return decodedEntry[T]{}, newFlowError(http.StatusInternalServerError, "found %d %s, expected exactly 1", n, label)
+	match, matchCount := matchOne(entries, pred)
+	if matchCount != 1 {
+		return decodedEntry[T]{}, newFlowError(http.StatusInternalServerError, "found %d %s, expected exactly 1", matchCount, label)
 	}
-	return m, nil
+	return match, nil
 }
 
 // exactFieldMatch requires the createArgument field at fieldPath to equal wantValue.
@@ -239,13 +239,13 @@ func hexFieldMatch(wantHex string, fieldPath ...string) createArgumentFieldMatch
 }
 
 // digestPrefixes returns the 65 prefixes of digest, from "" to the whole digest.
-func digestPrefixes(digest string) []string {
-	if len(digest) != 64 {
-		panic(fmt.Sprintf("disclosure-service: digest has %d characters, expected 64", len(digest)))
+func digestPrefixes(digest vaaDigestHex) []string {
+	if len(digest.hex) != 64 {
+		panic(fmt.Sprintf("disclosure-service: digest has %d characters, expected 64", len(digest.hex)))
 	}
-	prefixes := make([]string, 0, len(digest)+1)
-	for prefixLength := 0; prefixLength <= len(digest); prefixLength++ {
-		prefixes = append(prefixes, digest[:prefixLength])
+	prefixes := make([]string, 0, len(digest.hex)+1)
+	for prefixLength := 0; prefixLength <= len(digest.hex); prefixLength++ {
+		prefixes = append(prefixes, digest.hex[:prefixLength])
 	}
 	return prefixes
 }
@@ -280,12 +280,12 @@ func fetchDecodedQuery[T any](ctx context.Context, s *server, query activeContra
 		return nil, err
 	}
 	out := make([]decodedEntry[T], 0, len(entries))
-	for _, e := range entries {
-		var v T
-		if err := json.Unmarshal(e.CreateArgument, &v); err != nil {
-			return nil, newFlowError(http.StatusInternalServerError, "decode %s createArgument for contract %s: %v", query.template, e.ContractID, err)
+	for _, entry := range entries {
+		var decodedValue T
+		if err := json.Unmarshal(entry.CreateArgument, &decodedValue); err != nil {
+			return nil, newFlowError(http.StatusInternalServerError, "decode %s createArgument for contract %s: %v", query.template, entry.ContractID, err)
 		}
-		out = append(out, decodedEntry[T]{entry: e, value: v})
+		out = append(out, decodedEntry[T]{entry: entry, value: decodedValue})
 	}
 	return out, nil
 }
@@ -345,17 +345,17 @@ func checkReserveCustodianFollowsAdmin(mgr daNttManager) error {
 // findManager returns the NttManager whose managerAddress equals manager (already normalized:
 // lowercase, 64 hex chars). Zero matches is a 404: the client named an unknown deployment. Two
 // or more is a 500: managerAddress is meant to be unique per deployment.
-func findManager(entries []decodedEntry[daNttManager], manager string) (decodedEntry[daNttManager], error) {
-	m, n := matchOne(entries, func(e decodedEntry[daNttManager]) bool {
-		return strings.ToLower(e.value.ManagerAddress) == manager
+func findManager(entries []decodedEntry[daNttManager], manager managerAddressHex) (decodedEntry[daNttManager], error) {
+	match, matchCount := matchOne(entries, func(entry decodedEntry[daNttManager]) bool {
+		return strings.ToLower(entry.value.ManagerAddress) == manager.hex
 	})
 	switch {
-	case n == 0:
+	case matchCount == 0:
 		return decodedEntry[daNttManager]{}, newFlowError(http.StatusNotFound, "no NttManager found for managerAddress %s", manager)
-	case n > 1:
-		return decodedEntry[daNttManager]{}, newFlowError(http.StatusInternalServerError, "%d NttManager contracts found for managerAddress %s, expected exactly 1", n, manager)
+	case matchCount > 1:
+		return decodedEntry[daNttManager]{}, newFlowError(http.StatusInternalServerError, "%d NttManager contracts found for managerAddress %s, expected exactly 1", matchCount, manager)
 	default:
-		return m, nil
+		return match, nil
 	}
 }
 
@@ -363,45 +363,45 @@ func findManager(entries []decodedEntry[daNttManager], manager string) (decodedE
 // (the register flow's optional param), it instead requires the fetched set to hold exactly one
 // entry; an ambiguous set without gg is a 409, because the client resolves it by supplying gg.
 // Serves CoreState, NttGovernance, EmitterRegistry, and ReplayRootRegistry.
-func findGuardianAnchor(entries []decodedEntry[daGuardianAnchor], gg, label string) (decodedEntry[daGuardianAnchor], error) {
+func findGuardianAnchor(entries []decodedEntry[daGuardianAnchor], gg partyID, label string) (decodedEntry[daGuardianAnchor], error) {
 	if gg != "" {
-		m, n := matchOne(entries, func(e decodedEntry[daGuardianAnchor]) bool {
-			return e.value.GuardianGovernance == gg
+		match, matchCount := matchOne(entries, func(entry decodedEntry[daGuardianAnchor]) bool {
+			return partyID(entry.value.GuardianGovernance) == gg
 		})
 		switch {
-		case n == 1:
-			return m, nil
-		case n == 0:
+		case matchCount == 1:
+			return match, nil
+		case matchCount == 0:
 			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusNotFound, "no %s for gg %s", label, gg)
 		default:
-			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusInternalServerError, "found %d %s for gg %s, expected exactly 1", n, label, gg)
+			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusInternalServerError, "found %d %s for gg %s, expected exactly 1", matchCount, label, gg)
 		}
 	}
-	m, n := matchOne(entries, func(decodedEntry[daGuardianAnchor]) bool { return true })
+	match, matchCount := matchOne(entries, func(decodedEntry[daGuardianAnchor]) bool { return true })
 	switch {
-	case n == 1:
-		return m, nil
-	case n == 0:
+	case matchCount == 1:
+		return match, nil
+	case matchCount == 0:
 		return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusInternalServerError, "found 0 %s, expected exactly 1", label)
 	default:
-		return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusConflict, "found %d %s and no gg param to disambiguate", n, label)
+		return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusConflict, "found %d %s and no gg param to disambiguate", matchCount, label)
 	}
 }
 
 // coveringReplayNode finds the one node of consumer's namespace trie that covers digest.
 // Exactly one node covers any digest (the trie partition invariant); more or fewer shows a
 // forked or broken trie.
-func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer, namespace, digest string) (decodedEntry[daReplayNode], error) {
-	return exactlyOne(entries, roleCoveringReplayNode, func(e decodedEntry[daReplayNode]) bool {
-		return e.value.Consumer == consumer &&
-			e.value.Namespace == namespace &&
-			strings.HasPrefix(digest, strings.ToLower(e.value.Prefix))
+func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer, namespace string, digest vaaDigestHex) (decodedEntry[daReplayNode], error) {
+	return exactlyOne(entries, roleCoveringReplayNode, func(entry decodedEntry[daReplayNode]) bool {
+		return entry.value.Consumer == consumer &&
+			entry.value.Namespace == namespace &&
+			strings.HasPrefix(digest.hex, strings.ToLower(entry.value.Prefix))
 	})
 }
 
-func findLockedLedger(entries []decodedEntry[daLockedLedger], managerAddress string) (decodedEntry[daLockedLedger], error) {
-	return exactlyOne(entries, roleLockedLedger, func(e decodedEntry[daLockedLedger]) bool {
-		return strings.ToLower(e.value.ManagerAddress) == managerAddress
+func findLockedLedger(entries []decodedEntry[daLockedLedger], manager managerAddressHex) (decodedEntry[daLockedLedger], error) {
+	return exactlyOne(entries, roleLockedLedger, func(entry decodedEntry[daLockedLedger]) bool {
+		return strings.ToLower(entry.value.ManagerAddress) == manager.hex
 	})
 }
 
@@ -412,23 +412,23 @@ func findTransceiverEmitter(entries []decodedEntry[daEmitter], emitterID json.Nu
 	if err != nil {
 		return decodedEntry[daEmitter]{}, newFlowError(http.StatusInternalServerError, "manager transceiverEmitterId %q is not an integer: %v", emitterID, err)
 	}
-	return exactlyOne(entries, roleTransceiverEmitter, func(e decodedEntry[daEmitter]) bool {
-		got, err := e.value.EmitterId.Int64()
-		return err == nil && got == want && e.value.Owner == owner
+	return exactlyOne(entries, roleTransceiverEmitter, func(entry decodedEntry[daEmitter]) bool {
+		got, err := entry.value.EmitterId.Int64()
+		return err == nil && got == want && entry.value.Owner == owner
 	})
 }
 
 // checkCoinFactoryAdminIsGuardianGovernance mirrors requireCanonicalFactory's admin check.
-func checkCoinFactoryAdminIsGuardianGovernance(factory decodedEntry[daCoinFactory], gg string) error {
-	if factory.value.Admin != gg {
+func checkCoinFactoryAdminIsGuardianGovernance(factory decodedEntry[daCoinFactory], gg partyID) error {
+	if partyID(factory.value.Admin) != gg {
 		return newFlowError(http.StatusInternalServerError, "committed CoinFactory %s has admin %s, expected guardianGovernance %s", factory.entry.ContractID, factory.value.Admin, gg)
 	}
 	return nil
 }
 
-func findCanonicalCoinFactory(entries []decodedEntry[daCoinFactory], gg string) (decodedEntry[daCoinFactory], error) {
-	return exactlyOne(entries, roleCanonicalCoinFactory, func(e decodedEntry[daCoinFactory]) bool {
-		return e.value.Admin == gg
+func findCanonicalCoinFactory(entries []decodedEntry[daCoinFactory], gg partyID) (decodedEntry[daCoinFactory], error) {
+	return exactlyOne(entries, roleCanonicalCoinFactory, func(entry decodedEntry[daCoinFactory]) bool {
+		return partyID(entry.value.Admin) == gg
 	})
 }
 
@@ -455,17 +455,17 @@ func requireTokenConfig(mgr daNttManager, want, flow string) error {
 // TransferPreapproval (identical decode shape). Zero matches reports !found, and the caller
 // decides whether that is selection-critical (DepositPreapproval) or a "missing" entry
 // (TransferPreapproval). Two or more is always a 500: ambiguous which contract applies.
-func findPreapproval(entries []decodedEntry[daPreapproval], owner string, instrumentID daInstrumentId, label string) (decodedEntry[daPreapproval], bool, error) {
-	m, n := matchOne(entries, func(e decodedEntry[daPreapproval]) bool {
-		return e.value.Owner == owner && e.value.InstrumentId == instrumentID
+func findPreapproval(entries []decodedEntry[daPreapproval], owner partyID, instrumentID daInstrumentId, label string) (decodedEntry[daPreapproval], bool, error) {
+	match, matchCount := matchOne(entries, func(entry decodedEntry[daPreapproval]) bool {
+		return partyID(entry.value.Owner) == owner && entry.value.InstrumentId == instrumentID
 	})
 	switch {
-	case n == 0:
+	case matchCount == 0:
 		return decodedEntry[daPreapproval]{}, false, nil
-	case n > 1:
-		return decodedEntry[daPreapproval]{}, false, newFlowError(http.StatusInternalServerError, "%d %s contracts found for owner %s, expected at most 1", n, label, owner)
+	case matchCount > 1:
+		return decodedEntry[daPreapproval]{}, false, newFlowError(http.StatusInternalServerError, "%d %s contracts found for owner %s, expected at most 1", matchCount, label, owner)
 	default:
-		return m, true, nil
+		return match, true, nil
 	}
 }
 
@@ -490,12 +490,12 @@ func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], 
 
 // --- Fetch wrappers: one upstream query plus the matching selector ---
 
-func (s *server) fetchManager(ctx context.Context, managerHex string, offset int64) (decodedEntry[daNttManager], error) {
-	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(managerHex, "managerAddress"))
+func (s *server) fetchManager(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daNttManager], error) {
+	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(manager.hex, "managerAddress"))
 	if err != nil {
 		return decodedEntry[daNttManager]{}, err
 	}
-	mgr, err := findManager(entries, managerHex)
+	mgr, err := findManager(entries, manager)
 	if err != nil {
 		return decodedEntry[daNttManager]{}, err
 	}
@@ -505,15 +505,15 @@ func (s *server) fetchManager(ctx context.Context, managerHex string, offset int
 	return mgr, nil
 }
 
-func (s *server) fetchCoreState(ctx context.Context, gg string, offset int64) (decodedEntry[daGuardianAnchor], error) {
+func (s *server) fetchCoreState(ctx context.Context, gg partyID, offset int64) (decodedEntry[daGuardianAnchor], error) {
 	return s.fetchGuardianAnchor(ctx, tailCoreState, gg, roleCoreState, offset)
 }
 
 // fetchGuardianAnchor filters on guardianGovernance when gg is set.
-func (s *server) fetchGuardianAnchor(ctx context.Context, tail, gg, label string, offset int64) (decodedEntry[daGuardianAnchor], error) {
+func (s *server) fetchGuardianAnchor(ctx context.Context, tail string, gg partyID, label string, offset int64) (decodedEntry[daGuardianAnchor], error) {
 	var fieldMatches []createArgumentFieldMatch
 	if gg != "" {
-		fieldMatches = append(fieldMatches, exactFieldMatch(gg, "guardianGovernance"))
+		fieldMatches = append(fieldMatches, exactFieldMatch(string(gg), "guardianGovernance"))
 	}
 	entries, err := fetchDecoded[daGuardianAnchor](ctx, s, tail, offset, fieldMatches...)
 	if err != nil {
@@ -522,7 +522,7 @@ func (s *server) fetchGuardianAnchor(ctx context.Context, tail, gg, label string
 	return findGuardianAnchor(entries, gg, label)
 }
 
-func (s *server) fetchCoveringNode(ctx context.Context, consumer, namespace, digest string, offset int64) (decodedEntry[daReplayNode], error) {
+func (s *server) fetchCoveringNode(ctx context.Context, consumer, namespace string, digest vaaDigestHex, offset int64) (decodedEntry[daReplayNode], error) {
 	entries, err := fetchDecoded[daReplayNode](ctx, s, tailReplayNode, offset,
 		exactFieldMatch(consumer, "consumer"),
 		exactFieldMatch(namespace, "namespace"),
@@ -533,13 +533,12 @@ func (s *server) fetchCoveringNode(ctx context.Context, consumer, namespace, dig
 	return coveringReplayNode(entries, consumer, namespace, digest)
 }
 
-func (s *server) fetchLedger(ctx context.Context, managerAddress string, offset int64) (decodedEntry[daLockedLedger], error) {
-	managerAddress = strings.ToLower(managerAddress)
-	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(managerAddress, "managerAddress"))
+func (s *server) fetchLedger(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daLockedLedger], error) {
+	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(manager.hex, "managerAddress"))
 	if err != nil {
 		return decodedEntry[daLockedLedger]{}, err
 	}
-	return findLockedLedger(entries, managerAddress)
+	return findLockedLedger(entries, manager)
 }
 
 // fetchCommittedFactory checks factory's tag against wantTag, then reads the CoinFactory that
@@ -548,7 +547,7 @@ func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory
 	if err := requireFactoryTag(factory, wantTag); err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
-	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoinFactory), factory.Value)
+	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoinFactory), contractID(factory.Value))
 	if err != nil {
 		return decodedEntry[daCoinFactory]{}, newFlowError(upstreamErrorStatus(err), "read committed factory %s: %v", factory.Value, err)
 	}
@@ -572,25 +571,25 @@ func (s *server) fetchCommittedCanonicalCoinFactory(ctx context.Context, mgr daN
 	if err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
-	if err := checkCoinFactoryAdminIsGuardianGovernance(factoryEntry, mgr.GuardianGovernance); err != nil {
+	if err := checkCoinFactoryAdminIsGuardianGovernance(factoryEntry, partyID(mgr.GuardianGovernance)); err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
 	return factoryEntry, nil
 }
 
 // appendTransferPreapprovalOrMissing adds owner's TransferPreapproval for the deployment's instrument
-// under role, or names role as missing when the disclosing parties cannot see it.
-func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner string, instrumentID daInstrumentId, role string, offset int64, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
+// under role, or names role as missing when its reader parties cannot see it.
+func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner partyID, instrumentID daInstrumentId, role string, offset int64, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
 	preapprovals, err := fetchDecoded[daPreapproval](ctx, s, tailTransferPreapproval, offset, preapprovalFieldMatches(owner, instrumentID)...)
 	if err != nil {
 		return nil, nil, err
 	}
-	pre, found, err := findPreapproval(preapprovals, owner, instrumentID, role)
+	preapproval, found, err := findPreapproval(preapprovals, owner, instrumentID, role)
 	if err != nil {
 		return nil, nil, err
 	}
 	if found {
-		return append(disclosures, discloseAs(role, pre.entry)), missing, nil
+		return append(disclosures, discloseAs(role, preapproval.entry)), missing, nil
 	}
 	return disclosures, append(missing, missingEntry(role)), nil
 }
@@ -602,7 +601,7 @@ func isCustodyPotHoldingTemplate(pot acsEntry) bool {
 
 // fetchPotHolding reads the custody pot by the contract id its LockedLedger names. The read is
 // not pinned to the request offset; an archived pot gives a failed submission and a retry.
-func (s *server) fetchPotHolding(ctx context.Context, potContractID string) (acsEntry, bool, error) {
+func (s *server) fetchPotHolding(ctx context.Context, potContractID contractID) (acsEntry, bool, error) {
 	pot, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoin), potContractID)
 	if err != nil {
 		return acsEntry{}, false, newFlowError(upstreamErrorStatus(err), "read custody pot %s: %v", potContractID, err)
@@ -618,9 +617,9 @@ func (s *server) fetchPotHolding(ctx context.Context, potContractID string) (acs
 }
 
 // preapprovalFieldMatches selects the DepositPreapproval or TransferPreapproval of owner for instrumentID.
-func preapprovalFieldMatches(owner string, instrumentID daInstrumentId) []createArgumentFieldMatch {
+func preapprovalFieldMatches(owner partyID, instrumentID daInstrumentId) []createArgumentFieldMatch {
 	return []createArgumentFieldMatch{
-		exactFieldMatch(owner, "owner"),
+		exactFieldMatch(string(owner), "owner"),
 		exactFieldMatch(instrumentID.Admin, "instrumentId", "admin"),
 		exactFieldMatch(instrumentID.Id, "instrumentId", "id"),
 	}
@@ -641,24 +640,22 @@ func (s *server) fetchTransceiverEmitter(ctx context.Context, manager daNttManag
 
 // assembleRelease mirrors releaseDisclosures.
 func (s *server) assembleRelease(ctx context.Context, request releaseRequest, offset int64) (*flowResponse, error) {
-	managerHex, digest, recipient := request.manager.hex, request.digest.hex, request.recipient
-
-	mgr, err := s.fetchManager(ctx, managerHex, offset)
+	mgr, err := s.fetchManager(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
 	if err := requireTokenConfig(mgr.value, tokenConfigLockUnlock, "release"); err != nil {
 		return nil, err
 	}
-	cs, err := s.fetchCoreState(ctx, mgr.value.GuardianGovernance, offset)
+	coreState, err := s.fetchCoreState(ctx, partyID(mgr.value.GuardianGovernance), offset)
 	if err != nil {
 		return nil, err
 	}
-	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, digest, offset)
+	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, request.digest, offset)
 	if err != nil {
 		return nil, err
 	}
-	ledger, err := s.fetchLedger(ctx, mgr.value.ManagerAddress, offset)
+	ledger, err := s.fetchLedger(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -669,14 +666,14 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 
 	disclosures := []flowDisclosureEntry{
 		discloseAs(roleNttManager, mgr.entry),
-		discloseAs(roleCoreState, cs.entry),
+		discloseAs(roleCoreState, coreState.entry),
 		discloseAs(roleCoveringReplayNode, node.entry),
 		discloseAs(roleLockedLedger, ledger.entry),
 	}
 	missing := make([]flowMissingEntry, 0)
 
 	if ledger.value.CustodyHoldingCid != nil {
-		pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid)
+		pot, found, err := s.fetchPotHolding(ctx, contractID(*ledger.value.CustodyHoldingCid))
 		if err != nil {
 			return nil, err
 		}
@@ -689,8 +686,8 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 
 	disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
-	if recipient != "" {
-		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, recipient, mgr.value.InstrumentId, roleRecipientTransferPreapproval, offset, disclosures, missing)
+	if request.recipient != "" {
+		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, request.recipient, mgr.value.InstrumentId, roleRecipientTransferPreapproval, offset, disclosures, missing)
 		if err != nil {
 			return nil, err
 		}
@@ -701,35 +698,33 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 
 // assembleMint mirrors mintDisclosures.
 func (s *server) assembleMint(ctx context.Context, request mintRequest, offset int64) (*flowResponse, error) {
-	managerHex, digest, recipient := request.manager.hex, request.digest.hex, request.recipient
-
-	mgr, err := s.fetchManager(ctx, managerHex, offset)
+	mgr, err := s.fetchManager(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
 	if err := requireTokenConfig(mgr.value, tokenConfigBurnMint, "mint"); err != nil {
 		return nil, err
 	}
-	cs, err := s.fetchCoreState(ctx, mgr.value.GuardianGovernance, offset)
+	coreState, err := s.fetchCoreState(ctx, partyID(mgr.value.GuardianGovernance), offset)
 	if err != nil {
 		return nil, err
 	}
-	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, digest, offset)
+	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, request.digest, offset)
 	if err != nil {
 		return nil, err
 	}
 
-	deposits, err := fetchDecoded[daPreapproval](ctx, s, tailDepositPreapproval, offset, preapprovalFieldMatches(recipient, mgr.value.InstrumentId)...)
+	deposits, err := fetchDecoded[daPreapproval](ctx, s, tailDepositPreapproval, offset, preapprovalFieldMatches(request.recipient, mgr.value.InstrumentId)...)
 	if err != nil {
 		return nil, err
 	}
-	dep, found, err := findPreapproval(deposits, recipient, mgr.value.InstrumentId, roleDepositPreapproval)
+	depositPreapproval, found, err := findPreapproval(deposits, request.recipient, mgr.value.InstrumentId, roleDepositPreapproval)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		// The recipient has not opted in yet; the VAA stays deliverable once they do.
-		return nil, newFlowError(http.StatusNotFound, "no DepositPreapproval found for recipient %s and this deployment's instrument", recipient)
+		return nil, newFlowError(http.StatusNotFound, "no DepositPreapproval found for recipient %s and this deployment's instrument", truncateForError(string(request.recipient)))
 	}
 
 	factoryEntry, err := s.fetchCommittedCanonicalCoinFactory(ctx, mgr.value, offset)
@@ -739,9 +734,9 @@ func (s *server) assembleMint(ctx context.Context, request mintRequest, offset i
 
 	disclosures := []flowDisclosureEntry{
 		discloseAs(roleNttManager, mgr.entry),
-		discloseAs(roleCoreState, cs.entry),
+		discloseAs(roleCoreState, coreState.entry),
 		discloseAs(roleCoveringReplayNode, node.entry),
-		discloseAs(roleDepositPreapproval, dep.entry),
+		discloseAs(roleDepositPreapproval, depositPreapproval.entry),
 		discloseAs(roleCommittedCanonicalCoinFactory, factoryEntry.entry),
 	}
 	return &flowResponse{Flow: "mint", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
@@ -749,13 +744,11 @@ func (s *server) assembleMint(ctx context.Context, request mintRequest, offset i
 
 // assembleSetPeer mirrors setPeerByVaaDisclosures.
 func (s *server) assembleSetPeer(ctx context.Context, request setPeerRequest, offset int64) (*flowResponse, error) {
-	managerHex, digest := request.manager.hex, request.digest.hex
-
-	mgr, err := s.fetchManager(ctx, managerHex, offset)
+	mgr, err := s.fetchManager(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
-	cs, err := s.fetchCoreState(ctx, mgr.value.GuardianGovernance, offset)
+	coreState, err := s.fetchCoreState(ctx, partyID(mgr.value.GuardianGovernance), offset)
 	if err != nil {
 		return nil, err
 	}
@@ -763,14 +756,14 @@ func (s *server) assembleSetPeer(ctx context.Context, request setPeerRequest, of
 	if err != nil {
 		return nil, err
 	}
-	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, digest, offset)
+	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, request.digest, offset)
 	if err != nil {
 		return nil, err
 	}
 
 	disclosures := []flowDisclosureEntry{
 		discloseAs(roleNttManager, mgr.entry),
-		discloseAs(roleCoreState, cs.entry),
+		discloseAs(roleCoreState, coreState.entry),
 		discloseAs(roleTransceiverEmitter, emitter.entry),
 		discloseAs(roleCoveringReplayNode, node.entry),
 	}
@@ -779,27 +772,25 @@ func (s *server) assembleSetPeer(ctx context.Context, request setPeerRequest, of
 
 // assembleAcceptAdmin mirrors acceptAdminDisclosures.
 func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminRequest, offset int64) (*flowResponse, error) {
-	managerHex, digest := request.manager.hex, request.digest.hex
-
-	mgr, err := s.fetchManager(ctx, managerHex, offset)
+	mgr, err := s.fetchManager(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
 	if mgr.value.Admin == mgr.value.GuardianGovernance {
 		return nil, newFlowError(http.StatusConflict, "flow accept-admin: the admin is already guardianGovernance")
 	}
-	cs, err := s.fetchCoreState(ctx, mgr.value.GuardianGovernance, offset)
+	coreState, err := s.fetchCoreState(ctx, partyID(mgr.value.GuardianGovernance), offset)
 	if err != nil {
 		return nil, err
 	}
-	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, digest, offset)
+	node, err := s.fetchCoveringNode(ctx, mgr.value.GuardianGovernance, mgr.value.Namespace, request.digest, offset)
 	if err != nil {
 		return nil, err
 	}
 
 	disclosures := []flowDisclosureEntry{
 		discloseAs(roleNttManager, mgr.entry),
-		discloseAs(roleCoreState, cs.entry),
+		discloseAs(roleCoreState, coreState.entry),
 		discloseAs(roleCoveringReplayNode, node.entry),
 	}
 	missing := make([]flowMissingEntry, 0)
@@ -811,26 +802,26 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	if err != nil {
 		return nil, err
 	}
-	prop, found, err := findAdminTransferProposal(proposals, mgr.value)
+	proposal, found, err := findAdminTransferProposal(proposals, mgr.value)
 	if err != nil {
 		return nil, err
 	}
 	if found {
-		disclosures = append(disclosures, discloseAs(roleAdminTransferProposal, prop.entry))
+		disclosures = append(disclosures, discloseAs(roleAdminTransferProposal, proposal.entry))
 	} else {
 		missing = append(missing, missingEntry(roleAdminTransferProposal))
 	}
 
 	switch mgr.value.TokenConfig {
 	case tokenConfigLockUnlock:
-		ledger, err := s.fetchLedger(ctx, mgr.value.ManagerAddress, offset)
+		ledger, err := s.fetchLedger(ctx, request.manager, offset)
 		if err != nil {
 			return nil, err
 		}
 		disclosures = append(disclosures, discloseAs(roleLockedLedger, ledger.entry))
 
 		if ledger.value.CustodyHoldingCid != nil {
-			pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid)
+			pot, found, err := s.fetchPotHolding(ctx, contractID(*ledger.value.CustodyHoldingCid))
 			if err != nil {
 				return nil, err
 			}
@@ -846,7 +837,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 			disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
 			// AcceptAdminTransferByVaa requires newAdmin == gg, so the pot moves to nttCustody.
-			newCustodian := reserveCustodianFor(mgr.value.GuardianGovernance, mgr.value.NttCustody, mgr.value.GuardianGovernance)
+			newCustodian := partyID(mgr.value.NttCustody)
 			disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, newCustodian, mgr.value.InstrumentId, roleNewCustodianTransferPreapproval, offset, disclosures, missing)
 			if err != nil {
 				return nil, err
@@ -865,9 +856,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 
 // assembleTransfer mirrors transferDisclosures.
 func (s *server) assembleTransfer(ctx context.Context, request transferRequest, offset int64) (*flowResponse, error) {
-	managerHex := request.manager.hex
-
-	mgr, err := s.fetchManager(ctx, managerHex, offset)
+	mgr, err := s.fetchManager(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -875,7 +864,7 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 	if err != nil {
 		return nil, err
 	}
-	cs, err := s.fetchCoreState(ctx, mgr.value.GuardianGovernance, offset)
+	coreState, err := s.fetchCoreState(ctx, partyID(mgr.value.GuardianGovernance), offset)
 	if err != nil {
 		return nil, err
 	}
@@ -883,20 +872,20 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 	disclosures := []flowDisclosureEntry{
 		discloseAs(roleNttManager, mgr.entry),
 		discloseAs(roleTransceiverEmitter, emitter.entry),
-		discloseAs(roleCoreState, cs.entry),
+		discloseAs(roleCoreState, coreState.entry),
 	}
 	missing := make([]flowMissingEntry, 0)
 
 	switch mgr.value.TokenConfig {
 	case tokenConfigLockUnlock:
-		ledger, err := s.fetchLedger(ctx, mgr.value.ManagerAddress, offset)
+		ledger, err := s.fetchLedger(ctx, request.manager, offset)
 		if err != nil {
 			return nil, err
 		}
 		disclosures = append(disclosures, discloseAs(roleLockedLedger, ledger.entry))
 
 		if ledger.value.CustodyHoldingCid != nil {
-			pot, found, err := s.fetchPotHolding(ctx, *ledger.value.CustodyHoldingCid)
+			pot, found, err := s.fetchPotHolding(ctx, contractID(*ledger.value.CustodyHoldingCid))
 			if err != nil {
 				return nil, err
 			}
@@ -913,7 +902,7 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 		}
 		disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
-		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, mgr.value.ReserveCustodian, mgr.value.InstrumentId, roleCustodianTransferPreapproval, offset, disclosures, missing)
+		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, partyID(mgr.value.ReserveCustodian), mgr.value.InstrumentId, roleCustodianTransferPreapproval, offset, disclosures, missing)
 		if err != nil {
 			return nil, err
 		}
@@ -936,32 +925,32 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 func (s *server) assembleRegister(ctx context.Context, request registerRequest, offset int64) (*flowResponse, error) {
 	gg, byVaa := request.guardianGovernance, request.byVAA
 
-	gov, err := s.fetchGuardianAnchor(ctx, tailNttGovernance, gg, roleNttGovernance, offset)
+	nttGovernance, err := s.fetchGuardianAnchor(ctx, tailNttGovernance, gg, roleNttGovernance, offset)
 	if err != nil {
 		return nil, err
 	}
-	emRegEntry, err := s.fetchGuardianAnchor(ctx, tailEmitterRegistry, gg, roleEmitterRegistry, offset)
+	emitterRegistry, err := s.fetchGuardianAnchor(ctx, tailEmitterRegistry, gg, roleEmitterRegistry, offset)
 	if err != nil {
 		return nil, err
 	}
-	rrRegEntry, err := s.fetchGuardianAnchor(ctx, tailReplayRootRegistry, gg, roleReplayRootRegistry, offset)
+	replayRootRegistry, err := s.fetchGuardianAnchor(ctx, tailReplayRootRegistry, gg, roleReplayRootRegistry, offset)
 	if err != nil {
 		return nil, err
 	}
-	cs, err := s.fetchCoreState(ctx, gg, offset)
+	coreState, err := s.fetchCoreState(ctx, gg, offset)
 	if err != nil {
 		return nil, err
 	}
 
 	disclosures := []flowDisclosureEntry{
-		discloseAs(roleNttGovernance, gov.entry),
-		discloseAs(roleEmitterRegistry, emRegEntry.entry),
-		discloseAs(roleReplayRootRegistry, rrRegEntry.entry),
-		discloseAs(roleCoreState, cs.entry),
+		discloseAs(roleNttGovernance, nttGovernance.entry),
+		discloseAs(roleEmitterRegistry, emitterRegistry.entry),
+		discloseAs(roleReplayRootRegistry, replayRootRegistry.entry),
+		discloseAs(roleCoreState, coreState.entry),
 	}
 
 	if byVaa {
-		factories, err := fetchDecoded[daCoinFactory](ctx, s, tailCoinFactory, offset, exactFieldMatch(gg, "admin"))
+		factories, err := fetchDecoded[daCoinFactory](ctx, s, tailCoinFactory, offset, exactFieldMatch(string(gg), "admin"))
 		if err != nil {
 			return nil, err
 		}
@@ -978,16 +967,14 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 // assembleConsolidate mirrors consolidateDisclosures. The caller supplies the reserve custodian's
 // holdings as choice arguments; this set covers only the manager, ledger, and factory.
 func (s *server) assembleConsolidate(ctx context.Context, request consolidateRequest, offset int64) (*flowResponse, error) {
-	managerHex := request.manager.hex
-
-	mgr, err := s.fetchManager(ctx, managerHex, offset)
+	mgr, err := s.fetchManager(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
 	if err := requireTokenConfig(mgr.value, tokenConfigLockUnlock, "consolidate"); err != nil {
 		return nil, err
 	}
-	ledger, err := s.fetchLedger(ctx, mgr.value.ManagerAddress, offset)
+	ledger, err := s.fetchLedger(ctx, request.manager, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,7 +1001,7 @@ func (s *server) checkFlowEnabled(request flowRequest) error {
 	if s.opts.readerParties.operator == "" {
 		return newFlowError(http.StatusNotFound, "flow register not enabled: the service has no operator party")
 	}
-	if register.guardianGovernance != "" && partyID(register.guardianGovernance) != s.opts.readerParties.guardianGovernance {
+	if register.guardianGovernance != "" && register.guardianGovernance != s.opts.readerParties.guardianGovernance {
 		return newFlowError(http.StatusBadRequest, "gg must be the service's guardianGovernance party")
 	}
 	return nil
@@ -1072,10 +1059,10 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,7 +1079,7 @@ type managerEntry struct {
 	Paused           bool           `json:"paused"`
 }
 
-// handleManagers serves GET /v1/managers: every NttManager the disclosing parties see. Clients
+// handleManagers serves GET /v1/managers: every NttManager the gg reader party sees. Clients
 // read the managerAddress here to fill the flow endpoints' manager param.
 func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1110,22 +1097,22 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managersQuery.maxMatches = s.maxContracts
-	mgrs, err := fetchDecodedQuery[daNttManager](r.Context(), s, managersQuery)
+	managers, err := fetchDecodedQuery[daNttManager](r.Context(), s, managersQuery)
 	if err != nil {
 		s.writeFlowError(w, r, err)
 		return
 	}
-	out := make([]managerEntry, 0, len(mgrs))
-	for _, m := range mgrs {
+	out := make([]managerEntry, 0, len(managers))
+	for _, manager := range managers {
 		out = append(out, managerEntry{
-			ManagerAddress:   m.value.ManagerAddress,
-			ContractID:       m.entry.ContractID,
-			ChainId:          m.value.ChainId,
-			ManagerId:        m.value.ManagerId,
-			TokenConfig:      m.value.TokenConfig,
-			InstrumentId:     m.value.InstrumentId,
-			ReserveCustodian: m.value.ReserveCustodian,
-			Paused:           m.value.Paused,
+			ManagerAddress:   manager.value.ManagerAddress,
+			ContractID:       manager.entry.ContractID,
+			ChainId:          manager.value.ChainId,
+			ManagerId:        manager.value.ManagerId,
+			TokenConfig:      manager.value.TokenConfig,
+			InstrumentId:     manager.value.InstrumentId,
+			ReserveCustodian: manager.value.ReserveCustodian,
+			Paused:           manager.value.Paused,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ManagerAddress < out[j].ManagerAddress })

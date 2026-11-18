@@ -106,13 +106,13 @@ type flowRequest interface {
 type releaseRequest struct {
 	manager   managerAddressHex
 	digest    vaaDigestHex
-	recipient string // optional
+	recipient partyID // optional
 }
 
 type mintRequest struct {
 	manager   managerAddressHex
 	digest    vaaDigestHex
-	recipient string
+	recipient partyID
 }
 
 type setPeerRequest struct {
@@ -130,7 +130,7 @@ type transferRequest struct {
 }
 
 type registerRequest struct {
-	guardianGovernance string // optional
+	guardianGovernance partyID // optional
 	byVAA              bool
 }
 
@@ -162,7 +162,7 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		return releaseRequest{manager: manager, digest: digest, recipient: recipient}, nil
+		return releaseRequest{manager: manager, digest: digest, recipient: partyID(recipient)}, nil
 	case "mint":
 		manager, digest, err := parseManagerAndDigest(params)
 		if err != nil {
@@ -172,7 +172,7 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		return mintRequest{manager: manager, digest: digest, recipient: recipient}, nil
+		return mintRequest{manager: manager, digest: digest, recipient: partyID(recipient)}, nil
 	case "set-peer":
 		manager, digest, err := parseManagerAndDigest(params)
 		if err != nil {
@@ -210,7 +210,7 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if byVAA && guardianGovernance == "" {
 			return nil, newFlowError(http.StatusBadRequest, "gg is required when by-vaa=true")
 		}
-		return registerRequest{guardianGovernance: guardianGovernance, byVAA: byVAA}, nil
+		return registerRequest{guardianGovernance: partyID(guardianGovernance), byVAA: byVAA}, nil
 	default:
 		panic("disclosure-service: flowParamNames and parseFlowRequest disagree on flow " + flowName)
 	}

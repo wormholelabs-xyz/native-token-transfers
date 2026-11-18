@@ -113,7 +113,7 @@ func (blocking *blockingLedgerEndACS) ActiveContracts(context.Context, activeCon
 	return nil, nil
 }
 
-func (blocking *blockingLedgerEndACS) ActiveContractByID(context.Context, []partyID, string) (acsEntry, bool, error) {
+func (blocking *blockingLedgerEndACS) ActiveContractByID(context.Context, []partyID, contractID) (acsEntry, bool, error) {
 	return acsEntry{}, false, nil
 }
 

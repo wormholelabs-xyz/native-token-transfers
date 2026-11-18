@@ -96,12 +96,12 @@ func (b *boundedACS) ActiveContracts(ctx context.Context, query activeContractsQ
 	return b.inner.ActiveContracts(ctx, query)
 }
 
-func (b *boundedACS) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+func (b *boundedACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	if err := b.acquire(ctx); err != nil {
 		return acsEntry{}, false, err
 	}
 	defer b.release()
-	return b.inner.ActiveContractByID(ctx, readerParties, contractID)
+	return b.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,9 +156,9 @@ func newCachingACS(inner acsClient, ttl time.Duration) *cachingACS {
 // caller stops waiting when its own ctx ends.
 func (c *cachingACS) do(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
 	c.mu.Lock()
-	if e, ok := c.entries[key]; ok && c.now().Before(e.expires) {
+	if cached, ok := c.entries[key]; ok && c.now().Before(cached.expires) {
 		c.mu.Unlock()
-		return e.value, nil
+		return cached.value, nil
 	}
 	if call, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
@@ -213,27 +213,27 @@ func (c *cachingACS) sweepLocked() {
 		return
 	}
 	now := c.now()
-	for k, e := range c.entries {
-		if !now.Before(e.expires) {
-			delete(c.entries, k)
+	for key, cached := range c.entries {
+		if !now.Before(cached.expires) {
+			delete(c.entries, key)
 		}
 	}
-	for k := range c.entries {
+	for key := range c.entries {
 		if len(c.entries) < maxCacheEntries {
 			break
 		}
-		delete(c.entries, k)
+		delete(c.entries, key)
 	}
 }
 
 func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
-	v, err := c.do(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return c.inner.LedgerEnd(fetchCtx) })
+	cachedValue, err := c.do(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return c.inner.LedgerEnd(fetchCtx) })
 	if err != nil {
 		return 0, err
 	}
-	offset, ok := v.(int64)
+	offset, ok := cachedValue.(int64)
 	if !ok {
-		return 0, fmt.Errorf("disclosure-service: cached ledger-end has type %T", v)
+		return 0, fmt.Errorf("disclosure-service: cached ledger-end has type %T", cachedValue)
 	}
 	if offset < 1 {
 		return 0, fmt.Errorf("%w: cached %d", errLedgerEndOffsetNotPositive, offset)
@@ -243,15 +243,15 @@ func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
 
 // ActiveContracts caches the filtered result, so an entry holds at most query.maxMatches contracts.
 func (c *cachingACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
-	v, err := c.do(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+	cachedValue, err := c.do(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
 		return c.inner.ActiveContracts(fetchCtx, query)
 	})
 	if err != nil {
 		return nil, err
 	}
-	entries, ok := v.([]acsEntry)
+	entries, ok := cachedValue.([]acsEntry)
 	if !ok {
-		return nil, fmt.Errorf("disclosure-service: cached active-contracts has type %T", v)
+		return nil, fmt.Errorf("disclosure-service: cached active-contracts has type %T", cachedValue)
 	}
 	return entries, nil
 }
@@ -262,25 +262,25 @@ type contractByIDResult struct {
 	found bool
 }
 
-func (c *cachingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+func (c *cachingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	encodedKey, err := json.Marshal(struct {
 		Kind       string
 		Readers    []partyID
-		ContractID string
-	}{"contract-by-id", readerParties, contractID})
+		ContractID contractID
+	}{"contract-by-id", readerParties, wantContractID})
 	if err != nil {
 		return acsEntry{}, false, fmt.Errorf("disclosure-service: encode cache key: %w", err)
 	}
-	v, err := c.do(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
-		entry, found, err := c.inner.ActiveContractByID(fetchCtx, readerParties, contractID)
+	cachedValue, err := c.do(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
+		entry, found, err := c.inner.ActiveContractByID(fetchCtx, readerParties, wantContractID)
 		return contractByIDResult{entry: entry, found: found}, err
 	})
 	if err != nil {
 		return acsEntry{}, false, err
 	}
-	result, ok := v.(contractByIDResult)
+	result, ok := cachedValue.(contractByIDResult)
 	if !ok {
-		return acsEntry{}, false, fmt.Errorf("disclosure-service: cached contract-by-id has type %T", v)
+		return acsEntry{}, false, fmt.Errorf("disclosure-service: cached contract-by-id has type %T", cachedValue)
 	}
 	return result.entry, result.found, nil
 }

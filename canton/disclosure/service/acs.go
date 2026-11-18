@@ -37,6 +37,9 @@ var (
 // partyID is a Canton party identifier.
 type partyID string
 
+// contractID is a Canton contract identifier.
+type contractID string
+
 // acsEntry is one active contract, as this service needs it. It holds enough data to build a
 // Ledger API DisclosedContract client-side.
 type acsEntry struct {
@@ -166,7 +169,7 @@ func (fieldMatch createArgumentFieldMatch) matchesCreateArgument(createArgument 
 type acsClient interface {
 	LedgerEnd(ctx context.Context) (int64, error)
 	ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error)
-	ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error)
+	ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
@@ -409,15 +412,15 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 
 // ActiveContractByID calls POST /v2/events/events-by-contract-id. found means a created event and
 // no archived event. An upstream 404 means the readers cannot see the contract: found is false.
-func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	if len(readerParties) == 0 {
 		return acsEntry{}, false, errors.New("disclosure-service: events-by-contract-id: at least one reader party is required")
 	}
-	if contractID == "" {
+	if wantContractID == "" {
 		return acsEntry{}, false, errors.New("disclosure-service: events-by-contract-id: contract id is empty")
 	}
 	var reqBody eventsByContractIDRequest
-	reqBody.ContractID = contractID
+	reqBody.ContractID = string(wantContractID)
 	var wildcardFilter wildcardCumulativeFilter
 	wildcardFilter.IdentifierFilter.WildcardFilter.Value.IncludeCreatedEventBlob = true
 	reqBody.EventFormat.FiltersByParty = make(map[string]wildcardPartyFilter, len(readerParties))
@@ -461,8 +464,8 @@ func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []
 		return acsEntry{}, false, nil
 	}
 	createdEvent := events.Created.CreatedEvent
-	if createdEvent.ContractID != contractID {
-		return acsEntry{}, false, fmt.Errorf("%w: events-by-contract-id returned contract %q for %q", errUpstreamResponseMalformed, createdEvent.ContractID, contractID)
+	if contractID(createdEvent.ContractID) != wantContractID {
+		return acsEntry{}, false, fmt.Errorf("%w: events-by-contract-id returned contract %q for %q", errUpstreamResponseMalformed, createdEvent.ContractID, wantContractID)
 	}
 	if len(events.Archived) > 0 && !bytes.Equal(bytes.TrimSpace(events.Archived), []byte("null")) {
 		return acsEntry{}, false, nil

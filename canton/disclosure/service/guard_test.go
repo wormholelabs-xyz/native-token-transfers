@@ -67,13 +67,13 @@ func testQuery(template string, offset int64) activeContractsQuery {
 	return activeContractsQuery{readerParties: []partyID{"Alice"}, template: template, activeAtOffset: offset, maxMatches: maxMatchingContractsPerQuery}
 }
 
-func (f *countingACS) ActiveContractByID(_ context.Context, _ []partyID, contractID string) (acsEntry, bool, error) {
+func (f *countingACS) ActiveContractByID(_ context.Context, _ []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	defer f.track()()
 	f.byIDCalls.Add(1)
 	if f.err != nil {
 		return acsEntry{}, false, f.err
 	}
-	return acsEntry{ContractID: contractID}, true, nil
+	return acsEntry{ContractID: string(wantContractID)}, true, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +302,7 @@ func (scripted *scriptedLedgerEndACS) ActiveContracts(context.Context, activeCon
 	panic("scriptedLedgerEndACS: ActiveContracts is not scripted")
 }
 
-func (scripted *scriptedLedgerEndACS) ActiveContractByID(context.Context, []partyID, string) (acsEntry, bool, error) {
+func (scripted *scriptedLedgerEndACS) ActiveContractByID(context.Context, []partyID, contractID) (acsEntry, bool, error) {
 	panic("scriptedLedgerEndACS: ActiveContractByID is not scripted")
 }
 
@@ -435,8 +435,8 @@ func TestCachingACSContractByIDKeys(t *testing.T) {
 	inner := &countingACS{offset: 42}
 	cache := newCachingACS(inner, 5*time.Second)
 	reads := []struct {
-		readers    []partyID
-		contractID string
+		readers        []partyID
+		wantContractID contractID
 	}{
 		{[]partyID{"nttCustody::1"}, "pot-1"},
 		{[]partyID{"nttCustody::1"}, "pot-1"},
@@ -444,10 +444,10 @@ func TestCachingACSContractByIDKeys(t *testing.T) {
 		{[]partyID{"gg::1"}, "pot-1"},
 	}
 	for _, read := range reads {
-		entry, found, err := cache.ActiveContractByID(context.Background(), read.readers, read.contractID)
+		entry, found, err := cache.ActiveContractByID(context.Background(), read.readers, read.wantContractID)
 		require.NoError(t, err)
 		require.True(t, found)
-		assert.Equal(t, read.contractID, entry.ContractID)
+		assert.Equal(t, string(read.wantContractID), entry.ContractID)
 	}
 	assert.Equal(t, int64(3), inner.byIDCalls.Load(), "a repeat read is served from memory; readers and id are both in the key")
 }

@@ -52,7 +52,7 @@ func templateTail(templateID string) string {
 // HTTP server
 // ---------------------------------------------------------------------------
 
-// server is the disclosure-service's http.Handler. It is stateless: it queries per request.
+// server is the disclosure-service's http.Handler. Its upstream reads go through a short TTL cache.
 type server struct {
 	opts                   *options
 	acs                    acsClient

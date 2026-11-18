@@ -29,9 +29,9 @@ func (counter *callCountingACS) ActiveContracts(ctx context.Context, query activ
 	return counter.inner.ActiveContracts(ctx, query)
 }
 
-func (counter *callCountingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, contractID string) (acsEntry, bool, error) {
+func (counter *callCountingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	counter.contractByIDCalls.Add(1)
-	return counter.inner.ActiveContractByID(ctx, readerParties, contractID)
+	return counter.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
 func (counter *callCountingACS) totalCalls() int64 {
