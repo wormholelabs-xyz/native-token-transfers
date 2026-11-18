@@ -345,6 +345,22 @@ reserveCustodianFor : Party -> Party -> Party -> Party
 reserveCustodianFor guardianGovernance nttCustody admin =
   if admin == guardianGovernance then nttCustody else admin
 
+-- | The namespace fingerprint of a Canton party id @hint::fingerprint@.
+-- None unless both parts are non-empty and the id has exactly one @::@.
+partyNamespaceFromText : Text -> Optional Text
+partyNamespaceFromText partyText = case T.splitOn "::" partyText of
+  [hint, fingerprint] | hint /= "" && fingerprint /= "" -> Some fingerprint
+  _ -> None
+
+-- | Both parties have a namespace and it is the same. The root ceremony
+-- requires it of @nttCustody@ and gg. Not in an @ensure@: IDE ledger party
+-- ids have no namespace.
+partiesShareNamespace : Party -> Party -> Bool
+partiesShareNamespace firstParty secondParty =
+  case (partyNamespaceFromText (partyToText firstParty), partyNamespaceFromText (partyToText secondParty)) of
+    (Some firstNamespace, Some secondNamespace) -> firstNamespace == secondNamespace
+    _ -> False
+
 -- | Check that a caller-supplied 'LockedLedger' is this deployment's own, and
 -- return its payload. Only 'Wormhole.Ntt.Governance.RegisterManager' can
 -- create a ledger (it needs the root's signatures), and it creates exactly one
