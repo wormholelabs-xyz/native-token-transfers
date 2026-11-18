@@ -52,6 +52,7 @@ type acsEntry struct {
 	CreatedEventBlob string // base64, as returned by the JSON Ledger API
 	SynchronizerID   string
 	CreateArgument   json.RawMessage // Daml-JSON create arguments; populated only when the request sets eventFormat.verbose
+	CreatedAt        string          // ledger effective time of the create
 }
 
 // createArgumentFieldMatch requires one createArgument field to equal one of wantValues.
@@ -242,6 +243,7 @@ type acsCreatedEvent struct {
 	PackageName      string          `json:"packageName"`
 	CreatedEventBlob string          `json:"createdEventBlob"`
 	CreateArgument   json.RawMessage `json:"createArgument"`
+	CreatedAt        string          `json:"createdAt"`
 }
 
 // acsActiveContract is the JsActiveContract variant of a contractEntry oneOf. synchronizerId is
@@ -514,6 +516,7 @@ func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []
 		CreatedEventBlob: createdEvent.CreatedEventBlob,
 		SynchronizerID:   events.Created.SynchronizerID,
 		CreateArgument:   createdEvent.CreateArgument,
+		CreatedAt:        createdEvent.CreatedAt,
 	}, true, nil
 }
 
@@ -568,6 +571,7 @@ func decodeActiveContractsStream(body io.Reader, query activeContractsQuery) ([]
 			CreatedEventBlob: createdEvent.CreatedEventBlob,
 			SynchronizerID:   activeContract.SynchronizerID,
 			CreateArgument:   createdEvent.CreateArgument,
+			CreatedAt:        createdEvent.CreatedAt,
 		})
 		if len(matches) > query.maxMatches {
 			return nil, fmt.Errorf("%w: more than %d for %s", errMatchCapExceeded, query.maxMatches, query.template)

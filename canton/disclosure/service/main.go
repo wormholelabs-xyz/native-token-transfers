@@ -59,6 +59,7 @@ type options struct {
 	maxUpstreamConcurrency  int
 	cacheTTL                time.Duration
 	behindEdgeProxy         bool
+	registryInstrumentsPath string // empty when the registry API is off
 	verbose                 bool
 }
 
@@ -88,6 +89,7 @@ func parseFlags(args []string) (*options, error) {
 	oauthAudience := fs.String("oauth-audience", "", "OAuth2 audience of the JSON Ledger API")
 	oauthScope := fs.String("oauth-scope", "", "OAuth2 scope (optional)")
 	oauthCAFile := fs.String("oauth-ca-file", "", "PEM CA bundle that verifies the OAuth2 token endpoint certificate; replaces the system roots (https only)")
+	registryInstrumentsFile := fs.String("registry-instruments-file", "", "serve the CIP-0056 registry API (v1) for the instruments that --guardian-governance-party administers; JSON object keyed by instrument id, each value {\"name\": ..., \"symbol\": ...}")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -133,6 +135,7 @@ func parseFlags(args []string) (*options, error) {
 		maxUpstreamConcurrency:  *maxUpstream,
 		cacheTTL:                *cacheTTL,
 		behindEdgeProxy:         *behindEdgeProxy,
+		registryInstrumentsPath: *registryInstrumentsFile,
 		verbose:                 *verbose,
 	}, nil
 }
@@ -176,6 +179,15 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return err
 	}
 
+	var registry *registryConfig
+	if opts.registryInstrumentsPath != "" {
+		loadedRegistry, err := loadRegistryConfig(opts)
+		if err != nil {
+			return err
+		}
+		registry = loadedRegistry
+	}
+
 	// Fail fast at startup on an unreadable or invalid TLS file.
 	tlsConfig, err := loadUpstreamTLSConfig(opts.upstreamTLS, time.Now())
 	if err != nil {
@@ -196,6 +208,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		acs = newCachingACS(acs, opts.cacheTTL)
 	}
 	srv := newServer(opts, acs)
+	srv.registry = registry
 
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
@@ -210,6 +223,9 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
 		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
 	fmt.Fprintf(stderr, "disclosure-service: upstream auth: %s; upstream TLS: %s\n", describeUpstreamAuth(opts.upstreamAuth), describeUpstreamTLS(opts.upstreamTLS))
+	if registry != nil {
+		fmt.Fprintf(stderr, "disclosure-service: CIP-0056 registry API on for admin %s, %d configured instrument(s)\n", registry.adminParty, len(registry.displayByInstrumentID))
+	}
 	fmt.Fprintln(stderr, "disclosure-service: public flow routes; put an edge proxy (TLS, rate limit, WAF) in front")
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 

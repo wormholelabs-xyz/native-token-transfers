@@ -245,6 +245,8 @@ Set the memory limit of the container to more than 512 MiB.
   `/v1/managers` cap, the upstream query cap, and a short read cache.
   `--cache-ttl 0` turns the cache off.
 - `--listen` — bind address. The default is `127.0.0.1:7599`.
+- `--registry-instruments-file` — serve the CIP-0056 registry API for the
+  instruments that `gg` administers. See "CIP-0056 registry API".
 
 ## Build and run
 
@@ -349,6 +351,212 @@ spec:
       emptyDir:
         medium: Memory
 ```
+
+## CIP-0056 registry API
+
+The service can also serve the CIP-0056 off-ledger registry API, version 1.
+It serves the API for the burn/mint instruments that `gg` administers.
+Canton wallets use this API to show, send and receive the tokens that NTT
+mints on Canton. In this section, the Daml files are in
+`tokens/cip0056/daml/Token/CIP0056/` of the CantonExamples repository.
+
+### Endpoints
+
+| Endpoint | Response |
+|---|---|
+| `GET /registry/metadata/v1/info` | `adminId` is `gg`. `supportedApis` lists the four v1 APIs below. |
+| `GET /registry/metadata/v1/instruments` | The instruments, in instrument ID order. Parameters: `pageSize`, `pageToken`. |
+| `GET /registry/metadata/v1/instruments/{instrumentId}` | One instrument. |
+| `POST /registry/transfer-instruction/v1/transfer-factory` | The `CoinFactory`, the `transferKind` and the choice context. |
+| `POST /registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept,reject,withdraw}` | The choice context of a `CoinTransferInstruction`. |
+| `POST /registry/allocation-instruction/v1/allocation-factory` | The `CoinFactory` and the choice context. |
+| `POST /registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer,withdraw,cancel}` | The choice context of a `CoinAllocation`. |
+
+The responses agree with the OpenAPI specifications in `service/openapi/`.
+The Go tests validate each response against these files.
+
+### Instruments
+
+The instrument set is the instruments of the `NttManager` contracts with these
+properties:
+
+- `tokenConfig` is `BurnMint`.
+- `instrumentId.admin` is `gg`.
+- `guardianGovernance` is `gg`.
+
+The metadata of an instrument comes from these sources:
+
+| Field | Source |
+|---|---|
+| `id` | `NttManager.instrumentId.id` |
+| `name`, `symbol` | The instruments file |
+| `decimals` | `NttManager.tokenDecimals` |
+| `totalSupply` | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. |
+| `totalSupplyAsOf` | The service clock at the time of the ledger read |
+
+Two `NttManager` contracts can have the same instrument. Then their
+`tokenDecimals` and their factory must be equal, or the request fails with
+HTTP 500.
+
+`pageSize` has the default 25 and the range 1 to 100. A value outside the
+range moves to the nearest limit. `pageToken` is the last instrument ID of
+the previous page. The next page starts at the first ID after it.
+
+### Instruments file
+
+`--registry-instruments-file` names a JSON object. Each key is an instrument
+ID. Each value has the fields `name` and `symbol`:
+
+```json
+{
+  "wormhole-ntt:93f7db4b180e39ef5cae293224382ee567ffbf02fca6a62c612d72739e24dcfb": {
+    "name": "Wormhole Bridged Test",
+    "symbol": "WBT"
+  }
+}
+```
+
+The service reads the file at startup. These conditions stop the service:
+
+- The file is not a JSON object, or it has no entries.
+- Two entries have the same instrument ID.
+- An entry has the same field two times.
+- An entry has a field other than `name` and `symbol`.
+- An entry has no `name` or no `symbol`, or one of them is empty.
+- The file is larger than 1 MiB.
+
+An instrument with no entry in the file is not in the metadata responses.
+The service logs it one time. The transfer and allocation endpoints serve it.
+
+`--registry-admin-party` must be one of the `--disclosing-party` values. Give
+the two registry flags together. The allow-list must contain the `NttManager`,
+`CoinFactory`, `Coin`, `TransferPreapproval`, `CoinTransferInstruction` and
+`CoinAllocation` templates. The built-in list contains them.
+
+### Choice contexts and disclosures
+
+Each context comes from the choice body. A context contains each contract
+that the choice fetches and that the controller cannot see.
+
+| Endpoint | Choice body | `choiceContextData` | `disclosedContracts` |
+|---|---|---|---|
+| `transfer-factory`, `self` | `CoinFactory.daml:56-77`, `CoinTransfer.daml:160-163` | `{"values": {}}` | `CoinFactory` |
+| `transfer-factory`, `direct` | `CoinTransfer.daml:164-168`, `TransferPreapproval_Receive` at `CoinTransfer.daml:39-49` | `token-cip0056.transferPreapprovalCid` (see below) | `CoinFactory`, `TransferPreapproval` |
+| `transfer-factory`, `offer` | `CoinTransfer.daml:169`, `CoinFactory.daml:69-77` | `{"values": {}}` | `CoinFactory` |
+| `accept`, `reject`, `withdraw` | `CoinTransfer.daml:78-89` | `{"values": {}}` | None |
+| `allocation-factory` | `CoinFactory.daml:87-109` | `{"values": {}}` | `CoinFactory` |
+| `execute-transfer`, `withdraw`, `cancel` | `CoinAllocation.daml:24-38` | `{"values": {}}` | None |
+
+The `CoinFactory` has the signatory `gg` only (`CoinFactory.daml:26`). Thus
+the sender cannot see it. The service returns the `CoinFactory` that the
+`NttManager` of the instrument commits.
+
+`transferKind` has these values:
+
+- `self`: the sender and the receiver are the same party. `transferCore`
+  completes the transfer with the authority of the sender.
+- `direct`: the receiver has an active `TransferPreapproval` for the
+  instrument. The preapproval has the signatory `owner` and the observer
+  `instrumentId.admin` (`CoinTransfer.daml:33-34`). Thus `gg` sees it, and the
+  sender does not. With more than one preapproval, the service selects the
+  lowest contract ID.
+- `offer`: all other transfers. The choice creates a `CoinTransferInstruction`.
+  The receiver accepts it or rejects it.
+
+For `direct`, `choiceContextData` is this value. `lookupTransferPreapprovalCid`
+(`CoinTransfer.daml:17-24`) reads it:
+
+```json
+{"values": {"token-cip0056.transferPreapprovalCid": {"tag": "AV_ContractId", "value": "<preapproval contract ID>"}}}
+```
+
+The wallet gives `choiceContextData` as `extraArgs.context` of the choice.
+
+The choices on a `CoinTransferInstruction` and a `CoinAllocation` only create
+`Coin` contracts. Each controller is a stakeholder of the contract
+(`CoinTransfer.daml:63-64`, `CoinAllocation.daml:16-17`). Thus these contexts
+are empty. The service makes sure that the contract exists and that `gg`
+administers its instrument.
+
+### Errors
+
+Each error response is the `ErrorResponse` of the specification:
+`{"error": "<text>"}`.
+
+| Status | Cause |
+|---|---|
+| 400 | The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
+| 404 | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of a `gg` instrument. The registry API is off. |
+| 409 | A contract of the response is in a reassignment between synchronizers. |
+| 500 | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument. |
+| 502, 503 | The upstream participant failed, or the service shed the load. |
+
+The service finds a reassignment from the `JsIncompleteUnassigned` and
+`JsIncompleteAssigned` entries of the active contract set. The other
+endpoints of the service ignore these entries.
+
+### Debug fields
+
+With `excludeDebugFields` false (the default), each disclosed contract also
+has these fields:
+
+- `debugPackageName`: the `packageName` of the created event.
+- `debugPayload`: the create argument.
+- `debugCreatedAt`: the `createdAt` of the created event.
+
+With `excludeDebugFields` true, the service omits them.
+
+### Discovery
+
+CIP-0056 has this discovery model:
+
+- Each node of a decentralized registry serves the API under its own URL
+  prefix.
+- A wallet reads the CNS entry of the admin party. The metadata key
+  `splice.lfdecentralizedtrust.org/registryUrls` has the URL prefixes,
+  separated by commas.
+
+The Canton documentation states that this discovery is not implemented yet.
+Until then, each wallet keeps its own map from the admin party to the
+registry URL. A CNS entry for `gg` needs a later `gg` ceremony.
+
+### Trust in a registry node
+
+Each guardian gateway can serve the API, because each one reads as `gg`. A
+wallet can use the response of any node. A bad response cannot change what a
+transaction does. It can only make the transaction fail, or change a direct
+transfer into an offer:
+
+- The participant checks each `createdEventBlob` against its contract ID.
+  A node cannot change the contents of a disclosed contract.
+- The `CoinFactory` code checks `expectedAdmin`
+  (`CoinFactory.daml:57-58`) and the instrument admin
+  (`CoinTransfer.daml:156-157`).
+- With no preapproval value, or a value with a different tag,
+  `lookupTransferPreapprovalCid` returns `None`. The transfer then becomes an
+  offer (`CoinTransfer.daml:20-24`, `169`).
+- A preapproval ID of an archived contract, or of a different template, makes
+  the exercise fail.
+- A preapproval of a different owner or a different instrument fails the
+  asserts of `TransferPreapproval_Receive` (`CoinTransfer.daml:46-48`).
+
+WARNING: The interface choice runs the code of the factory contract. A node
+can return a different contract as the factory. The wallet must make sure
+that `templateId` of the factory is the `CoinFactory` of `token-cip0056`. The
+participant of the wallet runs only the packages that it vetted.
+
+### Specification files
+
+`service/openapi/` holds the four v1 specifications, with no changes. The
+source is `https://docs.canton.network/openapi/splice/token-standard/`,
+downloaded on 2026-11-18.
+
+| File | Spec version | SHA-256 |
+|---|---|---|
+| `token-metadata-v1.yaml` | 1.2.0 | `43ca08f0706b433ca20cee1a355da6d4ad00ea8c089b8982fb446627b7a2e135` |
+| `transfer-instruction-v1.yaml` | 1.1.0 | `6e8d4abbb912cd2fa890b7dfcdc940a9ceadd60467049921a1e1151b5363c46f` |
+| `allocation-instruction-v1.yaml` | 1.0.0 | `c82cf1b7d661666f676a05fcd4e130562df03f701eca755fbc50d364822ec1c4` |
+| `allocation-v1.yaml` | 1.1.0 | `b28762a1d8f94a300904f20ed9c3f42babad4120b112593a17167f544f24fdd3` |
 
 ## Deployment on a separate gateway
 

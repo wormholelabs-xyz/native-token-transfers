@@ -69,6 +69,8 @@ type server struct {
 	inboundSlots           chan struct{}
 	inboundRequestDeadline time.Duration
 	readiness              *readinessProbe
+	registry               *registryConfig  // nil when the registry API is off
+	now                    func() time.Time // injectable for totalSupplyAsOf
 }
 
 const (
@@ -88,6 +90,7 @@ func newServer(opts *options, acs acsClient) *server {
 		inboundSlots:           make(chan struct{}, maxConcurrentInboundRequests),
 		inboundRequestDeadline: inboundRequestDeadline,
 		readiness:              newReadinessProbe(acs),
+		now:                    time.Now,
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1", s.handleIndex)
@@ -95,6 +98,7 @@ func newServer(opts *options, acs acsClient) *server {
 	s.mux.HandleFunc("/v1/readyz", s.handleReadyz)
 	s.mux.HandleFunc("/v1/managers", s.handleManagers)
 	s.mux.HandleFunc("/v1/flows/{flow}", s.handleFlows)
+	s.mountRegistryRoutes()
 	return s
 }
 
@@ -180,6 +184,13 @@ var apiIndex = map[string]any{
 			"register":     {"gg (optional)", "by-vaa (optional bool)"},
 			"consolidate":  {"manager"},
 		}},
+		{"method": "GET", "path": "/registry/metadata/v1/info", "about": "CIP-0056 token-metadata-v1: registry admin and supported APIs"},
+		{"method": "GET", "path": "/registry/metadata/v1/instruments", "params": []string{"pageSize (optional)", "pageToken (optional)"}, "about": "CIP-0056 token-metadata-v1: instruments administered by the registry admin"},
+		{"method": "GET", "path": "/registry/metadata/v1/instruments/{instrumentId}", "about": "CIP-0056 token-metadata-v1: one instrument"},
+		{"method": "POST", "path": "/registry/transfer-instruction/v1/transfer-factory", "about": "CIP-0056 transfer-instruction-v1: transfer factory and choice context"},
+		{"method": "POST", "path": "/registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept|reject|withdraw}", "about": "CIP-0056 transfer-instruction-v1: choice context for a pending transfer"},
+		{"method": "POST", "path": "/registry/allocation-instruction/v1/allocation-factory", "about": "CIP-0056 allocation-instruction-v1: allocation factory and choice context"},
+		{"method": "POST", "path": "/registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer|withdraw|cancel}", "about": "CIP-0056 allocation-v1: choice context for an allocation"},
 	},
 }
 

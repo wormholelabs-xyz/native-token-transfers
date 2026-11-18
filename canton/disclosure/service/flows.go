@@ -102,6 +102,7 @@ type daNttManager struct {
 	TransceiverEmitterId json.Number    `json:"transceiverEmitterId"`
 	InstrumentId         daInstrumentId `json:"instrumentId"`
 	TokenConfig          string         `json:"tokenConfig"`
+	TokenDecimals        json.Number    `json:"tokenDecimals"`
 	Factory              daNttFactory   `json:"factory"`
 	Paused               bool           `json:"paused"`
 }

@@ -299,6 +299,9 @@ func testPackageName(templateID string) string {
 		qualifiedTemplate, known = custodyPotHoldingTemplateByTail[templateTail(templateID)]
 	}
 	if !known {
+		qualifiedTemplate, known = registryTemplateByTail[templateTail(templateID)]
+	}
+	if !known {
 		return "unknown-package"
 	}
 	return strings.TrimPrefix(strings.SplitN(qualifiedTemplate, ":", 2)[0], "#")
