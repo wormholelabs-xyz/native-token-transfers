@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,8 +17,8 @@ import (
 // eventsByContractIDJSON renders a JsGetEventsByContractIdResponse with a created event and,
 // when archived is set, an archived event.
 func eventsByContractIDJSON(templateID, contractID, blob, synchronizerID, createArgument string, archived bool) string {
-	created := fmt.Sprintf(`"created":{"createdEvent":{"contractId":%q,"templateId":%q,"createdEventBlob":%q,"createArgument":%s},"synchronizerId":%q}`,
-		contractID, templateID, blob, createArgument, synchronizerID)
+	created := fmt.Sprintf(`"created":{"createdEvent":{"contractId":%q,"templateId":%q,"packageName":%q,"createdEventBlob":%q,"createArgument":%s},"synchronizerId":%q}`,
+		contractID, templateID, testPackageName(templateID), blob, createArgument, synchronizerID)
 	if !archived {
 		return "{" + created + "}"
 	}
@@ -109,6 +110,9 @@ func TestFetchPotHoldingByContractID(t *testing.T) {
 			fixtures[tailCoin] = jsonArray(activePot)
 			fixtures[archivedFixtureKey(potContractID)] = ""
 		}, http.StatusOK, false, true},
+		{"pot is a Coin of another package", func(fixtures flowFixtures) {
+			fixtures[tailCoin] = jsonArray(strings.Replace(activePot, `"packageName":"token-cip0056"`, `"packageName":"token-evil"`, 1))
+		}, http.StatusBadGateway, false, false},
 		{"pot contract id names a TransferPreapproval", func(fixtures flowFixtures) {
 			fixtures[tailTransferPreapproval] = jsonArray(
 				lockUnlock.transferPreapprovalJSON(lockUnlock.reserveCustodian()),

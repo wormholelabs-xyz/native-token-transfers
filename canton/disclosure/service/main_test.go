@@ -86,8 +86,8 @@ func TestActiveContracts_MultiPartyFilter(t *testing.T) {
 // to more than one disclosing party is served once.
 func TestActiveContracts_DedupsSharedContracts(t *testing.T) {
 	const template = "#ntt:Wormhole.Ntt.Manager:NttManager"
-	shared := `{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":"00shared","templateId":"pkg:Wormhole.Ntt.Manager:NttManager","createdEventBlob":"AAA="},"synchronizerId":"sync"}}}`
-	only := `{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":"00only","templateId":"pkg:Wormhole.Ntt.Manager:NttManager","createdEventBlob":"BBB="},"synchronizerId":"sync"}}}`
+	shared := acsContractJSON("pkg:Wormhole.Ntt.Manager:NttManager", "00shared", "AAA=", "sync")
+	only := acsContractJSON("pkg:Wormhole.Ntt.Manager:NttManager", "00only", "BBB=", "sync")
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -122,27 +122,45 @@ func TestParseFlags_MissingRequired(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// templateTail / templateIDMatches
+// checkUpstreamTemplate
 // ---------------------------------------------------------------------------
 
-func TestTemplateIDMatches(t *testing.T) {
+func TestCheckUpstreamTemplate(t *testing.T) {
+	const requested = "#ntt:Wormhole.Ntt.Manager:NttManager"
 	cases := []struct {
-		name string
-		a, b string
-		want bool
+		name               string
+		returnedPackage    string
+		returnedTemplateID string
+		wantErr            bool
 	}{
-		{"exact tail equality", "Module:Entity", "Module:Entity", true},
-		{"package-id-qualified vs bare tail", "abcdef1234:Module:Entity", "Module:Entity", true},
-		{"package-name-qualified vs bare tail", "#ntt:Module:Entity", "Module:Entity", true},
-		{"both qualified, different prefixes", "abcdef1234:Module:Entity", "#ntt:Module:Entity", true},
-		{"different entity", "abcdef1234:Module:Entity", "Module:Other", false},
-		{"different module", "abcdef1234:Module:Entity", "Other:Entity", false},
+		{"right name and tail, package-id qualified", "ntt", "0123abcd:Wormhole.Ntt.Manager:NttManager", false},
+		{"right name and tail, name qualified", "ntt", "#ntt:Wormhole.Ntt.Manager:NttManager", false},
+		{"right tail, packageName ntt-evil", "ntt-evil", "0123abcd:Wormhole.Ntt.Manager:NttManager", true},
+		{"packageName missing", "", "0123abcd:Wormhole.Ntt.Manager:NttManager", true},
+		{"right name, wrong entity", "ntt", "0123abcd:Wormhole.Ntt.Manager:AdminTransferProposal", true},
+		{"right name, wrong module", "ntt", "0123abcd:Wormhole.Ntt.Ledger:NttManager", true},
+		{"template id with no package qualifier", "ntt", "Wormhole.Ntt.Manager:NttManager", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, templateIDMatches(tc.a, tc.b))
+			err := checkUpstreamTemplate(requested, tc.returnedPackage, tc.returnedTemplateID)
+			if tc.wantErr {
+				assert.ErrorIs(t, err, errUpstreamTemplateMismatch)
+				return
+			}
+			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestFlowRejectsWrongPackageName(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	wrongPackageManager := strings.Replace(b.managerJSON(), `"packageName":"ntt"`, `"packageName":"ntt-evil"`, 1)
+	require.NotEqual(t, b.managerJSON(), wrongPackageManager)
+	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(wrongPackageManager)})
+	logged := captureServerLog(srv)
+	recorder := requestFlow(t, srv, "transfer", "manager="+b.managerAddr)
+	requirePublicErrorWithLoggedDetail(t, recorder, logged, http.StatusBadGateway, "ntt-evil")
 }
 
 // ---------------------------------------------------------------------------
@@ -255,9 +273,18 @@ func decodeRequestedTemplate(t *testing.T, r *http.Request) (parties []partyID, 
 // synchronizerId sits beside createdEvent, at the same level (confirmed live).
 func acsContractJSON(templateID, contractID, blob, synchronizerID string) string {
 	return fmt.Sprintf(
-		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"createdEventBlob":%q},"synchronizerId":%q}}}`,
-		contractID, templateID, blob, synchronizerID,
+		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"packageName":%q,"createdEventBlob":%q},"synchronizerId":%q}}}`,
+		contractID, templateID, testPackageName(templateID), blob, synchronizerID,
 	)
+}
+
+// testPackageName is the package name of the flow template with templateID's tail.
+func testPackageName(templateID string) string {
+	qualifiedTemplate, known := flowTemplateByTail[templateTail(templateID)]
+	if !known {
+		return "unknown-package"
+	}
+	return strings.TrimPrefix(strings.SplitN(qualifiedTemplate, ":", 2)[0], "#")
 }
 
 // ---------------------------------------------------------------------------
@@ -461,8 +488,8 @@ const testRecipient = "recipient::1"
 // acsContractJSONWithArg is acsContractJSON plus a createArgument payload (raw JSON).
 func acsContractJSONWithArg(templateID, contractID, blob, synchronizerID, createArgument string) string {
 	return fmt.Sprintf(
-		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"createdEventBlob":%q,"createArgument":%s},"synchronizerId":%q}}}`,
-		contractID, templateID, blob, createArgument, synchronizerID,
+		`{"contractEntry":{"JsActiveContract":{"createdEvent":{"contractId":%q,"templateId":%q,"packageName":%q,"createdEventBlob":%q,"createArgument":%s},"synchronizerId":%q}}}`,
+		contractID, templateID, testPackageName(templateID), blob, createArgument, synchronizerID,
 	)
 }
 

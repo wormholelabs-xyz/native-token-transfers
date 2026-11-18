@@ -299,8 +299,8 @@ func (s *server) fetchEntries(ctx context.Context, query activeContractsQuery) (
 		return nil, newFlowError(http.StatusBadGateway, "query %s: %d contracts, cap %d", query.template, len(entries), query.maxMatches)
 	}
 	for _, entry := range entries {
-		if !templateIDMatches(entry.TemplateID, query.template) {
-			return nil, newFlowError(http.StatusBadGateway, "upstream returned templateId %q for requested %q", entry.TemplateID, query.template)
+		if err := checkUpstreamTemplate(query.template, entry.PackageName, entry.TemplateID); err != nil {
+			return nil, newFlowError(http.StatusBadGateway, "query %s: %v", query.template, err)
 		}
 	}
 	return entries, nil
@@ -554,8 +554,8 @@ func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory
 	if !found {
 		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "no CoinFactory found for committed factory contractId %s", factory.Value)
 	}
-	if !templateIDMatches(factoryEntry.TemplateID, flowTemplateByTail[tailCoinFactory]) {
-		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "committed factory %s has template %s, expected a CoinFactory", factory.Value, factoryEntry.TemplateID)
+	if err := checkUpstreamTemplate(flowTemplateByTail[tailCoinFactory], factoryEntry.PackageName, factoryEntry.TemplateID); err != nil {
+		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "committed factory %s: %v", factory.Value, err)
 	}
 	var coinFactory daCoinFactory
 	if err := json.Unmarshal(factoryEntry.CreateArgument, &coinFactory); err != nil {
@@ -594,9 +594,9 @@ func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner s
 	return disclosures, append(missing, missingEntry(role)), nil
 }
 
-// isCustodyPotHoldingTemplate reports whether templateID is a template a custody pot can have.
-func isCustodyPotHoldingTemplate(templateID string) bool {
-	return templateIDMatches(templateID, flowTemplateByTail[tailCoin])
+// isCustodyPotHoldingTemplate reports whether pot has the package name and template of a custody holding.
+func isCustodyPotHoldingTemplate(pot acsEntry) bool {
+	return checkUpstreamTemplate(flowTemplateByTail[tailCoin], pot.PackageName, pot.TemplateID) == nil
 }
 
 // fetchPotHolding reads the custody pot by the contract id its LockedLedger names. The read is
@@ -610,8 +610,8 @@ func (s *server) fetchPotHolding(ctx context.Context, potContractID string) (acs
 		return acsEntry{}, false, nil
 	}
 	//SECURITY: the ledger names the pot; its template must be a custody holding template.
-	if !isCustodyPotHoldingTemplate(pot.TemplateID) {
-		return acsEntry{}, false, newFlowError(http.StatusBadGateway, "custody pot %s has template %s, expected a custody holding", potContractID, pot.TemplateID)
+	if !isCustodyPotHoldingTemplate(pot) {
+		return acsEntry{}, false, newFlowError(http.StatusBadGateway, "custody pot %s has package %q and template %s, expected a custody holding", potContractID, pot.PackageName, pot.TemplateID)
 	}
 	return pot, true, nil
 }

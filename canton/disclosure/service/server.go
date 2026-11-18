@@ -44,12 +44,6 @@ func templateTail(templateID string) string {
 	return strings.Join(parts[len(parts)-2:], ":")
 }
 
-// templateIDMatches reports whether two template ids name the same "Module:Entity". Each id may
-// be bare, "#name:"-qualified, or package-ID-qualified, as the ACS returns them.
-func templateIDMatches(a, b string) bool {
-	return templateTail(a) == templateTail(b)
-}
-
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------

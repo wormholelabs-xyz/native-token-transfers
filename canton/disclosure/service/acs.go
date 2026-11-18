@@ -32,6 +32,7 @@ var (
 	errUpstreamResponseMalformed  = errors.New("disclosure-service: upstream response is malformed")
 	errUpstreamScanBoundExceeded  = errors.New("disclosure-service: upstream response exceeds the scanned-contract bound")
 	errMatchCapExceeded           = errors.New("disclosure-service: matching contracts exceed the query cap")
+	errUpstreamTemplateMismatch   = errors.New("disclosure-service: upstream contract has another package or template")
 )
 
 // partyID is a Canton party identifier.
@@ -41,6 +42,7 @@ type partyID string
 // Ledger API DisclosedContract client-side.
 type acsEntry struct {
 	TemplateID       string
+	PackageName      string
 	ContractID       string
 	CreatedEventBlob string // base64, as returned by the JSON Ledger API
 	SynchronizerID   string
@@ -232,6 +234,7 @@ type eventsByContractIDResponse struct {
 type acsCreatedEvent struct {
 	ContractID       string          `json:"contractId"`
 	TemplateID       string          `json:"templateId"`
+	PackageName      string          `json:"packageName"`
 	CreatedEventBlob string          `json:"createdEventBlob"`
 	CreateArgument   json.RawMessage `json:"createArgument"`
 }
@@ -469,6 +472,7 @@ func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []
 	}
 	return acsEntry{
 		TemplateID:       createdEvent.TemplateID,
+		PackageName:      createdEvent.PackageName,
 		ContractID:       createdEvent.ContractID,
 		CreatedEventBlob: createdEvent.CreatedEventBlob,
 		SynchronizerID:   events.Created.SynchronizerID,
@@ -500,6 +504,9 @@ func decodeActiveContractsStream(body io.Reader, query activeContractsQuery) ([]
 			continue // other contractEntry variant
 		}
 		createdEvent := activeContract.CreatedEvent
+		if err := checkUpstreamTemplate(query.template, createdEvent.PackageName, createdEvent.TemplateID); err != nil {
+			return nil, err
+		}
 		if seenContractIDs[createdEvent.ContractID] {
 			continue // visible to more than one reader party
 		}
@@ -509,6 +516,7 @@ func decodeActiveContractsStream(body io.Reader, query activeContractsQuery) ([]
 		}
 		matches = append(matches, acsEntry{
 			TemplateID:       createdEvent.TemplateID,
+			PackageName:      createdEvent.PackageName,
 			ContractID:       createdEvent.ContractID,
 			CreatedEventBlob: createdEvent.CreatedEventBlob,
 			SynchronizerID:   activeContract.SynchronizerID,
@@ -531,6 +539,27 @@ func decodeActiveContractsStream(body io.Reader, query activeContractsQuery) ([]
 		panic("disclosure-service: decodeActiveContractsStream exceeded its own bounds")
 	}
 	return matches, nil
+}
+
+// checkUpstreamTemplate requires the requested "#name:Module:Entity" to equal the returned
+// package name and "Module:Entity" tail. The package name survives a package-id change; the
+// Daml requireCanonicalFactory check uses the same rule.
+func checkUpstreamTemplate(requestedTemplate, returnedPackageName, returnedTemplateID string) error {
+	requestedParts := strings.Split(requestedTemplate, ":")
+	if len(requestedParts) != 3 || !strings.HasPrefix(requestedParts[0], "#") {
+		panic(fmt.Sprintf("disclosure-service: requested template %q is not \"#name:Module:Entity\"", requestedTemplate))
+	}
+	requestedPackageName := strings.TrimPrefix(requestedParts[0], "#")
+	if returnedPackageName != requestedPackageName {
+		return fmt.Errorf("%w: package %q, expected %q", errUpstreamTemplateMismatch, returnedPackageName, requestedPackageName)
+	}
+	if strings.Count(returnedTemplateID, ":") != 2 {
+		return fmt.Errorf("%w: template id %q is not package-qualified", errUpstreamTemplateMismatch, returnedTemplateID)
+	}
+	if templateTail(returnedTemplateID) != templateTail(requestedTemplate) {
+		return fmt.Errorf("%w: template %q, expected %q", errUpstreamTemplateMismatch, returnedTemplateID, requestedTemplate)
+	}
+	return nil
 }
 
 func expectJSONDelimiter(decoder *json.Decoder, wantDelimiter json.Delim) error {
