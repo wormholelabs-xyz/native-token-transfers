@@ -274,6 +274,7 @@ rights only:
 
 - `CanReadAs` for `gg`.
 - `CanReadAs` for `nttCustody`.
+- `CanReadAs` for the operator, only to serve the `register` flow.
 
 Do not give this user `CanActAs` for a party. Do not give it an admin right.
 The service reads the ledger only. It calls `GET /v2/state/ledger-end` and
@@ -364,10 +365,21 @@ the authority of that party.
 
 ### `nttCustody` owns the lock/unlock reserves
 
-`gg` never owns a lock/unlock reserve. `reserveCustodianFor` in
-`Wormhole.Ntt.Manager` gives the reserve owner. It is `nttCustody` when
-`gg` is the admin. It is the admin in all other cases. Each custody transfer
-sends with `sender = reserveCustodian`.
+`gg` never owns a lock/unlock reserve. In this section, `Manager.daml` is
+`canton/ntt/daml/Wormhole/Ntt/Manager.daml`. `reserveCustodianFor`
+(`Manager.daml:344`) gives the reserve owner. It is `nttCustody` when `gg`
+is the admin. It is the admin in all other cases. The `NttManager`
+precondition (`Manager.daml:465-469`) rejects `gg` as `reserveCustodian`.
+
+These custody transfers send with `sender = reserveCustodian`:
+
+- The pot merge in `Transfer` (`Manager.daml:896`).
+- `Release` (`Manager.daml:1008`).
+- `ConsolidateCustody` (`Manager.daml:1060`).
+- `TransferAdmin` (`Manager.daml:625`).
+
+A lock in `Transfer` sends from the user to `reserveCustodian`
+(`Manager.daml:877-878`).
 
 A registry that the guardians vetted thus runs with the authority of
 `nttCustody`. It can move each holding of `nttCustody`. This includes the
@@ -376,8 +388,11 @@ things:
 
 - Publish a message from an NTT transceiver `Emitter`. Its owner is `gg`.
 - Mint a `gg`-administered instrument through the canonical `CoinFactory`.
-- Change a manager. `SetPeer`, `SetFactory`, `SetPaused`, and
-  `TransferAdmin` need the admin, which is `gg`.
+  `BurnMintFactory_BurnMint` needs `gg` as the factory admin
+  (`Manager.daml:927-928`).
+- Change a manager. `SetPeer` (`Manager.daml:487`), `SetPaused`
+  (`Manager.daml:535`), `SetFactory` (`Manager.daml:556`), and
+  `TransferAdmin` (`Manager.daml:598`) need the admin, which is `gg`.
 
 Thus the quorum-held lock/unlock reserves are one risk pool. Accept quorum
 custody only for a registry that you examined.
@@ -385,8 +400,8 @@ custody only for a registry that you examined.
 ### Burn/mint uses the canonical `CoinFactory`
 
 A burn/mint deployment uses the canonical `CoinFactory` of the
-`token-cip0056` package. `requireCanonicalFactory` checks this. Its admin
-must be `gg`. The check uses the package name, not the package ID. Thus it
+`token-cip0056` package. `requireCanonicalFactory` (`Manager.daml:164-172`)
+checks this. Its admin must be `gg`. The check uses the package name, not the package ID. Thus it
 accepts a `CoinFactory` of each vetted `token-cip0056` version. An interface
 choice runs the code of the vetted version that the submitter prefers.
 
