@@ -467,6 +467,7 @@ template NttManager
         && reserveCustodian /= guardianGovernance
         && admin /= nttCustody
         && nttCustody /= guardianGovernance
+        && nttCustody /= operator
 
     -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
     -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
