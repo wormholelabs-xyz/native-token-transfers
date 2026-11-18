@@ -39,15 +39,6 @@ func (parties readerPartiesByRole) partyFor(role readerRole) partyID {
 	}
 }
 
-// byRoleName is the healthz view of the configured parties.
-func (parties readerPartiesByRole) byRoleName() map[string]partyID {
-	return map[string]partyID{
-		"guardianGovernance": parties.guardianGovernance,
-		"nttCustody":         parties.nttCustody,
-		"operator":           parties.operator,
-	}
-}
-
 // readerRolesByTail names the only reader roles of each flow template.
 //
 // SECURITY: each party reads only what its role needs. The operator party reads only

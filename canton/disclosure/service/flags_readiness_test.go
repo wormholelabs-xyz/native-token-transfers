@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -52,14 +51,13 @@ func TestParseFlagsNumericBounds(t *testing.T) {
 
 func TestHandleReadyz(t *testing.T) {
 	cases := []struct {
-		name          string
-		upstreamErr   error
-		wantStatus    int
-		wantLedgerEnd int64
+		name        string
+		upstreamErr error
+		wantStatus  int
 	}{
-		{"upstream ok", nil, http.StatusOK, 42},
-		{"upstream fault", errors.New("upstream 500: internal detail"), http.StatusServiceUnavailable, 0},
-		{"upstream busy", errUpstreamBusy, http.StatusServiceUnavailable, 0},
+		{"upstream ok", nil, http.StatusOK},
+		{"upstream fault", errors.New("upstream 500: internal detail"), http.StatusServiceUnavailable},
+		{"upstream busy", errUpstreamBusy, http.StatusServiceUnavailable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,9 +71,8 @@ func TestHandleReadyz(t *testing.T) {
 				return
 			}
 			require.Equal(t, http.StatusOK, recorder.Code)
-			var body readyzResponse
-			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
-			assert.Equal(t, tc.wantLedgerEnd, body.LedgerEnd)
+			assert.JSONEq(t, `{"status":"ready"}`, recorder.Body.String())
+			assert.NotContains(t, recorder.Body.String(), "42", "a public response carries no ledger offset")
 		})
 	}
 }
@@ -87,5 +84,5 @@ func TestHandleHealthzIsLivenessOnly(t *testing.T) {
 	srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/healthz", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.Zero(t, upstream.ledgerCalls.Load(), "healthz reads no upstream")
-	assert.NotContains(t, recorder.Body.String(), "ledgerEnd")
+	assert.JSONEq(t, `{"status":"ok"}`, recorder.Body.String())
 }

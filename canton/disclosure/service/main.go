@@ -2,8 +2,8 @@
 // one flow's disclosure set from one stakeholder participant's ACS over the JSON Ledger API v2.
 // Each set comes from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml (see flows.go).
 //
-// Posture: the service trusts each inbound request. An authenticating TLS proxy in front is
-// mandatory. A non-loopback --listen needs --behind-authenticating-proxy.
+// Posture: the flow routes are public and serve each client. An edge proxy in front terminates
+// TLS and applies a rate limit and a WAF. A non-loopback --listen needs --behind-edge-proxy.
 // --access-token-file is the service's own credential for the upstream JSON API.
 package main
 
@@ -49,15 +49,15 @@ const (
 
 // options is parseFlags' pure result. I/O happens later, when run() consumes it.
 type options struct {
-	listen                    string
-	jsonAPIBaseURL            string
-	readerParties             readerPartiesByRole
-	accessTokenFile           string
-	maxContractsPerTemplate   int
-	maxUpstreamConcurrency    int
-	cacheTTL                  time.Duration
-	behindAuthenticatingProxy bool
-	verbose                   bool
+	listen                  string
+	jsonAPIBaseURL          string
+	readerParties           readerPartiesByRole
+	accessTokenFile         string
+	maxContractsPerTemplate int
+	maxUpstreamConcurrency  int
+	cacheTTL                time.Duration
+	behindEdgeProxy         bool
+	verbose                 bool
 }
 
 // parseFlags parses args (normally os.Args[1:]) into options. It checks the required flags.
@@ -76,7 +76,7 @@ func parseFlags(args []string) (*options, error) {
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers, 1 to 10000; more is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long, 0 to 60s; 0 turns the cache off")
-	behindAuthenticatingProxy := fs.Bool("behind-authenticating-proxy", false, "state that an authenticating TLS proxy is in front; required for a non-loopback --listen")
+	behindEdgeProxy := fs.Bool("behind-edge-proxy", false, "state that an edge proxy terminates TLS and applies a rate limit and a WAF; required for a non-loopback --listen")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -95,7 +95,7 @@ func parseFlags(args []string) (*options, error) {
 	if *listen == "" {
 		return nil, fmt.Errorf("disclosure-service: --listen must not be empty")
 	}
-	if err := checkListenAddress(*listen, *behindAuthenticatingProxy); err != nil {
+	if err := checkListenAddress(*listen, *behindEdgeProxy); err != nil {
 		return nil, err
 	}
 	if *maxContracts < 1 || *maxContracts > maxContractsPerTemplateLimit {
@@ -108,21 +108,21 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("disclosure-service: --cache-ttl must be 0 to %s, got %s", maxCacheTTL, *cacheTTL)
 	}
 	return &options{
-		listen:                    *listen,
-		jsonAPIBaseURL:            *jsonAPI,
-		readerParties:             readerParties,
-		accessTokenFile:           *tokenFile,
-		maxContractsPerTemplate:   *maxContracts,
-		maxUpstreamConcurrency:    *maxUpstream,
-		cacheTTL:                  *cacheTTL,
-		behindAuthenticatingProxy: *behindAuthenticatingProxy,
-		verbose:                   *verbose,
+		listen:                  *listen,
+		jsonAPIBaseURL:          *jsonAPI,
+		readerParties:           readerParties,
+		accessTokenFile:         *tokenFile,
+		maxContractsPerTemplate: *maxContracts,
+		maxUpstreamConcurrency:  *maxUpstream,
+		cacheTTL:                *cacheTTL,
+		behindEdgeProxy:         *behindEdgeProxy,
+		verbose:                 *verbose,
 	}, nil
 }
 
-// checkListenAddress refuses a non-loopback bind unless the operator states that an
-// authenticating proxy is in front.
-func checkListenAddress(listenAddress string, behindAuthenticatingProxy bool) error {
+// checkListenAddress refuses a non-loopback bind unless the operator states that an edge proxy
+// is in front.
+func checkListenAddress(listenAddress string, behindEdgeProxy bool) error {
 	host, _, err := net.SplitHostPort(listenAddress)
 	if err != nil {
 		return fmt.Errorf("disclosure-service: --listen %q: %w", listenAddress, err)
@@ -130,8 +130,8 @@ func checkListenAddress(listenAddress string, behindAuthenticatingProxy bool) er
 	if isLoopbackIPAddress(host) {
 		return nil
 	}
-	if !behindAuthenticatingProxy {
-		return fmt.Errorf("disclosure-service: --listen %q is not a loopback IP address; set --behind-authenticating-proxy only when an authenticating proxy is in front", listenAddress)
+	if !behindEdgeProxy {
+		return fmt.Errorf("disclosure-service: --listen %q is not a loopback IP address; set --behind-edge-proxy only when an edge proxy (TLS, rate limit, WAF) is in front", listenAddress)
 	}
 	return nil
 }
@@ -155,7 +155,7 @@ func newHTTPServer(handler http.Handler) *http.Server {
 // run builds and serves the service until ctx is canceled, then shuts down gracefully. It
 // returns nil on a clean shutdown, including http.ErrServerClosed. Any other error is real.
 func run(ctx context.Context, opts *options, stderr io.Writer) error {
-	if err := checkListenAddress(opts.listen, opts.behindAuthenticatingProxy); err != nil {
+	if err := checkListenAddress(opts.listen, opts.behindEdgeProxy); err != nil {
 		return err
 	}
 	// Fail fast at startup when the token file is missing or unreadable. httpACSClient keeps
@@ -180,14 +180,14 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
 	//SECURITY: second boundary: check the bound address.
-	if err := checkListenAddress(ln.Addr().String(), opts.behindAuthenticatingProxy); err != nil {
+	if err := checkListenAddress(ln.Addr().String(), opts.behindEdgeProxy); err != nil {
 		_ = ln.Close()
 		return err
 	}
 
 	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
 		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
-	fmt.Fprintln(stderr, "disclosure-service: no inbound authentication; an authenticating proxy in front is mandatory")
+	fmt.Fprintln(stderr, "disclosure-service: public flow routes; put an edge proxy (TLS, rate limit, WAF) in front")
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 
 	httpSrv := newHTTPServer(srv)

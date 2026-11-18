@@ -17,10 +17,10 @@ import (
 
 func TestCheckListenAddress(t *testing.T) {
 	cases := []struct {
-		name                      string
-		listenAddress             string
-		behindAuthenticatingProxy bool
-		wantErr                   bool
+		name            string
+		listenAddress   string
+		behindEdgeProxy bool
+		wantErr         bool
 	}{
 		{"IPv4 loopback", "127.0.0.1:7599", false, false},
 		{"IPv6 loopback", "[::1]:7599", false, false},
@@ -36,7 +36,7 @@ func TestCheckListenAddress(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkListenAddress(tc.listenAddress, tc.behindAuthenticatingProxy)
+			err := checkListenAddress(tc.listenAddress, tc.behindEdgeProxy)
 			if tc.wantErr {
 				assert.Error(t, err)
 				return
@@ -54,7 +54,7 @@ func TestParseFlags_NonLoopbackListenNeedsProxyFlag(t *testing.T) {
 	}{
 		{"default loopback", nil, false},
 		{"non-loopback without flag", []string{"--listen", "0.0.0.0:7599"}, true},
-		{"non-loopback with flag", []string{"--listen", "0.0.0.0:7599", "--behind-authenticating-proxy"}, false},
+		{"non-loopback with flag", []string{"--listen", "0.0.0.0:7599", "--behind-edge-proxy"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -62,11 +62,11 @@ func TestParseFlags_NonLoopbackListenNeedsProxyFlag(t *testing.T) {
 			opts, err := parseFlags(args)
 			if tc.wantErr {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "--behind-authenticating-proxy")
+				assert.Contains(t, err.Error(), "--behind-edge-proxy")
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, len(tc.extraArgs) == 3, opts.behindAuthenticatingProxy)
+			assert.Equal(t, len(tc.extraArgs) == 3, opts.behindEdgeProxy)
 		})
 	}
 }
@@ -85,10 +85,10 @@ func TestRun_NonLoopbackBindWithoutProxyFlagStops(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--behind-authenticating-proxy")
+		assert.Contains(t, err.Error(), "--behind-edge-proxy")
 		assert.Empty(t, listeningURL(stderr.String()))
 	case <-time.After(3 * time.Second):
-		t.Fatal("run() served a non-loopback bind without --behind-authenticating-proxy")
+		t.Fatal("run() served a non-loopback bind without --behind-edge-proxy")
 	}
 }
 

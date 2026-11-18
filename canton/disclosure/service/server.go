@@ -90,7 +90,7 @@ func newServer(opts *options, acs acsClient) *server {
 }
 
 // ServeHTTP sheds a request past maxConcurrentInboundRequests with a 503 and bounds each request
-// by inboundRequestDeadline. The per-client rate limit belongs to the authenticating proxy.
+// by inboundRequestDeadline. The per-client rate limit belongs to the edge proxy.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.inboundSlots <- struct{}{}:
@@ -104,25 +104,18 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r.WithContext(ctx))
 }
 
-type healthzResponse struct {
-	ReaderParties map[string]partyID `json:"readerParties"`
-	Templates     int                `json:"templates"`
+// probeResponse is the public body of /v1/healthz and /v1/readyz.
+type probeResponse struct {
+	Status string `json:"status"`
 }
 
-type readyzResponse struct {
-	LedgerEnd int64 `json:"ledgerEnd"`
-}
-
-// handleHealthz is liveness: always 200, with the configuration only.
+// handleHealthz is liveness: always 200. The reader parties go to the startup log only.
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, healthzResponse{
-		ReaderParties: s.opts.readerParties.byRoleName(),
-		Templates:     len(flowTemplateByTail),
-	})
+	writeJSON(w, http.StatusOK, probeResponse{Status: "ok"})
 }
 
 // handleReadyz is 200 only when a ledger-end call succeeds; else 503 with the fixed public body.
@@ -131,12 +124,11 @@ func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	offset, err := s.acs.LedgerEnd(r.Context())
-	if err != nil {
+	if _, err := s.acs.LedgerEnd(r.Context()); err != nil {
 		s.writePublicError(w, r, http.StatusServiceUnavailable, fmt.Errorf("readyz: ledger-end: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, readyzResponse{LedgerEnd: offset})
+	writeJSON(w, http.StatusOK, probeResponse{Status: "ready"})
 }
 
 // apiIndex is /v1's static payload: every endpoint and its parameters.
@@ -144,8 +136,8 @@ var apiIndex = map[string]any{
 	"service": "disclosure-service",
 	"endpoints": []map[string]any{
 		{"method": "GET", "path": "/v1", "about": "this index"},
-		{"method": "GET", "path": "/v1/healthz", "about": "liveness: reader parties by role, template count"},
-		{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 with the ledger end when the upstream answers, else 503"},
+		{"method": "GET", "path": "/v1/healthz", "about": "liveness: always 200"},
+		{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 when the upstream answers, else 503"},
 		{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
 		{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
 			"release":      {"manager", "digest", "recipient (optional)"},

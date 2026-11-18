@@ -11,25 +11,35 @@ Mainnet base URL: `https://canton-disclosure.labsapis.com`.
 
 ## Deployment
 
-The service has no inbound authentication. An authenticating TLS proxy in
-front of the service is mandatory.
+The flow routes are public, as the Splice Scan routes are. Clients do not
+authenticate. Each response holds only the contracts and data that a flow
+needs.
 
-1. Keep the loopback default of `--listen` when the proxy is on the same host.
-2. Put an authenticating TLS proxy in front of the service.
-3. Set a rate limit for each client at the proxy.
-4. Set `--behind-authenticating-proxy` only after you complete steps 2 and 3.
+Put an edge proxy in front of the service. You choose the edge. Cloudflare is
+one example. The edge proxy does these tasks:
+
+- It ends the TLS connection from each client.
+- It applies a rate limit for each client.
+- It applies a WAF.
+
+Do these steps:
+
+1. Keep the loopback default of `--listen` when the edge proxy is on the same
+   host.
+2. Configure TLS, a rate limit, and a WAF at the edge proxy.
+3. Set `--behind-edge-proxy` only after you complete step 2.
 
 The service does not start with a `--listen` address that is not a loopback
-IP address, unless you set `--behind-authenticating-proxy`. The name
-`localhost` is not a loopback IP address for this check.
+IP address, unless you set `--behind-edge-proxy`. The name `localhost` is not
+a loopback IP address for this check.
 
 ## Endpoints
 
 - `GET /v1` — this endpoint list, as JSON.
-- `GET /v1/healthz` — liveness. It returns 200, the reader parties by role,
-  and the template count. It does not call the upstream.
-- `GET /v1/readyz` — readiness. It returns 200 and the ledger end when the
-  upstream answers. Else it returns 503.
+- `GET /v1/healthz` — liveness. It returns 200 and `{"status":"ok"}`. It does
+  not call the upstream.
+- `GET /v1/readyz` — readiness. It returns 200 and `{"status":"ready"}` when
+  the upstream answers. Else it returns 503.
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
   `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
@@ -78,17 +88,12 @@ id from this file.
 
 ## Examples
 
-Each request goes through the authenticating proxy. Replace
-`<proxy-credential>` with the credential that the proxy requires.
-
 ```
 # The disclosure set of one release.
-curl -H 'Authorization: Bearer <proxy-credential>' \
-  'https://canton-disclosure.labsapis.com/v1/flows/release?manager=<hex64>&digest=<hex64>'
+curl 'https://canton-disclosure.labsapis.com/v1/flows/release?manager=<hex64>&digest=<hex64>'
 
 # The visible deployments.
-curl -H 'Authorization: Bearer <proxy-credential>' \
-  'https://canton-disclosure.labsapis.com/v1/managers'
+curl 'https://canton-disclosure.labsapis.com/v1/managers'
 ```
 
 ## Errors
@@ -140,8 +145,9 @@ contract in `missing`.
 - `--access-token-file` — bearer token for the upstream, 16 KiB or less. The
   service reads the file again for each request. Thus you can replace the
   token without a restart.
-- `--behind-authenticating-proxy` — set it only when an authenticating proxy
-  is in front. A `--listen` address that is not loopback needs it.
+- `--behind-edge-proxy` — set it only when an edge proxy with TLS, a rate
+  limit, and a WAF is in front. A `--listen` address that is not loopback
+  needs it.
 - `--max-contracts-per-template` (1 to 10 000), `--max-upstream-concurrency`
   (1 to 64), `--cache-ttl` (0 to 60 s) — load bounds. They are the
   `/v1/managers` cap, the upstream query cap, and a short read cache.
@@ -158,6 +164,6 @@ contract in `missing`.
 
 Container: run `docker build -t disclosure-service canton/disclosure/service`.
 Then run the container with `--listen 0.0.0.0:7599
---behind-authenticating-proxy`, behind the authenticating proxy. Mount the
+--behind-edge-proxy`, behind the edge proxy. Mount the
 token file read-only. The loopback default is not reachable through a
 published port.

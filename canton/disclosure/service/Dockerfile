@@ -11,8 +11,8 @@ RUN CGO_ENABLED=0 go build -trimpath -mod=readonly -ldflags="-s -w" -o /disclosu
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:1b7b9f0f0e0a1d2155f531db587cc48ec26aaf97ab64364225f5bf18a054e66a
 COPY --from=build /disclosure-service /disclosure-service
 EXPOSE 7599
-# The binary defaults to loopback. An authenticating proxy in front is
-# mandatory. Pass --listen 0.0.0.0:7599 --behind-authenticating-proxy so the
-# proxy reaches the port. Mount the token file read-only and pass
+# The binary defaults to loopback. Put an edge proxy (TLS, rate limit, WAF)
+# in front. Pass --listen 0.0.0.0:7599 --behind-edge-proxy so the proxy
+# reaches the port. Mount the token file read-only and pass
 # --access-token-file for an authenticated upstream.
 ENTRYPOINT ["/disclosure-service"]

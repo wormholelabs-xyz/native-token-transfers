@@ -338,10 +338,10 @@ func TestHandleHealthz(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 
 	require.Equal(t, http.StatusOK, rr.Code)
-	var got healthzResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	assert.Equal(t, map[string]partyID{"guardianGovernance": testGuardianGovernanceParty, "nttCustody": testNttCustodyParty, "operator": testOperatorParty}, got.ReaderParties)
-	assert.Equal(t, len(flowTemplateByTail), got.Templates)
+	assert.JSONEq(t, `{"status":"ok"}`, rr.Body.String())
+	for _, party := range []string{testGuardianGovernanceParty, testNttCustodyParty, testOperatorParty} {
+		assert.NotContains(t, rr.Body.String(), party, "a public response carries no reader party id")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +462,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 
 	banner := out.String()
 	assert.Contains(t, banner, testGuardianGovernanceParty)
-	assert.Contains(t, banner, "an authenticating proxy in front is mandatory")
+	assert.Contains(t, banner, "put an edge proxy (TLS, rate limit, WAF) in front")
 	assert.NotContains(t, banner, "non-loopback") // 127.0.0.1 is loopback
 
 	resp, err := http.Get(addr + "/v1/healthz")
