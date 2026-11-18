@@ -2,9 +2,9 @@
 // one flow's disclosure set from one stakeholder participant's ACS over the JSON Ledger API v2.
 // Each set comes from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml (see flows.go).
 //
-// Posture: the service is unauthenticated and harness/ops-grade. It listens on loopback by
-// default. The --access-token-file flag adds a single shared bearer token. The service forwards
-// this token to the upstream JSON API.
+// Posture: the service has no inbound authentication. An authenticating TLS proxy in front is
+// mandatory. A non-loopback --listen needs --behind-authenticating-proxy.
+// --access-token-file is the service's own credential for the upstream JSON API.
 package main
 
 import (
@@ -36,6 +36,7 @@ const (
 	serverReadHeaderTimeout  = 10 * time.Second
 	serverReadTimeout        = 30 * time.Second
 	serverIdleTimeout        = 2 * time.Minute
+	maxInboundHeaderBytes    = 8 << 10
 )
 
 // ---------------------------------------------------------------------------
@@ -44,14 +45,15 @@ const (
 
 // options is parseFlags' pure result. I/O happens later, when run() consumes it.
 type options struct {
-	listen                  string
-	jsonAPIBaseURL          string
-	readerParties           readerPartiesByRole
-	accessTokenFile         string
-	maxContractsPerTemplate int
-	maxUpstreamConcurrency  int
-	cacheTTL                time.Duration
-	verbose                 bool
+	listen                    string
+	jsonAPIBaseURL            string
+	readerParties             readerPartiesByRole
+	accessTokenFile           string
+	maxContractsPerTemplate   int
+	maxUpstreamConcurrency    int
+	cacheTTL                  time.Duration
+	behindAuthenticatingProxy bool
+	verbose                   bool
 }
 
 // parseFlags parses args (normally os.Args[1:]) into options. It checks the required flags.
@@ -70,6 +72,7 @@ func parseFlags(args []string) (*options, error) {
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long; 0 disables the cache")
+	behindAuthenticatingProxy := fs.Bool("behind-authenticating-proxy", false, "state that an authenticating TLS proxy is in front; required for a non-loopback --listen")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -88,19 +91,51 @@ func parseFlags(args []string) (*options, error) {
 	if *listen == "" {
 		return nil, fmt.Errorf("disclosure-service: --listen must not be empty")
 	}
+	if err := checkListenAddress(*listen, *behindAuthenticatingProxy); err != nil {
+		return nil, err
+	}
 	if *maxContracts <= 0 {
 		return nil, fmt.Errorf("disclosure-service: --max-contracts-per-template must be positive, got %d", *maxContracts)
 	}
 	return &options{
-		listen:                  *listen,
-		jsonAPIBaseURL:          *jsonAPI,
-		readerParties:           readerParties,
-		accessTokenFile:         *tokenFile,
-		maxContractsPerTemplate: *maxContracts,
-		maxUpstreamConcurrency:  *maxUpstream,
-		cacheTTL:                *cacheTTL,
-		verbose:                 *verbose,
+		listen:                    *listen,
+		jsonAPIBaseURL:            *jsonAPI,
+		readerParties:             readerParties,
+		accessTokenFile:           *tokenFile,
+		maxContractsPerTemplate:   *maxContracts,
+		maxUpstreamConcurrency:    *maxUpstream,
+		cacheTTL:                  *cacheTTL,
+		behindAuthenticatingProxy: *behindAuthenticatingProxy,
+		verbose:                   *verbose,
 	}, nil
+}
+
+// checkListenAddress refuses a non-loopback bind unless the operator states that an
+// authenticating proxy is in front.
+func checkListenAddress(listenAddress string, behindAuthenticatingProxy bool) error {
+	host, _, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return fmt.Errorf("disclosure-service: --listen %q: %w", listenAddress, err)
+	}
+	if isLoopbackIPAddress(host) {
+		return nil
+	}
+	if !behindAuthenticatingProxy {
+		return fmt.Errorf("disclosure-service: --listen %q is not a loopback IP address; set --behind-authenticating-proxy only when an authenticating proxy is in front", listenAddress)
+	}
+	return nil
+}
+
+// newHTTPServer bounds the inbound headers and the time to write each response.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      inboundRequestDeadline + 5*time.Second,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    maxInboundHeaderBytes,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +145,9 @@ func parseFlags(args []string) (*options, error) {
 // run builds and serves the service until ctx is canceled, then shuts down gracefully. It
 // returns nil on a clean shutdown, including http.ErrServerClosed. Any other error is real.
 func run(ctx context.Context, opts *options, stderr io.Writer) error {
+	if err := checkListenAddress(opts.listen, opts.behindAuthenticatingProxy); err != nil {
+		return err
+	}
 	// Fail fast at startup when the token file is missing or unreadable. httpACSClient keeps
 	// only the path; see readAccessToken's call in authHeader.
 	if opts.accessTokenFile != "" {
@@ -131,25 +169,18 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
+	//SECURITY: second boundary; the bound address, not the flag text.
+	if err := checkListenAddress(ln.Addr().String(), opts.behindAuthenticatingProxy); err != nil {
+		_ = ln.Close()
+		return err
+	}
 
 	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
 		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
-	fmt.Fprintln(stderr, "disclosure-service: WARNING unauthenticated harness/ops-grade service -- do not expose beyond a trusted network")
-	if host, _, splitErr := net.SplitHostPort(ln.Addr().String()); splitErr == nil {
-		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
-			fmt.Fprintf(stderr, "disclosure-service: WARNING listening on non-loopback address %s\n", ln.Addr().String())
-		}
-	}
+	fmt.Fprintln(stderr, "disclosure-service: no inbound authentication; an authenticating proxy in front is mandatory")
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 
-	httpSrv := &http.Server{
-		Handler:           srv,
-		ReadHeaderTimeout: serverReadHeaderTimeout,
-		ReadTimeout:       serverReadTimeout,
-		// A flow reads at most every flow template plus one ledger-end call.
-		WriteTimeout: time.Duration(len(flowTemplateByTail)+1) * httpClientTimeout,
-		IdleTimeout:  serverIdleTimeout,
-	}
+	httpSrv := newHTTPServer(srv)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.Serve(ln) }()
 

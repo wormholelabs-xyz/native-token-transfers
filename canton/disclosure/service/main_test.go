@@ -462,7 +462,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 
 	banner := out.String()
 	assert.Contains(t, banner, testGuardianGovernanceParty)
-	assert.Contains(t, banner, "unauthenticated")
+	assert.Contains(t, banner, "an authenticating proxy in front is mandatory")
 	assert.NotContains(t, banner, "non-loopback") // 127.0.0.1 is loopback
 
 	resp, err := http.Get(addr + "/v1/healthz")

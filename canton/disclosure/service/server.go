@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,12 +53,21 @@ func templateTail(templateID string) string {
 
 // server is the disclosure-service's http.Handler. It is stateless: it queries per request.
 type server struct {
-	opts         *options
-	acs          acsClient
-	maxContracts int // cap per template; exceeding it is an error
-	mux          *http.ServeMux
-	logger       *log.Logger
+	opts                   *options
+	acs                    acsClient
+	maxContracts           int // cap per template; exceeding it is an error
+	mux                    *http.ServeMux
+	logger                 *log.Logger
+	inboundSlots           chan struct{}
+	inboundRequestDeadline time.Duration
 }
+
+const (
+	maxConcurrentInboundRequests = 64
+	inboundRequestDeadline       = 60 * time.Second
+)
+
+var errInboundBusy = errors.New("disclosure-service: inbound request cap reached")
 
 func newServer(opts *options, acs acsClient) *server {
 	s := &server{
@@ -63,6 +75,9 @@ func newServer(opts *options, acs acsClient) *server {
 		acs:          acs,
 		maxContracts: opts.maxContractsPerTemplate,
 		logger:       log.New(os.Stderr, "", log.LstdFlags),
+
+		inboundSlots:           make(chan struct{}, maxConcurrentInboundRequests),
+		inboundRequestDeadline: inboundRequestDeadline,
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1", s.handleIndex)
@@ -72,8 +87,19 @@ func newServer(opts *options, acs acsClient) *server {
 	return s
 }
 
+// ServeHTTP sheds a request past maxConcurrentInboundRequests with a 503 and bounds each request
+// by inboundRequestDeadline. The per-client rate limit belongs to the authenticating proxy.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	select {
+	case s.inboundSlots <- struct{}{}:
+	default:
+		s.writePublicError(w, r, http.StatusServiceUnavailable, errInboundBusy)
+		return
+	}
+	defer func() { <-s.inboundSlots }()
+	ctx, cancel := context.WithTimeout(r.Context(), s.inboundRequestDeadline)
+	defer cancel()
+	s.mux.ServeHTTP(w, r.WithContext(ctx))
 }
 
 type healthzResponse struct {
