@@ -48,7 +48,8 @@ func (f *countingACS) LedgerEnd(context.Context) (int64, error) {
 	return f.offset, nil
 }
 
-func (f *countingACS) ActiveContracts(_ context.Context, _ []string, template string, offset int64) ([]acsEntry, error) {
+func (f *countingACS) ActiveContracts(_ context.Context, query activeContractsQuery) ([]acsEntry, error) {
+	template, offset := query.template, query.activeAtOffset
 	defer f.track()()
 	f.acCalls.Add(1)
 	if f.release != nil {
@@ -58,6 +59,11 @@ func (f *countingACS) ActiveContracts(_ context.Context, _ []string, template st
 		return nil, f.err
 	}
 	return []acsEntry{{ContractID: fmt.Sprintf("%s@%d", template, offset)}}, nil
+}
+
+// testQuery is an unfiltered query of template at offset, read as "Alice".
+func testQuery(template string, offset int64) activeContractsQuery {
+	return activeContractsQuery{readerParties: []partyID{"Alice"}, template: template, activeAtOffset: offset, maxMatches: maxMatchingContractsPerQuery}
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +79,7 @@ func TestCachingACS_ServesRepeatReadsFromMemory(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(42), offset)
 
-		entries, err := c.ActiveContracts(context.Background(), []string{"Alice"}, "T", offset)
+		entries, err := c.ActiveContracts(context.Background(), testQuery("T", offset))
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
 	}
@@ -131,13 +137,13 @@ func TestCachingACS_KeysOnOffsetAndTemplate(t *testing.T) {
 	inner := &countingACS{}
 	c := newCachingACS(inner, 5*time.Second)
 
-	_, err := c.ActiveContracts(context.Background(), []string{"Alice"}, "T1", 1)
+	_, err := c.ActiveContracts(context.Background(), testQuery("T1", 1))
 	require.NoError(t, err)
-	_, err = c.ActiveContracts(context.Background(), []string{"Alice"}, "T2", 1)
+	_, err = c.ActiveContracts(context.Background(), testQuery("T2", 1))
 	require.NoError(t, err)
-	_, err = c.ActiveContracts(context.Background(), []string{"Alice"}, "T1", 2)
+	_, err = c.ActiveContracts(context.Background(), testQuery("T1", 2))
 	require.NoError(t, err)
-	_, err = c.ActiveContracts(context.Background(), []string{"Alice"}, "T1", 1)
+	_, err = c.ActiveContracts(context.Background(), testQuery("T1", 1))
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(3), inner.acCalls.Load(), "distinct template/offset pairs are distinct keys")
@@ -162,7 +168,7 @@ func TestCachingACS_EvictsWhenFull(t *testing.T) {
 	c := newCachingACS(inner, 5*time.Second)
 
 	for i := 0; i < maxCacheEntries+50; i++ {
-		_, err := c.ActiveContracts(context.Background(), []string{"Alice"}, "T", int64(i))
+		_, err := c.ActiveContracts(context.Background(), testQuery("T", int64(i)))
 		require.NoError(t, err)
 	}
 
@@ -189,7 +195,7 @@ func TestBoundedACS_CapsUpstreamConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = b.ActiveContracts(context.Background(), []string{"Alice"}, "T", 1)
+			_, _ = b.ActiveContracts(context.Background(), testQuery("T", 1))
 		}()
 	}
 
@@ -282,7 +288,7 @@ func (scripted *scriptedLedgerEndACS) LedgerEnd(ctx context.Context) (int64, err
 	return scripted.ledgerEnd(ctx, scripted.calls.Add(1))
 }
 
-func (scripted *scriptedLedgerEndACS) ActiveContracts(context.Context, []string, string, int64) ([]acsEntry, error) {
+func (scripted *scriptedLedgerEndACS) ActiveContracts(context.Context, activeContractsQuery) ([]acsEntry, error) {
 	panic("scriptedLedgerEndACS: ActiveContracts is not scripted")
 }
 

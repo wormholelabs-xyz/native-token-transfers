@@ -237,10 +237,63 @@ func findByContractID[T any](entries []decodedEntry[T], cid string) (decodedEntr
 	return decodedEntry[T]{}, false
 }
 
-// fetchDecoded resolves tail to its flow template name, queries ActiveContracts at
-// offset, and decodes each entry's createArgument into T.
-func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int64) ([]decodedEntry[T], error) {
-	entries, err := s.fetchEntries(ctx, tail, offset)
+// exactFieldMatch requires the createArgument field at fieldPath to equal wantValue.
+func exactFieldMatch(wantValue string, fieldPath ...string) createArgumentFieldMatch {
+	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantValue}}
+}
+
+// hexFieldMatch is exactFieldMatch with both sides lowercased.
+func hexFieldMatch(wantHex string, fieldPath ...string) createArgumentFieldMatch {
+	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantHex}, compareHex: true}
+}
+
+// digestPrefixes returns the 65 prefixes of digest, from "" to the whole digest.
+func digestPrefixes(digest string) []string {
+	if len(digest) != 64 {
+		panic(fmt.Sprintf("disclosure-service: digest has %d characters, expected 64", len(digest)))
+	}
+	prefixes := make([]string, 0, len(digest)+1)
+	for prefixLength := 0; prefixLength <= len(digest); prefixLength++ {
+		prefixes = append(prefixes, digest[:prefixLength])
+	}
+	return prefixes
+}
+
+// readerParties is the party set each query reads as.
+func (s *server) readerParties() []partyID {
+	parties := make([]partyID, 0, len(s.opts.disclosingParties))
+	for _, party := range s.opts.disclosingParties {
+		parties = append(parties, partyID(party))
+	}
+	return parties
+}
+
+// flowQuery builds a query for tail at offset, capped at maxMatchingContractsPerQuery.
+func (s *server) flowQuery(tail string, offset int64, fieldMatches ...createArgumentFieldMatch) (activeContractsQuery, error) {
+	template, ok := flowTemplateByTail[tail]
+	if !ok {
+		return activeContractsQuery{}, newFlowError(http.StatusInternalServerError, "template %q is not a flow template", tail)
+	}
+	return activeContractsQuery{
+		readerParties:  s.readerParties(),
+		template:       template,
+		activeAtOffset: offset,
+		fieldMatches:   fieldMatches,
+		maxMatches:     maxMatchingContractsPerQuery,
+	}, nil
+}
+
+// fetchDecoded runs flowQuery(tail, offset, fieldMatches...) and decodes each createArgument into T.
+func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int64, fieldMatches ...createArgumentFieldMatch) ([]decodedEntry[T], error) {
+	query, err := s.flowQuery(tail, offset, fieldMatches...)
+	if err != nil {
+		return nil, err
+	}
+	return fetchDecodedQuery[T](ctx, s, query)
+}
+
+func fetchDecodedQuery[T any](ctx context.Context, s *server, query activeContractsQuery) ([]decodedEntry[T], error) {
+	entries, err := s.fetchEntries(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -248,30 +301,25 @@ func fetchDecoded[T any](ctx context.Context, s *server, tail string, offset int
 	for _, e := range entries {
 		var v T
 		if err := json.Unmarshal(e.CreateArgument, &v); err != nil {
-			return nil, newFlowError(http.StatusInternalServerError, "decode %s createArgument for contract %s: %v", tail, e.ContractID, err)
+			return nil, newFlowError(http.StatusInternalServerError, "decode %s createArgument for contract %s: %v", query.template, e.ContractID, err)
 		}
 		out = append(out, decodedEntry[T]{entry: e, value: v})
 	}
 	return out, nil
 }
 
-// fetchEntries resolves tail to its flow template name, queries ActiveContracts at offset, checks
-// each returned template id, and enforces the per-template contract cap.
-func (s *server) fetchEntries(ctx context.Context, tail string, offset int64) ([]acsEntry, error) {
-	canonical, ok := flowTemplateByTail[tail]
-	if !ok {
-		return nil, newFlowError(http.StatusInternalServerError, "template %q is not a flow template", tail)
-	}
-	entries, err := s.acs.ActiveContracts(ctx, s.opts.disclosingParties, canonical, offset)
+// fetchEntries runs query and checks each returned template id.
+func (s *server) fetchEntries(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
+	entries, err := s.acs.ActiveContracts(ctx, query)
 	if err != nil {
-		return nil, newFlowError(upstreamErrorStatus(err), "query %s: %v", canonical, err)
+		return nil, newFlowError(upstreamErrorStatus(err), "query %s: %v", query.template, err)
 	}
-	if msg := s.contractCapError(canonical, len(entries)); msg != "" {
-		return nil, newFlowError(http.StatusBadGateway, "%s", msg)
+	if len(entries) > query.maxMatches {
+		return nil, newFlowError(http.StatusBadGateway, "query %s: %d contracts, cap %d", query.template, len(entries), query.maxMatches)
 	}
 	for _, entry := range entries {
-		if !templateIDMatches(entry.TemplateID, canonical) {
-			return nil, newFlowError(http.StatusBadGateway, "upstream returned templateId %q for requested %q", entry.TemplateID, canonical)
+		if !templateIDMatches(entry.TemplateID, query.template) {
+			return nil, newFlowError(http.StatusBadGateway, "upstream returned templateId %q for requested %q", entry.TemplateID, query.template)
 		}
 	}
 	return entries, nil
@@ -458,7 +506,7 @@ func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], 
 // --- Fetch wrappers: one upstream query plus the matching selector ---
 
 func (s *server) fetchManager(ctx context.Context, managerHex string, offset int64) (decodedEntry[daNttManager], error) {
-	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset)
+	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(managerHex, "managerAddress"))
 	if err != nil {
 		return decodedEntry[daNttManager]{}, err
 	}
@@ -473,15 +521,27 @@ func (s *server) fetchManager(ctx context.Context, managerHex string, offset int
 }
 
 func (s *server) fetchCoreState(ctx context.Context, gg string, offset int64) (decodedEntry[daGuardianAnchor], error) {
-	entries, err := fetchDecoded[daGuardianAnchor](ctx, s, tailCoreState, offset)
+	return s.fetchGuardianAnchor(ctx, tailCoreState, gg, roleCoreState, offset)
+}
+
+// fetchGuardianAnchor filters on guardianGovernance when gg is set.
+func (s *server) fetchGuardianAnchor(ctx context.Context, tail, gg, label string, offset int64) (decodedEntry[daGuardianAnchor], error) {
+	var fieldMatches []createArgumentFieldMatch
+	if gg != "" {
+		fieldMatches = append(fieldMatches, exactFieldMatch(gg, "guardianGovernance"))
+	}
+	entries, err := fetchDecoded[daGuardianAnchor](ctx, s, tail, offset, fieldMatches...)
 	if err != nil {
 		return decodedEntry[daGuardianAnchor]{}, err
 	}
-	return findGuardianAnchor(entries, gg, roleCoreState)
+	return findGuardianAnchor(entries, gg, label)
 }
 
 func (s *server) fetchCoveringNode(ctx context.Context, consumer, namespace, digest string, offset int64) (decodedEntry[daReplayNode], error) {
-	entries, err := fetchDecoded[daReplayNode](ctx, s, tailReplayNode, offset)
+	entries, err := fetchDecoded[daReplayNode](ctx, s, tailReplayNode, offset,
+		exactFieldMatch(consumer, "consumer"),
+		exactFieldMatch(namespace, "namespace"),
+		createArgumentFieldMatch{fieldPath: []string{"prefix"}, wantValues: digestPrefixes(digest), compareHex: true})
 	if err != nil {
 		return decodedEntry[daReplayNode]{}, err
 	}
@@ -489,7 +549,8 @@ func (s *server) fetchCoveringNode(ctx context.Context, consumer, namespace, dig
 }
 
 func (s *server) fetchLedger(ctx context.Context, managerAddress string, offset int64) (decodedEntry[daLockedLedger], error) {
-	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset)
+	managerAddress = strings.ToLower(managerAddress)
+	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(managerAddress, "managerAddress"))
 	if err != nil {
 		return decodedEntry[daLockedLedger]{}, err
 	}
@@ -529,7 +590,7 @@ func (s *server) fetchCommittedCanonicalCoinFactory(ctx context.Context, mgr daN
 // appendTransferPreapprovalOrMissing adds owner's TransferPreapproval for the deployment's instrument
 // under role, or names role as missing when the disclosing parties cannot see it.
 func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner string, instrumentID daInstrumentId, role string, offset int64, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
-	preapprovals, err := fetchDecoded[daPreapproval](ctx, s, tailTransferPreapproval, offset)
+	preapprovals, err := fetchDecoded[daPreapproval](ctx, s, tailTransferPreapproval, offset, preapprovalFieldMatches(owner, instrumentID)...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -544,7 +605,11 @@ func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner s
 }
 
 func (s *server) fetchPotHolding(ctx context.Context, cid string, offset int64) (acsEntry, bool, error) {
-	entries, err := s.fetchEntries(ctx, tailCoin, offset)
+	query, err := s.flowQuery(tailCoin, offset)
+	if err != nil {
+		return acsEntry{}, false, err
+	}
+	entries, err := s.fetchEntries(ctx, query)
 	if err != nil {
 		return acsEntry{}, false, err
 	}
@@ -554,6 +619,26 @@ func (s *server) fetchPotHolding(ctx context.Context, cid string, offset int64) 
 		}
 	}
 	return acsEntry{}, false, nil
+}
+
+// preapprovalFieldMatches selects the DepositPreapproval or TransferPreapproval of owner for instrumentID.
+func preapprovalFieldMatches(owner string, instrumentID daInstrumentId) []createArgumentFieldMatch {
+	return []createArgumentFieldMatch{
+		exactFieldMatch(owner, "owner"),
+		exactFieldMatch(instrumentID.Admin, "instrumentId", "admin"),
+		exactFieldMatch(instrumentID.Id, "instrumentId", "id"),
+	}
+}
+
+// fetchTransceiverEmitter selects the manager's transceiver Emitter, owned by gg.
+func (s *server) fetchTransceiverEmitter(ctx context.Context, manager daNttManager, offset int64) (decodedEntry[daEmitter], error) {
+	emitters, err := fetchDecoded[daEmitter](ctx, s, tailEmitter, offset,
+		exactFieldMatch(manager.GuardianGovernance, "owner"),
+		exactFieldMatch(manager.TransceiverEmitterId.String(), "emitterId"))
+	if err != nil {
+		return decodedEntry[daEmitter]{}, err
+	}
+	return findTransceiverEmitter(emitters, manager.TransceiverEmitterId, manager.GuardianGovernance)
 }
 
 // --- Per-flow assemblers ---
@@ -638,7 +723,7 @@ func (s *server) assembleMint(ctx context.Context, request mintRequest, offset i
 		return nil, err
 	}
 
-	deposits, err := fetchDecoded[daPreapproval](ctx, s, tailDepositPreapproval, offset)
+	deposits, err := fetchDecoded[daPreapproval](ctx, s, tailDepositPreapproval, offset, preapprovalFieldMatches(recipient, mgr.value.InstrumentId)...)
 	if err != nil {
 		return nil, err
 	}
@@ -678,11 +763,7 @@ func (s *server) assembleSetPeer(ctx context.Context, request setPeerRequest, of
 	if err != nil {
 		return nil, err
 	}
-	emitters, err := fetchDecoded[daEmitter](ctx, s, tailEmitter, offset)
-	if err != nil {
-		return nil, err
-	}
-	emitter, err := findTransceiverEmitter(emitters, mgr.value.TransceiverEmitterId, mgr.value.GuardianGovernance)
+	emitter, err := s.fetchTransceiverEmitter(ctx, mgr.value, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -724,7 +805,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	}
 	missing := make([]flowMissingEntry, 0)
 
-	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset)
+	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset, hexFieldMatch(strings.ToLower(mgr.value.ManagerAddress), "managerAddress"))
 	if err != nil {
 		return nil, err
 	}
@@ -788,11 +869,7 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 	if err != nil {
 		return nil, err
 	}
-	emitters, err := fetchDecoded[daEmitter](ctx, s, tailEmitter, offset)
-	if err != nil {
-		return nil, err
-	}
-	emitter, err := findTransceiverEmitter(emitters, mgr.value.TransceiverEmitterId, mgr.value.GuardianGovernance)
+	emitter, err := s.fetchTransceiverEmitter(ctx, mgr.value, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -857,38 +934,19 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 func (s *server) assembleRegister(ctx context.Context, request registerRequest, offset int64) (*flowResponse, error) {
 	gg, byVaa := request.guardianGovernance, request.byVAA
 
-	govs, err := fetchDecoded[daGuardianAnchor](ctx, s, tailNttGovernance, offset)
+	gov, err := s.fetchGuardianAnchor(ctx, tailNttGovernance, gg, roleNttGovernance, offset)
 	if err != nil {
 		return nil, err
 	}
-	gov, err := findGuardianAnchor(govs, gg, roleNttGovernance)
+	emRegEntry, err := s.fetchGuardianAnchor(ctx, tailEmitterRegistry, gg, roleEmitterRegistry, offset)
 	if err != nil {
 		return nil, err
 	}
-
-	emReg, err := fetchDecoded[daGuardianAnchor](ctx, s, tailEmitterRegistry, offset)
+	rrRegEntry, err := s.fetchGuardianAnchor(ctx, tailReplayRootRegistry, gg, roleReplayRootRegistry, offset)
 	if err != nil {
 		return nil, err
 	}
-	emRegEntry, err := findGuardianAnchor(emReg, gg, roleEmitterRegistry)
-	if err != nil {
-		return nil, err
-	}
-
-	rrReg, err := fetchDecoded[daGuardianAnchor](ctx, s, tailReplayRootRegistry, offset)
-	if err != nil {
-		return nil, err
-	}
-	rrRegEntry, err := findGuardianAnchor(rrReg, gg, roleReplayRootRegistry)
-	if err != nil {
-		return nil, err
-	}
-
-	coreStates, err := fetchDecoded[daGuardianAnchor](ctx, s, tailCoreState, offset)
-	if err != nil {
-		return nil, err
-	}
-	cs, err := findGuardianAnchor(coreStates, gg, roleCoreState)
+	cs, err := s.fetchCoreState(ctx, gg, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -901,7 +959,7 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 	}
 
 	if byVaa {
-		factories, err := fetchDecoded[daCoinFactory](ctx, s, tailCoinFactory, offset)
+		factories, err := fetchDecoded[daCoinFactory](ctx, s, tailCoinFactory, offset, exactFieldMatch(gg, "admin"))
 		if err != nil {
 			return nil, err
 		}
@@ -989,13 +1047,6 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *server) contractCapError(template string, count int) string {
-	if count > s.maxContracts {
-		return fmt.Sprintf("template %s: %d contracts exceeds cap %d -- refusing rather than truncating", template, count, s.maxContracts)
-	}
-	return ""
-}
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -1028,7 +1079,13 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 		s.writePublicError(w, r, upstreamErrorStatus(err), fmt.Errorf("ledger-end: %w", err))
 		return
 	}
-	mgrs, err := fetchDecoded[daNttManager](r.Context(), s, tailNttManager, offset)
+	managersQuery, err := s.flowQuery(tailNttManager, offset)
+	if err != nil {
+		s.writeFlowError(w, r, err)
+		return
+	}
+	managersQuery.maxMatches = s.maxContracts
+	mgrs, err := fetchDecodedQuery[daNttManager](r.Context(), s, managersQuery)
 	if err != nil {
 		s.writeFlowError(w, r, err)
 		return

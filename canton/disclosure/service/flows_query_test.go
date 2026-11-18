@@ -23,9 +23,9 @@ func (counter *callCountingACS) LedgerEnd(ctx context.Context) (int64, error) {
 	return counter.inner.LedgerEnd(ctx)
 }
 
-func (counter *callCountingACS) ActiveContracts(ctx context.Context, parties []string, template string, activeAtOffset int64) ([]acsEntry, error) {
+func (counter *callCountingACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
 	counter.activeContractsCalls.Add(1)
-	return counter.inner.ActiveContracts(ctx, parties, template, activeAtOffset)
+	return counter.inner.ActiveContracts(ctx, query)
 }
 
 func (counter *callCountingACS) totalCalls() int64 {

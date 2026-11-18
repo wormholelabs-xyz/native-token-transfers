@@ -98,7 +98,7 @@ func TestActiveContracts_MultiPartyFilter(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, "")
-	_, err := client.ActiveContracts(context.Background(), []string{"Alice", "Bob"}, template, 42)
+	_, err := client.ActiveContracts(context.Background(), activeContractsQuery{readerParties: []partyID{"Alice", "Bob"}, template: template, activeAtOffset: 42, maxMatches: maxMatchingContractsPerQuery})
 	require.NoError(t, err)
 
 	var req activeContractsRequest
@@ -126,7 +126,7 @@ func TestActiveContracts_DedupsSharedContracts(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, "")
-	entries, err := client.ActiveContracts(context.Background(), []string{"Alice", "Bob"}, template, 42)
+	entries, err := client.ActiveContracts(context.Background(), activeContractsQuery{readerParties: []partyID{"Alice", "Bob"}, template: template, activeAtOffset: 42, maxMatches: maxMatchingContractsPerQuery})
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
 	assert.Equal(t, "00shared", entries[0].ContractID)
@@ -353,7 +353,7 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, tokenPath)
-	_, err = client.ActiveContracts(context.Background(), []string{"Alice"}, template, 42)
+	_, err = client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
 }
@@ -373,13 +373,13 @@ func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 	})
 
 	client := newHTTPACSClient(upstream.URL, tokenPath)
-	_, err := client.ActiveContracts(context.Background(), []string{"Alice"}, template, 42)
+	_, err := client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer first-token", capture.get())
 
 	require.NoError(t, os.WriteFile(tokenPath, []byte("second-token\n"), 0o600))
 
-	_, err = client.ActiveContracts(context.Background(), []string{"Alice"}, template, 42)
+	_, err = client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer second-token", capture.get())
 }

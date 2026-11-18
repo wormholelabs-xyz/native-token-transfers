@@ -1,7 +1,7 @@
 // Upstream guards: a TTL cache and a concurrency bound, both wrapping acsClient.
 //
-// One HTTP request can fan out to every allow-listed template plus a ledger-end call, so
-// inbound traffic reaches the participant amplified. These two decorators bound that.
+// One flow request fans out to several templates plus a ledger-end call, so inbound traffic
+// reaches the participant amplified. These two decorators bound that.
 //
 // Compose them cache-outermost (see run()): a cache hit answers without holding a semaphore
 // slot, so cheap repeat traffic never competes with work that must go upstream.
@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 )
@@ -88,12 +87,12 @@ func (b *boundedACS) LedgerEnd(ctx context.Context) (int64, error) {
 	return b.inner.LedgerEnd(ctx)
 }
 
-func (b *boundedACS) ActiveContracts(ctx context.Context, parties []string, template string, activeAtOffset int64) ([]acsEntry, error) {
+func (b *boundedACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
 	if err := b.acquire(ctx); err != nil {
 		return nil, err
 	}
 	defer b.release()
-	return b.inner.ActiveContracts(ctx, parties, template, activeAtOffset)
+	return b.inner.ActiveContracts(ctx, query)
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +232,10 @@ func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
 	return offset, nil
 }
 
-func (c *cachingACS) ActiveContracts(ctx context.Context, parties []string, template string, activeAtOffset int64) ([]acsEntry, error) {
-	key := fmt.Sprintf("ac\x00%d\x00%s\x00%s", activeAtOffset, template, strings.Join(parties, ","))
-	v, err := c.do(ctx, key, func(fetchCtx context.Context) (any, error) {
-		return c.inner.ActiveContracts(fetchCtx, parties, template, activeAtOffset)
+// ActiveContracts caches the filtered result, so an entry holds at most query.maxMatches contracts.
+func (c *cachingACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
+	v, err := c.do(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+		return c.inner.ActiveContracts(fetchCtx, query)
 	})
 	if err != nil {
 		return nil, err
