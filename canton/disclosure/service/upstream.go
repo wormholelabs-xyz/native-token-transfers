@@ -50,8 +50,8 @@ func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool) error {
 	return nil
 }
 
-// newDirectUpstreamHTTPClient connects to the JSON API directly: no proxy from the environment,
-// and a redirect is returned to the caller as the response.
+// newDirectUpstreamHTTPClient connects to the JSON API directly and ignores proxy variables. It
+// returns a redirect to the caller as the response.
 func newDirectUpstreamHTTPClient() *http.Client {
 	defaultTransport, isTransport := http.DefaultTransport.(*http.Transport)
 	if !isTransport {

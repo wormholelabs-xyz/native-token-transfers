@@ -152,7 +152,7 @@ func newCachingACS(inner acsClient, ttl time.Duration) *cachingACS {
 }
 
 // do returns key's cached value, joins the call already fetching it, or starts the fetch. The
-// fetch runs under a service-owned deadline, so one caller's cancel does not fail the others. Each
+// fetch runs under a service-owned deadline: each caller's cancel ends only its own wait. Each
 // caller stops waiting when its own ctx ends.
 func (c *cachingACS) do(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
 	c.mu.Lock()

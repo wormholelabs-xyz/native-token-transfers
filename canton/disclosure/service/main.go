@@ -2,7 +2,7 @@
 // one flow's disclosure set from one stakeholder participant's ACS over the JSON Ledger API v2.
 // Each set comes from its choice body in canton/ntt/daml/Wormhole/Ntt/Manager.daml (see flows.go).
 //
-// Posture: the service has no inbound authentication. An authenticating TLS proxy in front is
+// Posture: the service trusts each inbound request. An authenticating TLS proxy in front is
 // mandatory. A non-loopback --listen needs --behind-authenticating-proxy.
 // --access-token-file is the service's own credential for the upstream JSON API.
 package main
@@ -179,7 +179,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("disclosure-service: listen on %s: %w", opts.listen, err)
 	}
-	//SECURITY: second boundary; the bound address, not the flag text.
+	//SECURITY: second boundary: check the bound address.
 	if err := checkListenAddress(ln.Addr().String(), opts.behindAuthenticatingProxy); err != nil {
 		_ = ln.Close()
 		return err

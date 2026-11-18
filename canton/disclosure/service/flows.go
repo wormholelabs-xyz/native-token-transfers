@@ -599,8 +599,8 @@ func isCustodyPotHoldingTemplate(pot acsEntry) bool {
 	return checkUpstreamTemplate(flowTemplateByTail[tailCoin], pot.PackageName, pot.TemplateID) == nil
 }
 
-// fetchPotHolding reads the custody pot by the contract id its LockedLedger names. The read is
-// not pinned to the request offset; an archived pot gives a failed submission and a retry.
+// fetchPotHolding reads the custody pot by the contract id its LockedLedger names, at the
+// latest ledger state; an archived pot gives a failed submission and a retry.
 func (s *server) fetchPotHolding(ctx context.Context, potContractID contractID) (acsEntry, bool, error) {
 	pot, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoin), potContractID)
 	if err != nil {
