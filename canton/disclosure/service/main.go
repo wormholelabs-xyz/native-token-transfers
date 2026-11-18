@@ -78,6 +78,9 @@ func parseFlags(args []string) (*options, error) {
 	if *jsonAPI == "" {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://127.0.0.1:6975)")
 	}
+	if err := checkJSONAPIURL(*jsonAPI, *tokenFile != ""); err != nil {
+		return nil, err
+	}
 	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)
 	if err != nil {
 		return nil, err

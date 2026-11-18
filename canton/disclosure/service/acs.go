@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 )
@@ -264,11 +263,15 @@ type httpACSClient struct {
 	maxResponseBytes int64
 }
 
+// newHTTPACSClient panics when baseURL breaks checkJSONAPIURL; parseFlags checks it first.
 func newHTTPACSClient(baseURL, tokenFile string) *httpACSClient {
+	if err := checkJSONAPIURL(baseURL, tokenFile != ""); err != nil {
+		panic(err.Error())
+	}
 	return &httpACSClient{
 		baseURL:          strings.TrimRight(baseURL, "/"),
 		tokenFile:        tokenFile,
-		client:           &http.Client{Timeout: httpClientTimeout},
+		client:           newDirectUpstreamHTTPClient(),
 		maxResponseBytes: maxUpstreamResponseBytes,
 	}
 }
@@ -311,12 +314,6 @@ func (reader *boundedBodyReader) Read(buffer []byte) (int, error) {
 	return readCount, err
 }
 
-// readBounded reads a response body of at most maxUpstreamResponseBytes. A larger body is an
-// error.
-func readBounded(r io.Reader) ([]byte, error) {
-	return io.ReadAll(&boundedBodyReader{source: r, remainingBytes: maxUpstreamResponseBytes})
-}
-
 // newUpstreamHTTPError keeps at most maxLoggedUpstreamBodyBytes of a non-200 body.
 func newUpstreamHTTPError(operation string, resp *http.Response) error {
 	bodyExcerpt, _ := io.ReadAll(io.LimitReader(resp.Body, maxLoggedUpstreamBodyBytes))
@@ -342,7 +339,7 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, newUpstreamHTTPError("ledger-end", resp)
 	}
-	body, err := readBounded(resp.Body)
+	body, err := readAtMost(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
 		return 0, fmt.Errorf("disclosure-service: read ledger-end response: %w", err)
 	}
@@ -588,7 +585,7 @@ func wrapStreamError(err error) error {
 // the common case. A file that trims to nothing is an error: it would send an empty bearer
 // token upstream.
 func readAccessToken(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readFileAtMost(path, maxAccessTokenFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("disclosure-service: read access token file %s: %w", path, err)
 	}
