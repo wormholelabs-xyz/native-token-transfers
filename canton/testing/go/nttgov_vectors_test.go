@@ -220,7 +220,7 @@ func encodeSetMessageFeePayload(chain uint16, fee uint64) []byte {
 }
 
 // TestReproduceGovSetFeeVAA regenerates Test.TestCore's govSetFeeVAA
-// byte-for-byte: SetMessageFee(chain=75, fee=1000) for wormhole-core 0.5.0's
+// byte-for-byte: SetMessageFee(chain=75, fee=1000) for the core
 // cantonChainId. If it fails, this encoder has drifted from the wire format
 // -- fix here, not the Daml constant.
 func TestReproduceGovSetFeeVAA(t *testing.T) {
