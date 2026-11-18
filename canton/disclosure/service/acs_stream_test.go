@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -270,6 +271,47 @@ func TestFlowsIgnoreStrangerContractsBeyondCap(t *testing.T) {
 				assert.NotContains(t, disclosure.ContractID, "stranger")
 			}
 			assert.True(t, found, "role %s not served", tc.wantRole)
+		})
+	}
+}
+
+func TestBoundedBodyReaderStaysOverLimit(t *testing.T) {
+	cases := []struct {
+		name           string
+		source         string
+		remainingBytes int64
+		wantOverLimit  bool
+	}{
+		{"under the limit", "ab", 3, false},
+		{"at the limit", "abc", 3, false},
+		{"one byte over the limit", "abcd", 3, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &boundedBodyReader{source: strings.NewReader(tc.source), remainingBytes: tc.remainingBytes}
+			_, firstErr := io.ReadAll(reader)
+			var probe [1]byte
+			_, secondErr := reader.Read(probe[:])
+			assert.Equal(t, tc.wantOverLimit, reader.limitExceeded)
+			if tc.wantOverLimit {
+				assert.ErrorIs(t, firstErr, errUpstreamResponseTooLarge)
+				assert.ErrorIs(t, secondErr, errUpstreamResponseTooLarge, "a read after the limit reports the limit again")
+				return
+			}
+			assert.NoError(t, firstErr)
+			assert.ErrorIs(t, secondErr, io.EOF)
+		})
+	}
+}
+
+// TestActiveContractsOverLimitAtArrayEnd: the cut falls on the closing "]", where Decoder.More drops the read error.
+func TestActiveContractsOverLimitAtArrayEnd(t *testing.T) {
+	oneEntry := acsContractJSON("pkg:"+tailNttManager, "cid-1", "YmxvYg==", "sync1")
+	body := "[" + oneEntry + "]"
+	for _, cutBytes := range []int64{1, 2, int64(len(oneEntry)) / 2} {
+		t.Run(fmt.Sprintf("limit is body minus %d", cutBytes), func(t *testing.T) {
+			_, err := decodeBoundedActiveContracts(&boundedBodyReader{source: strings.NewReader(body), remainingBytes: int64(len(body)) - cutBytes}, managerQuery())
+			assert.ErrorIs(t, err, errUpstreamResponseTooLarge)
 		})
 	}
 }

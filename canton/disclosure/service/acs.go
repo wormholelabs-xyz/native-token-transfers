@@ -294,17 +294,22 @@ func (c *httpACSClient) authHeader(req *http.Request) error {
 }
 
 // boundedBodyReader fails with errUpstreamResponseTooLarge once source yields more than
-// remainingBytes.
+// remainingBytes. limitExceeded stays set, and each later Read fails the same way.
 type boundedBodyReader struct {
 	source         io.Reader
 	remainingBytes int64
+	limitExceeded  bool
 }
 
 func (reader *boundedBodyReader) Read(buffer []byte) (int, error) {
+	if reader.limitExceeded {
+		return 0, errUpstreamResponseTooLarge
+	}
 	if reader.remainingBytes <= 0 {
 		var probe [1]byte
 		probeCount, err := reader.source.Read(probe[:])
 		if probeCount > 0 {
+			reader.limitExceeded = true
 			return 0, errUpstreamResponseTooLarge
 		}
 		return 0, err
@@ -403,7 +408,7 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 	if resp.StatusCode != http.StatusOK {
 		return nil, newUpstreamHTTPError("active-contracts", resp)
 	}
-	entries, err := decodeActiveContractsStream(&boundedBodyReader{source: resp.Body, remainingBytes: c.maxResponseBytes}, query)
+	entries, err := decodeBoundedActiveContracts(&boundedBodyReader{source: resp.Body, remainingBytes: c.maxResponseBytes}, query)
 	if err != nil {
 		return nil, fmt.Errorf("disclosure-service: active-contracts %s: %w", query.template, err)
 	}
@@ -478,6 +483,16 @@ func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []
 		SynchronizerID:   events.Created.SynchronizerID,
 		CreateArgument:   createdEvent.CreateArgument,
 	}, true, nil
+}
+
+// decodeBoundedActiveContracts reports errUpstreamResponseTooLarge whenever body passed its limit.
+// json.Decoder.More drops a read error, so the decode error alone can name another cause.
+func decodeBoundedActiveContracts(body *boundedBodyReader, query activeContractsQuery) ([]acsEntry, error) {
+	entries, err := decodeActiveContractsStream(body, query)
+	if body.limitExceeded {
+		return nil, errUpstreamResponseTooLarge
+	}
+	return entries, err
 }
 
 // decodeActiveContractsStream reads one JSON array element at a time. It fails past
