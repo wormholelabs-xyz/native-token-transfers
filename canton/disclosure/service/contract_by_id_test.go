@@ -156,7 +156,7 @@ func TestCommittedFactoryByContractID(t *testing.T) {
 		wantStatus int
 	}{
 		{"committed factory among 1001 other factories", jsonArray(append(append([]string{}, strangerFactories...), lockUnlock.factoryJSON())...), http.StatusOK},
-		{"committed factory not visible", "[]", http.StatusInternalServerError},
+		{"committed factory not visible", "[]", http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -89,7 +89,16 @@ synchronizer. The `missing` array names the set members that no reader party
 can see, for example a proposal or a preapproval. The client supplies them.
 
 The service does not serve a template outside a flow set. The service serves
-a `Coin` only as the custody pot that a `LockedLedger` names.
+a `Coin` or an `Amulet` only as the custody pot that a `LockedLedger` names.
+It reads the pot by its contract id.
+
+### Canton Coin deployments
+
+A lock/unlock deployment of Canton Coin (Amulet) commits the Amulet registry
+`TransferFactory`. The reader parties cannot see this DSO contract. Thus the
+lock/unlock flows name `committed TransferFactory` in `missing`. Get the
+factory and its choice context from the transfer-factory API of the
+registry. The custody pot of such a deployment is a `Splice.Amulet:Amulet`.
 
 ## Client checks
 
