@@ -128,6 +128,12 @@ func readBounded(r io.Reader) ([]byte, error) {
 	return body, nil
 }
 
+// newUpstreamHTTPError keeps at most maxLoggedUpstreamBodyBytes of a non-200 body.
+func newUpstreamHTTPError(operation string, resp *http.Response) error {
+	bodyExcerpt, _ := io.ReadAll(io.LimitReader(resp.Body, maxLoggedUpstreamBodyBytes))
+	return &upstreamHTTPError{operation: operation, statusCode: resp.StatusCode, bodyExcerpt: bodyExcerpt}
+}
+
 // LedgerEnd calls GET /v2/state/ledger-end. This pins ActiveContracts' activeAtOffset.
 func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v2/state/ledger-end", nil)
@@ -144,12 +150,12 @@ func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("disclosure-service: ledger-end request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, newUpstreamHTTPError("ledger-end", resp)
+	}
 	body, err := readBounded(resp.Body)
 	if err != nil {
 		return 0, fmt.Errorf("disclosure-service: read ledger-end response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("disclosure-service: ledger-end: HTTP %d: %s", resp.StatusCode, body)
 	}
 	var out struct {
 		Offset int64 `json:"offset"`
@@ -198,12 +204,12 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, parties []string, t
 		return nil, fmt.Errorf("disclosure-service: active-contracts request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, newUpstreamHTTPError("active-contracts", resp)
+	}
 	respBody, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("disclosure-service: read active-contracts response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("disclosure-service: active-contracts: HTTP %d: %s", resp.StatusCode, respBody)
 	}
 
 	var entries []acsResponseEntry

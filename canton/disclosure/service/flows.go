@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -197,17 +196,6 @@ func newFlowError(status int, format string, args ...any) error {
 	return &flowError{status: status, msg: "disclosure-service: " + fmt.Sprintf(format, args...)}
 }
 
-// writeFlowError reports err's status if it is a *flowError, else 500: a defensive default, since
-// every error an assembler produces is expected to be a *flowError.
-func writeFlowError(w http.ResponseWriter, err error) {
-	var fe *flowError
-	if errors.As(err, &fe) {
-		http.Error(w, fe.msg, fe.status)
-		return
-	}
-	http.Error(w, fmt.Sprintf("disclosure-service: %v", err), http.StatusInternalServerError)
-}
-
 // --- Param parsing (pure) ---
 
 func requireParam(q url.Values, name string) (string, error) {
@@ -227,7 +215,7 @@ func normalizeHex64(raw, param string) (string, error) {
 	}
 	for _, c := range v {
 		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
-			return "", newFlowError(http.StatusBadRequest, "%s must be hex, got %q", param, raw)
+			return "", newFlowError(http.StatusBadRequest, "%s must be hex, got %q", param, truncateForError(raw))
 		}
 	}
 	return v, nil
@@ -261,7 +249,7 @@ func parseByVaa(q url.Values) (bool, error) {
 	}
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		return false, newFlowError(http.StatusBadRequest, "by-vaa must be a bool, got %q", raw)
+		return false, newFlowError(http.StatusBadRequest, "by-vaa must be a bool, got %q", truncateForError(raw))
 	}
 	return v, nil
 }
@@ -1053,7 +1041,7 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 
 	offset, err := s.acs.LedgerEnd(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), upstreamErrorStatus(err))
+		s.writePublicError(w, r, upstreamErrorStatus(err), fmt.Errorf("ledger-end: %w", err))
 		return
 	}
 
@@ -1074,11 +1062,11 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	case "consolidate":
 		resp, err = s.assembleConsolidate(r.Context(), q, offset)
 	default:
-		http.Error(w, fmt.Sprintf("disclosure-service: unknown flow %q", flow), http.StatusNotFound)
+		s.writeFlowError(w, r, newFlowError(http.StatusNotFound, "unknown flow %q", truncateForError(flow)))
 		return
 	}
 	if err != nil {
-		writeFlowError(w, err)
+		s.writeFlowError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1120,12 +1108,12 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 	}
 	offset, err := s.acs.LedgerEnd(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), upstreamErrorStatus(err))
+		s.writePublicError(w, r, upstreamErrorStatus(err), fmt.Errorf("ledger-end: %w", err))
 		return
 	}
 	mgrs, err := fetchDecoded[daNttManager](r.Context(), s, tailNttManager, offset)
 	if err != nil {
-		writeFlowError(w, err)
+		s.writeFlowError(w, r, err)
 		return
 	}
 	out := make([]managerEntry, 0, len(mgrs))

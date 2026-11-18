@@ -20,11 +20,13 @@ import (
 // errUpstreamBusy reports that the concurrency bound shed this call. Handlers map it to 503.
 var errUpstreamBusy = errors.New("disclosure-service: upstream busy")
 
-// upstreamErrorStatus separates load shedding, which a caller should retry, from an upstream
-// fault, which it should not.
+// upstreamErrorStatus separates load shedding (503) and a timeout (504) from an upstream fault (502).
 func upstreamErrorStatus(err error) int {
 	if errors.Is(err, errUpstreamBusy) {
 		return http.StatusServiceUnavailable
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
 	}
 	return http.StatusBadGateway
 }

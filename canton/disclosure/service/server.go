@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -103,6 +104,7 @@ type server struct {
 	acs              acsClient
 	maxContracts     int // cap per template; exceeding it is an error
 	mux              *http.ServeMux
+	logger           *log.Logger
 }
 
 func newServer(opts *options, allowList []string, acs acsClient) *server {
@@ -112,6 +114,7 @@ func newServer(opts *options, allowList []string, acs acsClient) *server {
 		allowListOrdered: allowList,
 		acs:              acs,
 		maxContracts:     opts.maxContractsPerTemplate,
+		logger:           log.New(os.Stderr, "", log.LstdFlags),
 	}
 	for _, t := range allowList {
 		s.allowListByTail[templateTail(t)] = t
@@ -189,7 +192,7 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 	// One offset for the whole request: a multi-template response is one consistent snapshot.
 	offset, err := s.acs.LedgerEnd(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("disclosure-service: ledger-end: %v", err), upstreamErrorStatus(err))
+		s.writePublicError(w, r, upstreamErrorStatus(err), fmt.Errorf("ledger-end: %w", err))
 		return
 	}
 
@@ -197,21 +200,19 @@ func (s *server) handleDisclosures(w http.ResponseWriter, r *http.Request) {
 	for _, t := range resolved {
 		entries, err := s.acs.ActiveContracts(r.Context(), s.opts.disclosingParties, t, offset)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("disclosure-service: query %s: %v", t, err), upstreamErrorStatus(err))
+			s.writePublicError(w, r, upstreamErrorStatus(err), fmt.Errorf("query %s: %w", t, err))
 			return
 		}
 		if msg := s.contractCapError(t, len(entries)); msg != "" {
-			http.Error(w, "disclosure-service: "+msg, http.StatusBadGateway)
+			s.writePublicError(w, r, http.StatusBadGateway, errors.New(msg))
 			return
 		}
 		for _, e := range entries {
 			// Defense in depth: the query was filtered to t, but the handler still verifies
 			// the upstream's echoed templateId before serving it onward.
 			if !templateIDMatches(e.TemplateID, t) {
-				http.Error(w, fmt.Sprintf(
-					"disclosure-service: upstream returned mismatched templateId %q for requested %q",
-					e.TemplateID, t,
-				), http.StatusBadGateway)
+				s.writePublicError(w, r, http.StatusBadGateway, fmt.Errorf(
+					"upstream returned mismatched templateId %q for requested %q", e.TemplateID, t))
 				return
 			}
 			out = append(out, discloseEntry{

@@ -367,6 +367,13 @@ func newTestServer(t *testing.T, upstream *httptest.Server, party string, allowL
 	return newServer(opts, allowList, acs)
 }
 
+// newTestServerWithClient builds a server over acs with one disclosing party, "Alice".
+func newTestServerWithClient(t *testing.T, acs acsClient) *server {
+	t.Helper()
+	opts := &options{disclosingParties: []string{"Alice"}, maxContractsPerTemplate: defaultMaxContractsPerTemplate}
+	return newServer(opts, defaultAllowList(), acs)
+}
+
 func TestHandleDisclosures_RejectsUnknownTemplate(t *testing.T) {
 	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("active-contracts must not be queried for a rejected request")
@@ -1279,9 +1286,9 @@ func TestHandleFlows_CoveringNode_ZeroMatches_500(t *testing.T) {
 		tailCoinFactory:  jsonArray(b.factoryJSON()),
 	}
 	srv := newFlowTestServer(t, fixtures, "Alice")
+	logged := captureServerLog(srv)
 	rr := requestFlow(t, srv, "release", "manager="+b.managerAddr+"&digest="+b.digest)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
-	assert.Contains(t, rr.Body.String(), roleCoveringReplayNode)
+	requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, roleCoveringReplayNode)
 }
 
 func TestHandleFlows_CoveringNode_TwoMatches_500(t *testing.T) {
@@ -1633,9 +1640,9 @@ func TestHandleFlows_Consolidate_WrongMode_409(t *testing.T) {
 func TestHandleFlows_Consolidate_LedgerAbsent_500(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
 	srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(b.managerJSON())}, "Alice")
+	logged := captureServerLog(srv)
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
-	assert.Contains(t, rr.Body.String(), roleLockedLedger)
+	requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, roleLockedLedger)
 }
 
 func TestHandleFlows_Consolidate_FactoryAbsent_500(t *testing.T) {
@@ -1827,9 +1834,9 @@ func TestHandleFlows_BurnMint_CommittedFactoryNotGuardianGovernance_500(t *testi
 	srv := newFlowTestServer(t, fixtures, "Alice")
 	for _, tc := range cases {
 		t.Run(tc.flow, func(t *testing.T) {
+			logged := captureServerLog(srv)
 			rr := requestFlow(t, srv, tc.flow, tc.query)
-			assert.Equal(t, http.StatusInternalServerError, rr.Code)
-			assert.Contains(t, rr.Body.String(), "expected guardianGovernance")
+			requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, "expected guardianGovernance")
 		})
 	}
 }
@@ -1852,9 +1859,9 @@ func TestHandleFlows_ManagerPayloadBeforeNtt040_500(t *testing.T) {
 	srv := newFlowTestServer(t, fixtures, "Alice")
 	for _, tc := range cases {
 		t.Run(tc.flow, func(t *testing.T) {
+			logged := captureServerLog(srv)
 			rr := requestFlow(t, srv, tc.flow, tc.query)
-			assert.Equal(t, http.StatusInternalServerError, rr.Code)
-			assert.Contains(t, rr.Body.String(), "ntt 0.4.0 or later is required")
+			requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, "ntt 0.4.0 or later is required")
 		})
 	}
 }
