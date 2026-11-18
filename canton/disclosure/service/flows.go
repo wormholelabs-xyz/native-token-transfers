@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -1128,5 +1129,29 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ManagerAddress < out[j].ManagerAddress })
-	writeJSON(w, http.StatusOK, map[string]any{"managers": out})
+	if len(out) > s.maxContracts {
+		panic("disclosure-service: managers list exceeds the contract cap after the query cap")
+	}
+	writeManagersList(w, out)
+}
+
+// writeManagersList encodes one managerEntry at a time into {"managers":[...]}.
+func writeManagersList(w http.ResponseWriter, managers []managerEntry) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.WriteString(w, `{"managers":[`); err != nil {
+		return
+	}
+	encoder := json.NewEncoder(w)
+	for index, manager := range managers {
+		if index > 0 {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return
+			}
+		}
+		if err := encoder.Encode(manager); err != nil {
+			return
+		}
+	}
+	_, _ = io.WriteString(w, "]}\n")
 }

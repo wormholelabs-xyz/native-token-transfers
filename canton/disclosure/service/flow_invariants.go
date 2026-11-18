@@ -69,13 +69,34 @@ func checkFlowResponseInvariants(response *flowResponse) error {
 	return nil
 }
 
-// checkAssembledFlowResponse runs both set postconditions. A violation is a 500.
+// checkAssembledFlowResponse runs the set postconditions (500) and the size bound (502).
 func checkAssembledFlowResponse(response *flowResponse) error {
 	if err := checkFlowResponseInvariants(response); err != nil {
 		return newFlowError(http.StatusInternalServerError, "flow %s: %v", response.Flow, err)
 	}
 	if err := checkOneSynchronizer(response.Disclosures); err != nil {
 		return newFlowError(http.StatusInternalServerError, "flow %s: %v", response.Flow, err)
+	}
+	return checkFlowResponseSize(response)
+}
+
+// maxFlowResponseBytes bounds the blob, contract id, and template id bytes of one flow response.
+const maxFlowResponseBytes = 4 << 20
+
+// countFlowResponseBytes sums the blob, contract id, and template id bytes of each disclosure.
+func countFlowResponseBytes(response *flowResponse) int {
+	totalBytes := 0
+	for _, disclosure := range response.Disclosures {
+		totalBytes += len(disclosure.CreatedEventBlob) + len(disclosure.ContractID) + len(disclosure.TemplateID)
+	}
+	return totalBytes
+}
+
+// checkFlowResponseSize runs before the status line is sent. A larger set is a 502.
+func checkFlowResponseSize(response *flowResponse) error {
+	totalBytes := countFlowResponseBytes(response)
+	if totalBytes > maxFlowResponseBytes {
+		return newFlowError(http.StatusBadGateway, "flow %s: response of %d bytes exceeds %d", response.Flow, totalBytes, maxFlowResponseBytes)
 	}
 	return nil
 }
