@@ -37,6 +37,10 @@ const (
 	serverReadTimeout        = 30 * time.Second
 	serverIdleTimeout        = 2 * time.Minute
 	maxInboundHeaderBytes    = 8 << 10
+
+	maxUpstreamConcurrencyLimit  = 64
+	maxCacheTTL                  = 60 * time.Second
+	maxContractsPerTemplateLimit = 10_000
 )
 
 // ---------------------------------------------------------------------------
@@ -69,9 +73,9 @@ func parseFlags(args []string) (*options, error) {
 	nttCustodyParty := fs.String("ntt-custody-party", "", "nttCustody: reads the custody pots and its own TransferPreapprovals (required)")
 	operatorParty := fs.String("operator-party", "", "operator: reads ReplayRootRegistry only; enables the register flow (optional)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
-	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on active contracts returned per template; a template that exceeds it is an error")
-	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries; excess requests wait briefly, then get a 503")
-	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long; 0 disables the cache")
+	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers, 1 to 10000; more is an error")
+	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
+	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long, 0 to 60s; 0 turns the cache off")
 	behindAuthenticatingProxy := fs.Bool("behind-authenticating-proxy", false, "state that an authenticating TLS proxy is in front; required for a non-loopback --listen")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
@@ -94,8 +98,14 @@ func parseFlags(args []string) (*options, error) {
 	if err := checkListenAddress(*listen, *behindAuthenticatingProxy); err != nil {
 		return nil, err
 	}
-	if *maxContracts <= 0 {
-		return nil, fmt.Errorf("disclosure-service: --max-contracts-per-template must be positive, got %d", *maxContracts)
+	if *maxContracts < 1 || *maxContracts > maxContractsPerTemplateLimit {
+		return nil, fmt.Errorf("disclosure-service: --max-contracts-per-template must be 1 to %d, got %d", maxContractsPerTemplateLimit, *maxContracts)
+	}
+	if *maxUpstream < 1 || *maxUpstream > maxUpstreamConcurrencyLimit {
+		return nil, fmt.Errorf("disclosure-service: --max-upstream-concurrency must be 1 to %d, got %d", maxUpstreamConcurrencyLimit, *maxUpstream)
+	}
+	if *cacheTTL < 0 || *cacheTTL > maxCacheTTL {
+		return nil, fmt.Errorf("disclosure-service: --cache-ttl must be 0 to %s, got %s", maxCacheTTL, *cacheTTL)
 	}
 	return &options{
 		listen:                    *listen,
@@ -156,10 +166,10 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		}
 	}
 
-	var acs acsClient = newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile)
-	if opts.maxUpstreamConcurrency > 0 {
-		acs = newBoundedACS(acs, opts.maxUpstreamConcurrency)
+	if opts.maxUpstreamConcurrency < 1 || opts.maxUpstreamConcurrency > maxUpstreamConcurrencyLimit {
+		return fmt.Errorf("disclosure-service: upstream concurrency %d is out of bounds", opts.maxUpstreamConcurrency)
 	}
+	var acs acsClient = newBoundedACS(newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile), opts.maxUpstreamConcurrency)
 	if opts.cacheTTL > 0 {
 		acs = newCachingACS(acs, opts.cacheTTL)
 	}

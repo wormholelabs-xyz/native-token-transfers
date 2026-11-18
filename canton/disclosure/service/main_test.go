@@ -342,7 +342,6 @@ func TestHandleHealthz(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
 	assert.Equal(t, map[string]partyID{"guardianGovernance": testGuardianGovernanceParty, "nttCustody": testNttCustodyParty, "operator": testOperatorParty}, got.ReaderParties)
 	assert.Equal(t, len(flowTemplateByTail), got.Templates)
-	assert.Equal(t, int64(42), got.LedgerEnd) // from the fake's fixed ledger-end offset
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +441,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 		jsonAPIBaseURL:          upstream.URL,
 		readerParties:           testReaderParties(),
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
+		maxUpstreamConcurrency:  defaultMaxUpstreamConcurrency,
 	}
 
 	var out syncBuffer

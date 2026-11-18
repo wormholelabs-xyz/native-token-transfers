@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -82,6 +83,7 @@ func newServer(opts *options, acs acsClient) *server {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1", s.handleIndex)
 	s.mux.HandleFunc("/v1/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/v1/readyz", s.handleReadyz)
 	s.mux.HandleFunc("/v1/managers", s.handleManagers)
 	s.mux.HandleFunc("/v1/flows/{flow}", s.handleFlows)
 	return s
@@ -105,24 +107,36 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type healthzResponse struct {
 	ReaderParties map[string]partyID `json:"readerParties"`
 	Templates     int                `json:"templates"`
-	LedgerEnd     int64              `json:"ledgerEnd,omitempty"`
 }
 
+type readyzResponse struct {
+	LedgerEnd int64 `json:"ledgerEnd"`
+}
+
+// handleHealthz is liveness: always 200, with the configuration only.
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	resp := healthzResponse{
+	writeJSON(w, http.StatusOK, healthzResponse{
 		ReaderParties: s.opts.readerParties.byRoleName(),
 		Templates:     len(flowTemplateByTail),
+	})
+}
+
+// handleReadyz is 200 only when a ledger-end call succeeds; else 503 with the fixed public body.
+func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	if offset, err := s.acs.LedgerEnd(r.Context()); err == nil {
-		resp.LedgerEnd = offset
-	} else if s.opts.verbose {
-		log.Printf("disclosure-service: healthz: ledger-end: %v", err)
+	offset, err := s.acs.LedgerEnd(r.Context())
+	if err != nil {
+		s.writePublicError(w, r, http.StatusServiceUnavailable, fmt.Errorf("readyz: ledger-end: %w", err))
+		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, readyzResponse{LedgerEnd: offset})
 }
 
 // apiIndex is /v1's static payload: every endpoint and its parameters.
@@ -130,7 +144,8 @@ var apiIndex = map[string]any{
 	"service": "disclosure-service",
 	"endpoints": []map[string]any{
 		{"method": "GET", "path": "/v1", "about": "this index"},
-		{"method": "GET", "path": "/v1/healthz", "about": "liveness: reader parties by role, template count, ledger end"},
+		{"method": "GET", "path": "/v1/healthz", "about": "liveness: reader parties by role, template count"},
+		{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 with the ledger end when the upstream answers, else 503"},
 		{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
 		{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
 			"release":      {"manager", "digest", "recipient (optional)"},
