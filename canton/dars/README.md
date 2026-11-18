@@ -79,8 +79,9 @@ version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 (SCU) check. `ntt/daml.yaml` references it in its `upgrades:` field. `damlc`
 rejects an `ntt` build that is not upgrade-compatible with it.
 
-- Source: this repo, commit `1db4b3cf1caca05af7028e1585d6a99c859cc910`,
-  `canton/ntt`, built with SDK 3.5.1.
+- Source: this repo, PR #74 (branch commit
+  `1db4b3cf1caca05af7028e1585d6a99c859cc910`), `canton/ntt`, built with
+  SDK 3.5.1.
 - Main package id:
   `8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a`. This
   is the build on the LocalNet rehearsal.

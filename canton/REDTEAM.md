@@ -86,7 +86,7 @@ Possible changes:
 ## F2: a third-party relayer cannot deliver a release
 
 Severity: Medium.
-Status: fixed in commit `17bcd79`.
+Status: fixed in PR #74 (branch commit `17bcd79`).
 Before the fix, value stayed safe, but an inbound unlock needed the recipient to submit.
 
 ### Cause
@@ -152,7 +152,7 @@ The registry is the instrument admin, so it can already move each holding of its
 ## F3: outbound transfer accepts fields that the guardians cannot deliver
 
 Severity: Low.
-Status: fixed in commit `0c48f58`.
+Status: fixed in PR #74 (branch commit `0c48f58`).
 Before the fix, a wrong client input burned or locked value, and no peer could redeem it.
 
 ### Cause
