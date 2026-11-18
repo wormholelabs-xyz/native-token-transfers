@@ -2631,10 +2631,11 @@ testReceivePinsGuardianGovernance = do
   admin <- allocateParty "PinAdmin"
   recipient <- allocateParty "PinRecipient"
   rogueGov <- allocateParty "RogueGovernance"
+  rogueFeeCustody <- allocateParty "RogueFeeCustody"
   let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
-  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+  fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 ["1111111111111111111111111111111111111111"] rogueInst rogueGov)
+                 ["1111111111111111111111111111111111111111"] rogueInst rogueFeeCustody)
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
@@ -3040,7 +3041,7 @@ testAcceptAdminByVaaRequiresCurrentGuardianSet = do
   relayer <- allocateParty "AcceptStaleSetRelayer"
   fx <- acceptAdminFixture operator gg admin BurnMint csId
 
-  staleCsId <- submit (actAs operator <> actAs gg) do
+  staleCsId <- submit (actAs operator <> actAs gg <> actAs cs.feeRecipient) do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
@@ -3169,10 +3170,11 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "AcceptPinAdmin"
   rogueGov <- allocateParty "AcceptPinRogueGovernance"
+  rogueFeeCustody <- allocateParty "AcceptPinRogueFeeCustody"
   let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
-  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+  fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 ["1111111111111111111111111111111111111111"] rogueInst rogueGov)
+                 ["1111111111111111111111111111111111111111"] rogueInst rogueFeeCustody)
   fx <- acceptAdminFixture operator gg admin BurnMint csId
   (nodeCid, _) <- coveringDisclosure operator gg fx.namespace (parseVAA acceptAdminHappyVAA).hash
   dProp <- fromSome <$> queryDisclosure admin fx.propCid
@@ -3307,7 +3309,7 @@ testSetPeerByVaaRequiresCurrentGuardianSet = do
   Some cs <- queryContractId operator csId
   relayer <- allocateParty "SetPeerByVaaStaleSetRelayer"
   fx <- setPeerByVaaFixture operator gg csId
-  staleCsId <- submit (actAs operator <> actAs gg) do
+  staleCsId <- submit (actAs operator <> actAs gg <> actAs cs.feeRecipient) do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
@@ -3739,7 +3741,7 @@ testRegisterManagerByVaaRequiresCurrentGuardianSet = do
   (operator, gg, csId) <- nttSetup
   Some cs <- queryContractId operator csId
   admin <- allocateParty "RegisterStaleSetAdmin"
-  staleCsId <- submit (actAs operator <> actAs gg) do
+  staleCsId <- submit (actAs operator <> actAs gg <> actAs cs.feeRecipient) do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList

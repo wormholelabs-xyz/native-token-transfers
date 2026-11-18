@@ -13,7 +13,7 @@
 # an interface implementer.
 sdk-version: 3.5.1
 name: ntt
-version: 0.3.2
+version: 0.3.3
 source: daml
 # Compile-time SCU check against the previous release (package id and
 # provenance in ../dars/README.md).
@@ -25,7 +25,7 @@ build-options:
   # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
   - --target=2.3
 data-dependencies:
-  - ../dars/wormhole-core-0.8.0.dar
+  - ../dars/wormhole-core-0.8.1.dar
   - ../dars/token-cip0056-0.2.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar

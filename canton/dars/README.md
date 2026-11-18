@@ -18,15 +18,25 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: built from `wormholelabs-xyz/wormhole` branch
-`canton/overnight-u2-fixes` (version 0.8.0) at commit
-`60c95900000a96f59c063320bb4005aa724ec8ed`, SDK 3.5.1. The main package id
-is `03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6`.
-Version 0.8.0 declares 0.7.0 (`7a22a1c4...`) as its `upgrades:` baseline.
-`guardianGovernance` co-signs `EmitterRegistry` and `Emitter`. 0.7.0
-registries and emitters cannot run under 0.8.0, so 0.8.0 starts from a fresh
-genesis. `RegisterEmitter` takes `expectedGuardianGovernance`; `ntt` passes
-`Some guardianGovernance`.
+Provenance: built from `wormholelabs-xyz/wormhole` PR #81 (branch
+`canton/core-fee-custody`) at its head commit
+`fd66847d7658f8159d5850aee1a6857171c30fb6` (version 0.8.1), SDK 3.5.1. The
+main package id is
+`5b256d1377919ed618dffcf3f632dd05e97702ca99e4a3fe5320131b57ec690f`. The
+package id identifies the build. A squash merge of PR #81 changes the commit
+id, but not the package id.
+
+Version 0.8.1 declares 0.7.0 (`7a22a1c4...`) as its `upgrades:` baseline.
+Version 0.8.0 (`03a65dc3...`) is withdrawn. `guardianGovernance` co-signs
+`EmitterRegistry` and `Emitter`. `RegisterEmitter` takes
+`expectedGuardianGovernance`; `ntt` passes `Some guardianGovernance`.
+
+Version 0.8.1 adds the fee recipient (`feeCustody`) as a signatory of
+`CoreState`. The `CoreState` precondition rejects a fee recipient that is
+`guardianGovernance` or the operator. When a fee is due, `chargeFee` rejects
+a payer that is `guardianGovernance` or the operator. Thus a deployment with
+`admin = gg` cannot pay a non-zero fee as `payer = admin`. 0.7.0 contracts
+cannot run under 0.8.1, so 0.8.1 starts from a fresh genesis.
 
 `ntt` data-depends on `wormhole-core` by package id, so each NTT call into
 core runs the code of this exact package id. Do not vendor a core version
@@ -96,7 +106,7 @@ package id is reproducible.
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
 | `ntt-0.2.0.dar` | `ntt` (`upgrades:`) | `12910821c7147b3b1702c82d473a027b73e1568b0fbb725477f18b09e08f6aec` |
-| `wormhole-core-0.8.0.dar` | `ntt`, `ntt-test` | `2a8720bbe563d50066f7a13971eff247300db2cf763af38ec65d9e599eb97c49` |
+| `wormhole-core-0.8.1.dar` | `ntt`, `ntt-test` | `32dba2510c7140e5d2660ebc6ffe43386c694c392240780d5fe473e11d9bff80` |
 | `token-cip0056-0.2.0.dar` | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar` | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
