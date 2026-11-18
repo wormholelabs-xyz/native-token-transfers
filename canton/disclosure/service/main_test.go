@@ -976,25 +976,42 @@ func TestFindPreapproval(t *testing.T) {
 }
 
 func TestFindAdminTransferProposal(t *testing.T) {
-	addr := strings.Repeat("aa", 32)
-	mk := func() decodedEntry[daAdminTransferProposal] {
-		return decodedEntry[daAdminTransferProposal]{entry: acsEntry{ContractID: "prop-cid"}, value: daAdminTransferProposal{ManagerAddress: addr}}
+	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: strings.Repeat("aa", 32)}
+	proposal := func(contractID, admin, newAdmin, managerAddress string) decodedEntry[daAdminTransferProposal] {
+		return decodedEntry[daAdminTransferProposal]{
+			entry: acsEntry{ContractID: contractID},
+			value: daAdminTransferProposal{Admin: admin, NewAdmin: newAdmin, ManagerAddress: managerAddress},
+		}
 	}
-	t.Run("found", func(t *testing.T) {
-		m, found, err := findAdminTransferProposal([]decodedEntry[daAdminTransferProposal]{mk()}, addr)
-		require.NoError(t, err)
-		assert.True(t, found)
-		assert.Equal(t, "prop-cid", m.entry.ContractID)
-	})
-	t.Run("absent is not an error", func(t *testing.T) {
-		_, found, err := findAdminTransferProposal(nil, addr)
-		require.NoError(t, err)
-		assert.False(t, found)
-	})
-	t.Run("duplicate is 500", func(t *testing.T) {
-		_, _, err := findAdminTransferProposal([]decodedEntry[daAdminTransferProposal]{mk(), mk()}, addr)
-		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
-	})
+	exact := proposal("prop-exact", manager.Admin, manager.GuardianGovernance, manager.ManagerAddress)
+	cases := []struct {
+		name           string
+		proposals      []decodedEntry[daAdminTransferProposal]
+		wantFound      bool
+		wantContractID string
+		wantStatus     int
+	}{
+		{"exact", []decodedEntry[daAdminTransferProposal]{exact}, true, "prop-exact", 0},
+		{"exact, upper-case managerAddress", []decodedEntry[daAdminTransferProposal]{proposal("prop-upper", manager.Admin, manager.GuardianGovernance, strings.ToUpper(manager.ManagerAddress))}, true, "prop-upper", 0},
+		{"admin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress)}, false, "", 0},
+		{"newAdmin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, "stranger::1", manager.ManagerAddress)}, false, "", 0},
+		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, strings.Repeat("bb", 32))}, false, "", 0},
+		{"stranger plus real", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress), exact}, true, "prop-exact", 0},
+		{"none", nil, false, "", 0},
+		{"two exact is 500", []decodedEntry[daAdminTransferProposal]{exact, exact}, false, "", http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			match, found, err := findAdminTransferProposal(tc.proposals, manager)
+			if tc.wantStatus != 0 {
+				requireFlowErrorStatus(t, err, tc.wantStatus)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantFound, found)
+			assert.Equal(t, tc.wantContractID, match.entry.ContractID)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

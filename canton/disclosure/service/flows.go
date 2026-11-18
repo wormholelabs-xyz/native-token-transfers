@@ -477,19 +477,22 @@ func findPreapproval(entries []decodedEntry[daPreapproval], owner string, instru
 	}
 }
 
-// findAdminTransferProposal matches managerAddress. Zero matches goes to the "missing" list; two
-// or more is a 500.
-func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], managerAddress string) (decodedEntry[daAdminTransferProposal], bool, error) {
-	m, n := matchOne(entries, func(e decodedEntry[daAdminTransferProposal]) bool {
-		return strings.ToLower(e.value.ManagerAddress) == managerAddress
+// findAdminTransferProposal mirrors AcceptAdminTransferByVaa's three proposal asserts: admin,
+// newAdmin == guardianGovernance, and managerAddress. Zero matches goes to the "missing" list;
+// two or more is a 500.
+func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], manager daNttManager) (decodedEntry[daAdminTransferProposal], bool, error) {
+	match, matchCount := matchOne(entries, func(entry decodedEntry[daAdminTransferProposal]) bool {
+		return entry.value.Admin == manager.Admin &&
+			entry.value.NewAdmin == manager.GuardianGovernance &&
+			strings.EqualFold(entry.value.ManagerAddress, manager.ManagerAddress)
 	})
 	switch {
-	case n == 0:
+	case matchCount == 0:
 		return decodedEntry[daAdminTransferProposal]{}, false, nil
-	case n > 1:
-		return decodedEntry[daAdminTransferProposal]{}, false, newFlowError(http.StatusInternalServerError, "%d AdminTransferProposal contracts found for managerAddress %s, expected at most 1", n, managerAddress)
+	case matchCount > 1:
+		return decodedEntry[daAdminTransferProposal]{}, false, newFlowError(http.StatusInternalServerError, "%d AdminTransferProposal contracts found for managerAddress %s, expected at most 1", matchCount, manager.ManagerAddress)
 	default:
-		return m, true, nil
+		return match, true, nil
 	}
 }
 
@@ -790,6 +793,9 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	if err != nil {
 		return nil, err
 	}
+	if mgr.value.Admin == mgr.value.GuardianGovernance {
+		return nil, newFlowError(http.StatusConflict, "flow accept-admin: the admin is already guardianGovernance")
+	}
 	cs, err := s.fetchCoreState(ctx, mgr.value.GuardianGovernance, offset)
 	if err != nil {
 		return nil, err
@@ -806,11 +812,14 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	}
 	missing := make([]flowMissingEntry, 0)
 
-	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset, hexFieldMatch(strings.ToLower(mgr.value.ManagerAddress), "managerAddress"))
+	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset,
+		exactFieldMatch(mgr.value.Admin, "admin"),
+		exactFieldMatch(mgr.value.GuardianGovernance, "newAdmin"),
+		hexFieldMatch(mgr.value.ManagerAddress, "managerAddress"))
 	if err != nil {
 		return nil, err
 	}
-	prop, found, err := findAdminTransferProposal(proposals, mgr.value.ManagerAddress)
+	prop, found, err := findAdminTransferProposal(proposals, mgr.value)
 	if err != nil {
 		return nil, err
 	}
