@@ -570,10 +570,14 @@ template NttManager
     -- propose-accept ('AdminTransferProposal' carries the old admin's standing
     -- consent and its 'AcceptAdminTransfer' nests this choice), so the parties
     -- need not act in one submission; exercising this directly with both
-    -- authorities works too. The pot is transferred to the new custodian and
-    -- the ledger's hint repointed. The pot must cover the ledger balance:
-    -- custody the hint does not track — untracked fragments, or a reserve
-    -- eroded by registry fees — would stay with the old custodian, out of the
+    -- authorities works too. Exactly the ledger balance moves to the new
+    -- custodian; the rest of the pot stays with the old custodian, because a
+    -- pot can hold other deployments' reserves ('ConsolidateCustody'). The
+    -- registry must take exactly the balance from the old custodian and
+    -- deliver exactly the balance to the new one. The hint points at the
+    -- received holdings. The pot must cover the ledger balance: custody the
+    -- hint does not track — untracked fragments, or a reserve eroded by
+    -- registry fees — would stay with the old custodian, out of the
     -- deployment's reach once the role changes hands. If the coverage check
     -- fails, run 'ConsolidateCustody' first; the outgoing admin can include
     -- extra holdings of its own there to cover a shortfall. The deployment's
@@ -584,10 +588,10 @@ template NttManager
     -- observership to @newAdmin@ ('SetAdmin').
     --
     -- Transferring to @guardianGovernance@ is the quorum's custody opt-in: the
-    -- reserve moves to @nttCustody@ and every admin operation ('SetPeer',
+    -- ledger balance moves to @nttCustody@ and every admin operation ('SetPeer',
     -- 'SetFactory', a further transfer) becomes a governance action. The same
     -- choice serves admin succession between ordinary parties, and lets gg
-    -- hand the role back (demotion), which moves the reserve from
+    -- hand the role back (demotion), which moves the ledger balance from
     -- @nttCustody@ to the new admin.
     choice TransferAdmin : (ContractId NttManager, Optional (ContractId LockedLedger))
       with
@@ -619,18 +623,22 @@ template NttManager
                 total <- sumCustodyHoldings this [pot]
                 assertMsg "ntt: custody pot does not cover the locked balance; run ConsolidateCustody first"
                   (total >= ledger.balance)
-                transferFactoryCid <- requireTransferFactory factory
-                (movedCids, _) <- executeSyncTransfer transferFactoryCid
-                  SyncTransfer with
-                    sender = reserveCustodian
-                    receiver = newReserveCustodian
-                    amount = total
-                    instrumentId
-                  ReceiverHoldingsSumToAmount
-                  [pot]
-                  extraArgs
-                exercise lcid SetCustodyHint with
-                  newCustodyHint = custodyHintFrom movedCids
+                -- The pot can hold other deployments' reserves: move only this ledger's balance.
+                newCustodyHint <- if ledger.balance == 0.0
+                  then pure None
+                  else do
+                    transferFactoryCid <- requireTransferFactory factory
+                    (receivedCids, _keptByOldCustodianCids) <- executeSyncTransfer transferFactoryCid
+                      SyncTransfer with
+                        sender = reserveCustodian
+                        receiver = newReserveCustodian
+                        amount = ledger.balance
+                        instrumentId
+                      SenderOutflowAndReceiverInflowEqualAmount
+                      [pot]
+                      extraArgs
+                    pure (custodyHintFrom receivedCids)
+                exercise lcid SetCustodyHint with newCustodyHint
             -- Hand the ledger observership to the incoming admin atomically.
             Some <$> exercise lcid' SetAdmin with newAdmin
         mgrCid' <- create this with admin = newAdmin, reserveCustodian = newReserveCustodian

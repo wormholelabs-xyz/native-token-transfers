@@ -47,6 +47,9 @@ data SettledAmountCheck
     -- the sender. A registry can still report a pre-existing sender holding
     -- as change: a holding carries no marker of the transaction that
     -- created it.
+  | SenderOutflowAndReceiverInflowEqualAmount
+    -- ^ Both checks above. For a hand-off between two custodians that both
+    -- authorize: rejects a registry fee on either side.
   deriving (Eq, Show)
 
 -- | Execute a CIP-56 'TIV1.TransferFactory_Transfer' that must settle in the
@@ -69,22 +72,42 @@ executeSyncTransfer factoryCid syncTransfer settledAmountCheck inputHoldingCids 
   case settledAmountCheck of
     ReceiverHoldingsSumToAmount -> do
       settled@(receiverHoldingCids, _) <- settleSyncTransfer factoryCid syncTransfer inputHoldingCids extraArgs
-      assertMsg "ntt: duplicate receiver holding" (unique receiverHoldingCids)
-      delivered <- sumSettledHoldings ReceiverHolding syncTransfer.receiver syncTransfer.instrumentId receiverHoldingCids
-      assertMsg "ntt: registry did not deliver the exact transfer amount"
-        (delivered == syncTransfer.amount)
+      checkReceiverInflowEqualsAmount syncTransfer receiverHoldingCids
       pure settled
     SenderOutflowEqualsAmount -> do
       -- Read before the exercise: the registry archives the inputs.
       inputTotal <- sumSettledHoldings SenderHolding syncTransfer.sender syncTransfer.instrumentId inputHoldingCids
       settled@(_, senderChangeCids) <- settleSyncTransfer factoryCid syncTransfer inputHoldingCids extraArgs
-      assertMsg "ntt: duplicate sender change holding" (unique senderChangeCids)
-      assertMsg "ntt: sender change reuses an input holding"
-        (all (`notElem` inputHoldingCids) senderChangeCids)
-      changeTotal <- sumSettledHoldings SenderHolding syncTransfer.sender syncTransfer.instrumentId senderChangeCids
-      assertMsg "ntt: registry did not take the exact transfer amount from the sender"
-        (inputTotal - changeTotal == syncTransfer.amount)
+      checkSenderOutflowEqualsAmount syncTransfer inputHoldingCids inputTotal senderChangeCids
       pure settled
+    SenderOutflowAndReceiverInflowEqualAmount -> do
+      -- Read before the exercise: the registry archives the inputs.
+      inputTotal <- sumSettledHoldings SenderHolding syncTransfer.sender syncTransfer.instrumentId inputHoldingCids
+      settled@(receiverHoldingCids, senderChangeCids) <- settleSyncTransfer factoryCid syncTransfer inputHoldingCids extraArgs
+      checkSenderOutflowEqualsAmount syncTransfer inputHoldingCids inputTotal senderChangeCids
+      checkReceiverInflowEqualsAmount syncTransfer receiverHoldingCids
+      pure settled
+
+-- | 'ReceiverHoldingsSumToAmount': the receiver's new holdings are distinct,
+-- valid, and sum to the amount.
+checkReceiverInflowEqualsAmount : SyncTransfer -> [ContractId Holding] -> Update ()
+checkReceiverInflowEqualsAmount syncTransfer receiverHoldingCids = do
+  assertMsg "ntt: duplicate receiver holding" (unique receiverHoldingCids)
+  delivered <- sumSettledHoldings ReceiverHolding syncTransfer.receiver syncTransfer.instrumentId receiverHoldingCids
+  assertMsg "ntt: registry did not deliver the exact transfer amount"
+    (delivered == syncTransfer.amount)
+
+-- | 'SenderOutflowEqualsAmount': the change is distinct, disjoint from the
+-- inputs, valid, and @inputTotal@ less the change equals the amount.
+checkSenderOutflowEqualsAmount
+  : SyncTransfer -> [ContractId Holding] -> Decimal -> [ContractId Holding] -> Update ()
+checkSenderOutflowEqualsAmount syncTransfer inputHoldingCids inputTotal senderChangeCids = do
+  assertMsg "ntt: duplicate sender change holding" (unique senderChangeCids)
+  assertMsg "ntt: sender change reuses an input holding"
+    (all (`notElem` inputHoldingCids) senderChangeCids)
+  changeTotal <- sumSettledHoldings SenderHolding syncTransfer.sender syncTransfer.instrumentId senderChangeCids
+  assertMsg "ntt: registry did not take the exact transfer amount from the sender"
+    (inputTotal - changeTotal == syncTransfer.amount)
 
 -- | Exercise the transfer; abort unless it completed in this transaction.
 -- Returns the receiver's new holdings and the sender's change holdings.

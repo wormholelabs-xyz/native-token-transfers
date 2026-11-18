@@ -1212,7 +1212,8 @@ testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority = do
 -- | With @nttCustody@ as the reserve custodian on the issuer's production-like
 -- registry: the hand-off to gg moves the pot to @nttCustody@, a lock merges
 -- into it, a third-party relayer releases from it, a stranger consolidates
--- it with a donated holding, and the demotion moves it to the next admin.
+-- it with a donated holding, and the demotion moves the ledger balance to
+-- the next admin. The donated surplus stays with @nttCustody@.
 -- gg owns no custody holding at any step.
 testQuorumCustodyReserveLifecycleOnCoinRegistry : Script ()
 testQuorumCustodyReserveLifecycleOnCoinRegistry = do
@@ -1270,7 +1271,7 @@ testQuorumCustodyReserveLifecycleOnCoinRegistry = do
   managerAfter <- managerOf env lockA
   managerAfter.admin === nextAdmin
   managerAfter.reserveCustodian === nextAdmin
-  checkBalances [(nextAdmin, 1.3), (env.nttCustody, 0.0), (env.gg, 0.0)]
+  checkBalances [(nextAdmin, 1.1), (env.nttCustody, 0.2), (env.gg, 0.0)]
 
 -- | Who holds deployment A's admin role before and after its hand-off. B
 -- stays with A's old reserve custodian.
