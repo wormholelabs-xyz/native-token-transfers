@@ -45,7 +45,8 @@ applies to the flow routes and to the CIP-0056 registry routes.
 
 ## Endpoints
 
-- `GET /v1` — this endpoint list, as JSON.
+- `GET /v1` — the list of the endpoints that the service serves, as JSON.
+  The list has the CIP-0056 registry routes only when the registry API is on.
 - `GET /v1/healthz` — liveness. It returns 200 and `{"status":"ok"}` while
   the process serves HTTP. It does not call the upstream.
 - `GET /v1/readyz` — readiness. It returns 200 and `{"status":"ready"}` when

@@ -165,31 +165,32 @@ func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, probeResponse{Status: "ready"})
 }
 
-// apiIndex is /v1's static payload: every endpoint and its parameters.
-var apiIndex = map[string]any{
-	"service": "disclosure-service",
-	"endpoints": []map[string]any{
-		{"method": "GET", "path": "/v1", "about": "this index"},
-		{"method": "GET", "path": "/v1/healthz", "about": "liveness: 200 while the process serves HTTP"},
-		{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 when the upstream answers, else 503"},
-		{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
-		{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
-			"release":      {"manager", "digest", "recipient (optional)"},
-			"mint":         {"manager", "digest", "recipient"},
-			"set-peer":     {"manager", "digest"},
-			"accept-admin": {"manager", "digest"},
-			"transfer":     {"manager"},
-			"register":     {"gg (optional)", "by-vaa (optional bool)"},
-			"consolidate":  {"manager"},
-		}},
-		{"method": "GET", "path": "/registry/metadata/v1/info", "about": "CIP-0056 token-metadata-v1: registry admin and supported APIs"},
-		{"method": "GET", "path": "/registry/metadata/v1/instruments", "params": []string{"pageSize (optional)", "pageToken (optional)"}, "about": "CIP-0056 token-metadata-v1: instruments administered by the registry admin"},
-		{"method": "GET", "path": "/registry/metadata/v1/instruments/{instrumentId}", "about": "CIP-0056 token-metadata-v1: one instrument"},
-		{"method": "POST", "path": "/registry/transfer-instruction/v1/transfer-factory", "about": "CIP-0056 transfer-instruction-v1: transfer factory and choice context"},
-		{"method": "POST", "path": "/registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept|reject|withdraw}", "about": "CIP-0056 transfer-instruction-v1: choice context for a pending transfer"},
-		{"method": "POST", "path": "/registry/allocation-instruction/v1/allocation-factory", "about": "CIP-0056 allocation-instruction-v1: allocation factory and choice context"},
-		{"method": "POST", "path": "/registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer|withdraw|cancel}", "about": "CIP-0056 allocation-v1: choice context for an allocation"},
-	},
+// flowIndexEndpoints are the /v1 routes, mounted on every server.
+var flowIndexEndpoints = []map[string]any{
+	{"method": "GET", "path": "/v1", "about": "this index"},
+	{"method": "GET", "path": "/v1/healthz", "about": "liveness: 200 while the process serves HTTP"},
+	{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 when the upstream answers, else 503"},
+	{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
+	{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
+		"release":      {"manager", "digest", "recipient (optional)"},
+		"mint":         {"manager", "digest", "recipient"},
+		"set-peer":     {"manager", "digest"},
+		"accept-admin": {"manager", "digest"},
+		"transfer":     {"manager"},
+		"register":     {"gg (optional)", "by-vaa (optional bool)"},
+		"consolidate":  {"manager"},
+	}},
+}
+
+// registryIndexEndpoints are the CIP-0056 registry routes, served only when the registry API is on.
+var registryIndexEndpoints = []map[string]any{
+	{"method": "GET", "path": "/registry/metadata/v1/info", "about": "CIP-0056 token-metadata-v1: registry admin and supported APIs"},
+	{"method": "GET", "path": "/registry/metadata/v1/instruments", "params": []string{"pageSize (optional)", "pageToken (optional)"}, "about": "CIP-0056 token-metadata-v1: instruments administered by the registry admin"},
+	{"method": "GET", "path": "/registry/metadata/v1/instruments/{instrumentId}", "about": "CIP-0056 token-metadata-v1: one instrument"},
+	{"method": "POST", "path": "/registry/transfer-instruction/v1/transfer-factory", "about": "CIP-0056 transfer-instruction-v1: transfer factory and choice context"},
+	{"method": "POST", "path": "/registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept|reject|withdraw}", "about": "CIP-0056 transfer-instruction-v1: choice context for a pending transfer"},
+	{"method": "POST", "path": "/registry/allocation-instruction/v1/allocation-factory", "about": "CIP-0056 allocation-instruction-v1: allocation factory and choice context"},
+	{"method": "POST", "path": "/registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer|withdraw|cancel}", "about": "CIP-0056 allocation-v1: choice context for an allocation"},
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -197,5 +198,17 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, apiIndex)
+	writeJSON(w, http.StatusOK, s.apiIndex())
+}
+
+// apiIndex is /v1's payload: every endpoint this server answers and its parameters.
+func (s *server) apiIndex() map[string]any {
+	endpoints := append([]map[string]any{}, flowIndexEndpoints...)
+	if s.registry != nil {
+		endpoints = append(endpoints, registryIndexEndpoints...)
+	}
+	return map[string]any{
+		"service":   "disclosure-service",
+		"endpoints": endpoints,
+	}
 }
