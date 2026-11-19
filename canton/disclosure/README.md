@@ -49,7 +49,8 @@ The reason is the participant list limit. See [Bounds](#bounds).
 - `GET /v1/readyz` — readiness. It returns 200 and `{"status":"ready"}` when
   the last upstream ledger-end call succeeded. Else it returns 503. The
   service makes one such call in 2 s or more, with a timeout of 3 s. Each
-  other caller in that time gets the last result.
+  other caller in that time gets the last result. The service writes one
+  log line for each failed call, not for each 503.
 
 The inbound cap of 64 requests does not apply to `/v1`, `/v1/healthz`, and
 `/v1/readyz`. Thus an orchestrator gets a probe result when flow requests
@@ -74,7 +75,9 @@ fill the cap.
 `manager` is the manager address and `digest` is the VAA hash. Each is a hex
 string of 64 characters. `recipient` and `gg` are party ids with the format
 `<hint>::1220<fingerprint>`. The hint has 1 to 185 characters from
-`[A-Za-z0-9._-]`. The fingerprint has 64 lowercase hex characters. The
+`[A-Za-z0-9 :_-]`. This is the Canton party character set. The service
+splits the value at the first `::`, as Canton does. The fingerprint has 64
+lowercase hex characters. The
 service rejects a different value with 400 before it reads the ledger. Give each parameter one time only. The service
 rejects a repeated parameter and a parameter that the flow does not use. The
 query string is 1024 bytes or less.
@@ -245,8 +248,8 @@ published port.
 
 The CI job `disclosure service (go)` runs `govulncheck` v1.9.0. The job
 compares the module checksum of `golang.org/x/vuln@v1.9.0` with a fixed value
-in the workflow. `sum.golang.org` also checks the download. The `go.sum` file
-in that module pins the dependencies of `govulncheck`. To change the version,
+in the workflow. The `go.mod` file in that module sets the version of each
+dependency. `sum.golang.org` checks each download. To change the version,
 change the module and the checksum in the workflow together.
 
 ## Open items

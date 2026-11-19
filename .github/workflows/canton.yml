@@ -81,7 +81,7 @@ jobs:
       # Builds and scans with the go.mod toolchain (go1.26.11).
       # Pin: the module checksum of golang.org/x/vuln v1.9.0 must equal GOVULNCHECK_MODULE_SUM.
       # sum.golang.org also verifies the download; no variable may exempt the module from it.
-      # The go.sum inside that module pins the build dependencies of govulncheck.
+      # The go.mod of that module sets each dependency version; sum.golang.org verifies each download.
       - name: govulncheck (disclosure service)
         working-directory: ./canton/disclosure/service
         env:
