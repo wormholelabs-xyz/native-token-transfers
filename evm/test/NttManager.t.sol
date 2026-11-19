@@ -152,14 +152,14 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         TransceiverStructs.NttManagerMessage memory nttManagerMessage;
         bytes memory transceiverMessage;
-        (nttManagerMessage, transceiverMessage) = TransceiverHelpersLib
-            .buildTransceiverMessageWithNttManagerPayload(
-            0,
-            bytes32(0),
-            peer,
-            toWormholeFormat(address(nttManagerZeroRateLimiter)),
-            abi.encode("payload")
-        );
+        (nttManagerMessage, transceiverMessage) =
+            TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
+                0,
+                bytes32(0),
+                peer,
+                toWormholeFormat(address(nttManagerZeroRateLimiter)),
+                abi.encode("payload")
+            );
 
         e1.receiveMessage(transceiverMessage);
 
@@ -235,6 +235,81 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         nttManager.unpause();
         assertEq(nttManager.isPaused(), false);
+    }
+
+    // === executeMsg() peer verification
+    // _verifyPeer must reject a message whose source manager address does not
+    // match the configured peer for that chain.
+    function test_executeMsg_revertsOnInvalidPeer() public {
+        // Register a known, valid peer for the sending chain.
+        bytes32 realPeer = toWormholeFormat(address(nttManagerOther));
+        nttManager.setPeer(TransceiverHelpersLib.SENDING_CHAIN_ID, realPeer, 9, type(uint64).max);
+        TransceiverStructs.NttManagerMessage memory message =
+            TransceiverStructs.NttManagerMessage(bytes32(0), realPeer, abi.encode("payload"));
+
+        // Call executeMsg with a source manager address that does NOT match the peer. Expect revert.
+        bytes32 wrongPeer = toWormholeFormat(address(0x1337));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                INttManager.InvalidPeer.selector, TransceiverHelpersLib.SENDING_CHAIN_ID, wrongPeer
+            )
+        );
+        nttManager.executeMsg(TransceiverHelpersLib.SENDING_CHAIN_ID, wrongPeer, message);
+    }
+
+    // executeMsg successful call
+    function test_executeMsg_succeedsWithValidPeer() public {
+        address user_B = address(0x456);
+        DummyToken token = DummyToken(nttManager.token());
+        TrimmedAmount amount = packTrimmedAmount(50, 8);
+
+        // setUp registered `dummyTransceiver`. Add a second one and require both.
+        DummyTransceiver secondTransceiver = new DummyTransceiver(address(nttManager));
+        nttManager.setTransceiver(address(secondTransceiver));
+        nttManager.setThreshold(2);
+
+        bytes32 peer = toWormholeFormat(address(nttManagerOther));
+        nttManager.setPeer(TransceiverHelpersLib.SENDING_CHAIN_ID, peer, 9, type(uint64).max);
+
+        // LOCKING mode: fund the manager so it can unlock to the recipient.
+        token.mintDummy(address(nttManager), amount.untrim(token.decimals()));
+
+        bytes memory ntt = TransceiverStructs.encodeNativeTokenTransfer(
+            TransceiverStructs.NativeTokenTransfer({
+                amount: amount,
+                sourceToken: toWormholeFormat(address(token)),
+                to: toWormholeFormat(user_B),
+                toChain: chainId,
+                additionalPayload: ""
+            })
+        );
+        TransceiverStructs.NttManagerMessage memory message;
+        bytes memory transceiverMessage;
+        (message, transceiverMessage) =
+            TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
+                bytes32(uint256(1)), bytes32(0), peer, toWormholeFormat(address(nttManager)), ntt
+            );
+
+        // Not executed because of 2/2 threshold.
+        dummyTransceiver.receiveMessage(transceiverMessage);
+        bytes32 digest = TransceiverStructs.nttManagerMessageDigest(
+            TransceiverHelpersLib.SENDING_CHAIN_ID, message
+        );
+        assertEq(nttManager.messageAttestations(digest), 1);
+        assertEq(nttManager.isMessageApproved(digest), false);
+        assertEq(nttManager.isMessageExecuted(digest), false);
+        assertEq(token.balanceOf(user_B), 0);
+
+        // Lower the threshold to 1. Makes executable now.
+        nttManager.setThreshold(1);
+        assertEq(nttManager.isMessageApproved(digest), true);
+        assertEq(nttManager.isMessageExecuted(digest), false);
+
+        // Fallback execution via executeMsg(): passes _verifyPeer and unlocks tokens.
+        nttManager.executeMsg(TransceiverHelpersLib.SENDING_CHAIN_ID, peer, message);
+
+        assertEq(nttManager.isMessageExecuted(digest), true);
+        assertEq(token.balanceOf(user_B), amount.untrim(token.decimals()));
     }
 
     function test_pausePauserUnpauseOnlyOwner() public {
@@ -607,10 +682,14 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         TransceiverStructs.NttManagerMessage memory nttManagerMessage;
         bytes memory transceiverMessage;
-        (nttManagerMessage, transceiverMessage) = TransceiverHelpersLib
-            .buildTransceiverMessageWithNttManagerPayload(
-            0, bytes32(0), peer, toWormholeFormat(address(nttManagerOther)), abi.encode("payload")
-        );
+        (nttManagerMessage, transceiverMessage) =
+            TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
+                0,
+                bytes32(0),
+                peer,
+                toWormholeFormat(address(nttManagerOther)),
+                abi.encode("payload")
+            );
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -630,10 +709,14 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         TransceiverStructs.NttManagerMessage memory nttManagerMessage;
         bytes memory transceiverMessage;
-        (nttManagerMessage, transceiverMessage) = TransceiverHelpersLib
-            .buildTransceiverMessageWithNttManagerPayload(
-            0, bytes32(0), peer, toWormholeFormat(address(nttManagerOther)), abi.encode("payload")
-        );
+        (nttManagerMessage, transceiverMessage) =
+            TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
+                0,
+                bytes32(0),
+                peer,
+                toWormholeFormat(address(nttManagerOther)),
+                abi.encode("payload")
+            );
 
         e1.receiveMessage(transceiverMessage);
 
@@ -653,10 +736,14 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         TransceiverStructs.NttManagerMessage memory nttManagerMessage;
         bytes memory transceiverMessage;
-        (nttManagerMessage, transceiverMessage) = TransceiverHelpersLib
-            .buildTransceiverMessageWithNttManagerPayload(
-            0, bytes32(0), peer, toWormholeFormat(address(nttManagerOther)), abi.encode("payload")
-        );
+        (nttManagerMessage, transceiverMessage) =
+            TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
+                0,
+                bytes32(0),
+                peer,
+                toWormholeFormat(address(nttManagerOther)),
+                abi.encode("payload")
+            );
 
         bytes32 hash = TransceiverStructs.nttManagerMessageDigest(
             TransceiverHelpersLib.SENDING_CHAIN_ID, nttManagerMessage
@@ -929,14 +1016,14 @@ contract TestNttManager is Test, IRateLimiterEvents {
 
         bytes memory transceiverMessage;
         TransceiverStructs.NttManagerMessage memory nttManagerMessage;
-        (nttManagerMessage, transceiverMessage) = TransceiverHelpersLib
-            .buildTransceiverMessageWithNttManagerPayload(
-            0,
-            toWormholeFormat(address(0x1)),
-            toWormholeFormat(address(nttManagerOther)),
-            toWormholeFormat(address(nttManager)),
-            tokenTransferMessage
-        );
+        (nttManagerMessage, transceiverMessage) =
+            TransceiverHelpersLib.buildTransceiverMessageWithNttManagerPayload(
+                0,
+                toWormholeFormat(address(0x1)),
+                toWormholeFormat(address(nttManagerOther)),
+                toWormholeFormat(address(nttManager)),
+                tokenTransferMessage
+            );
 
         // Inbound transfers can't be completed
         vm.expectRevert(abi.encodeWithSelector(InvalidFork.selector, evmChainId, chainId));

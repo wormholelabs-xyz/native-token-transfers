@@ -1,12 +1,21 @@
 import { web3 } from "@coral-xyz/anchor";
 import { chainToPlatform } from "@wormhole-foundation/sdk-connect";
 
+import { register as registerDefinitionsNtt } from "@wormhole-foundation/sdk-definitions-ntt";
+import { register as registerEvmNtt } from "@wormhole-foundation/sdk-evm-ntt";
+import { register as registerSolanaNtt } from "@wormhole-foundation/sdk-solana-ntt";
+
 import { registerRelayers } from "./accountant.js";
 import { Ctx, setMessageFee, testHub } from "./utils.js";
 import { ethers } from "ethers";
 
+// v5 NTT SDKs require explicit register() calls; auto-registration on import was removed.
+registerDefinitionsNtt();
+registerEvmNtt();
+registerSolanaNtt();
+
 // Note: Currently, in order for this to run, the evm bindings with extra contracts must be build
-// To do that, at the root, run `npm run generate:test`
+// To do that, at the root, run `bun run generate:test`
 
 // https://github.com/wormhole-foundation/wormhole/blob/347357b251e850a51eca351943cf71423c4f0bc3/scripts/devnet-consts.json#L257
 const ETH_PRIVATE_KEY =
@@ -71,21 +80,19 @@ describe("Hub and Spoke Tests", function () {
   });
 
   test("Test Solana and Ethereum Hubs", async () => {
-    await Promise.all([
-      testHub(
-        "Solana",
-        "Ethereum",
-        "Bsc",
-        makeGetNativeSigner(ETH_PRIVATE_KEY, SOL_PRIVATE_KEY),
-        ACCT_MNEMONIC
-      ),
-      testHub(
-        "Ethereum",
-        "Bsc",
-        "Solana",
-        makeGetNativeSigner(ETH_PRIVATE_KEY_2, SOL_PRIVATE_KEY_2),
-        ACCT_MNEMONIC_2
-      ),
-    ]);
+    await testHub(
+      "Solana",
+      "Ethereum",
+      "Bsc",
+      makeGetNativeSigner(ETH_PRIVATE_KEY, SOL_PRIVATE_KEY),
+      ACCT_MNEMONIC
+    );
+    await testHub(
+      "Ethereum",
+      "Bsc",
+      "Solana",
+      makeGetNativeSigner(ETH_PRIVATE_KEY_2, SOL_PRIVATE_KEY_2),
+      ACCT_MNEMONIC_2
+    );
   });
 });

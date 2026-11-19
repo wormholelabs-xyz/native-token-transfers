@@ -4,20 +4,38 @@
 # It's safe to run these tests outside of docker, as we create an isolated temporary
 # directory for the tests.
 
-set -euox pipefail
+set -euo pipefail
+if [ "${TRACE:-1}" -eq 1 ]; then
+  set -x
+fi
 
 BSC_PORT=8545
 SEPOLIA_PORT=8546
-BSC_RPC_URL=https://bsc-testnet-rpc.publicnode.com
-SEPOLIA_RPC_URL=wss://ethereum-sepolia-rpc.publicnode.com
+
+if [ -n "${BSC_RPC_URL_FILE-}" ] || [ -n "${SEPOLIA_RPC_URL_FILE-}" ]; then
+  TRACE=0
+  set +x
+  if [ -n "${BSC_RPC_URL_FILE-}" ]; then
+    BSC_RPC_URL=$(cat "$BSC_RPC_URL_FILE")
+  fi
+  if [ -n "${SEPOLIA_RPC_URL_FILE-}" ]; then
+    SEPOLIA_RPC_URL=$(cat "$SEPOLIA_RPC_URL_FILE")
+  fi
+  if [ "${TRACE:-1}" -eq 1 ]; then
+    set -x
+  fi
+fi
+
+BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-testnet-rpc.publicnode.com}
+SEPOLIA_RPC_URL=${SEPOLIA_RPC_URL:-wss://ethereum-sepolia-rpc.publicnode.com}
 SEPOLIA_FORK_RPC_URL=http://127.0.0.1:$SEPOLIA_PORT
 BSC_FORK_RPC_URL=http://127.0.0.1:$BSC_PORT
 SEPOLIA_CORE_BRIDGE=0x4a8bc80Ed5a4067f1CCf107057b8270E0cC11A78
 BSC_CORE_BRIDGE=0x68605AD7b15c732a30b1BbC62BE8F2A509D74b4D
 
-anvil --silent --rpc-url $BSC_RPC_URL -p "$BSC_PORT" &
+anvil --silent --rpc-url $BSC_RPC_URL -p "$BSC_PORT" --compute-units-per-second 100 &
 pid1=$!
-anvil --silent --rpc-url $SEPOLIA_RPC_URL -p "$SEPOLIA_PORT" &
+anvil --silent --rpc-url $SEPOLIA_RPC_URL -p "$SEPOLIA_PORT" --compute-units-per-second 100 &
 pid2=$!
 # check both processes are running
 if ! kill -0 $pid1 || ! kill -0 $pid2; then
@@ -87,8 +105,8 @@ cat <<EOF > overrides.json
 }
 EOF
 
-ntt add-chain Bsc --token 0x0B15635FCF5316EdFD2a9A0b0dC3700aeA4D09E6 --mode locking --skip-verify --latest --no-executor
-ntt add-chain Sepolia --token 0xB82381A3fBD3FaFA77B3a7bE693342618240067b --skip-verify --ver 1.0.0
+ntt add-chain Bsc --token 0x0B15635FCF5316EdFD2a9A0b0dC3700aeA4D09E6 --mode locking --skip-verify --latest --yes
+ntt add-chain Sepolia --token 0xB82381A3fBD3FaFA77B3a7bE693342618240067b --skip-verify --ver 1.0.0 --yes
 
 ntt pull --yes
 ntt push --yes

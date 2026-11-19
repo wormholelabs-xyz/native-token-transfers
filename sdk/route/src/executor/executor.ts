@@ -13,6 +13,7 @@ import {
   TransferReceipt as _TransferReceipt,
   TransferState,
   UniversalAddress,
+  UnsignedTransaction,
   Wormhole,
   WormholeMessageId,
   amount,
@@ -28,68 +29,69 @@ import {
   isSourceFinalized,
   isSourceInitiated,
   nativeTokenId,
-  routes,
   serializeLayout,
   signSendWait,
   toChainId,
-  Platform,
   chainToPlatform,
 } from "@wormhole-foundation/sdk-connect";
-import "@wormhole-foundation/sdk-definitions-ntt";
+import * as routes from "@wormhole-foundation/sdk-connect/routes";
 import { NttRoute } from "../types.js";
 import {
-  calculateReferrerFee,
+  collectTransactions,
+  deserializeSignedQuoteWithToken,
   fetchCapabilities,
   fetchSignedQuote,
   fetchStatus,
-  RelayStatus,
+  isRelayStatusFailed,
 } from "./utils.js";
 import { Ntt, NttWithExecutor } from "@wormhole-foundation/sdk-definitions-ntt";
 import {
   isNative,
   relayInstructionsLayout,
-  signedQuoteLayout,
 } from "@wormhole-foundation/sdk-definitions";
 import { getDefaultReferrerAddress } from "./consts.js";
 
 export namespace NttExecutorRoute {
   export type Config = {
     ntt: NttRoute.Config;
-    referrerFee?: ReferrerFeeConfig;
+    getFee?: GetFeeCallback;
   };
 
-  export type ReferrerFeeConfig = {
-    // Referrer Fee in *tenths* of basis points - e.g. 10 = 1 basis point (0.01%)
-    feeDbps: bigint;
-    // The address to which the referrer fee will be sent
-    referrerAddresses?: Partial<Record<Platform, string>>;
-    perTokenOverrides?: Partial<
-      Record<
-        Chain,
-        Record<
-          string,
-          {
-            referrerFeeDbps?: bigint;
-            // Some tokens may require more gas to redeem than the default.
-            gasLimit?: bigint;
-            // Some tokens may require more msgValue than the default.
-            msgValue?: bigint;
-          }
-        >
-      >
-    >;
+  export type GetFeeResult = {
+    transferTokenFee: bigint;
+    nativeTokenFee: bigint;
+    referrerAddress: string;
   };
+
+  export type GetFeeCallback = (params: {
+    amount: bigint;
+    sourceChain: Chain;
+    sourceToken: string;
+    destinationChain: Chain;
+    destinationToken: string;
+  }) => Promise<GetFeeResult>;
 
   export type Options = {
     // 0.0 - 1.0 percentage of the maximum gas drop-off amount
     nativeGas?: number;
+    // Override the executor's destination relay funding / gas budget. When
+    // unset, estimateMsgValueAndGasLimit on the destination protocol is used.
+    msgValue?: bigint;
+    gasLimit?: bigint;
+    // When set, the executor relay fee is paid in this ERC20 (EQ03 quote /
+    // NttManagerWithExecutorWithToken) instead of native gas. Must be an
+    // allowed fee token on the source chain (advertised by /v0/capabilities).
+    // Leave unset for the standard native-fee path.
+    feeToken?: string;
   };
 
   export type NormalizedParams = {
     amount: amount.Amount;
     sourceContracts: Ntt.Contracts;
     destinationContracts: Ntt.Contracts;
-    referrerFeeDbps: bigint;
+    transferTokenFee: bigint;
+    nativeTokenFee: bigint;
+    referrerAddress?: ChainAddress;
   };
 
   export interface ValidatedParams
@@ -99,7 +101,7 @@ export namespace NttExecutorRoute {
 
   export type TransferReceipt<
     SC extends Chain = Chain,
-    DC extends Chain = Chain
+    DC extends Chain = Chain,
   > = _TransferReceipt<NttRoute.ManualAttestationReceipt, SC, DC> & {
     params: ValidatedParams;
   };
@@ -115,6 +117,28 @@ type Q = routes.Quote<Op, Vp, NttWithExecutor.Quote>;
 type QR = routes.QuoteResult<Op, Vp>;
 
 type R = NttExecutorRoute.TransferReceipt;
+
+function buildRelayFee<N extends Network>(
+  fromChain: ChainContext<N>,
+  estimatedCost: bigint,
+  feeToken: string | undefined,
+  feeTokenDecimals: number | undefined
+): { token: TokenId; amount: amount.Amount } {
+  if (!feeToken) {
+    return {
+      token: nativeTokenId(fromChain.chain),
+      amount: amount.fromBaseUnits(
+        estimatedCost,
+        fromChain.config.nativeTokenDecimals
+      ),
+    };
+  }
+  // Invariant: fetchExecutorQuote sets feeToken and feeTokenDecimals together.
+  return {
+    token: Wormhole.tokenId(fromChain.chain, feeToken),
+    amount: amount.fromBaseUnits(estimatedCost, feeTokenDecimals!),
+  };
+}
 
 export function nttExecutorRoute(config: NttExecutorRoute.Config) {
   class NttExecutorRouteImpl<N extends Network> extends NttExecutorRoute<N> {
@@ -209,19 +233,24 @@ export class NttExecutorRoute<N extends Network>
       request.destination.id
     );
 
-    let referrerFeeDbps = 0n;
-    if (this.staticConfig.referrerFee) {
-      referrerFeeDbps = this.staticConfig.referrerFee.feeDbps;
-      if (this.staticConfig.referrerFee.perTokenOverrides) {
-        const srcTokenAddress = canonicalAddress(request.source.id);
-        const override =
-          this.staticConfig.referrerFee.perTokenOverrides[
-            request.source.id.chain
-          ]?.[srcTokenAddress];
-        if (override?.referrerFeeDbps !== undefined) {
-          referrerFeeDbps = override.referrerFeeDbps;
-        }
-      }
+    let transferTokenFee = 0n;
+    let nativeTokenFee = 0n;
+    let referrerAddress: ChainAddress | undefined;
+
+    if (this.staticConfig.getFee) {
+      const result = await this.staticConfig.getFee({
+        amount: amount.units(trimmedAmount),
+        sourceChain: request.source.id.chain,
+        sourceToken: canonicalAddress(request.source.id),
+        destinationChain: request.destination.id.chain,
+        destinationToken: canonicalAddress(request.destination.id),
+      });
+      transferTokenFee = result.transferTokenFee;
+      nativeTokenFee = result.nativeTokenFee;
+      referrerAddress = Wormhole.chainAddress(
+        request.source.id.chain,
+        result.referrerAddress
+      );
     }
 
     const validatedParams: Vp = {
@@ -230,7 +259,9 @@ export class NttExecutorRoute<N extends Network>
         amount: trimmedAmount,
         sourceContracts: srcContracts,
         destinationContracts: dstContracts,
-        referrerFeeDbps,
+        transferTokenFee,
+        nativeTokenFee,
+        referrerAddress,
       },
       options,
     };
@@ -247,12 +278,25 @@ export class NttExecutorRoute<N extends Network>
     try {
       const executorQuote = await this.fetchExecutorQuote(request, params);
 
-      const { remainingAmount, estimatedCost, gasDropOff, expires } =
-        executorQuote;
+      const {
+        remainingAmount,
+        estimatedCost,
+        gasDropOff,
+        expires,
+        feeToken,
+        feeTokenDecimals,
+      } = executorQuote;
 
       const receivedAmount = amount.scale(
         amount.fromBaseUnits(remainingAmount, request.source.decimals),
         request.destination.decimals
+      );
+
+      const relayFee = buildRelayFee(
+        fromChain,
+        estimatedCost,
+        feeToken,
+        feeTokenDecimals
       );
 
       const result: QR = {
@@ -266,20 +310,15 @@ export class NttExecutorRoute<N extends Network>
           token: request.destination.id,
           amount: receivedAmount,
         },
-        relayFee: {
-          token: nativeTokenId(fromChain.chain),
-          amount: amount.fromBaseUnits(
-            estimatedCost,
-            fromChain.config.nativeTokenDecimals
-          ),
-        },
+        relayFee,
         destinationNativeGas: amount.fromBaseUnits(
           gasDropOff,
           toChain.config.nativeTokenDecimals
         ),
         eta:
+          params.normalizedParams.sourceContracts.eta ??
           finality.estimateFinalityTime(request.fromChain.chain) +
-          guardians.guardianAttestationEta * 1000,
+            guardians.guardianAttestationEta * 1000,
         expires,
         details: executorQuote,
       };
@@ -323,23 +362,23 @@ export class NttExecutorRoute<N extends Network>
   ): Promise<NttWithExecutor.Quote> {
     const { fromChain, toChain } = request;
 
-    let referrer = getDefaultReferrerAddress(fromChain.chain);
-    const referrerFeeConfig = this.staticConfig.referrerFee;
-    if (referrerFeeConfig) {
-      const platform = chainToPlatform(fromChain.chain);
-      const referrerAddress =
-        referrerFeeConfig.referrerAddresses?.[platform] ?? "";
-      if (referrerAddress) {
-        referrer = Wormhole.chainAddress(fromChain.chain, referrerAddress);
-      }
-    }
+    const referrer =
+      params.normalizedParams.referrerAddress ??
+      getDefaultReferrerAddress(fromChain.chain);
 
-    const { referrerFee, remainingAmount, referrerFeeDbps } =
-      calculateReferrerFee(
-        params.normalizedParams.amount,
-        params.normalizedParams.referrerFeeDbps,
+    const nativeTokenFee = params.normalizedParams.nativeTokenFee;
+    const transferAmount = amount.units(params.normalizedParams.amount);
+    // Trim the fee to destination decimals to avoid dust on the remaining amount.
+    const transferTokenFee = amount.units(
+      NttRoute.trimAmount(
+        amount.fromBaseUnits(
+          params.normalizedParams.transferTokenFee,
+          request.source.decimals
+        ),
         request.destination.decimals
-      );
+      )
+    );
+    const remainingAmount = transferAmount - transferTokenFee;
     if (remainingAmount <= 0n) {
       throw new Error("Amount after fee <= 0");
     }
@@ -348,6 +387,31 @@ export class NttExecutorRoute<N extends Network>
     const srcCapabilities = capabilities[toChainId(fromChain.chain)];
     if (!srcCapabilities) {
       throw new Error("Unsupported source chain");
+    }
+
+    let feeToken = params.options.feeToken;
+    let feeTokenDecimals: number | undefined;
+    // Default to token-fee when the chain only advertises allowedFeeTokens
+    // (no native-fee executor): prefer the native token, else the first
+    // allowed token. Callers can override via options.feeToken.
+    if (!feeToken && srcCapabilities.allowedFeeTokens) {
+      const allowed = srcCapabilities.allowedFeeTokens;
+      const allowedKeys = Object.keys(allowed);
+      if (allowedKeys.length > 0) {
+        const nativeAddr = canonicalAddress(
+          nativeTokenId(fromChain.chain)
+        ).toLowerCase();
+        feeToken = allowed[nativeAddr] ? nativeAddr : allowedKeys[0];
+      }
+    }
+    if (feeToken) {
+      const entry = srcCapabilities.allowedFeeTokens?.[feeToken.toLowerCase()];
+      if (!entry) {
+        throw new Error(
+          `feeToken ${feeToken} is not an allowed fee token on ${fromChain.chain}`
+        );
+      }
+      feeTokenDecimals = entry.decimals;
     }
 
     const dstCapabilities = capabilities[toChainId(toChain.chain)];
@@ -370,23 +434,10 @@ export class NttExecutorRoute<N extends Network>
           100n
         : 0n;
 
-    let { msgValue, gasLimit } =
+    const estimate =
       await dstNttWithExec.estimateMsgValueAndGasLimit(recipient);
-
-    // Check for overrides in the config.
-    if (this.staticConfig.referrerFee?.perTokenOverrides) {
-      const dstTokenAddress = canonicalAddress(request.destination.id);
-      const override =
-        this.staticConfig.referrerFee.perTokenOverrides[
-          request.destination.id.chain
-        ]?.[dstTokenAddress];
-      if (override?.gasLimit !== undefined) {
-        gasLimit = override.gasLimit;
-      }
-      if (override?.msgValue !== undefined) {
-        msgValue = override.msgValue;
-      }
-    }
+    const msgValue = params.options.msgValue ?? estimate.msgValue;
+    const gasLimit = params.options.gasLimit ?? estimate.gasLimit;
 
     const relayRequests = [];
 
@@ -423,7 +474,8 @@ export class NttExecutorRoute<N extends Network>
       fromChain.network,
       fromChain.chain,
       toChain.chain,
-      encoding.hex.encode(relayInstructions, true)
+      encoding.hex.encode(relayInstructions, true),
+      feeToken
     );
 
     if (!quote.estimatedCost) {
@@ -432,28 +484,30 @@ export class NttExecutorRoute<N extends Network>
     const estimatedCost = BigInt(quote.estimatedCost);
 
     const signedQuoteBytes = encoding.hex.decode(quote.signedQuote);
-    const signedQuote = deserializeLayout(signedQuoteLayout, signedQuoteBytes);
+    const { payeeAddress, expiryTime } =
+      deserializeSignedQuoteWithToken(signedQuoteBytes);
 
     return {
       signedQuote: signedQuoteBytes,
       relayInstructions: relayInstructions,
       estimatedCost,
-      payeeAddress: signedQuote.quote.payeeAddress,
+      payeeAddress,
       referrer,
-      referrerFee,
+      transferTokenFee,
+      nativeTokenFee,
       remainingAmount,
-      referrerFeeDbps,
-      expires: signedQuote.quote.expiryTime,
+      expires: expiryTime,
       gasDropOff: dropOff,
+      ...(feeToken ? { feeToken, feeTokenDecimals } : {}),
     };
   }
 
-  async initiate(
+  async _buildInitiateXfer(
     request: routes.RouteTransferRequest<N>,
-    signer: Signer,
-    quote: Q,
-    to: ChainAddress
-  ): Promise<R> {
+    sender: ChainAddress,
+    to: ChainAddress,
+    quote: Q
+  ) {
     if (!quote.details) {
       throw new Error("Missing quote details");
     }
@@ -476,7 +530,10 @@ export class NttExecutorRoute<N extends Network>
     });
 
     const { fromChain } = request;
-    const sender = Wormhole.parseAddress(signer.chain(), signer.address());
+    const senderAddress = Wormhole.parseAddress(
+      sender.chain,
+      sender.address.toString()
+    );
 
     const nttWithExec = await fromChain.getProtocol("NttWithExecutor", {
       ntt: params.normalizedParams.sourceContracts,
@@ -488,15 +545,43 @@ export class NttExecutorRoute<N extends Network>
 
     const wrapNative = isNative(request.source.id.address);
 
-    const initXfer = nttWithExec.transfer(
-      sender,
+    return nttWithExec.transfer(
+      senderAddress,
       to,
       amount.units(params.normalizedParams.amount),
       details,
       ntt,
       wrapNative
     );
-    const txids = await signSendWait(fromChain, initXfer, signer);
+  }
+
+  async buildInitiateTransactions(
+    request: routes.RouteTransferRequest<N>,
+    sender: ChainAddress,
+    recipient: ChainAddress,
+    quote: Q
+  ): Promise<UnsignedTransaction<N, Chain>[]> {
+    const xfer = await this._buildInitiateXfer(
+      request,
+      sender,
+      recipient,
+      quote
+    );
+    const txs = await collectTransactions(xfer);
+    return txs as UnsignedTransaction<N, Chain>[];
+  }
+
+  async initiate(
+    request: routes.RouteTransferRequest<N>,
+    signer: Signer,
+    quote: Q,
+    to: ChainAddress
+  ): Promise<R> {
+    const sender = Wormhole.chainAddress(signer.chain(), signer.address());
+    const xfer = await this._buildInitiateXfer(request, sender, to, quote);
+
+    const { fromChain } = request;
+    const txids = await signSendWait(fromChain, xfer, signer);
 
     // Status the transfer immediately before returning
     let statusAttempts = 0;
@@ -531,13 +616,13 @@ export class NttExecutorRoute<N extends Network>
       to: to.chain,
       state: TransferState.SourceInitiated,
       originTxs: txids,
-      params,
+      params: quote.params,
     };
   }
 
-  async complete(signer: Signer, receipt: R): Promise<R> {
+  async _buildCompleteXfer(sender: ChainAddress, receipt: R) {
     if (!isAttested(receipt) && !isFailed(receipt)) {
-      if (isRedeemed(receipt)) return receipt;
+      if (isRedeemed(receipt)) return null;
       throw new Error(
         "The source must be finalized in order to complete the transfer"
       );
@@ -551,16 +636,36 @@ export class NttExecutorRoute<N extends Network>
     const ntt = await toChain.getProtocol("Ntt", {
       ntt: receipt.params.normalizedParams.destinationContracts,
     });
-    const sender = Wormhole.parseAddress(signer.chain(), signer.address());
-    const completeXfer = ntt.redeem([receipt.attestation.attestation], sender);
+    const senderAddress = Wormhole.parseAddress(
+      sender.chain,
+      sender.address.toString()
+    );
+    return ntt.redeem([receipt.attestation.attestation], senderAddress);
+  }
 
-    const txids = await signSendWait(toChain, completeXfer, signer);
+  async buildCompleteTransactions(
+    sender: ChainAddress,
+    receipt: R
+  ): Promise<UnsignedTransaction<N, Chain>[]> {
+    const xfer = await this._buildCompleteXfer(sender, receipt);
+    if (xfer === null) return [];
+
+    const txs = await collectTransactions(xfer);
+    return txs as UnsignedTransaction<N, Chain>[];
+  }
+
+  async complete(signer: Signer, receipt: R): Promise<R> {
+    const sender = Wormhole.chainAddress(signer.chain(), signer.address());
+    const xfer = await this._buildCompleteXfer(sender, receipt);
+    if (xfer === null) return receipt;
+
+    const toChain = this.wh.getChain(receipt.to);
+    const txids = await signSendWait(toChain, xfer, signer);
     return {
       ...receipt,
       state: TransferState.DestinationInitiated,
-      attestation: receipt.attestation,
       destinationTxs: txids,
-    };
+    } as R;
   }
 
   async resume(tx: TransactionId): Promise<R> {
@@ -634,7 +739,8 @@ export class NttExecutorRoute<N extends Network>
               wormhole: dstInfo.transceiver["wormhole"]!,
             },
           },
-          referrerFeeDbps: 0n,
+          transferTokenFee: 0n,
+          nativeTokenFee: 0n,
         },
       },
     };
@@ -642,7 +748,7 @@ export class NttExecutorRoute<N extends Network>
 
   // Even though this is an automatic route, the transfer may need to be
   // manually finalized if it was queued
-  async finalize(signer: Signer, receipt: R): Promise<R> {
+  async _buildFinalizeXfer(sender: ChainAddress, receipt: R) {
     if (!isDestinationQueued(receipt)) {
       throw new Error(
         "The transfer must be destination queued in order to finalize"
@@ -657,13 +763,34 @@ export class NttExecutorRoute<N extends Network>
     const ntt = await toChain.getProtocol("Ntt", {
       ntt: receipt.params.normalizedParams.destinationContracts,
     });
-    const sender = Wormhole.chainAddress(signer.chain(), signer.address());
-    const completeTransfer = ntt.completeInboundQueuedTransfer(
+    return ntt.completeInboundQueuedTransfer(
       receipt.from,
       vaa.payload["nttManagerPayload"],
       sender.address
     );
-    const finalizeTxids = await signSendWait(toChain, completeTransfer, signer);
+  }
+
+  async buildFinalizeTransactions(
+    sender: ChainAddress,
+    receipt: R
+  ): Promise<UnsignedTransaction<N, Chain>[]> {
+    const txs = await collectTransactions(
+      await this._buildFinalizeXfer(sender, receipt)
+    );
+    return txs as UnsignedTransaction<N, Chain>[];
+  }
+
+  async finalize(signer: Signer, receipt: R): Promise<R> {
+    if (!isDestinationQueued(receipt)) {
+      throw new Error(
+        "The transfer must be destination queued in order to finalize"
+      );
+    }
+
+    const sender = Wormhole.chainAddress(signer.chain(), signer.address());
+    const xfer = await this._buildFinalizeXfer(sender, receipt);
+    const toChain = this.wh.getChain(receipt.to);
+    const finalizeTxids = await signSendWait(toChain, xfer, signer);
     return {
       ...receipt,
       state: TransferState.DestinationFinalized,
@@ -674,7 +801,12 @@ export class NttExecutorRoute<N extends Network>
   public override async *track(receipt: R, timeout?: number) {
     // First we fetch the attestation (VAA) for the transfer
     if (isSourceInitiated(receipt) || isSourceFinalized(receipt)) {
-      const { txid } = receipt.originTxs.at(-1)!;
+      // On XRPL, originTxs[0] is the NTT payment (Wormhole message) and
+      // originTxs[1] is the executor request. Wormholescan only indexes the
+      // NTT payment, so use originTxs[0] for XRPL.
+      const { txid } = receipt.originTxs.at(
+        chainToPlatform(receipt.from) === "Xrpl" ? 0 : -1
+      )!;
       const vaa = await this.wh.getVaa(txid, "Ntt:WormholeTransfer", timeout);
       if (!vaa) throw new Error("No VAA found for transaction: " + txid);
 
@@ -711,12 +843,7 @@ export class NttExecutorRoute<N extends Network>
       if (!txStatus) throw new Error("No transaction status found");
 
       const relayStatus = txStatus.status;
-      if (
-        relayStatus === RelayStatus.Failed || // this could happen if simulation fails
-        relayStatus === RelayStatus.Underpaid || // only happens if you don't pay at least the costEstimate
-        relayStatus === RelayStatus.Unsupported || // capabilities check didn't pass
-        relayStatus === RelayStatus.Aborted // An unrecoverable error indicating the attempt should stop (bad data, pre-flight checks failed, or chain-specific conditions)
-      ) {
+      if (isRelayStatusFailed(relayStatus)) {
         receipt = {
           ...receipt,
           state: TransferState.Failed,
@@ -724,6 +851,15 @@ export class NttExecutorRoute<N extends Network>
             `Relay failed with status: ${relayStatus}`
           ),
         };
+        yield receipt;
+      } else if (chainToPlatform(receipt.to) === "Xrpl") {
+        // XRPL has no on-chain state to verify redemption; the executor
+        // status is the only source of truth.  If the relay didn't fail,
+        // treat the transfer as finalized.
+        receipt = {
+          ...receipt,
+          state: TransferState.DestinationFinalized,
+        } satisfies CompletedTransferReceipt<NttRoute.ManualAttestationReceipt> as R;
         yield receipt;
       }
     }

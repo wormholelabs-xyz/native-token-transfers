@@ -1,4 +1,5 @@
 // Global test setup
+import { jest } from "@jest/globals";
 
 // Increase timeout for async operations
 jest.setTimeout(30000);
@@ -13,6 +14,6 @@ global.console = {
 };
 
 // Handle BigInt serialization for Jest
-(BigInt.prototype as any).toJSON = function() {
-  return this.toString() + 'n';
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString() + "n";
 };

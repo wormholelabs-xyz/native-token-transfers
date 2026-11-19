@@ -41,7 +41,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     using TrimmedAmountLib for uint256;
     using TrimmedAmountLib for TrimmedAmount;
 
-    string public constant NTT_MANAGER_VERSION = "1.1.0";
+    string public constant NTT_MANAGER_VERSION = "2.0.1";
 
     // =============== Setup =================================================================
 
@@ -142,7 +142,10 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     }
 
     /// @inheritdoc INttManager
-    function setInboundLimit(uint256 limit, uint16 chainId_) external onlyOwner {
+    function setInboundLimit(
+        uint256 limit,
+        uint16 chainId_
+    ) external onlyOwner {
         uint8 toDecimals = tokenDecimals();
         _setInboundLimit(limit.trim(toDecimals, toDecimals), chainId_);
     }
@@ -193,7 +196,7 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 nttManagerMessageHash = _recordTransceiverAttestation(sourceChainId, payload);
 
         if (isMessageApproved(nttManagerMessageHash)) {
-            executeMsg(sourceChainId, sourceNttManagerAddress, payload);
+            executeMsgInner(sourceChainId, sourceNttManagerAddress, payload);
         }
     }
 
@@ -203,6 +206,15 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
         bytes32 sourceNttManagerAddress,
         TransceiverStructs.NttManagerMessage memory message
     ) public whenNotPaused {
+        _verifyPeer(sourceChainId, sourceNttManagerAddress);
+        executeMsgInner(sourceChainId, sourceNttManagerAddress, message);
+    }
+
+    function executeMsgInner(
+        uint16 sourceChainId,
+        bytes32 sourceNttManagerAddress,
+        TransceiverStructs.NttManagerMessage memory message
+    ) private {
         (bytes32 digest, bool alreadyExecuted) =
             _isMessageExecuted(sourceChainId, sourceNttManagerAddress, message);
 
@@ -262,7 +274,10 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     /// @dev Override this function to process an additional payload on the NativeTokenTransfer
     /// For integrator flexibility, this function is *not* marked pure or view
     /// @param - The Wormhole chain id of the sender
-    /// @param - The address of the sender's NTT Manager contract.
+    /// @param - The address verified to equal the peer currently registered for the source chain —
+    ///          not necessarily the manager that originally sent the message, since the peer may have
+    ///          been changed while the message was in flight. Integrators must not treat this as the
+    ///          authenticated original sender.
     /// @param - The message id from the NttManagerMessage.
     /// @param - The original message sender address from the NttManagerMessage.
     /// @param - The parsed NativeTokenTransfer, which includes the additionalPayload field
@@ -579,9 +594,9 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
             seq
         );
 
-        emit TransferSent(
-            TransceiverStructs._nttManagerMessageDigest(chainId, encodedNttManagerPayload)
-        );
+        emit TransferSent(TransceiverStructs._nttManagerMessageDigest(
+                chainId, encodedNttManagerPayload
+            ));
 
         // return the sequence number
         return seq;
@@ -631,13 +646,20 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
 
         if (mode == Mode.LOCKING) {
             // unlock tokens to the specified recipient
-            IERC20(token).safeTransfer(recipient, untrimmedAmount);
+            _unlockTokens(recipient, untrimmedAmount);
         } else if (mode == Mode.BURNING) {
             // mint tokens to the specified recipient
             INttToken(token).mint(recipient, untrimmedAmount);
         } else {
             revert InvalidMode(uint8(mode));
         }
+    }
+
+    function _unlockTokens(
+        address recipient,
+        uint256 untrimmedAmount
+    ) internal virtual {
+        IERC20(token).safeTransfer(recipient, untrimmedAmount);
     }
 
     function tokenDecimals() public view override(INttManager, RateLimiter) returns (uint8) {
@@ -654,7 +676,10 @@ contract NttManager is INttManager, RateLimiter, ManagerBase {
     // ==================== Internal Helpers ===============================================
 
     /// @dev Verify that the peer address saved for `sourceChainId` matches the `peerAddress`.
-    function _verifyPeer(uint16 sourceChainId, bytes32 peerAddress) internal view {
+    function _verifyPeer(
+        uint16 sourceChainId,
+        bytes32 peerAddress
+    ) internal view {
         if (_getPeersStorage()[sourceChainId].peerAddress != peerAddress) {
             revert InvalidPeer(sourceChainId, peerAddress);
         }
