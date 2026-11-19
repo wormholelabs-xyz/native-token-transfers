@@ -597,9 +597,9 @@ func TestRegistryChoiceContextBoundsEndToEnd(t *testing.T) {
 		wantStatus int
 	}{
 		{"factory and preapproval on one synchronizer", func(flowFixtures) {}, http.StatusOK},
-		{"preapproval on another synchronizer", func(fixtures flowFixtures) {
+		{"preapproval on another synchronizer gives offer", func(fixtures flowFixtures) {
 			fixtures[tailTransferPreapproval] = jsonArray(registryContractJSONWithPackage(tailTransferPreapproval, cidBobPreapprovalA, registryTestPackageNameOf(tailTransferPreapproval), "other-sync::1220", preapprovalArg(registryTestBob, registryTestGG, instrumentA)))
-		}, http.StatusInternalServerError},
+		}, http.StatusOK},
 		{"factory blob above 4 MiB", func(fixtures flowFixtures) {
 			fixtures[tailCoinFactory] = jsonArray(registryContractJSON(tailCoinFactory, cidCanonicalFactory, strings.Repeat("A", maxFlowResponseBytes+4), coinFactoryArg(registryTestGG)))
 		}, http.StatusBadGateway},

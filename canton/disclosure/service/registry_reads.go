@@ -83,8 +83,14 @@ func (s *server) fetchRegistryInstruments(ctx context.Context, registry *registr
 	for _, manager := range managers {
 		value := manager.value
 		//SECURITY: second check of the field matches.
-		if value.TokenConfig != tokenConfigBurnMint || value.InstrumentId.Admin != registry.adminParty || value.GuardianGovernance != registry.adminParty {
-			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s passed the registry filter with tokenConfig %s, instrument admin %s, guardianGovernance %s", manager.entry.ContractID, value.TokenConfig, value.InstrumentId.Admin, value.GuardianGovernance)
+		if value.TokenConfig != tokenConfigBurnMint {
+			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s passed the registry filter with tokenConfig %s", manager.entry.ContractID, value.TokenConfig)
+		}
+		if value.InstrumentId.Admin != registry.adminParty {
+			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s passed the registry filter with instrument admin %s", manager.entry.ContractID, value.InstrumentId.Admin)
+		}
+		if value.GuardianGovernance != registry.adminParty {
+			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s passed the registry filter with guardianGovernance %s", manager.entry.ContractID, value.GuardianGovernance)
 		}
 		if err := requireFactoryTag(value.Factory, factoryTagBurnMint); err != nil {
 			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s: %v", manager.entry.ContractID, err)
@@ -93,8 +99,14 @@ func (s *server) fetchRegistryInstruments(ctx context.Context, registry *registr
 			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s commits an empty factory contract id", manager.entry.ContractID)
 		}
 		decimals, err := value.TokenDecimals.Int64()
-		if err != nil || decimals < 0 || decimals > maxTokenDecimals {
-			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s: tokenDecimals %q is outside 0..%d", manager.entry.ContractID, value.TokenDecimals, maxTokenDecimals)
+		if err != nil {
+			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s: tokenDecimals %q is not an integer", manager.entry.ContractID, value.TokenDecimals)
+		}
+		if decimals < 0 {
+			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s: tokenDecimals %d is negative", manager.entry.ContractID, decimals)
+		}
+		if decimals > maxTokenDecimals {
+			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s: tokenDecimals %d is above %d", manager.entry.ContractID, decimals, maxTokenDecimals)
 		}
 		if err := checkRegistryIdentifier("NttManager instrumentId.id", value.InstrumentId.Id); err != nil {
 			return nil, newFlowError(http.StatusInternalServerError, "NttManager %s: %v", manager.entry.ContractID, err)
@@ -128,8 +140,8 @@ func (s *server) findRegistryInstrument(ctx context.Context, registry *registryC
 }
 
 // fetchTotalSupplies sums the active Coin amounts of the registry admin's instruments by id. The
-// read keeps only the sums.
-func (s *server) fetchTotalSupplies(ctx context.Context, registry *registryConfig, offset int64) (amountTotalsByGroup, error) {
+// read keeps only the sums and its read time.
+func (s *server) fetchTotalSupplies(ctx context.Context, registry *registryConfig, offset int64) (amountTotalsRead, error) {
 	query := amountTotalsQuery{
 		contracts: activeContractsQuery{
 			readerParties:  s.registryReaderParties(registry),
@@ -143,23 +155,73 @@ func (s *server) fetchTotalSupplies(ctx context.Context, registry *registryConfi
 	}
 	totals, err := s.acs.ActiveContractAmountTotals(ctx, query)
 	if err != nil {
-		return nil, &flowError{status: upstreamErrorStatus(err), msg: fmt.Sprintf("disclosure-service: Coin totals: %v", err), cause: err}
+		return amountTotalsRead{}, &flowError{status: upstreamErrorStatus(err), msg: fmt.Sprintf("disclosure-service: Coin totals: %v", err), cause: err}
+	}
+	if totals.readAt.IsZero() {
+		return amountTotalsRead{}, newFlowError(http.StatusInternalServerError, "Coin totals have no read time")
 	}
 	return totals, nil
 }
 
+// registrySupplyTotals is the Coin totals of one request. available is false when the Coin read
+// stopped at a read bound; the metadata routes then omit totalSupply and totalSupplyAsOf.
+type registrySupplyTotals struct {
+	read      amountTotalsRead
+	available bool
+}
+
+// isUpstreamReadBoundError reports a read that stopped at the participant list limit (413), the
+// scanned-contract bound, or the response byte limit.
+func isUpstreamReadBoundError(err error) bool {
+	return errors.Is(err, errUpstreamListLimitExceeded) ||
+		errors.Is(err, errUpstreamScanBoundExceeded) ||
+		errors.Is(err, errUpstreamResponseTooLarge)
+}
+
+// isCoinTotalsReadBoundError adds the group cap to isUpstreamReadBoundError.
+func isCoinTotalsReadBoundError(err error) bool {
+	return isUpstreamReadBoundError(err) || errors.Is(err, errAmountTotalsGroupCapExceeded)
+}
+
+// isPreapprovalReadBoundError adds the match cap to isUpstreamReadBoundError.
+func isPreapprovalReadBoundError(err error) bool {
+	return isUpstreamReadBoundError(err) || errors.Is(err, errMatchCapExceeded)
+}
+
+// fetchTotalSuppliesWithinBounds is fetchTotalSupplies. A read that stops at a bound gives
+// unavailable totals and one log line. Any other error fails the request.
+func (s *server) fetchTotalSuppliesWithinBounds(ctx context.Context, registry *registryConfig, offset int64) (registrySupplyTotals, error) {
+	read, err := s.fetchTotalSupplies(ctx, registry, offset)
+	if err == nil {
+		return registrySupplyTotals{read: read, available: true}, nil
+	}
+	if !isCoinTotalsReadBoundError(err) {
+		return registrySupplyTotals{}, err
+	}
+	s.logger.Printf("disclosure-service: registry: totalSupply omitted: the Coin read stopped at a bound: %q", err.Error())
+	return registrySupplyTotals{available: false}, nil
+}
+
+// registryContractNotFound is the one 404 text of a read by contract id. Do not give the cause
+// to the client: it shows whether gg sees a contract with that id.
+func registryContractNotFound(tail string) error {
+	return newFlowError(http.StatusNotFound, "no active %s with this id in this registry", templateTail(tail))
+}
+
 // fetchRegistryContractByID reads contractID as the registry admin. A contract the admin cannot
-// see, an archived contract, and a contract of another package or template are each a 404.
+// see, an archived contract, and a contract of another package or template are each a 404 with
+// one text.
 func fetchRegistryContractByID[T any](ctx context.Context, s *server, registry *registryConfig, tail string, wantContractID contractID) (decodedEntry[T], error) {
 	entry, found, err := s.acs.ActiveContractByID(ctx, s.registryReaderParties(registry), wantContractID)
 	if err != nil {
 		return decodedEntry[T]{}, &flowError{status: upstreamErrorStatus(err), msg: fmt.Sprintf("disclosure-service: read %s %s: %v", tail, wantContractID, err), cause: err}
 	}
 	if !found {
-		return decodedEntry[T]{}, newFlowError(http.StatusNotFound, "no active %s %s visible to the registry", templateTail(tail), truncateForError(string(wantContractID)))
+		return decodedEntry[T]{}, registryContractNotFound(tail)
 	}
 	if err := checkUpstreamTemplate(registryQualifiedTemplate(tail), entry.PackageName, entry.TemplateID); err != nil {
-		return decodedEntry[T]{}, newFlowError(http.StatusNotFound, "contract %s is not a %s", truncateForError(string(wantContractID)), registryQualifiedTemplate(tail))
+		s.logger.Printf("disclosure-service: registry: 404 for %s %q: %q", templateTail(tail), string(wantContractID), err.Error())
+		return decodedEntry[T]{}, registryContractNotFound(tail)
 	}
 	if contractID(entry.ContractID) != wantContractID {
 		return decodedEntry[T]{}, newFlowError(http.StatusBadGateway, "read %s returned contract %s", wantContractID, entry.ContractID)
@@ -206,8 +268,11 @@ func findReceiverPreapproval(entries []decodedEntry[daPreapproval], receiver par
 	var chosen *decodedEntry[daPreapproval]
 	for index := range entries {
 		candidate := &entries[index]
-		if partyID(candidate.value.Owner) != receiver || candidate.value.InstrumentId != instrument {
+		if candidate.value.Owner != receiver {
 			return decodedEntry[daPreapproval]{}, false, newFlowError(http.StatusInternalServerError, "TransferPreapproval %s passed the receiver filter with owner %s", candidate.entry.ContractID, candidate.value.Owner)
+		}
+		if candidate.value.InstrumentId != instrument {
+			return decodedEntry[daPreapproval]{}, false, newFlowError(http.StatusInternalServerError, "TransferPreapproval %s passed the instrument filter with instrument %+v", candidate.entry.ContractID, candidate.value.InstrumentId)
 		}
 		if chosen == nil || candidate.entry.ContractID < chosen.entry.ContractID {
 			chosen = candidate

@@ -106,11 +106,11 @@ func TestRegistryCoinTotalsAboveAReadBoundOmitTotalSupply(t *testing.T) {
 				for range 3 {
 					response := serveRegistry(t, srv, http.MethodGet, route.target, "")
 					requireStatus(t, response, tc.wantStatus)
-					requireConformsToSpec(t, response, specTokenMetadataV1, "GET", route.pathTemplate)
 					if tc.wantStatus != http.StatusOK {
 						requireRegistryErrorBody(t, response)
 						continue
 					}
+					requireConformsToSpec(t, response, specTokenMetadataV1, "GET", route.pathTemplate)
 					instrument := route.instrumentOf(t, response.Body.String())
 					assert.Equal(t, instrumentA, instrument["id"])
 					assert.Equal(t, "Token A", instrument["name"])
@@ -184,11 +184,11 @@ func TestTransferFactoryPreapprovalReadAboveABoundGivesOffer(t *testing.T) {
 			for range 3 {
 				response := serveRegistry(t, srv, http.MethodPost, pathTransferFactory, transferToBob)
 				requireStatus(t, response, tc.wantStatus)
-				requireConformsToSpec(t, response, specTransferInstructionV1, "POST", pathTransferFactory)
 				if tc.wantStatus != http.StatusOK {
 					requireRegistryErrorBody(t, response)
 					continue
 				}
+				requireConformsToSpec(t, response, specTransferInstructionV1, "POST", pathTransferFactory)
 				got := decodeRecorded[transferFactoryWithChoiceContext](t, response)
 				assert.Equal(t, tc.wantKind, got.TransferKind)
 				assert.Equal(t, cidCanonicalFactory, got.FactoryID)

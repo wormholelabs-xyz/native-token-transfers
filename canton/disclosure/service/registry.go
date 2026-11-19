@@ -2,15 +2,16 @@ package main
 
 // CIP-0056 off-ledger registry API, v1, for the burn/mint instruments the registry admin (gg)
 // administers. Response shapes follow openapi/*.yaml. Each choice context comes from its choice
-// body in the token-cip0056 package (CantonExamples tokens/cip0056/daml/Token/CIP0056):
+// body in the token-cip0056 package. The line numbers are for the sources in the vendored
+// canton/dars/token-cip0056-0.2.0.dar (CantonExamples b448589, tokens/cip0056/daml/Token/CIP0056):
 //
-//   - TransferFactory_Transfer (CoinFactory.daml:56-77, CoinTransfer.daml:152-169): the sender
+//   - TransferFactory_Transfer (CoinFactory.daml:56-77, CoinTransfer.daml:151-168): the sender
 //     cannot see the CoinFactory (signatory admin only). transferCore exercises the receiver's
 //     TransferPreapproval (signatory owner, observer admin) when extraArgs.context carries its id
-//     under transferPreapprovalContextKey (CoinTransfer.daml:17-24, 164-168).
-//   - AllocationFactory_Allocate (CoinFactory.daml:87-109): the sender cannot see the CoinFactory.
-//   - TransferInstruction accept/reject/withdraw (CoinTransfer.daml:78-89) and Allocation
-//     execute-transfer/cancel/withdraw (CoinAllocation.daml:24-38) only create Coins; their
+//     under transferPreapprovalContextKey (CoinTransfer.daml:17-24, 163-167).
+//   - AllocationFactory_Allocate (CoinFactory.daml:87-104): the sender cannot see the CoinFactory.
+//   - TransferInstruction accept/reject/withdraw (CoinTransfer.daml:77-88) and Allocation
+//     execute-transfer/cancel/withdraw (CoinAllocation.daml:22-36) only create Coins; their
 //     controllers are stakeholders of the instruction or allocation. The context is empty.
 
 import (
@@ -50,11 +51,16 @@ const (
 	maxInstrumentsFileBytes     = 1 << 20
 	maxRegistryInstruments      = 1000
 	maxRegistryIdentifierLength = 512 // party, instrument id, contract id
+	maxEncodedPageTokenLength   = (maxRegistryIdentifierLength*4 + 2) / 3
 	maxDisplayTextLength        = 256
 	maxTokenDecimals            = 10 // Daml Decimal scale
 	damlDecimalScale            = 10
 	damlDecimalMaxDigits        = 38
 )
+
+// Compile-time: the query of the longest instrument page fits maxFlowQueryBytes, with no
+// percent-encoding of the base64url pageToken.
+const _ = uint(maxFlowQueryBytes - len("pageSize=100&pageToken=") - maxEncodedPageTokenLength)
 
 // registrySupportedApis are the four v1 off-ledger APIs this service implements, at minor version 1.
 func registrySupportedApis() map[string]int {
@@ -98,14 +104,17 @@ func newRegistryConfig(adminParty partyID, displayByInstrumentID map[string]regi
 }
 
 // logUnconfiguredOnce logs an instrument with no display config the first time a request meets it.
-func (config *registryConfig) logUnconfiguredOnce(instrumentID string) {
+func (config *registryConfig) logUnconfiguredOnce(logger *log.Logger, instrumentID string) {
 	config.unconfiguredLogMutex.Lock()
 	defer config.unconfiguredLogMutex.Unlock()
-	if config.unconfiguredLogged[instrumentID] || len(config.unconfiguredLogged) >= maxRegistryInstruments {
+	if config.unconfiguredLogged[instrumentID] {
+		return
+	}
+	if len(config.unconfiguredLogged) >= maxRegistryInstruments {
 		return
 	}
 	config.unconfiguredLogged[instrumentID] = true
-	log.Printf("disclosure-service: registry: instrument %q has no entry in --registry-instruments-file; it is left out of the metadata API", instrumentID)
+	logger.Printf("disclosure-service: registry: instrument %q has no entry in --registry-instruments-file; it is left out of the metadata API", instrumentID)
 }
 
 // loadRegistryConfig reads the instruments file. The registry admin is the guardianGovernance party.
@@ -308,8 +317,8 @@ type registryInstrumentResponse struct {
 	ID              string         `json:"id"`
 	Name            string         `json:"name"`
 	Symbol          string         `json:"symbol"`
-	TotalSupply     string         `json:"totalSupply"`
-	TotalSupplyAsOf string         `json:"totalSupplyAsOf"`
+	TotalSupply     string         `json:"totalSupply,omitempty"`     // omitted when the Coin read stops at a bound
+	TotalSupplyAsOf string         `json:"totalSupplyAsOf,omitempty"` // the time of the Coin read
 	Decimals        int            `json:"decimals"`
 	SupportedApis   map[string]int `json:"supportedApis"`
 }
@@ -376,15 +385,21 @@ type getChoiceContextRequest struct {
 	ExcludeDebugFields bool              `json:"excludeDebugFields"`
 }
 
+// requestInstrumentID is a request InstrumentId before parseRequestInstrumentID.
+type requestInstrumentID struct {
+	Admin string `json:"admin"`
+	Id    string `json:"id"`
+}
+
 // transferFactoryChoiceArguments is the JSON Ledger API encoding of TransferFactory_Transfer,
 // reduced to the fields the registry checks.
 type transferFactoryChoiceArguments struct {
 	ExpectedAdmin string `json:"expectedAdmin"`
 	Transfer      *struct {
-		Sender       string          `json:"sender"`
-		Receiver     string          `json:"receiver"`
-		Amount       json.Number     `json:"amount"`
-		InstrumentID *daInstrumentId `json:"instrumentId"`
+		Sender       string               `json:"sender"`
+		Receiver     string               `json:"receiver"`
+		Amount       json.Number          `json:"amount"`
+		InstrumentID *requestInstrumentID `json:"instrumentId"`
 	} `json:"transfer"`
 }
 
@@ -394,21 +409,15 @@ type allocationFactoryChoiceArguments struct {
 	ExpectedAdmin string `json:"expectedAdmin"`
 	Allocation    *struct {
 		TransferLeg *struct {
-			Sender       string          `json:"sender"`
-			Receiver     string          `json:"receiver"`
-			Amount       json.Number     `json:"amount"`
-			InstrumentID *daInstrumentId `json:"instrumentId"`
+			Sender       string               `json:"sender"`
+			Receiver     string               `json:"receiver"`
+			Amount       json.Number          `json:"amount"`
+			InstrumentID *requestInstrumentID `json:"instrumentId"`
 		} `json:"transferLeg"`
 	} `json:"allocation"`
 }
 
 // --- Daml-JSON decode shapes ---
-
-type daCoin struct {
-	InstrumentId daInstrumentId `json:"instrumentId"`
-	Owner        string         `json:"owner"`
-	Amount       json.Number    `json:"amount"`
-}
 
 type daCoinTransferInstruction struct {
 	InstrumentId daInstrumentId `json:"instrumentId"`

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,7 +67,7 @@ func registryPublicErrorText(status int, err error, requestID string) string {
 }
 
 func (s *server) handleRegistryUnknownPath(w http.ResponseWriter, r *http.Request) {
-	s.writeRegistryError(w, r, newFlowError(http.StatusNotFound, "no registry endpoint %s %s", r.Method, truncateForError(r.URL.Path)))
+	s.writeRegistryError(w, r, newFlowError(http.StatusNotFound, "no registry endpoint %q %q", truncateForError(r.Method), truncateForError(r.URL.Path)))
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +102,40 @@ func checkRegistryQuery(rawQuery string, allowedNames ...string) (map[string]str
 
 // listInstrumentsRequest is the parsed query of GET /registry/metadata/v1/instruments.
 type listInstrumentsRequest struct {
-	pageSize  int    // 1 to maxInstrumentPageSize
-	pageToken string // "" for the first page
+	pageSize          int    // 1 to maxInstrumentPageSize
+	afterInstrumentID string // the decoded pageToken; "" for the first page
+}
+
+// encodeInstrumentPageToken is the pageToken of the page after instrumentID: unpadded base64url,
+// so the token needs no percent-encoding in a query.
+func encodeInstrumentPageToken(instrumentID string) string {
+	if instrumentID == "" {
+		panic("disclosure-service: page token of an empty instrument id")
+	}
+	pageToken := base64.RawURLEncoding.EncodeToString([]byte(instrumentID))
+	if len(pageToken) > maxEncodedPageTokenLength {
+		panic("disclosure-service: page token exceeds maxEncodedPageTokenLength")
+	}
+	return pageToken
+}
+
+// parseInstrumentPageToken decodes a pageToken into an instrument id of 1 to
+// maxRegistryIdentifierLength bytes.
+func parseInstrumentPageToken(pageToken string) (string, error) {
+	if pageToken == "" {
+		return "", newFlowError(http.StatusBadRequest, "pageToken must not be empty")
+	}
+	if len(pageToken) > maxEncodedPageTokenLength {
+		return "", newFlowError(http.StatusBadRequest, "pageToken is longer than %d bytes", maxEncodedPageTokenLength)
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(pageToken)
+	if err != nil {
+		return "", newFlowError(http.StatusBadRequest, "pageToken is not a nextPageToken of this registry")
+	}
+	if err := checkRegistryIdentifier(registryParamPageToken, string(decoded)); err != nil {
+		return "", err
+	}
+	return string(decoded), nil
 }
 
 // parseListInstrumentsRequest reads pageSize and pageToken. pageSize is an integer; a value
@@ -121,15 +154,34 @@ func parseListInstrumentsRequest(rawQuery string) (listInstrumentsRequest, error
 		request.pageSize = min(max(requestedPageSize, 1), maxInstrumentPageSize)
 	}
 	if pageToken, present := params[registryParamPageToken]; present {
-		if err := checkRegistryIdentifier(registryParamPageToken, pageToken); err != nil {
+		afterInstrumentID, err := parseInstrumentPageToken(pageToken)
+		if err != nil {
 			return listInstrumentsRequest{}, err
 		}
-		request.pageToken = pageToken
+		request.afterInstrumentID = afterInstrumentID
 	}
 	if request.pageSize < 1 || request.pageSize > maxInstrumentPageSize {
 		panic("disclosure-service: pageSize left its bounds")
 	}
 	return request, nil
+}
+
+// describeRequestBodyFault is a 400 with a fixed text for a body decode fault. A json error can
+// quote the full client value, so only a bounded field name is kept.
+func describeRequestBodyFault(where string, err error) error {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return newFlowError(http.StatusBadRequest, "%s is larger than %d bytes", where, maxRegistryRequestBodyBytes)
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return newFlowError(http.StatusBadRequest, "%s: field %q has the wrong type", where, truncateForError(typeErr.Field))
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return newFlowError(http.StatusBadRequest, "%s is not valid JSON at byte %d", where, syntaxErr.Offset)
+	}
+	return newFlowError(http.StatusBadRequest, "%s does not match the request schema", where)
 }
 
 // decodeRegistryRequestObject reads a bounded JSON object body into target. Any read, syntax,
@@ -139,7 +191,7 @@ func decodeRegistryRequestObject(w http.ResponseWriter, r *http.Request, target 
 	decoder := json.NewDecoder(body)
 	var raw json.RawMessage
 	if err := decoder.Decode(&raw); err != nil {
-		return newFlowError(http.StatusBadRequest, "request body: %v", err)
+		return describeRequestBodyFault("request body", err)
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return newFlowError(http.StatusBadRequest, "request body: trailing data after the JSON object")
@@ -148,7 +200,7 @@ func decodeRegistryRequestObject(w http.ResponseWriter, r *http.Request, target 
 		return newFlowError(http.StatusBadRequest, "request body must be a JSON object")
 	}
 	if err := json.Unmarshal(raw, target); err != nil {
-		return newFlowError(http.StatusBadRequest, "request body: %v", err)
+		return describeRequestBodyFault("request body", err)
 	}
 	return nil
 }
@@ -196,10 +248,10 @@ func checkPositiveAmount(field string, amount json.Number) error {
 // equal the instrument admin (400), and the instrument admin must be this registry's admin (404).
 func checkInstrumentOfRegistry(expectedAdmin partyID, instrument daInstrumentId, registryAdmin partyID) error {
 	if expectedAdmin != instrument.Admin {
-		return newFlowError(http.StatusBadRequest, "expectedAdmin %s does not match instrumentId.admin %s", truncateForError(string(expectedAdmin)), truncateForError(string(instrument.Admin)))
+		return newFlowError(http.StatusBadRequest, "expectedAdmin %q does not match instrumentId.admin %q", truncateForError(string(expectedAdmin)), truncateForError(string(instrument.Admin)))
 	}
 	if instrument.Admin != registryAdmin {
-		return newFlowError(http.StatusNotFound, "instrument admin %s is not this registry's admin", truncateForError(string(instrument.Admin)))
+		return newFlowError(http.StatusNotFound, "instrument admin %q is not this registry's admin", truncateForError(string(instrument.Admin)))
 	}
 	return nil
 }
@@ -214,7 +266,7 @@ func parseFactoryRequest(w http.ResponseWriter, r *http.Request, arguments any) 
 		return getFactoryRequest{}, newFlowError(http.StatusBadRequest, "choiceArguments must be a JSON object")
 	}
 	if err := json.Unmarshal(request.ChoiceArguments, arguments); err != nil {
-		return getFactoryRequest{}, newFlowError(http.StatusBadRequest, "choiceArguments: %v", err)
+		return getFactoryRequest{}, describeRequestBodyFault("choiceArguments", err)
 	}
 	return request, nil
 }
@@ -236,8 +288,9 @@ func checkTransferFactoryChoiceArguments(arguments transferFactoryChoiceArgument
 	if transfer == nil {
 		return requestedTransfer{}, newFlowError(http.StatusBadRequest, "choiceArguments.transfer is required")
 	}
-	if transfer.InstrumentID == nil {
-		return requestedTransfer{}, newFlowError(http.StatusBadRequest, "choiceArguments.transfer.instrumentId is required")
+	instrument, err := parseRequestInstrumentID("choiceArguments.transfer.instrumentId", transfer.InstrumentID)
+	if err != nil {
+		return requestedTransfer{}, err
 	}
 	sender, err := parseRequestPartyID(transfer.Sender, "choiceArguments.transfer.sender")
 	if err != nil {
@@ -247,9 +300,6 @@ func checkTransferFactoryChoiceArguments(arguments transferFactoryChoiceArgument
 	if err != nil {
 		return requestedTransfer{}, err
 	}
-	if err := checkRegistryInstrumentIdentifiers("choiceArguments.transfer.instrumentId", *transfer.InstrumentID); err != nil {
-		return requestedTransfer{}, err
-	}
 	if err := checkPositiveAmount("choiceArguments.transfer.amount", transfer.Amount); err != nil {
 		return requestedTransfer{}, err
 	}
@@ -257,7 +307,7 @@ func checkTransferFactoryChoiceArguments(arguments transferFactoryChoiceArgument
 		expectedAdmin: expectedAdmin,
 		sender:        sender,
 		receiver:      receiver,
-		instrument:    *transfer.InstrumentID,
+		instrument:    instrument,
 	}, nil
 }
 
@@ -267,12 +317,16 @@ func checkAllocationFactoryChoiceArguments(arguments allocationFactoryChoiceArgu
 	if err != nil {
 		return "", daInstrumentId{}, err
 	}
-	if arguments.Allocation == nil || arguments.Allocation.TransferLeg == nil {
+	if arguments.Allocation == nil {
+		return "", daInstrumentId{}, newFlowError(http.StatusBadRequest, "choiceArguments.allocation is required")
+	}
+	if arguments.Allocation.TransferLeg == nil {
 		return "", daInstrumentId{}, newFlowError(http.StatusBadRequest, "choiceArguments.allocation.transferLeg is required")
 	}
 	leg := arguments.Allocation.TransferLeg
-	if leg.InstrumentID == nil {
-		return "", daInstrumentId{}, newFlowError(http.StatusBadRequest, "choiceArguments.allocation.transferLeg.instrumentId is required")
+	instrument, err := parseRequestInstrumentID("choiceArguments.allocation.transferLeg.instrumentId", leg.InstrumentID)
+	if err != nil {
+		return "", daInstrumentId{}, err
 	}
 	if _, err := parseRequestPartyID(leg.Sender, "choiceArguments.allocation.transferLeg.sender"); err != nil {
 		return "", daInstrumentId{}, err
@@ -280,22 +334,26 @@ func checkAllocationFactoryChoiceArguments(arguments allocationFactoryChoiceArgu
 	if _, err := parseRequestPartyID(leg.Receiver, "choiceArguments.allocation.transferLeg.receiver"); err != nil {
 		return "", daInstrumentId{}, err
 	}
-	if err := checkRegistryInstrumentIdentifiers("choiceArguments.allocation.transferLeg.instrumentId", *leg.InstrumentID); err != nil {
-		return "", daInstrumentId{}, err
-	}
 	if err := checkPositiveAmount("choiceArguments.allocation.transferLeg.amount", leg.Amount); err != nil {
 		return "", daInstrumentId{}, err
 	}
-	return expectedAdmin, *leg.InstrumentID, nil
+	return expectedAdmin, instrument, nil
 }
 
-// checkRegistryInstrumentIdentifiers requires a non-empty, bounded admin and id. The admin must
-// then equal expectedAdmin (checkInstrumentOfRegistry).
-func checkRegistryInstrumentIdentifiers(fieldPrefix string, instrument daInstrumentId) error {
-	if err := checkRegistryIdentifier(fieldPrefix+".admin", string(instrument.Admin)); err != nil {
-		return err
+// parseRequestInstrumentID parses the admin as a party id and bounds the id. The admin must then
+// equal expectedAdmin (checkInstrumentOfRegistry).
+func parseRequestInstrumentID(fieldPrefix string, rawInstrument *requestInstrumentID) (daInstrumentId, error) {
+	if rawInstrument == nil {
+		return daInstrumentId{}, newFlowError(http.StatusBadRequest, "%s is required", fieldPrefix)
 	}
-	return checkRegistryIdentifier(fieldPrefix+".id", instrument.Id)
+	admin, err := parseRequestPartyID(rawInstrument.Admin, fieldPrefix+".admin")
+	if err != nil {
+		return daInstrumentId{}, err
+	}
+	if err := checkRegistryIdentifier(fieldPrefix+".id", rawInstrument.Id); err != nil {
+		return daInstrumentId{}, err
+	}
+	return daInstrumentId{Admin: admin, Id: rawInstrument.Id}, nil
 }
 
 // beginRegistryRequest runs the checks of every registry route: the registry API is on, and the
@@ -347,14 +405,23 @@ func checkRegistryChoiceContext(choiceContext registryChoiceContext) error {
 		return newFlowError(http.StatusInternalServerError, "choice context disclosedContracts is nil")
 	}
 	for key, contextValue := range choiceContext.ChoiceContextData.Values {
-		if contextValue.Tag != anyValueContractIDTag || contextValue.Value == "" {
-			return newFlowError(http.StatusInternalServerError, "choice context value %s is %+v", key, contextValue)
+		if contextValue.Tag != anyValueContractIDTag {
+			return newFlowError(http.StatusInternalServerError, "choice context value %s has tag %q", key, contextValue.Tag)
+		}
+		if contextValue.Value == "" {
+			return newFlowError(http.StatusInternalServerError, "choice context value %s is empty", key)
 		}
 	}
 	seenContractIDs := make(map[string]bool, len(choiceContext.DisclosedContracts))
 	for _, disclosed := range choiceContext.DisclosedContracts {
-		if disclosed.ContractID == "" || disclosed.TemplateID == "" || disclosed.CreatedEventBlob == "" {
-			return newFlowError(http.StatusInternalServerError, "disclosed contract %q is incomplete", disclosed.ContractID)
+		if disclosed.ContractID == "" {
+			return newFlowError(http.StatusInternalServerError, "disclosed contract has no contract id")
+		}
+		if disclosed.TemplateID == "" {
+			return newFlowError(http.StatusInternalServerError, "disclosed contract %s has no template id", disclosed.ContractID)
+		}
+		if disclosed.CreatedEventBlob == "" {
+			return newFlowError(http.StatusInternalServerError, "disclosed contract %s has no createdEventBlob", disclosed.ContractID)
 		}
 		if disclosed.SynchronizerID == "" {
 			return newFlowError(http.StatusInternalServerError, "disclosed contract %s has no synchronizer", disclosed.ContractID)
@@ -429,21 +496,32 @@ func (s *server) handleRegistryInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, registryInfoResponse{AdminID: string(registry.adminParty), SupportedApis: registrySupportedApis()})
 }
 
-// instrumentMetadata renders one instrument. A missing supply total is zero.
-func instrumentMetadata(instrument registryInstrument, display registryInstrumentDisplay, supplies amountTotalsByGroup, asOf string) registryInstrumentResponse {
-	supply, minted := supplies[instrument.id]
+// instrumentMetadata renders one instrument. A missing supply total is zero. Unavailable totals
+// leave out totalSupply and totalSupplyAsOf.
+func instrumentMetadata(instrument registryInstrument, display registryInstrumentDisplay, supplies registrySupplyTotals) registryInstrumentResponse {
+	metadata := registryInstrumentResponse{
+		ID:            instrument.id,
+		Name:          display.name,
+		Symbol:        display.symbol,
+		Decimals:      instrument.decimals,
+		SupportedApis: registrySupportedApis(),
+	}
+	if !supplies.available {
+		return metadata
+	}
+	supply, minted := supplies.read.totalsByGroup[instrument.id]
 	if !minted {
 		supply = new(big.Int)
 	}
-	return registryInstrumentResponse{
-		ID:              instrument.id,
-		Name:            display.name,
-		Symbol:          display.symbol,
-		TotalSupply:     formatDamlDecimalScaled(supply),
-		TotalSupplyAsOf: asOf,
-		Decimals:        instrument.decimals,
-		SupportedApis:   registrySupportedApis(),
+	metadata.TotalSupply = formatDamlDecimalScaled(supply)
+	metadata.TotalSupplyAsOf = supplies.read.readAt.UTC().Format(time.RFC3339Nano)
+	if metadata.TotalSupply == "" {
+		panic("disclosure-service: available totals rendered an empty totalSupply")
 	}
+	if metadata.TotalSupplyAsOf == "" {
+		panic("disclosure-service: available totals rendered an empty totalSupplyAsOf")
+	}
+	return metadata
 }
 
 // listedInstruments returns the registry instruments that have display config, in id order.
@@ -452,12 +530,11 @@ func (s *server) listedInstruments(ctx context.Context, registry *registryConfig
 	if err != nil {
 		return nil, err
 	}
-	asOf := s.now().UTC().Format(time.RFC3339Nano)
 	instruments, err := s.fetchRegistryInstruments(ctx, registry, offset)
 	if err != nil {
 		return nil, err
 	}
-	supplies, err := s.fetchTotalSupplies(ctx, registry, offset)
+	supplies, err := s.fetchTotalSuppliesWithinBounds(ctx, registry, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -465,15 +542,15 @@ func (s *server) listedInstruments(ctx context.Context, registry *registryConfig
 	for _, instrument := range instruments {
 		display, configured := registry.displayByInstrumentID[instrument.id]
 		if !configured {
-			registry.logUnconfiguredOnce(instrument.id)
+			registry.logUnconfiguredOnce(s.logger, instrument.id)
 			continue
 		}
-		listed = append(listed, instrumentMetadata(instrument, display, supplies, asOf))
+		listed = append(listed, instrumentMetadata(instrument, display, supplies))
 	}
 	return listed, nil
 }
 
-// handleListInstruments pages by id. pageToken is the last id of the previous page; the next
+// handleListInstruments pages by id. pageToken encodes the last id of the previous page; the next
 // page starts at the first id greater than it. Ids stay in order when the set changes.
 func (s *server) handleListInstruments(w http.ResponseWriter, r *http.Request) {
 	registry, ok := s.beginRegistryRequest(w, r, registryParamPageSize, registryParamPageToken)
@@ -491,13 +568,13 @@ func (s *server) handleListInstruments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := 0
-	if request.pageToken != "" {
-		start = sort.Search(len(listed), func(index int) bool { return listed[index].ID > request.pageToken })
+	if request.afterInstrumentID != "" {
+		start = sort.Search(len(listed), func(index int) bool { return listed[index].ID > request.afterInstrumentID })
 	}
 	end := min(start+request.pageSize, len(listed))
 	nextPageToken := ""
 	if end < len(listed) {
-		nextPageToken = listed[end-1].ID
+		nextPageToken = encodeInstrumentPageToken(listed[end-1].ID)
 	}
 	writeInstrumentsPage(w, listed[start:end], nextPageToken)
 }
@@ -522,18 +599,17 @@ func (s *server) handleGetInstrument(w http.ResponseWriter, r *http.Request) {
 		s.writeRegistryError(w, r, err)
 		return
 	}
-	asOf := s.now().UTC().Format(time.RFC3339Nano)
 	instrument, err := s.findRegistryInstrument(r.Context(), registry, instrumentID, offset)
 	if err != nil {
 		s.writeRegistryError(w, r, err)
 		return
 	}
-	supplies, err := s.fetchTotalSupplies(r.Context(), registry, offset)
+	supplies, err := s.fetchTotalSuppliesWithinBounds(r.Context(), registry, offset)
 	if err != nil {
 		s.writeRegistryError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, instrumentMetadata(instrument, display, supplies, asOf))
+	writeJSON(w, http.StatusOK, instrumentMetadata(instrument, display, supplies))
 }
 
 // ---------------------------------------------------------------------------
@@ -565,7 +641,11 @@ func (s *server) handleTransferFactory(w http.ResponseWriter, r *http.Request) {
 }
 
 // assembleTransferFactory mirrors TransferFactory_Transfer (CoinFactory.daml:56-77) and
-// transferCore (CoinTransfer.daml:152-169).
+// transferCore (CoinTransfer.daml:151-168).
+//
+// SECURITY: offer is the fallback when no usable preapproval is known. With no preapproval value,
+// lookupTransferPreapprovalCid gives None (CoinTransfer.daml:20-24), and the factory creates a
+// CoinTransferInstruction for the receiver (CoinTransfer.daml:168, CoinFactory.daml:69-77).
 func (s *server) assembleTransferFactory(ctx context.Context, registry *registryConfig, transfer requestedTransfer, excludeDebugFields bool) (*transferFactoryWithChoiceContext, error) {
 	if err := checkInstrumentOfRegistry(transfer.expectedAdmin, transfer.instrument, registry.adminParty); err != nil {
 		return nil, err
@@ -592,9 +672,19 @@ func (s *server) assembleTransferFactory(ctx context.Context, registry *registry
 	}
 	preapproval, found, err := s.fetchReceiverPreapproval(ctx, registry, transfer.receiver, transfer.instrument, offset)
 	if err != nil {
-		return nil, err
+		if !isPreapprovalReadBoundError(err) {
+			return nil, err
+		}
+		s.logger.Printf("disclosure-service: registry: transferKind offer: the TransferPreapproval read stopped at a bound: %q", err.Error())
+		response.TransferKind = transferKindOffer
+		return response, nil
 	}
 	if !found {
+		response.TransferKind = transferKindOffer
+		return response, nil
+	}
+	if preapproval.entry.SynchronizerID != factory.entry.SynchronizerID {
+		s.logger.Printf("disclosure-service: registry: transferKind offer: TransferPreapproval %s is on synchronizer %q, the CoinFactory on %q", preapproval.entry.ContractID, preapproval.entry.SynchronizerID, factory.entry.SynchronizerID)
 		response.TransferKind = transferKindOffer
 		return response, nil
 	}
@@ -605,7 +695,7 @@ func (s *server) assembleTransferFactory(ctx context.Context, registry *registry
 }
 
 // handleTransferInstructionChoiceContext serves accept, reject and withdraw for a
-// CoinTransferInstruction. The choice bodies (CoinTransfer.daml:78-89) only create Coins, and
+// CoinTransferInstruction. The choice bodies (CoinTransfer.daml:77-88) only create Coins, and
 // each controller is a stakeholder: the context is empty.
 func (s *server) handleTransferInstructionChoiceContext(w http.ResponseWriter, r *http.Request) {
 	registry, ok := s.beginRegistryRequest(w, r)
@@ -633,7 +723,8 @@ func (s *server) handleTransferInstructionChoiceContext(w http.ResponseWriter, r
 		return
 	}
 	if instruction.value.InstrumentId.Admin != registry.adminParty {
-		s.writeRegistryError(w, r, newFlowError(http.StatusNotFound, "CoinTransferInstruction %s is for an instrument of another admin", instructionID))
+		s.logger.Printf("disclosure-service: registry: 404 for CoinTransferInstruction %q: instrument admin %q", string(instructionID), string(instruction.value.InstrumentId.Admin))
+		s.writeRegistryError(w, r, registryContractNotFound(tailCoinTransferInstruction))
 		return
 	}
 	choiceContext := emptyChoiceContext()
@@ -644,7 +735,7 @@ func (s *server) handleTransferInstructionChoiceContext(w http.ResponseWriter, r
 // allocation-instruction-v1 and allocation-v1
 // ---------------------------------------------------------------------------
 
-// handleAllocationFactory mirrors AllocationFactory_Allocate (CoinFactory.daml:87-109): the
+// handleAllocationFactory mirrors AllocationFactory_Allocate (CoinFactory.daml:87-104): the
 // disclosure set is the CoinFactory, and the context data is empty.
 func (s *server) handleAllocationFactory(w http.ResponseWriter, r *http.Request) {
 	registry, ok := s.beginRegistryRequest(w, r)
@@ -687,7 +778,7 @@ func (s *server) handleAllocationFactory(w http.ResponseWriter, r *http.Request)
 }
 
 // handleAllocationChoiceContext serves execute-transfer, withdraw and cancel for a CoinAllocation.
-// The choice bodies (CoinAllocation.daml:24-38) only create Coins, and each controller is a
+// The choice bodies (CoinAllocation.daml:22-36) only create Coins, and each controller is a
 // stakeholder: the context is empty.
 func (s *server) handleAllocationChoiceContext(w http.ResponseWriter, r *http.Request) {
 	registry, ok := s.beginRegistryRequest(w, r)
@@ -715,7 +806,8 @@ func (s *server) handleAllocationChoiceContext(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if allocation.value.Allocation.TransferLeg.InstrumentId.Admin != registry.adminParty {
-		s.writeRegistryError(w, r, newFlowError(http.StatusNotFound, "CoinAllocation %s is for an instrument of another admin", allocationID))
+		s.logger.Printf("disclosure-service: registry: 404 for CoinAllocation %q: instrument admin %q", string(allocationID), string(allocation.value.Allocation.TransferLeg.InstrumentId.Admin))
+		s.writeRegistryError(w, r, registryContractNotFound(tailCoinAllocation))
 		return
 	}
 	choiceContext := emptyChoiceContext()

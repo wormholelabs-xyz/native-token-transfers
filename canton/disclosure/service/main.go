@@ -35,12 +35,17 @@ const (
 	// fires only after parsing, so this byte ceiling is the earlier bound.
 	maxUpstreamResponseBytes = 64 << 20
 	serverReadHeaderTimeout  = 10 * time.Second
-	serverReadTimeout        = 30 * time.Second
-	serverIdleTimeout        = 2 * time.Minute
-	maxInboundHeaderBytes    = 8 << 10
+	// serverReadTimeout bounds the read of headers and body, so a slow body holds an inbound slot
+	// for at most this long.
+	serverReadTimeout     = 10 * time.Second
+	serverIdleTimeout     = 2 * time.Minute
+	maxInboundHeaderBytes = 8 << 10
 
-	maxUpstreamConcurrencyLimit  = 64
-	maxCacheTTL                  = 60 * time.Second
+	maxUpstreamConcurrencyLimit = 64
+	maxCacheTTL                 = 60 * time.Second
+	// minRegistryCacheTTL is the cache floor with the registry API: each instruments request
+	// without the cache is a full Coin read.
+	minRegistryCacheTTL          = 1 * time.Second
 	maxContractsPerTemplateLimit = 10_000
 )
 
@@ -124,6 +129,9 @@ func parseFlags(args []string) (*options, error) {
 	}
 	if *cacheTTL < 0 || *cacheTTL > maxCacheTTL {
 		return nil, fmt.Errorf("disclosure-service: --cache-ttl must be 0 to %s, got %s", maxCacheTTL, *cacheTTL)
+	}
+	if *registryInstrumentsFile != "" && *cacheTTL < minRegistryCacheTTL {
+		return nil, fmt.Errorf("disclosure-service: --cache-ttl must be at least %s with --registry-instruments-file, got %s", minRegistryCacheTTL, *cacheTTL)
 	}
 	return &options{
 		listen:                  *listen,

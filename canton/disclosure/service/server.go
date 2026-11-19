@@ -69,8 +69,7 @@ type server struct {
 	inboundSlots           chan struct{}
 	inboundRequestDeadline time.Duration
 	readiness              *readinessProbe
-	registry               *registryConfig  // nil when the registry API is off
-	now                    func() time.Time // injectable for totalSupplyAsOf
+	registry               *registryConfig // nil when the registry API is off
 }
 
 const (
@@ -90,7 +89,6 @@ func newServer(opts *options, acs acsClient) *server {
 		inboundSlots:           make(chan struct{}, maxConcurrentInboundRequests),
 		inboundRequestDeadline: inboundRequestDeadline,
 		readiness:              newReadinessProbe(acs),
-		now:                    time.Now,
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1", s.handleIndex)

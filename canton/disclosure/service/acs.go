@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ type acsClient interface {
 	LedgerEnd(ctx context.Context) (int64, error)
 	ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error)
 	ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error)
-	ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error)
+	ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsRead, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
@@ -280,6 +281,7 @@ type httpACSClient struct {
 	tokens           bearerTokenSource // nil for an unauthenticated upstream
 	client           *http.Client
 	maxResponseBytes int64
+	now              func() time.Time // read time of the Coin totals
 }
 
 // newHTTPACSClient panics when baseURL breaks checkJSONAPIURL; parseFlags checks it first.
@@ -295,6 +297,7 @@ func newHTTPACSClient(baseURL string, client *http.Client, tokens bearerTokenSou
 		tokens:           tokens,
 		client:           client,
 		maxResponseBytes: maxUpstreamResponseBytes,
+		now:              time.Now,
 	}
 }
 

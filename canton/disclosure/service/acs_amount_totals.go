@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"time"
 )
 
 var errAmountTotalsGroupCapExceeded = errors.New("disclosure-service: amount totals exceed the group cap")
@@ -23,6 +24,16 @@ type amountTotalsQuery struct {
 
 // amountTotalsByGroup maps a group value to its total, scaled by 10^10.
 type amountTotalsByGroup map[string]*big.Int
+
+// amountTotalsRead is the totals of one upstream read and the time the read started.
+type amountTotalsRead struct {
+	totalsByGroup amountTotalsByGroup
+	readAt        time.Time
+}
+
+func (read amountTotalsRead) clone() amountTotalsRead {
+	return amountTotalsRead{totalsByGroup: read.totalsByGroup.clone(), readAt: read.readAt}
+}
 
 func (totals amountTotalsByGroup) clone() amountTotalsByGroup {
 	cloned := make(amountTotalsByGroup, len(totals))
@@ -70,34 +81,38 @@ func (query amountTotalsQuery) cacheKey() string {
 
 // ActiveContractAmountTotals reads query.contracts.template without createdEventBlobs and sums
 // the amount field per group value. A contract two readers both see is counted once.
-func (c *httpACSClient) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+func (c *httpACSClient) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsRead, error) {
 	if err := query.check(); err != nil {
-		return nil, err
+		return amountTotalsRead{}, err
 	}
 	bodyBytes, err := marshalActiveContractsRequest(query.contracts, false)
 	if err != nil {
-		return nil, err
+		return amountTotalsRead{}, err
 	}
+	readAt := c.now()
 	resp, err := c.sendUpstreamRequest(ctx, "active-contracts", http.MethodPost, "/v2/state/active-contracts", bodyBytes)
 	if err != nil {
-		return nil, err
+		return amountTotalsRead{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusRequestEntityTooLarge {
-		return nil, fmt.Errorf("%w: template %s: %w", errUpstreamListLimitExceeded, query.contracts.template, newUpstreamHTTPError("active-contracts", resp))
+		return amountTotalsRead{}, fmt.Errorf("%w: template %s: %w", errUpstreamListLimitExceeded, query.contracts.template, newUpstreamHTTPError("active-contracts", resp))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, newUpstreamHTTPError("active-contracts", resp)
+		return amountTotalsRead{}, newUpstreamHTTPError("active-contracts", resp)
 	}
 	body := &boundedBodyReader{source: resp.Body, remainingBytes: c.maxResponseBytes}
 	totals, err := decodeActiveContractAmountTotals(body, query)
 	if body.limitExceeded {
-		return nil, fmt.Errorf("disclosure-service: amount totals %s: %w", query.contracts.template, errUpstreamResponseTooLarge)
+		return amountTotalsRead{}, fmt.Errorf("disclosure-service: amount totals %s: %w", query.contracts.template, errUpstreamResponseTooLarge)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("disclosure-service: amount totals %s: %w", query.contracts.template, err)
+		return amountTotalsRead{}, fmt.Errorf("disclosure-service: amount totals %s: %w", query.contracts.template, err)
 	}
-	return totals, nil
+	if readAt.IsZero() {
+		panic("disclosure-service: amount totals read has no read time")
+	}
+	return amountTotalsRead{totalsByGroup: totals, readAt: readAt}, nil
 }
 
 // decodeActiveContractAmountTotals reads one JSON array element at a time. Each kept contract
@@ -168,8 +183,11 @@ func decodeActiveContractAmountTotals(body io.Reader, query amountTotalsQuery) (
 		}
 		return nil, fmt.Errorf("%w: data after the array", errUpstreamResponseMalformed)
 	}
-	if scannedCount > maxScannedContractsPerQuery || len(totals) > query.maxGroups {
-		panic("disclosure-service: decodeActiveContractAmountTotals exceeded its own bounds")
+	if scannedCount > maxScannedContractsPerQuery {
+		panic("disclosure-service: decodeActiveContractAmountTotals exceeded the scan bound")
+	}
+	if len(totals) > query.maxGroups {
+		panic("disclosure-service: decodeActiveContractAmountTotals exceeded the group cap")
 	}
 	return totals, nil
 }
