@@ -41,8 +41,8 @@ func (blocking *blockingActiveContractsACS) ActiveContractByID(context.Context, 
 	return acsEntry{}, false, nil
 }
 
-func (blocking *blockingActiveContractsACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
-	return amountTotalsByGroup{}, nil
+func (blocking *blockingActiveContractsACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsRead, error) {
+	return amountTotalsRead{totalsByGroup: amountTotalsByGroup{}}, nil
 }
 
 func TestProbesAnswerWhileInboundCapIsFull(t *testing.T) {

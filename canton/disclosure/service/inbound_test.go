@@ -118,8 +118,8 @@ func (blocking *blockingLedgerEndACS) ActiveContractByID(context.Context, []part
 	return acsEntry{}, false, nil
 }
 
-func (blocking *blockingLedgerEndACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
-	return amountTotalsByGroup{}, nil
+func (blocking *blockingLedgerEndACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsRead, error) {
+	return amountTotalsRead{totalsByGroup: amountTotalsByGroup{}}, nil
 }
 
 func TestServeHTTPInboundBounds(t *testing.T) {

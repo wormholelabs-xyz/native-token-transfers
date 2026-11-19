@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -143,8 +144,17 @@ func newRegistryTestServer(t *testing.T, fixtures flowFixtures) *server {
 	srv := newFlowTestServer(t, fixtures)
 	useRegistryTestParties(srv)
 	srv.registry = newRegistryConfig(registryTestGG, registryTestDisplay())
-	srv.now = func() time.Time { return registryTestNow }
+	useRegistryTestReadClock(srv)
 	return srv
+}
+
+// useRegistryTestReadClock stamps each upstream totals read with registryTestNow.
+func useRegistryTestReadClock(srv *server) {
+	httpClient, isHTTPClient := srv.acs.(*httpACSClient)
+	if !isHTTPClient {
+		panic("useRegistryTestReadClock: the test server upstream is not an httpACSClient")
+	}
+	httpClient.now = func() time.Time { return registryTestNow }
 }
 
 // useRegistryTestParties makes registryTestGG the guardianGovernance reader party.
@@ -412,6 +422,11 @@ func TestListInstruments_Content(t *testing.T) {
 	}
 }
 
+// instrumentPageToken is the pageToken of the page after instrumentID.
+func instrumentPageToken(instrumentID string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(instrumentID))
+}
+
 func TestListInstruments_Pagination(t *testing.T) {
 	srv := newRegistryTestServer(t, registryTestFixtures())
 	cases := []struct {
@@ -421,15 +436,15 @@ func TestListInstruments_Pagination(t *testing.T) {
 		wantNextToken string
 	}{
 		{name: "default page size", query: "", wantIDs: []string{instrumentA, instrumentB, instrumentC}},
-		{name: "first page", query: "pageSize=1", wantIDs: []string{instrumentA}, wantNextToken: instrumentA},
-		{name: "middle page", query: "pageSize=1&pageToken=" + url.QueryEscape(instrumentA), wantIDs: []string{instrumentB}, wantNextToken: instrumentB},
-		{name: "last page exact", query: "pageSize=1&pageToken=" + url.QueryEscape(instrumentB), wantIDs: []string{instrumentC}},
+		{name: "first page", query: "pageSize=1", wantIDs: []string{instrumentA}, wantNextToken: instrumentPageToken(instrumentA)},
+		{name: "middle page", query: "pageSize=1&pageToken=" + instrumentPageToken(instrumentA), wantIDs: []string{instrumentB}, wantNextToken: instrumentPageToken(instrumentB)},
+		{name: "last page exact", query: "pageSize=1&pageToken=" + instrumentPageToken(instrumentB), wantIDs: []string{instrumentC}},
 		{name: "page size equals the count", query: "pageSize=3", wantIDs: []string{instrumentA, instrumentB, instrumentC}},
-		{name: "short last page", query: "pageSize=2&pageToken=" + url.QueryEscape(instrumentA), wantIDs: []string{instrumentB, instrumentC}},
-		{name: "token after the last id", query: "pageToken=" + url.QueryEscape(instrumentC), wantIDs: []string{}},
-		{name: "token between ids", query: "pageToken=" + url.QueryEscape(instrumentA+"0"), wantIDs: []string{instrumentB, instrumentC}},
-		{name: "zero page size clamps to 1", query: "pageSize=0", wantIDs: []string{instrumentA}, wantNextToken: instrumentA},
-		{name: "negative page size clamps to 1", query: "pageSize=-5", wantIDs: []string{instrumentA}, wantNextToken: instrumentA},
+		{name: "short last page", query: "pageSize=2&pageToken=" + instrumentPageToken(instrumentA), wantIDs: []string{instrumentB, instrumentC}},
+		{name: "token after the last id", query: "pageToken=" + instrumentPageToken(instrumentC), wantIDs: []string{}},
+		{name: "token between ids", query: "pageToken=" + instrumentPageToken(instrumentA+"0"), wantIDs: []string{instrumentB, instrumentC}},
+		{name: "zero page size clamps to 1", query: "pageSize=0", wantIDs: []string{instrumentA}, wantNextToken: instrumentPageToken(instrumentA)},
+		{name: "negative page size clamps to 1", query: "pageSize=-5", wantIDs: []string{instrumentA}, wantNextToken: instrumentPageToken(instrumentA)},
 		{name: "huge page size clamps to the max", query: "pageSize=2147483648", wantIDs: []string{instrumentA, instrumentB, instrumentC}},
 	}
 	for _, tc := range cases {

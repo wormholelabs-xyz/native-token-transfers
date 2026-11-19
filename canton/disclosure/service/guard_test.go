@@ -80,13 +80,13 @@ func (f *countingACS) ActiveContractByID(_ context.Context, _ []partyID, wantCon
 }
 
 // ActiveContractAmountTotals returns one group per call, named by the template and the offset.
-func (f *countingACS) ActiveContractAmountTotals(_ context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+func (f *countingACS) ActiveContractAmountTotals(_ context.Context, query amountTotalsQuery) (amountTotalsRead, error) {
 	defer f.track()()
 	f.totalsCalls.Add(1)
 	if f.err != nil {
-		return nil, f.err
+		return amountTotalsRead{}, f.err
 	}
-	return amountTotalsByGroup{fmt.Sprintf("%s@%d", query.contracts.template, query.contracts.activeAtOffset): big.NewInt(1)}, nil
+	return amountTotalsRead{totalsByGroup: amountTotalsByGroup{fmt.Sprintf("%s@%d", query.contracts.template, query.contracts.activeAtOffset): big.NewInt(1)}}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +339,7 @@ func (scripted *scriptedLedgerEndACS) ActiveContractByID(context.Context, []part
 	panic("scriptedLedgerEndACS: ActiveContractByID is not scripted")
 }
 
-func (scripted *scriptedLedgerEndACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
+func (scripted *scriptedLedgerEndACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsRead, error) {
 	panic("scriptedLedgerEndACS: ActiveContractAmountTotals is not scripted")
 }
 

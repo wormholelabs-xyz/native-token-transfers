@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -654,6 +655,15 @@ func newFlowTestServer(t *testing.T, fixtures flowFixtures) *server {
 // archivedFixtureKey marks contractID as archived for the events-by-contract-id fake.
 func archivedFixtureKey(contractID string) string { return "archived:" + contractID }
 
+// upstreamStatusFixtureKey makes the active-contracts fake answer tail with the HTTP status in
+// the fixture value, for example "413".
+func upstreamStatusFixtureKey(tail string) string { return "upstream-status:" + tail }
+
+// isFixtureMarkerKey reports a fixture key that holds no contract list.
+func isFixtureMarkerKey(key string) bool {
+	return strings.HasPrefix(key, "archived:") || strings.HasPrefix(key, "upstream-status:")
+}
+
 // queriedTemplateRecorder records the template tail of each active-contracts query, and the
 // reader parties of each upstream read by tail.
 type queriedTemplateRecorder struct {
@@ -702,6 +712,12 @@ func newRecordingFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *
 		parties, tmpl := decodeRequestedTemplate(t, r)
 		recorder.record(templateTail(tmpl))
 		recorder.recordReaders(templateTail(tmpl), parties)
+		if statusText, hasStatus := fixtures[upstreamStatusFixtureKey(templateTail(tmpl))]; hasStatus {
+			statusCode, err := strconv.Atoi(statusText)
+			require.NoError(t, err)
+			http.Error(w, `{"code":"FAKE_UPSTREAM_STATUS"}`, statusCode)
+			return
+		}
 		body, ok := fixtures[templateTail(tmpl)]
 		if !ok {
 			body = "[]"
@@ -744,7 +760,7 @@ func newRecordingFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *
 func findFixtureContract(t *testing.T, fixtures flowFixtures, contractID string) (string, bool) {
 	t.Helper()
 	for key, body := range fixtures {
-		if strings.HasPrefix(key, "archived:") {
+		if isFixtureMarkerKey(key) {
 			continue
 		}
 		var entries []struct {
@@ -754,6 +770,9 @@ func findFixtureContract(t *testing.T, fixtures flowFixtures, contractID string)
 		}
 		require.NoError(t, json.Unmarshal([]byte(body), &entries))
 		for _, entry := range entries {
+			if len(entry.ContractEntry.JsActiveContract) == 0 {
+				continue
+			}
 			var activeContract struct {
 				CreatedEvent struct {
 					ContractID string `json:"contractId"`

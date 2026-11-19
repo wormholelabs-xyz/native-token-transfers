@@ -37,7 +37,7 @@ func newRecordingRegistryTestServer(t *testing.T, fixtures flowFixtures) (*serve
 	srv, recorder := newRecordingFlowTestServer(t, fixtures)
 	useRegistryTestParties(srv)
 	srv.registry = newRegistryConfig(registryTestGG, registryTestDisplay())
-	srv.now = func() time.Time { return registryTestNow }
+	useRegistryTestReadClock(srv)
 	return srv, recorder
 }
 
@@ -77,8 +77,8 @@ func TestParseListInstrumentsRequest(t *testing.T) {
 		{name: "page size above the max", rawQuery: "pageSize=101", wantPageSize: 100},
 		{name: "page size zero", rawQuery: "pageSize=0", wantPageSize: 1},
 		{name: "page size negative", rawQuery: "pageSize=-1", wantPageSize: 1},
-		{name: "page token", rawQuery: "pageToken=abc", wantPageSize: defaultInstrumentPageSize, wantPageToken: "abc"},
-		{name: "page token at the length limit", rawQuery: "pageToken=" + strings.Repeat("a", maxRegistryIdentifierLength), wantPageSize: defaultInstrumentPageSize, wantPageToken: strings.Repeat("a", maxRegistryIdentifierLength)},
+		{name: "page token", rawQuery: "pageToken=" + instrumentPageToken("abc"), wantPageSize: defaultInstrumentPageSize, wantPageToken: "abc"},
+		{name: "page token at the length limit", rawQuery: "pageToken=" + instrumentPageToken(strings.Repeat("a", maxRegistryIdentifierLength)), wantPageSize: defaultInstrumentPageSize, wantPageToken: strings.Repeat("a", maxRegistryIdentifierLength)},
 		{name: "page size not an integer", rawQuery: "pageSize=ten", wantStatus: http.StatusBadRequest},
 		{name: "page size overflows int", rawQuery: "pageSize=9999999999999999999999", wantStatus: http.StatusBadRequest},
 		{name: "page size empty", rawQuery: "pageSize=", wantStatus: http.StatusBadRequest},
@@ -86,7 +86,7 @@ func TestParseListInstrumentsRequest(t *testing.T) {
 		{name: "repeated page token", rawQuery: "pageToken=a&pageToken=b", wantStatus: http.StatusBadRequest},
 		{name: "unknown parameter", rawQuery: "limit=5", wantStatus: http.StatusBadRequest},
 		{name: "empty page token", rawQuery: "pageToken=", wantStatus: http.StatusBadRequest},
-		{name: "page token above the length limit", rawQuery: "pageToken=" + strings.Repeat("a", maxRegistryIdentifierLength+1), wantStatus: http.StatusBadRequest},
+		{name: "page token above the length limit", rawQuery: "pageToken=" + instrumentPageToken(strings.Repeat("a", maxRegistryIdentifierLength+1)), wantStatus: http.StatusBadRequest},
 		{name: "malformed escape", rawQuery: "pageToken=%zz", wantStatus: http.StatusBadRequest},
 		{name: "query at the byte limit", rawQuery: "pageToken=" + strings.Repeat("a", maxFlowQueryBytes-len("pageToken=")), wantStatus: http.StatusBadRequest},
 		{name: "query above the byte limit", rawQuery: "pageToken=" + strings.Repeat("a", maxFlowQueryBytes), wantStatus: http.StatusRequestURITooLong},
@@ -102,7 +102,7 @@ func TestParseListInstrumentsRequest(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantPageSize, request.pageSize)
-			assert.Equal(t, tc.wantPageToken, request.pageToken)
+			assert.Equal(t, tc.wantPageToken, request.afterInstrumentID)
 		})
 	}
 }
@@ -184,8 +184,8 @@ func (failing failingACS) ActiveContracts(context.Context, activeContractsQuery)
 func (failing failingACS) ActiveContractByID(context.Context, []partyID, contractID) (acsEntry, bool, error) {
 	return acsEntry{}, false, failing.err
 }
-func (failing failingACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
-	return nil, failing.err
+func (failing failingACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsRead, error) {
+	return amountTotalsRead{}, failing.err
 }
 
 func TestRegistryErrorPolicy(t *testing.T) {
@@ -255,19 +255,7 @@ func allocationFactoryTestBody(choiceArguments string) string {
 	return fmt.Sprintf(`{"choiceArguments":%s,"excludeDebugFields":false}`, choiceArguments)
 }
 
-// amountTotalsFailingACS serves every read from acsClient except the Coin totals, which fail with err.
-type amountTotalsFailingACS struct {
-	acsClient
-	err error
-}
-
-func (failing amountTotalsFailingACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
-	return nil, failing.err
-}
-
 func TestRegistryUpstreamListLimitIsAFixedPublicError(t *testing.T) {
-	coinListLimitErr := fmt.Errorf("%w: template %s: %w", errUpstreamListLimitExceeded, registryQualifiedTemplate(tailCoin),
-		&upstreamHTTPError{operation: "active-contracts", statusCode: http.StatusRequestEntityTooLarge, bodyExcerpt: []byte("matching elements 1025 exceed the limit 1024")})
 	const listLimitBody = `{"code":"LIST_LIMIT","cause":"matching elements 1025 exceed the limit 1024"}`
 	cases := []struct {
 		name         string
@@ -283,11 +271,6 @@ func TestRegistryUpstreamListLimitIsAFixedPublicError(t *testing.T) {
 			srv.registry = newRegistryConfig(registryTestGG, registryTestDisplay())
 			return srv
 		}, registryQualifiedTemplate(tailNttManager)},
-		{"Coin totals above the participant limit", func(t *testing.T) *server {
-			srv := newRegistryTestServer(t, registryTestFixtures())
-			srv.acs = amountTotalsFailingACS{acsClient: srv.acs, err: coinListLimitErr}
-			return srv
-		}, registryQualifiedTemplate(tailCoin)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -417,10 +400,10 @@ func TestRegistryExactFiltersBeforeCap(t *testing.T) {
 		wantStatus   int
 		wantKind     string
 	}{
-		{"1001 TransferPreapprovals of other owners", func(fixtures flowFixtures) {
+		{"1001 TransferPreapprovals of other owners, under the participant list limit", func(fixtures flowFixtures) {
 			fixtures[tailTransferPreapproval] = jsonArray(append(strangerPreapprovals(1001, registryTestAlice, instrumentA), registryContractJSON(tailTransferPreapproval, cidBobPreapprovalA, "cHJlQQ==", preapprovalArg(registryTestBob, registryTestGG, instrumentA)))...)
 		}, http.MethodPost, pathTransferFactory, transferToBob, http.StatusOK, transferKindDirect},
-		{"1001 TransferPreapprovals of the receiver for another instrument", func(fixtures flowFixtures) {
+		{"1001 TransferPreapprovals of the receiver for another instrument, under the participant list limit", func(fixtures flowFixtures) {
 			fixtures[tailTransferPreapproval] = jsonArray(strangerPreapprovals(1001, registryTestBob, instrumentB)...)
 		}, http.MethodPost, pathTransferFactory, transferToBob, http.StatusOK, transferKindOffer},
 		{"8 TransferPreapprovals of the receiver", func(fixtures flowFixtures) {
@@ -428,7 +411,7 @@ func TestRegistryExactFiltersBeforeCap(t *testing.T) {
 		}, http.MethodPost, pathTransferFactory, transferToBob, http.StatusOK, transferKindDirect},
 		{"9 TransferPreapprovals of the receiver exceed the match cap", func(fixtures flowFixtures) {
 			fixtures[tailTransferPreapproval] = jsonArray(strangerPreapprovals(9, registryTestBob, instrumentA)...)
-		}, http.MethodPost, pathTransferFactory, transferToBob, http.StatusBadGateway, ""},
+		}, http.MethodPost, pathTransferFactory, transferToBob, http.StatusOK, transferKindOffer},
 		{"1001 LockUnlock NttManagers of gg", func(fixtures flowFixtures) {
 			fixtures[tailNttManager] = jsonArray(append(baseManagers(), strangerManagers(1001, tokenConfigLockUnlock, registryTestGG)...)...)
 		}, http.MethodGet, pathInstruments, "", http.StatusOK, ""},
@@ -705,13 +688,13 @@ func TestCachingACSAmountTotalsReturnsCopies(t *testing.T) {
 	}
 	first, err := cache.ActiveContractAmountTotals(context.Background(), query)
 	require.NoError(t, err)
-	for _, total := range first {
+	for _, total := range first.totalsByGroup {
 		total.Add(total, big.NewInt(1000))
 	}
 	second, err := cache.ActiveContractAmountTotals(context.Background(), query)
 	require.NoError(t, err)
-	require.Len(t, second, 1)
-	for _, total := range second {
+	require.Len(t, second.totalsByGroup, 1)
+	for _, total := range second.totalsByGroup {
 		assert.Equal(t, int64(1), total.Int64())
 	}
 	assert.Equal(t, int64(1), inner.totalsCalls.Load())

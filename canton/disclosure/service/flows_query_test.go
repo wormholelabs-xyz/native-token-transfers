@@ -35,7 +35,7 @@ func (counter *callCountingACS) ActiveContractByID(ctx context.Context, readerPa
 	return counter.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
-func (counter *callCountingACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+func (counter *callCountingACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsRead, error) {
 	counter.amountTotalsCalls.Add(1)
 	return counter.inner.ActiveContractAmountTotals(ctx, query)
 }
