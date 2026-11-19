@@ -45,6 +45,7 @@ COPY tsconfig.esm.json tsconfig.esm.json
 COPY package.json package.json
 COPY bun.lock bun.lock
 COPY bunfig.toml bunfig.toml
+COPY vendor vendor
 COPY sdk sdk
 COPY solana/package.json solana/package.json
 COPY solana/ts solana/ts
