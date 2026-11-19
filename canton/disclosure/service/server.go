@@ -142,8 +142,15 @@ func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.readiness.checkLedgerEnd(r.Context()); err != nil {
-		s.writePublicError(w, r, http.StatusServiceUnavailable, fmt.Errorf("readyz: ledger-end: %w", err))
+	checkErr, ranUpstreamCheck := s.readiness.checkLedgerEnd(r.Context())
+	if checkErr != nil {
+		readyzErr := fmt.Errorf("readyz: ledger-end: %w", checkErr)
+		// One log line for each upstream check bounds the log rate during an upstream failure.
+		if ranUpstreamCheck {
+			s.writePublicError(w, r, http.StatusServiceUnavailable, readyzErr)
+		} else {
+			writeUnloggedPublicError(w, http.StatusServiceUnavailable, readyzErr)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, probeResponse{Status: "ready"})

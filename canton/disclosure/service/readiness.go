@@ -50,30 +50,31 @@ func (probe *readinessProbe) cachedResult() (fresh bool, checkErr error) {
 }
 
 // checkLedgerEnd returns nil when the upstream answered a ledger-end call in the last resultTTL.
-// A caller waits for the check in progress, or until its own ctx ends.
-func (probe *readinessProbe) checkLedgerEnd(ctx context.Context) error {
-	if fresh, checkErr := probe.cachedResult(); fresh {
-		return checkErr
+// A caller waits for the check in progress, or until its own ctx ends. ranUpstreamCheck is true
+// for the one caller in each resultTTL window that made the upstream call.
+func (probe *readinessProbe) checkLedgerEnd(ctx context.Context) (checkErr error, ranUpstreamCheck bool) {
+	if fresh, cachedErr := probe.cachedResult(); fresh {
+		return cachedErr, false
 	}
 	select {
 	case probe.checkSlot <- struct{}{}:
 	case <-ctx.Done():
-		return ctx.Err()
+		return ctx.Err(), false
 	}
 	defer func() { <-probe.checkSlot }()
-	if fresh, checkErr := probe.cachedResult(); fresh {
-		return checkErr
+	if fresh, cachedErr := probe.cachedResult(); fresh {
+		return cachedErr, false
 	}
 
 	// The check outlives a canceled caller, so its result is not that caller's cancellation.
 	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), probe.checkTimeout)
 	defer cancel()
-	_, checkErr := probe.acs.LedgerEnd(checkCtx)
+	_, checkErr = probe.acs.LedgerEnd(checkCtx)
 
 	probe.mu.Lock()
 	probe.hasResult = true
 	probe.lastCheckedAt = probe.now()
 	probe.lastCheckErr = checkErr
 	probe.mu.Unlock()
-	return checkErr
+	return checkErr, true
 }

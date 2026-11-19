@@ -165,3 +165,43 @@ func TestReadinessProbeBounds(t *testing.T) {
 	assert.Equal(t, readinessCheckTimeout, srv.readiness.checkTimeout)
 	assert.Equal(t, readinessResultTTL, srv.readiness.resultTTL)
 }
+
+func TestReadinessFailureLogsOncePerUpstreamCheck(t *testing.T) {
+	cases := []struct {
+		name           string
+		upstreamErr    error
+		wantStatus     int
+		wantLogsPerTTL int
+	}{
+		{"ready result logs nothing", nil, http.StatusOK, 0},
+		{"failed result logs one line for each check", errors.New("upstream down"), http.StatusServiceUnavailable, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &countingACS{offset: 42, err: tc.upstreamErr}
+			srv := newTestServerWithClient(t, upstream)
+			logged := captureServerLog(srv)
+			now := time.Now()
+			srv.readiness.now = func() time.Time { return now }
+
+			for window := 1; window <= 2; window++ {
+				for range 5 {
+					recorder := httptest.NewRecorder()
+					srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil))
+					require.Equal(t, tc.wantStatus, recorder.Code)
+					if tc.wantStatus != http.StatusOK {
+						assert.NotEmpty(t, recorder.Header().Get("X-Request-Id"))
+						assert.NotContains(t, recorder.Body.String(), "upstream down")
+					}
+				}
+				assert.Equal(t, int64(window), upstream.ledgerCalls.Load())
+				assert.Equal(t, window*tc.wantLogsPerTTL, strings.Count(logged.String(), "\n"), logged.String())
+				now = now.Add(readinessResultTTL)
+			}
+			if tc.wantLogsPerTTL > 0 {
+				assert.Contains(t, logged.String(), "ledger-end")
+				assert.Contains(t, logged.String(), "upstream down")
+			}
+		})
+	}
+}

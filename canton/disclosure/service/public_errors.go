@@ -78,18 +78,24 @@ func truncateForError(clientValue string) string {
 	return clientValue[:maxEchoedClientValueBytes] + "..."
 }
 
-// writePublicError logs err with a new request id, then writes the fixed message for status.
+// writePublicError writes the fixed message for status, then logs err with its request id.
 //
 // SECURITY: err can hold upstream bodies, URLs, IP addresses, and file paths. Only the log sees it.
 // The path and err are quoted: a client value cannot start a new log line.
 func (s *server) writePublicError(w http.ResponseWriter, r *http.Request, status int, err error) {
-	if status < 500 || status > 599 {
-		panic(fmt.Sprintf("disclosure-service: writePublicError needs a 5xx status, got %d", status))
-	}
-	requestID := newRequestID()
+	requestID := writeUnloggedPublicError(w, status, err)
 	s.logger.Printf("disclosure-service: request %s %q: status %d: %q", requestID, r.URL.Path, status, err.Error())
+}
+
+// writeUnloggedPublicError writes the fixed 5xx body and returns its request id.
+func writeUnloggedPublicError(w http.ResponseWriter, status int, err error) (requestID string) {
+	if status < 500 || status > 599 {
+		panic(fmt.Sprintf("disclosure-service: a public error needs a 5xx status, got %d", status))
+	}
+	requestID = newRequestID()
 	w.Header().Set("X-Request-Id", requestID)
 	writeJSON(w, status, publicErrorBody{Error: publicMessageFor(status, err), RequestID: requestID})
+	return requestID
 }
 
 // writeFlowError writes a 4xx flowError with its own message; every other error is a fixed 5xx.
