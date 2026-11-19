@@ -158,21 +158,25 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		recipient, _, err := optionalParam(params, "recipient")
+		recipient, err := optionalPartyParam(params, "recipient")
 		if err != nil {
 			return nil, err
 		}
-		return releaseRequest{manager: manager, digest: digest, recipient: partyID(recipient)}, nil
+		return releaseRequest{manager: manager, digest: digest, recipient: recipient}, nil
 	case "mint":
 		manager, digest, err := parseManagerAndDigest(params)
 		if err != nil {
 			return nil, err
 		}
-		recipient, err := requiredParam(params, "recipient")
+		rawRecipient, err := requiredParam(params, "recipient")
 		if err != nil {
 			return nil, err
 		}
-		return mintRequest{manager: manager, digest: digest, recipient: partyID(recipient)}, nil
+		recipient, err := parseRequestPartyID(rawRecipient, "recipient")
+		if err != nil {
+			return nil, err
+		}
+		return mintRequest{manager: manager, digest: digest, recipient: recipient}, nil
 	case "set-peer":
 		manager, digest, err := parseManagerAndDigest(params)
 		if err != nil {
@@ -198,7 +202,7 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		}
 		return consolidateRequest{manager: manager}, nil
 	case "register":
-		guardianGovernance, _, err := optionalParam(params, "gg")
+		guardianGovernance, err := optionalPartyParam(params, "gg")
 		if err != nil {
 			return nil, err
 		}
@@ -210,7 +214,7 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if byVAA && guardianGovernance == "" {
 			return nil, newFlowError(http.StatusBadRequest, "gg is required when by-vaa=true")
 		}
-		return registerRequest{guardianGovernance: partyID(guardianGovernance), byVAA: byVAA}, nil
+		return registerRequest{guardianGovernance: guardianGovernance, byVAA: byVAA}, nil
 	default:
 		panic("disclosure-service: flowParamNames and parseFlowRequest disagree on flow " + flowName)
 	}
@@ -234,6 +238,15 @@ func optionalParam(params map[string]string, name string) (string, bool, error) 
 		return "", true, newFlowError(http.StatusBadRequest, "%s is empty", name)
 	}
 	return paramValue, true, nil
+}
+
+// optionalPartyParam returns an absent parameter as "". A present value must parse as a party id.
+func optionalPartyParam(params map[string]string, name string) (partyID, error) {
+	rawParty, present, err := optionalParam(params, name)
+	if err != nil || !present {
+		return "", err
+	}
+	return parseRequestPartyID(rawParty, name)
 }
 
 func parseManagerParam(params map[string]string) (managerAddressHex, error) {
