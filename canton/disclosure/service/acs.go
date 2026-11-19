@@ -32,6 +32,9 @@ var (
 	errUpstreamScanBoundExceeded  = errors.New("disclosure-service: upstream response exceeds the scanned-contract bound")
 	errMatchCapExceeded           = errors.New("disclosure-service: matching contracts exceed the query cap")
 	errUpstreamTemplateMismatch   = errors.New("disclosure-service: upstream contract has another package or template")
+	// errUpstreamListLimitExceeded is the participant's 413: the template has more visible
+	// contracts than its http-list-max-elements-limit.
+	errUpstreamListLimitExceeded = errors.New("disclosure-service: upstream list exceeds the participant http-list-max-elements-limit (HTTP 413)")
 )
 
 // partyID is a Canton party identifier.
@@ -405,6 +408,9 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 		return nil, fmt.Errorf("disclosure-service: active-contracts request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		return nil, fmt.Errorf("%w: template %s: %w", errUpstreamListLimitExceeded, query.template, newUpstreamHTTPError("active-contracts", resp))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, newUpstreamHTTPError("active-contracts", resp)
 	}

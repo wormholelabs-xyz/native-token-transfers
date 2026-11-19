@@ -28,7 +28,19 @@ type upstreamHTTPError struct {
 }
 
 func (e *upstreamHTTPError) Error() string {
-	return fmt.Sprintf("disclosure-service: %s: HTTP %d: %s", e.operation, e.statusCode, e.bodyExcerpt)
+	return fmt.Sprintf("disclosure-service: %s: HTTP %d: %q", e.operation, e.statusCode, e.bodyExcerpt)
+}
+
+// publicMessageUpstreamListLimit is the fixed client text when the participant refuses a list
+// above its http-list-max-elements-limit.
+const publicMessageUpstreamListLimit = "upstream ledger list limit reached"
+
+// publicMessageFor is the fixed client text for a 5xx status and its cause.
+func publicMessageFor(status int, err error) string {
+	if status == http.StatusBadGateway && errors.Is(err, errUpstreamListLimitExceeded) {
+		return publicMessageUpstreamListLimit
+	}
+	return publicMessageForStatus(status)
 }
 
 // publicMessageForStatus is the fixed client text for a 5xx status.
@@ -69,14 +81,15 @@ func truncateForError(clientValue string) string {
 // writePublicError logs err with a new request id, then writes the fixed message for status.
 //
 // SECURITY: err can hold upstream bodies, URLs, IP addresses, and file paths. Only the log sees it.
+// The path and err are quoted: a client value cannot start a new log line.
 func (s *server) writePublicError(w http.ResponseWriter, r *http.Request, status int, err error) {
 	if status < 500 || status > 599 {
 		panic(fmt.Sprintf("disclosure-service: writePublicError needs a 5xx status, got %d", status))
 	}
 	requestID := newRequestID()
-	s.logger.Printf("disclosure-service: request %s %s: status %d: %v", requestID, r.URL.Path, status, err)
+	s.logger.Printf("disclosure-service: request %s %q: status %d: %q", requestID, r.URL.Path, status, err.Error())
 	w.Header().Set("X-Request-Id", requestID)
-	writeJSON(w, status, publicErrorBody{Error: publicMessageForStatus(status), RequestID: requestID})
+	writeJSON(w, status, publicErrorBody{Error: publicMessageFor(status, err), RequestID: requestID})
 }
 
 // writeFlowError writes a 4xx flowError with its own message; every other error is a fixed 5xx.

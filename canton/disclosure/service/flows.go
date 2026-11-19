@@ -187,9 +187,12 @@ func missingEntry(role string) flowMissingEntry {
 type flowError struct {
 	status int
 	msg    string
+	cause  error // nil, or the upstream error behind a 5xx
 }
 
 func (flowErr *flowError) Error() string { return flowErr.msg }
+
+func (flowErr *flowError) Unwrap() error { return flowErr.cause }
 
 func newFlowError(status int, format string, args ...any) error {
 	return &flowError{status: status, msg: "disclosure-service: " + fmt.Sprintf(format, args...)}
@@ -294,7 +297,7 @@ func fetchDecodedQuery[T any](ctx context.Context, s *server, query activeContra
 func (s *server) fetchEntries(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
 	entries, err := s.acs.ActiveContracts(ctx, query)
 	if err != nil {
-		return nil, newFlowError(upstreamErrorStatus(err), "query %s: %v", query.template, err)
+		return nil, &flowError{status: upstreamErrorStatus(err), msg: fmt.Sprintf("disclosure-service: query %s: %v", query.template, err), cause: err}
 	}
 	if len(entries) > query.maxMatches {
 		return nil, newFlowError(http.StatusBadGateway, "query %s: %d contracts, cap %d", query.template, len(entries), query.maxMatches)

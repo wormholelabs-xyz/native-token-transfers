@@ -108,17 +108,19 @@ func (b *boundedACS) ActiveContractByID(ctx context.Context, readerParties []par
 // TTL cache with single flight
 // ---------------------------------------------------------------------------
 
+// cacheEntry is one upstream answer: a result, or the error of a failed fetch.
 type cacheEntry struct {
-	value   any
+	result  any
+	err     error
 	expires time.Time
 }
 
-// inflightCall lets concurrent callers for one key share a single upstream result. value and err
+// inflightCall lets concurrent callers for one key share a single upstream result. result and err
 // are written before done is closed.
 type inflightCall struct {
-	done  chan struct{}
-	value any
-	err   error
+	done   chan struct{}
+	result any
+	err    error
 }
 
 // cachingACS serves repeat reads from memory for ttl.
@@ -127,6 +129,10 @@ type inflightCall struct {
 // every request resolves the same offset, so their ActiveContracts keys collide and hit. A
 // caller can therefore receive a set up to ttl old; a contract archived inside that window
 // yields a blob whose submission fails, and the caller refetches.
+//
+// A failed fetch is cached for ttl also, so a template above an upstream bound costs one upstream
+// read per window. Two errors are not cached: errUpstreamBusy (local load shedding) and
+// errUpstreamFetchPanicked (a service bug).
 type cachingACS struct {
 	inner        acsClient
 	ttl          time.Duration
@@ -151,14 +157,14 @@ func newCachingACS(inner acsClient, ttl time.Duration) *cachingACS {
 	}
 }
 
-// do returns key's cached value, joins the call already fetching it, or starts the fetch. The
-// fetch runs under a service-owned deadline: each caller's cancel ends only its own wait. Each
-// caller stops waiting when its own ctx ends.
-func (c *cachingACS) do(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
+// loadOrFetch returns key's cached answer, joins the call already fetching it, or starts the
+// fetch. The fetch runs under a service-owned deadline: each caller's cancel ends only its own
+// wait. Each caller stops waiting when its own ctx ends.
+func (c *cachingACS) loadOrFetch(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
 	c.mu.Lock()
 	if cached, ok := c.entries[key]; ok && c.now().Before(cached.expires) {
 		c.mu.Unlock()
-		return cached.value, nil
+		return cached.result, cached.err
 	}
 	if call, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
@@ -178,29 +184,33 @@ func (c *cachingACS) runInflightFetch(key string, call *inflightCall, fetch func
 	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			call.value = nil
+			call.result = nil
 			call.err = fmt.Errorf("%w: %v", errUpstreamFetchPanicked, recovered)
-			c.logger.Printf("disclosure-service: upstream fetch %q panic: %v\n%s", key, recovered, debug.Stack())
+			c.logger.Printf("disclosure-service: upstream fetch %q panic: %q\n%s", key, fmt.Sprint(recovered), debug.Stack())
 		}
 		c.mu.Lock()
 		if c.inflight[key] != call {
 			panic("disclosure-service: inflight entry replaced while its fetch ran")
 		}
 		delete(c.inflight, key)
-		if call.err == nil {
+		if isCacheableFetchResult(call.err) {
 			c.sweepLocked()
-			c.entries[key] = cacheEntry{value: call.value, expires: c.now().Add(c.ttl)}
+			c.entries[key] = cacheEntry{result: call.result, err: call.err, expires: c.now().Add(c.ttl)}
 		}
 		c.mu.Unlock()
 		close(call.done)
 	}()
-	call.value, call.err = fetch(fetchCtx)
+	call.result, call.err = fetch(fetchCtx)
+}
+
+func isCacheableFetchResult(fetchErr error) bool {
+	return !errors.Is(fetchErr, errUpstreamBusy) && !errors.Is(fetchErr, errUpstreamFetchPanicked)
 }
 
 func awaitInflightCall(ctx context.Context, call *inflightCall) (any, error) {
 	select {
 	case <-call.done:
-		return call.value, call.err
+		return call.result, call.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -227,7 +237,7 @@ func (c *cachingACS) sweepLocked() {
 }
 
 func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
-	cachedValue, err := c.do(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return c.inner.LedgerEnd(fetchCtx) })
+	cachedValue, err := c.loadOrFetch(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return c.inner.LedgerEnd(fetchCtx) })
 	if err != nil {
 		return 0, err
 	}
@@ -243,7 +253,7 @@ func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
 
 // ActiveContracts caches the filtered result, so an entry holds at most query.maxMatches contracts.
 func (c *cachingACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
-	cachedValue, err := c.do(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+	cachedValue, err := c.loadOrFetch(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
 		return c.inner.ActiveContracts(fetchCtx, query)
 	})
 	if err != nil {
@@ -271,7 +281,7 @@ func (c *cachingACS) ActiveContractByID(ctx context.Context, readerParties []par
 	if err != nil {
 		return acsEntry{}, false, fmt.Errorf("disclosure-service: encode cache key: %w", err)
 	}
-	cachedValue, err := c.do(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
+	cachedValue, err := c.loadOrFetch(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
 		entry, found, err := c.inner.ActiveContractByID(fetchCtx, readerParties, wantContractID)
 		return contractByIDResult{entry: entry, found: found}, err
 	})
