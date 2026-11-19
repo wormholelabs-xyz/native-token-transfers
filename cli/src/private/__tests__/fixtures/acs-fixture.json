@@ -1,0 +1,207 @@
+[
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "core-state-cid",
+          "templateId": "pkg1:Wormhole.Core.State:CoreState",
+          "createArgument": { "admin": "guardianGovernance::ns" }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "manager-a-cid",
+          "templateId": "pkg1:Wormhole.Ntt.Manager:NttManager",
+          "createArgument": {
+            "managerAddress": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "namespace": "ns-a",
+            "transceiverEmitterId": "em-a",
+            "peers": []
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "manager-b-cid",
+          "templateId": "pkg1:Wormhole.Ntt.Manager:NttManager",
+          "createArgument": {
+            "managerAddress": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "namespace": "ns-b",
+            "transceiverEmitterId": "em-b",
+            "peers": []
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "emitter-a-cid",
+          "templateId": "pkg1:Wormhole.Core.State:Emitter",
+          "createArgument": { "owner": "guardianGovernance::ns", "emitterId": "em-a" }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "emitter-b-cid",
+          "templateId": "pkg1:Wormhole.Core.State:Emitter",
+          "createArgument": { "owner": "guardianGovernance::ns", "emitterId": "em-b" }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "locked-ledger-a-cid",
+          "templateId": "pkg1:Wormhole.Ntt.Ledger:LockedLedger",
+          "createArgument": {
+            "managerAddress": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "custodyHoldingCid": "coin-custody-a",
+            "balance": "500"
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "deposit-preapproval-a-cid",
+          "templateId": "pkg1:Wormhole.Ntt.Deposit:DepositPreapproval",
+          "createArgument": {
+            "owner": "alice::ns",
+            "instrumentId": { "id": "instrA", "admin": "issuer::ns" }
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "replay-node-a-cid",
+          "templateId": "pkg1:Wormhole.Core.Replay:ReplayNode",
+          "createArgument": { "namespace": "ns-a" }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "replay-node-b-cid",
+          "templateId": "pkg1:Wormhole.Core.Replay:ReplayNode",
+          "createArgument": { "namespace": "ns-b" }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "coin-1",
+          "templateId": "pkg2:Token.CIP0056.Coin:Coin",
+          "createArgument": {
+            "owner": "alice::ns",
+            "instrumentId": { "id": "instrA", "admin": "issuer::ns" },
+            "amount": "10.0000000000"
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "coin-custody-a",
+          "templateId": "pkg2:Token.CIP0056.Coin:Coin",
+          "createArgument": {
+            "owner": "alice::ns",
+            "instrumentId": { "id": "instrA", "admin": "issuer::ns" },
+            "amount": "500.0000000000"
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "coin-3",
+          "templateId": "pkg2:Token.CIP0056.Coin:Coin",
+          "createArgument": {
+            "owner": "alice::ns",
+            "instrumentId": { "id": "instrA", "admin": "issuer::ns" },
+            "amount": "50.0000000000"
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "coin-4",
+          "templateId": "pkg2:Token.CIP0056.Coin:Coin",
+          "createArgument": {
+            "owner": "alice::ns",
+            "instrumentId": { "id": "instrA", "admin": "issuer::ns" },
+            "amount": "100.0000000000"
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  },
+  {
+    "contractEntry": {
+      "JsActiveContract": {
+        "createdEvent": {
+          "contractId": "coin-other-instrument",
+          "templateId": "pkg2:Token.CIP0056.Coin:Coin",
+          "createArgument": {
+            "owner": "alice::ns",
+            "instrumentId": { "id": "instrB", "admin": "issuer::ns" },
+            "amount": "9999"
+          }
+        },
+        "synchronizerId": "sync1"
+      }
+    }
+  }
+]
