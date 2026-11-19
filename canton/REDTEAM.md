@@ -15,26 +15,26 @@ The `NttGovernance` root has a separate custody party, `nttCustody`.
 
 ## Results
 
-| ID | Attack | Test | Result |
-|----|--------|------|--------|
-| A3 | Replay a consumed VAA on `Release` and `Mint`: same manager, other executor, other manager, other replay trie, other mode | `testRedTeamReplayRejected` | Held |
-| A4 | Commit a non-canonical factory through `SetFactoryByVaa` and `RegisterManagerByVaa` | `testRedTeamGovernanceForgeriesRejected` | Held |
-| A5 | Lock or burn a forged holding, a holding of another owner, a holding of another instrument, one coin two times | `testRedTeamLyingHoldingsRejected` | Held |
-| A10 | Release more than the ledger balance, from a sibling pot, after `ConsolidateCustody`, after a drain | `testRedTeamLedgerOverdrawRejected` | Held |
-| A11 | Wrong target chain, zero amount, dust, decimals overflow, maximum amount, wrong emitter, wrong source manager, wrong guardian set, foreign key, wrong recipient | `testRedTeamInboundEdgeCasesRejected` | Held |
-| A12 | Governance VAAs with a wrong emitter chain, emitter address, guardian set, epoch, manager, chain, or action; replay; stale epoch after a rotation | `testRedTeamGovernanceForgeriesRejected` | Held |
-| A13 | Operator, relayer, gg alone, or a stranger moves the admin role, a peer, the ledger, or custody | `testRedTeamUnauthorizedMovesRejected` | Held |
-| N1 | Registry code mints a gg-administered instrument after the quorum accepts custody | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument` | Fixed (F1) |
-| N1a | Under quorum custody, registry code forges a transfer from another transceiver or sets a peer on another gg-adminned manager | `testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority` | Fixed (F1) |
-| N1b | A root, manager, registration, or hand-off makes gg a custodian, `nttCustody` an admin, or the operator `nttCustody` | `testRedTeamReserveCustodianIsNeverGuardianGovernance` | Held |
-| N1c | A hand-off moves a pooled sibling reserve; a registry takes or delivers an incorrect hand-off amount | `testRedTeamAdminTransferMovesOnlyTheLedgerBalance` | Fixed (F1 follow-up) |
-| N2 | A third-party relayer delivers a release on a production registry | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry` | Fixed (F2) |
-| N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow` | Held |
-| N2b | Registry reports a bad deposit or change: wrong owner or instrument, locked, unsigned, duplicate, or an input | `testRedTeamRegistryMisreportedHoldingsRejected` | Held |
-| N3 | Outbound wire fields one step outside the range, 63-character or 65-character addresses, and boundary values | `testRedTeamTransferWireFieldBounds` | Fixed (F3) |
-| N4 | A third-party relayer releases Canton Coin from an aged custody pot | LocalNet, `NTT_RELEASE_AFTER_ROUNDS=5 ntt_lock_unlock.sh` | Held |
-| N5 | The DSO expires an idle custody pot of Canton Coin as dust | Splice 0.10.2 source | Open (F4) |
-| N6 | A lock/unlock admin alone publishes on its gg-owned `Emitter`, sets a burn/mint factory, hands the admin role to gg, or registers a burn/mint deployment | `testRedTeamLockUnlockAdminCannotUseGgAuthority` | Held |
+| ID  | Attack                                                                                                                                                          | Test                                                           | Result               |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------- |
+| A3  | Replay a consumed VAA on `Release` and `Mint`: same manager, other executor, other manager, other replay trie, other mode                                       | `testRedTeamReplayRejected`                                    | Held                 |
+| A4  | Commit a non-canonical factory through `SetFactoryByVaa` and `RegisterManagerByVaa`                                                                             | `testRedTeamGovernanceForgeriesRejected`                       | Held                 |
+| A5  | Lock or burn a forged holding, a holding of another owner, a holding of another instrument, one coin two times                                                  | `testRedTeamLyingHoldingsRejected`                             | Held                 |
+| A10 | Release more than the ledger balance, from a sibling pot, after `ConsolidateCustody`, after a drain                                                             | `testRedTeamLedgerOverdrawRejected`                            | Held                 |
+| A11 | Wrong target chain, zero amount, dust, decimals overflow, maximum amount, wrong emitter, wrong source manager, wrong guardian set, foreign key, wrong recipient | `testRedTeamInboundEdgeCasesRejected`                          | Held                 |
+| A12 | Governance VAAs with a wrong emitter chain, emitter address, guardian set, epoch, manager, chain, or action; replay; stale epoch after a rotation               | `testRedTeamGovernanceForgeriesRejected`                       | Held                 |
+| A13 | Operator, relayer, gg alone, or a stranger moves the admin role, a peer, the ledger, or custody                                                                 | `testRedTeamUnauthorizedMovesRejected`                         | Held                 |
+| N1  | Registry code mints a gg-administered instrument after the quorum accepts custody                                                                               | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument`  | Fixed (F1)           |
+| N1a | Under quorum custody, registry code forges a transfer from another transceiver or sets a peer on another gg-adminned manager                                    | `testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority` | Fixed (F1)           |
+| N1b | A root, manager, registration, or hand-off makes gg a custodian, `nttCustody` an admin, or the operator `nttCustody`                                            | `testRedTeamReserveCustodianIsNeverGuardianGovernance`         | Held                 |
+| N1c | A hand-off moves a pooled sibling reserve; a registry takes or delivers an incorrect hand-off amount                                                            | `testRedTeamAdminTransferMovesOnlyTheLedgerBalance`            | Fixed (F1 follow-up) |
+| N2  | A third-party relayer delivers a release on a production registry                                                                                               | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry`           | Fixed (F2)           |
+| N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot                                                              | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow`   | Held                 |
+| N2b | Registry reports a bad deposit or change: wrong owner or instrument, locked, unsigned, duplicate, or an input                                                   | `testRedTeamRegistryMisreportedHoldingsRejected`               | Held                 |
+| N3  | Outbound wire fields one step outside the range, 63-character or 65-character addresses, and boundary values                                                    | `testRedTeamTransferWireFieldBounds`                           | Fixed (F3)           |
+| N4  | A third-party relayer releases Canton Coin from an aged custody pot                                                                                             | LocalNet, `NTT_RELEASE_AFTER_ROUNDS=5 ntt_lock_unlock.sh`      | Held                 |
+| N5  | The DSO expires an idle custody pot of Canton Coin as dust                                                                                                      | Splice 0.10.2 source                                           | Open (F4)            |
+| N6  | A lock/unlock admin alone publishes on its gg-owned `Emitter`, sets a burn/mint factory, hands the admin role to gg, or registers a burn/mint deployment        | `testRedTeamLockUnlockAdminCannotUseGgAuthority`               | Held                 |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.

@@ -61,10 +61,10 @@ Canton encodes the three nested NTT structures exactly as the spec and the refer
 implementations do:
 
 - `NativeTokenTransfer`: `0x994E5454 ‖ decimals(1) ‖ amount(8) ‖ sourceToken(32) ‖
-  recipientAddress(32) ‖ recipientChain(2) [‖ additionalPayloadLen(2) ‖ payload]`
+recipientAddress(32) ‖ recipientChain(2) [‖ additionalPayloadLen(2) ‖ payload]`
 - `NttManagerMessage`: `id(32) ‖ sender(32) ‖ payloadLen(2) ‖ payload`
 - `WormholeTransceiverMessage`: `0x9945FF10 ‖ sourceManager(32) ‖ recipientManager(32)
-  ‖ mgrPayloadLen(2) ‖ mgrPayload ‖ xcvrPayloadLen(2) ‖ xcvrPayload`
+‖ mgrPayloadLen(2) ‖ mgrPayload ‖ xcvrPayloadLen(2) ‖ xcvrPayload`
 
 The ported test `testVectorTransceiverMessage1` proves Canton's encoder produces
 byte-for-byte the shared 217-byte `evm/test/payloads/transceiver_message_1.txt` vector
@@ -90,10 +90,10 @@ infrastructure.
 Per peer chain, four data cross the boundary:
 
 - **On the EVM peer** (`onlyOwner`): `NttManager.setPeer(cantonChainId,
-  cantonManagerAddress, cantonTokenDecimals, inboundLimit)` and
+cantonManagerAddress, cantonTokenDecimals, inboundLimit)` and
   `WormholeTransceiver.setWormholePeer(cantonChainId, cantonTransceiverAddress)`.
 - **On the Canton side** (`controller admin`): `SetPeer{chainId, Peer{managerAddress,
-  transceiverAddress}}` — one choice registers both the peer manager and peer
+transceiverAddress}}` — one choice registers both the peer manager and peer
   transceiver (EVM splits these across two contracts).
 
 Canton's two 32-byte identities are keccak hashes bound to the stable `namespace` party
@@ -243,21 +243,21 @@ choice; the README paragraphs are stale from the cip56 rework.
 
 ## 4. Findings, ranked
 
-| ID | Finding | Severity | Class | Invariants |
-|----|---------|----------|-------|------------|
-| F3 | No assigned Wormhole chain id (launch prerequisite) | medium | missing-feature | INV-019 |
-| F2 | Outbound trim ignores peer decimals → value loss to <8-dec peers | medium | spec-divergence | INV-001, INV-018 |
-| F13 | No pause/halt; burn/mint mint uncapped | medium | spec-divergence | INV-014/015 (+009/010/011/026) |
-| F1 | Inbound `recipientChain` not checked (subsumed by managerAddress) | low | spec-divergence | INV-019 |
-| F4 | Single transceiver ⇒ EVM peers need global threshold=1 | low | intended-design | INV-012/022-025 |
-| F5 | No TransceiverInit/Registration broadcasts (accountant only) | low | missing-feature | — |
-| F6 | `sender` field = manager address, not user | low | spec-divergence | — |
-| F7 | Decoders tolerate trailing bytes (not exploitable) | low | spec-divergence | INV-006 |
-| F9 | `SetPeer` lacks EVM guards (admin-only, misconfig only) | low | spec-divergence | INV-021 |
-| F10 | Outbound `sourceToken` caller-supplied, unchecked (metadata) | low | spec-divergence | — |
-| F8 | Replay scope per-namespace not per-manager (sound) | info | intended-design | — |
-| F11 | Decimals bounded 0..10; 0-dec can't be an EVM peer | info | intended-design | INV-018 |
-| F12 | Custody override / permissionless consolidate (sound) | info | intended-design | — |
+| ID  | Finding                                                           | Severity | Class           | Invariants                     |
+| --- | ----------------------------------------------------------------- | -------- | --------------- | ------------------------------ |
+| F3  | No assigned Wormhole chain id (launch prerequisite)               | medium   | missing-feature | INV-019                        |
+| F2  | Outbound trim ignores peer decimals → value loss to <8-dec peers  | medium   | spec-divergence | INV-001, INV-018               |
+| F13 | No pause/halt; burn/mint mint uncapped                            | medium   | spec-divergence | INV-014/015 (+009/010/011/026) |
+| F1  | Inbound `recipientChain` not checked (subsumed by managerAddress) | low      | spec-divergence | INV-019                        |
+| F4  | Single transceiver ⇒ EVM peers need global threshold=1            | low      | intended-design | INV-012/022-025                |
+| F5  | No TransceiverInit/Registration broadcasts (accountant only)      | low      | missing-feature | —                              |
+| F6  | `sender` field = manager address, not user                        | low      | spec-divergence | —                              |
+| F7  | Decoders tolerate trailing bytes (not exploitable)                | low      | spec-divergence | INV-006                        |
+| F9  | `SetPeer` lacks EVM guards (admin-only, misconfig only)           | low      | spec-divergence | INV-021                        |
+| F10 | Outbound `sourceToken` caller-supplied, unchecked (metadata)      | low      | spec-divergence | —                              |
+| F8  | Replay scope per-namespace not per-manager (sound)                | info     | intended-design | —                              |
+| F11 | Decimals bounded 0..10; 0-dec can't be an EVM peer                | info     | intended-design | INV-018                        |
+| F12 | Custody override / permissionless consolidate (sound)             | info     | intended-design | —                              |
 
 Uint64 asymmetry (not a numbered finding, folded into wire compat): Daml's signed 64-bit
 `Int` cannot represent wire amounts in `[2^63, 2^64)`; such an inbound transfer aborts

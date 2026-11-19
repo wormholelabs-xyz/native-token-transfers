@@ -23,12 +23,12 @@ trie, disclosed-cid submission, the trust model) is in the core
 
 ## Packages
 
-| Directory (Daml package) | Contents |
-| --- | --- |
-| `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
-| `disclosure/service` | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md). |
-| `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
-| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
+| Directory (Daml package) | Contents                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ntt` (`ntt`)            | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
+| `disclosure/service`     | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md).                                                                                                                                                                                                                                  |
+| `test` (`ntt-test`)      | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`.                                                                                                                                                                                                 |
+| `dars/`                  | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md).                                                                                                                                                                                                                                   |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
 `TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
@@ -375,7 +375,7 @@ broadcast choice and no separate re-broadcast path.
 
 - `SetPeer` (`controller admin, payer`, consuming) publishes
   `TransceiverRegistration` (prefix `0x18fc67c2`, 38 bytes: `prefix(4) ‖
-  peerChain(2) ‖ peerAddress(32)`) every time it runs — the first peer for a
+peerChain(2) ‖ peerAddress(32)`) every time it runs — the first peer for a
   chain and every replacement alike — at nonce 0. `payer` is an explicit
   parameter, not hardcoded to `admin`: the direct admin path calls it with
   `payer = admin` (self-funding, unchanged in effect from before `payer`

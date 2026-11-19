@@ -111,14 +111,14 @@ the read time of 10 s still apply.
 
 Add a rate limiting rule for `/v1/*` and `/registry/*`:
 
-| Setting | Value |
-|---|---|
-| Expression | `http.host eq "canton-disclosure.example.com" and (starts_with(http.request.uri.path, "/v1/") or starts_with(http.request.uri.path, "/registry/"))` |
-| Characteristics | IP |
-| Requests | Select a value from the expected relayer volume |
-| Period | 10 seconds on the Free plan; longer periods on paid plans |
-| Action | Block |
-| Duration | 10 seconds on the Free plan; longer durations on paid plans |
+| Setting         | Value                                                                                                                                               |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Expression      | `http.host eq "canton-disclosure.example.com" and (starts_with(http.request.uri.path, "/v1/") or starts_with(http.request.uri.path, "/registry/"))` |
+| Characteristics | IP                                                                                                                                                  |
+| Requests        | Select a value from the expected relayer volume                                                                                                     |
+| Period          | 10 seconds on the Free plan; longer periods on paid plans                                                                                           |
+| Action          | Block                                                                                                                                               |
+| Duration        | 10 seconds on the Free plan; longer durations on paid plans                                                                                         |
 
 Relayers are programs. A program cannot complete a challenge. Thus use the
 Block action, not a challenge action.

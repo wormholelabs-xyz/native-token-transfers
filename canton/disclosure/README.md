@@ -57,6 +57,7 @@ applies to the flow routes and to the CIP-0056 registry routes.
 The inbound cap of 64 requests does not apply to `/v1`, `/v1/healthz`, and
 `/v1/readyz`. Thus an orchestrator gets a probe result when flow requests
 fill the cap.
+
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
   `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
@@ -64,15 +65,15 @@ fill the cap.
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
-  | Flow | Parameters |
-  |---|---|
-  | `release` | `manager`, `digest`, `recipient` (optional) |
-  | `mint` | `manager`, `digest`, `recipient` |
-  | `set-peer` | `manager`, `digest` |
-  | `accept-admin` | `manager`, `digest` |
-  | `transfer` | `manager` |
-  | `register` | `gg` (optional), `by-vaa` (bool, optional) |
-  | `consolidate` | `manager` |
+  | Flow           | Parameters                                  |
+  | -------------- | ------------------------------------------- |
+  | `release`      | `manager`, `digest`, `recipient` (optional) |
+  | `mint`         | `manager`, `digest`, `recipient`            |
+  | `set-peer`     | `manager`, `digest`                         |
+  | `accept-admin` | `manager`, `digest`                         |
+  | `transfer`     | `manager`                                   |
+  | `register`     | `gg` (optional), `by-vaa` (bool, optional)  |
+  | `consolidate`  | `manager`                                   |
 
 `manager` is the manager address and `digest` is the VAA hash. Each is a hex
 string of 64 characters. `recipient` and `gg` are party ids with the format
@@ -188,11 +189,11 @@ The routes are public. The owner accepts this exposure by design:
 
 The service reads each template as one role only:
 
-| Role flag | Party | Templates |
-|---|---|---|
+| Role flag                     | Party                       | Templates                                                                                                                                                                                   |
+| ----------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--guardian-governance-party` | `gg` (`guardianGovernance`) | `NttManager`, `LockedLedger`, `CoreState`, `Emitter`, `ReplayNode`, `NttGovernance`, `EmitterRegistry`, `CoinFactory`, `DepositPreapproval`, `AdminTransferProposal`, `TransferPreapproval` |
-| `--ntt-custody-party` | `nttCustody` | The custody pots, and `TransferPreapproval` |
-| `--operator-party` | operator | `ReplayRootRegistry` (`register` flow only) |
+| `--ntt-custody-party`         | `nttCustody`                | The custody pots, and `TransferPreapproval`                                                                                                                                                 |
+| `--operator-party`            | operator                    | `ReplayRootRegistry` (`register` flow only)                                                                                                                                                 |
 
 The registry API reads `NttManager`, `CoinFactory`, `Coin`,
 `TransferPreapproval`, `CoinTransferInstruction` and `CoinAllocation` as `gg`
@@ -209,21 +210,21 @@ contract in `missing`.
 
 ## Bounds
 
-| Bound | Value |
-|---|---|
-| Contracts in one upstream template list | The participant `http-list-max-elements-limit`. The Canton documentation gives 1024 as the default. Above it, the participant returns 413, and each flow that reads the template returns 502. This is the first bound for the registry reads of `Coin` and `TransferPreapproval`. See "Registry reads at a bound". |
-| Time to read the headers and the body of one request | 10 s |
-| Inbound requests at one time | 64, without `/v1`, `/v1/healthz`, and `/v1/readyz`; the next request gets 503 |
-| Upstream readiness calls | 1 in 2 s, with a 3 s timeout |
-| Time for one request | 60 s |
-| Bytes of blobs and ids in one flow response or choice context | 4 MiB |
-| Query string of a flow or a registry route | 1024 bytes |
-| Request body of a registry route | 64 KiB |
-| Matching contracts for one selector | 8 |
-| Instruments in one registry page | 100 |
-| Instruments with a `Coin` total | 1000 |
-| Contracts scanned in one upstream response | 100 000 |
-| Bytes of one upstream response | 64 MiB |
+| Bound                                                         | Value                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Contracts in one upstream template list                       | The participant `http-list-max-elements-limit`. The Canton documentation gives 1024 as the default. Above it, the participant returns 413, and each flow that reads the template returns 502. This is the first bound for the registry reads of `Coin` and `TransferPreapproval`. See "Registry reads at a bound". |
+| Time to read the headers and the body of one request          | 10 s                                                                                                                                                                                                                                                                                                               |
+| Inbound requests at one time                                  | 64, without `/v1`, `/v1/healthz`, and `/v1/readyz`; the next request gets 503                                                                                                                                                                                                                                      |
+| Upstream readiness calls                                      | 1 in 2 s, with a 3 s timeout                                                                                                                                                                                                                                                                                       |
+| Time for one request                                          | 60 s                                                                                                                                                                                                                                                                                                               |
+| Bytes of blobs and ids in one flow response or choice context | 4 MiB                                                                                                                                                                                                                                                                                                              |
+| Query string of a flow or a registry route                    | 1024 bytes                                                                                                                                                                                                                                                                                                         |
+| Request body of a registry route                              | 64 KiB                                                                                                                                                                                                                                                                                                             |
+| Matching contracts for one selector                           | 8                                                                                                                                                                                                                                                                                                                  |
+| Instruments in one registry page                              | 100                                                                                                                                                                                                                                                                                                                |
+| Instruments with a `Coin` total                               | 1000                                                                                                                                                                                                                                                                                                               |
+| Contracts scanned in one upstream response                    | 100 000                                                                                                                                                                                                                                                                                                            |
+| Bytes of one upstream response                                | 64 MiB                                                                                                                                                                                                                                                                                                             |
 
 The list limit is a participant setting. Each deployment sets it on its own
 participant. The service cannot read the value. Record the value of each
@@ -274,8 +275,8 @@ Set the memory limit of the container to more than 512 MiB.
 
 1. Run `cd canton/disclosure/service && go build -o disclosure-service .`.
 2. Run `./disclosure-service --json-api <url>
-   --guardian-governance-party <gg-party> --ntt-custody-party
-   <ntt-custody-party> [--access-token-file <jwt-file>]`.
+--guardian-governance-party <gg-party> --ntt-custody-party
+<ntt-custody-party> [--access-token-file <jwt-file>]`.
 3. To serve the `register` flow, add `--operator-party <operator-party>`.
 
 Container: run `docker build -t disclosure-service canton/disclosure/service`.
@@ -346,7 +347,12 @@ spec:
       image: <shell image with install, pinned by digest>
       securityContext:
         runAsUser: 0
-      command: ["sh", "-c", "install -o 65532 -g 65532 -m 0400 /secrets/* /etc/disclosure/"]
+      command:
+        [
+          "sh",
+          "-c",
+          "install -o 65532 -g 65532 -m 0400 /secrets/* /etc/disclosure/",
+        ]
       volumeMounts:
         - name: disclosure-secrets-source
           mountPath: /secrets
@@ -387,15 +393,15 @@ commit.
 
 ### Endpoints
 
-| Endpoint | Response |
-|---|---|
-| `GET /registry/metadata/v1/info` | `adminId` is `gg`. `supportedApis` lists the four v1 APIs below. |
-| `GET /registry/metadata/v1/instruments` | The instruments, in instrument ID order. Parameters: `pageSize`, `pageToken`. |
-| `GET /registry/metadata/v1/instruments/{instrumentId}` | One instrument. |
-| `POST /registry/transfer-instruction/v1/transfer-factory` | The `CoinFactory`, the `transferKind` and the choice context. |
-| `POST /registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept,reject,withdraw}` | The choice context of a `CoinTransferInstruction`. |
-| `POST /registry/allocation-instruction/v1/allocation-factory` | The `CoinFactory` and the choice context. |
-| `POST /registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer,withdraw,cancel}` | The choice context of a `CoinAllocation`. |
+| Endpoint                                                                                                  | Response                                                                      |
+| --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `GET /registry/metadata/v1/info`                                                                          | `adminId` is `gg`. `supportedApis` lists the four v1 APIs below.              |
+| `GET /registry/metadata/v1/instruments`                                                                   | The instruments, in instrument ID order. Parameters: `pageSize`, `pageToken`. |
+| `GET /registry/metadata/v1/instruments/{instrumentId}`                                                    | One instrument.                                                               |
+| `POST /registry/transfer-instruction/v1/transfer-factory`                                                 | The `CoinFactory`, the `transferKind` and the choice context.                 |
+| `POST /registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept,reject,withdraw}` | The choice context of a `CoinTransferInstruction`.                            |
+| `POST /registry/allocation-instruction/v1/allocation-factory`                                             | The `CoinFactory` and the choice context.                                     |
+| `POST /registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer,withdraw,cancel}`         | The choice context of a `CoinAllocation`.                                     |
 
 The responses agree with the OpenAPI specifications in `service/openapi/`.
 The Go tests validate each response against these files. The registry
@@ -412,13 +418,13 @@ properties:
 
 The metadata of an instrument comes from these sources:
 
-| Field | Source |
-|---|---|
-| `id` | `NttManager.instrumentId.id` |
-| `name`, `symbol` | The instruments file |
-| `decimals` | `NttManager.tokenDecimals` |
-| `totalSupply` | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. The read keeps only the sums, and it requests no `createdEventBlob`. The service omits the field when the `Coin` read stops at a bound. |
-| `totalSupplyAsOf` | The service clock at the start of the `Coin` read. A response from the cache keeps the time of its read. The service omits the field together with `totalSupply`. |
+| Field             | Source                                                                                                                                                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`              | `NttManager.instrumentId.id`                                                                                                                                                                                                                                     |
+| `name`, `symbol`  | The instruments file                                                                                                                                                                                                                                             |
+| `decimals`        | `NttManager.tokenDecimals`                                                                                                                                                                                                                                       |
+| `totalSupply`     | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. The read keeps only the sums, and it requests no `createdEventBlob`. The service omits the field when the `Coin` read stops at a bound. |
+| `totalSupplyAsOf` | The service clock at the start of the `Coin` read. A response from the cache keeps the time of its read. The service omits the field together with `totalSupply`.                                                                                                |
 
 `totalSupply` does not include value in transit. A `CoinTransferInstruction`
 and a `CoinAllocation` hold their amount directly. The choice that makes them
@@ -495,14 +501,14 @@ API.
 Each context comes from the choice body. A context contains each contract
 that the choice fetches and that the controller cannot see.
 
-| Endpoint | Choice body | `choiceContextData` | `disclosedContracts` |
-|---|---|---|---|
-| `transfer-factory`, `self` | `CoinFactory.daml:56-77`, `CoinTransfer.daml:159-162` | `{"values": {}}` | `CoinFactory` |
-| `transfer-factory`, `direct` | `CoinTransfer.daml:163-167`, `TransferPreapproval_Receive` at `CoinTransfer.daml:39-49` | `token-cip0056.transferPreapprovalCid` (see below) | `CoinFactory`, `TransferPreapproval` |
-| `transfer-factory`, `offer` | `CoinTransfer.daml:168`, `CoinFactory.daml:69-77` | `{"values": {}}` | `CoinFactory` |
-| `accept`, `reject`, `withdraw` | `CoinTransfer.daml:77-88` | `{"values": {}}` | None |
-| `allocation-factory` | `CoinFactory.daml:87-104` | `{"values": {}}` | `CoinFactory` |
-| `execute-transfer`, `withdraw`, `cancel` | `CoinAllocation.daml:22-36` | `{"values": {}}` | None |
+| Endpoint                                 | Choice body                                                                             | `choiceContextData`                                | `disclosedContracts`                 |
+| ---------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| `transfer-factory`, `self`               | `CoinFactory.daml:56-77`, `CoinTransfer.daml:159-162`                                   | `{"values": {}}`                                   | `CoinFactory`                        |
+| `transfer-factory`, `direct`             | `CoinTransfer.daml:163-167`, `TransferPreapproval_Receive` at `CoinTransfer.daml:39-49` | `token-cip0056.transferPreapprovalCid` (see below) | `CoinFactory`, `TransferPreapproval` |
+| `transfer-factory`, `offer`              | `CoinTransfer.daml:168`, `CoinFactory.daml:69-77`                                       | `{"values": {}}`                                   | `CoinFactory`                        |
+| `accept`, `reject`, `withdraw`           | `CoinTransfer.daml:77-88`                                                               | `{"values": {}}`                                   | None                                 |
+| `allocation-factory`                     | `CoinFactory.daml:87-104`                                                               | `{"values": {}}`                                   | `CoinFactory`                        |
+| `execute-transfer`, `withdraw`, `cancel` | `CoinAllocation.daml:22-36`                                                             | `{"values": {}}`                                   | None                                 |
 
 The `CoinFactory` has the signatory `gg` only (`CoinFactory.daml:26`). Thus
 the sender cannot see it. The service returns the `CoinFactory` that the
@@ -535,7 +541,14 @@ For `direct`, `choiceContextData` is this value. `lookupTransferPreapprovalCid`
 (`CoinTransfer.daml:17-24`) reads it:
 
 ```json
-{"values": {"token-cip0056.transferPreapprovalCid": {"tag": "AV_ContractId", "value": "<preapproval contract ID>"}}}
+{
+  "values": {
+    "token-cip0056.transferPreapprovalCid": {
+      "tag": "AV_ContractId",
+      "value": "<preapproval contract ID>"
+    }
+  }
+}
 ```
 
 The wallet gives `choiceContextData` as `extraArgs.context` of the choice.
@@ -553,13 +566,13 @@ Each error response is the `ErrorResponse` of the specification:
 `error` is a fixed text that ends with the request ID. The service log has
 the detail for that request ID. The response does not contain upstream text.
 
-| Status | Cause |
-|---|---|
-| 400 | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. `pageToken` is not a `nextPageToken` of this service. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. The value of `expectedAdmin`, `instrumentId.admin`, `sender`, or `receiver` is not a party id `<hint>::1220<64 lowercase hex>`. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
-| 404 | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of `token-cip0056` for a `gg` instrument. The registry API is off. |
-| 414 | The query string is larger than 1024 bytes. |
-| 500 | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument, or a choice context on two synchronizers. |
-| 502, 503, 504 | The upstream participant failed, a read passed a bound, the service shed the load, or the upstream timed out. |
+| Status        | Cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 400           | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. `pageToken` is not a `nextPageToken` of this service. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. The value of `expectedAdmin`, `instrumentId.admin`, `sender`, or `receiver` is not a party id `<hint>::1220<64 lowercase hex>`. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
+| 404           | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of `token-cip0056` for a `gg` instrument. The registry API is off.                                                                                                                                                                                                                                                                                         |
+| 414           | The query string is larger than 1024 bytes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 500           | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument, or a choice context on two synchronizers.                                                                                                                                                                                                                                                                                                                                                                                |
+| 502, 503, 504 | The upstream participant failed, a read passed a bound, the service shed the load, or the upstream timed out.                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 A 400 text repeats a client value of 32 bytes or less, in quotes. A body
 fault has a fixed text. All causes of a 404 for a contract ID have the same
@@ -659,12 +672,12 @@ participant of the wallet runs only the packages that it vetted.
 source is `https://docs.canton.network/openapi/splice/token-standard/`,
 downloaded on 2026-11-18.
 
-| File | Spec version | SHA-256 |
-|---|---|---|
-| `token-metadata-v1.yaml` | 1.2.0 | `43ca08f0706b433ca20cee1a355da6d4ad00ea8c089b8982fb446627b7a2e135` |
-| `transfer-instruction-v1.yaml` | 1.1.0 | `6e8d4abbb912cd2fa890b7dfcdc940a9ceadd60467049921a1e1151b5363c46f` |
-| `allocation-instruction-v1.yaml` | 1.0.0 | `c82cf1b7d661666f676a05fcd4e130562df03f701eca755fbc50d364822ec1c4` |
-| `allocation-v1.yaml` | 1.1.0 | `b28762a1d8f94a300904f20ed9c3f42babad4120b112593a17167f544f24fdd3` |
+| File                             | Spec version | SHA-256                                                            |
+| -------------------------------- | ------------ | ------------------------------------------------------------------ |
+| `token-metadata-v1.yaml`         | 1.2.0        | `43ca08f0706b433ca20cee1a355da6d4ad00ea8c089b8982fb446627b7a2e135` |
+| `transfer-instruction-v1.yaml`   | 1.1.0        | `6e8d4abbb912cd2fa890b7dfcdc940a9ceadd60467049921a1e1151b5363c46f` |
+| `allocation-instruction-v1.yaml` | 1.0.0        | `c82cf1b7d661666f676a05fcd4e130562df03f701eca755fbc50d364822ec1c4` |
+| `allocation-v1.yaml`             | 1.1.0        | `b28762a1d8f94a300904f20ed9c3f42babad4120b112593a17167f544f24fdd3` |
 
 ## Deployment on a separate gateway
 
@@ -721,20 +734,20 @@ set the flag.
 
 ### Flags for the gateway
 
-| Flag | Value on the gateway |
-|---|---|
-| `--listen` | The address that the edge connects to. With a local tunnel, keep the loopback default. |
-| `--behind-edge-proxy` | Set it only with a `--listen` address that is not loopback. |
-| `--json-api` | The `https://` URL of the participant JSON Ledger API. |
-| `--json-api-ca-file` | The PEM CA bundle of the participant server certificate. It replaces the system roots. |
-| `--json-api-client-cert-file` | The PEM client certificate for mutual TLS. |
-| `--json-api-client-key-file` | The PEM private key of that certificate. |
-| `--oauth-token-url` | The token endpoint of the identity provider. It must use `https`. Plain `http` works only to a loopback IP address, for a test. |
-| `--oauth-ca-file` | Optional. The PEM CA bundle of the token endpoint certificate. It replaces the system roots. |
-| `--oauth-client-id` | The client ID of the gateway ledger user. |
-| `--oauth-client-secret-file` | The file that holds the client secret. |
-| `--oauth-audience` | The audience of the participant Ledger API. |
-| `--oauth-scope` | Optional. The scope that the identity provider needs. |
+| Flag                          | Value on the gateway                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--listen`                    | The address that the edge connects to. With a local tunnel, keep the loopback default.                                          |
+| `--behind-edge-proxy`         | Set it only with a `--listen` address that is not loopback.                                                                     |
+| `--json-api`                  | The `https://` URL of the participant JSON Ledger API.                                                                          |
+| `--json-api-ca-file`          | The PEM CA bundle of the participant server certificate. It replaces the system roots.                                          |
+| `--json-api-client-cert-file` | The PEM client certificate for mutual TLS.                                                                                      |
+| `--json-api-client-key-file`  | The PEM private key of that certificate.                                                                                        |
+| `--oauth-token-url`           | The token endpoint of the identity provider. It must use `https`. Plain `http` works only to a loopback IP address, for a test. |
+| `--oauth-ca-file`             | Optional. The PEM CA bundle of the token endpoint certificate. It replaces the system roots.                                    |
+| `--oauth-client-id`           | The client ID of the gateway ledger user.                                                                                       |
+| `--oauth-client-secret-file`  | The file that holds the client secret.                                                                                          |
+| `--oauth-audience`            | The audience of the participant Ledger API.                                                                                     |
+| `--oauth-scope`               | Optional. The scope that the identity provider needs.                                                                           |
 
 Rules for these flags:
 

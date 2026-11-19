@@ -99,15 +99,15 @@ version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
 ## sha256
 
-| DAR | consumed by | sha256 |
-| --- | --- | --- |
-| `wormhole-core-0.8.3.dar` | `ntt`, `ntt-test` | `a41bd91de2ab5cdd5bd879d634476fa620d8b8a0b9f52d020c472ce083fb8458` |
-| `token-cip0056-0.2.0.dar` | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
-| `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
-| `splice-api-token-holding-v1-1.0.0.dar` | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
-| `splice-api-token-allocation-v1-1.0.0.dar` | `ntt`, `ntt-test` | `c3f3b447142577ea4fa7d912ca11cd6821de7588e324e8877425932a02fccaa1` |
+| DAR                                                    | consumed by       | sha256                                                             |
+| ------------------------------------------------------ | ----------------- | ------------------------------------------------------------------ |
+| `wormhole-core-0.8.3.dar`                              | `ntt`, `ntt-test` | `a41bd91de2ab5cdd5bd879d634476fa620d8b8a0b9f52d020c472ce083fb8458` |
+| `token-cip0056-0.2.0.dar`                              | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
+| `splice-api-token-metadata-v1-1.0.0.dar`               | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
+| `splice-api-token-holding-v1-1.0.0.dar`                | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
+| `splice-api-token-allocation-v1-1.0.0.dar`             | `ntt`, `ntt-test` | `c3f3b447142577ea4fa7d912ca11cd6821de7588e324e8877425932a02fccaa1` |
 | `splice-api-token-allocation-instruction-v1-1.0.0.dar` | `ntt`, `ntt-test` | `e2607ca3a1d735a82d3066b78132aa8f94b1886c99a5f14148742d252c7220a2` |
-| `splice-api-token-burn-mint-v1-1.0.0.dar` | `ntt`, `ntt-test` | `a18e85c4841a278bce000df8329c3f0e2fee3b30b55dd6a31492d10a72b4f9c1` |
-| `splice-api-token-transfer-instruction-v1-1.0.0.dar` | `ntt`, `ntt-test` | `e4c73aa7ae73fb2fc330b938ffb99f568792321640ba4b9472902aa8d742c994` |
+| `splice-api-token-burn-mint-v1-1.0.0.dar`              | `ntt`, `ntt-test` | `a18e85c4841a278bce000df8329c3f0e2fee3b30b55dd6a31492d10a72b4f9c1` |
+| `splice-api-token-transfer-instruction-v1-1.0.0.dar`   | `ntt`, `ntt-test` | `e4c73aa7ae73fb2fc330b938ffb99f568792321640ba4b9472902aa8d742c994` |
 
 Verify with `sha256sum <file>` against this table before trusting a copy.
