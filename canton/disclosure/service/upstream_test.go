@@ -159,3 +159,45 @@ func TestReadAtMost(t *testing.T) {
 		})
 	}
 }
+
+func TestParseFlagsJSONAPIURLRuleForEachAuthMode(t *testing.T) {
+	authModeFlags := map[string][]string{
+		"none":       nil,
+		"token file": {"--access-token-file", "/run/secrets/token"},
+		"OAuth2": {
+			"--oauth-token-url", "https://idp.example/token",
+			"--oauth-client-id", "gateway",
+			"--oauth-client-secret-file", "/run/secrets/client-secret",
+			"--oauth-audience", "https://ledger_api.example",
+		},
+	}
+	cases := []struct {
+		jsonAPIURL      string
+		wantErrNone     bool
+		wantErrWithAuth bool
+	}{
+		{"https://participant:7575", false, false},
+		{"http://participant.internal:7575", false, true},
+		{"http://127.0.0.1:7575", false, false},
+		{"http://[::1]:7575", false, false},
+		{"http://localhost:7575", false, true},
+	}
+	for _, tc := range cases {
+		for authModeName, flags := range authModeFlags {
+			t.Run(authModeName+" "+tc.jsonAPIURL, func(t *testing.T) {
+				args := append(append([]string{"--json-api", tc.jsonAPIURL}, testPartyFlags...), flags...)
+				_, err := parseFlags(args)
+				wantErr := tc.wantErrWithAuth
+				if authModeName == "none" {
+					wantErr = tc.wantErrNone
+				}
+				if wantErr {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "an upstream token needs https")
+					return
+				}
+				require.NoError(t, err)
+			})
+		}
+	}
+}

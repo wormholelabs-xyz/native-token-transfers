@@ -96,11 +96,11 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://127.0.0.1:6975)")
 	}
 	upstreamTLS := upstreamTLSFiles{caFile: *caFile, clientCertFile: *clientCertFile, clientKeyFile: *clientKeyFile}
-	if err := checkJSONAPIURL(*jsonAPI, *tokenFile != "", upstreamTLS); err != nil {
-		return nil, err
-	}
 	upstreamAuth, err := parseUpstreamAuthMode(*tokenFile, oauthClientFlags{tokenURL: *oauthTokenURL, clientID: *oauthClientID, clientSecretFile: *oauthSecretFile, audience: *oauthAudience, scope: *oauthScope})
 	if err != nil {
+		return nil, err
+	}
+	if err := checkJSONAPIURL(*jsonAPI, upstreamAuth.sendsBearerToken(), upstreamTLS); err != nil {
 		return nil, err
 	}
 	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)

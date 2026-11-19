@@ -465,3 +465,33 @@ func TestNewBearerTokenSource(t *testing.T) {
 		})
 	}
 }
+
+func TestParseOAuthClientConfigTokenURL(t *testing.T) {
+	cases := []struct {
+		tokenURL   string
+		wantErrSub string
+	}{
+		{"https://idp.example/token", ""},
+		{"http://127.0.0.1:8080/token", ""},
+		{"http://[::1]:8080/token", ""},
+		{"http://localhost:8080/token", "https"},
+		{"http://idp.example/token", "https"},
+		{"https://user:password@idp.example/token", "user information"},
+		{"https://idp.example/token?realm=internal", "query"},
+		{"https://idp.example/token?", "query"},
+		{"https://idp.example/token#fragment", "fragment"},
+		{"ftp://idp.example/token", "https"},
+		{"https:///token", "host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tokenURL, func(t *testing.T) {
+			_, err := parseOAuthClientConfig(oauthClientFlags{tokenURL: tc.tokenURL, clientID: "c", clientSecretFile: "s", audience: "a"})
+			if tc.wantErrSub == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErrSub)
+		})
+	}
+}

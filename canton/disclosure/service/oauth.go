@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -67,12 +66,21 @@ func parseOAuthClientConfig(flags oauthClientFlags) (validatedOAuthClientConfig,
 	if tokenURL.Hostname() == "" {
 		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: missing host", flags.tokenURL)
 	}
-	//SECURITY: the request body carries the client secret; plain http is only for a loopback test endpoint.
+	if tokenURL.User != nil {
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url must not hold user information")
+	}
+	if tokenURL.RawQuery != "" || tokenURL.ForceQuery {
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q must not hold a query", flags.tokenURL)
+	}
+	if tokenURL.Fragment != "" || tokenURL.RawFragment != "" {
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q must not hold a fragment", flags.tokenURL)
+	}
+	//SECURITY: the request body carries the client secret; plain http is only for a loopback IP address.
 	switch tokenURL.Scheme {
 	case "https":
 	case "http":
-		if !isLoopbackHost(tokenURL.Hostname()) {
-			return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https (http only for a loopback host)", flags.tokenURL)
+		if !isLoopbackIPAddress(tokenURL.Hostname()) {
+			return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https (http only to a loopback IP address)", flags.tokenURL)
 		}
 	default:
 		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https", flags.tokenURL)
@@ -84,14 +92,6 @@ func parseOAuthClientConfig(flags oauthClientFlags) (validatedOAuthClientConfig,
 		audience:         flags.audience,
 		scope:            flags.scope,
 	}, nil
-}
-
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // readClientSecret reads and trims the client secret file. An empty secret is an error.
