@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -513,5 +514,60 @@ func TestNewTokenEndpointHTTPClient(t *testing.T) {
 			assert.Equal(t, tc.wantRootCAs, transport.TLSClientConfig.RootCAs != nil)
 			assert.NotNil(t, client.CheckRedirect)
 		})
+	}
+}
+
+// The token file, the client secret file, and the client key file must give no right to the group or to other users.
+func TestSecretFilesRefuseGroupAndOtherPermissions(t *testing.T) {
+	pki := newTestUpstreamPKI(t)
+	secretDirectory := t.TempDir()
+	secretReaders := []struct {
+		name       string
+		path       string
+		readSecret func(path string) error
+	}{
+		{"access token file", filepath.Join(secretDirectory, "token"), func(path string) error {
+			_, err := readAccessToken(path)
+			return err
+		}},
+		{"client secret file", filepath.Join(secretDirectory, "client-secret"), func(path string) error {
+			_, err := readClientSecret(path)
+			return err
+		}},
+		{"client key file", pki.validClient.keyPEMPath, func(path string) error {
+			_, err := loadClientKeyPair(upstreamTLSFiles{clientCertFile: pki.validClient.certPEMPath, clientKeyFile: path}, time.Now())
+			return err
+		}},
+	}
+	require.NoError(t, os.WriteFile(secretReaders[0].path, []byte("tok\n"), 0o600))
+	require.NoError(t, os.WriteFile(secretReaders[1].path, []byte("secret\n"), 0o600))
+	modes := []struct {
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{0o400, false},
+		{0o600, false},
+		{0o440, true},
+		{0o404, true},
+		{0o640, true},
+		{0o644, true},
+		{0o620, true},
+		{0o602, true},
+		{0o601, true},
+		{0o610, true},
+	}
+	for _, reader := range secretReaders {
+		for _, modeCase := range modes {
+			t.Run(fmt.Sprintf("%s %04o", reader.name, modeCase.mode), func(t *testing.T) {
+				require.NoError(t, os.Chmod(reader.path, modeCase.mode))
+				err := reader.readSecret(reader.path)
+				if !modeCase.wantErr {
+					require.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "group or other")
+			})
+		}
 	}
 }

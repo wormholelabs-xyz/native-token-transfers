@@ -143,3 +143,46 @@ func TestFileTokenSourceRetriesOnceOn401(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, httpError.statusCode)
 	assert.Equal(t, int64(2), upstreamCalls.Load())
 }
+
+// A 401 for a newly fetched token is a token source failure: it arms the token endpoint backoff.
+func TestUpstreamRepeated401BacksOffTokenRequests(t *testing.T) {
+	endpoint := newFakeTokenEndpoint(t, bearerTokenResponse("tok", 3600))
+	var upstreamAcceptsTokens atomic.Bool
+	upstream, upstreamCalls := newTokenCheckingJSONAPI(t, func(string) bool { return upstreamAcceptsTokens.Load() }, http.StatusUnauthorized)
+	clock := newFakeClock()
+	tokens := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), clock.now)
+	srv := newTestServerWithClient(t, newTestHTTPACSClient(upstream.URL, tokens))
+	srv.logger, _ = newCapturedLogger()
+
+	const requestsPerStep = 100
+	steps := []struct {
+		name                  string
+		advanceBy             time.Duration
+		upstreamAcceptsTokens bool
+		wantStatus            int
+		wantTokenFetches      int64
+		wantUpstreamCalls     int64
+	}{
+		{"t0: two tokens rejected, then the 1 s backoff", 0, false, http.StatusServiceUnavailable, 2, 2},
+		{"t0+0.999s: inside the 1 s backoff", 999 * time.Millisecond, false, http.StatusServiceUnavailable, 2, 2},
+		{"t0+1s: two tokens rejected, then the 2 s backoff", time.Millisecond, false, http.StatusServiceUnavailable, 4, 4},
+		{"t0+2.999s: inside the 2 s backoff", 1999 * time.Millisecond, false, http.StatusServiceUnavailable, 4, 4},
+		{"t0+3s: two tokens rejected, then the 4 s backoff", time.Millisecond, false, http.StatusServiceUnavailable, 6, 6},
+		{"t0+6.999s: inside the 4 s backoff", 3999 * time.Millisecond, false, http.StatusServiceUnavailable, 6, 6},
+		{"t0+7s: upstream accepts the new token", time.Millisecond, true, http.StatusOK, 7, 6 + requestsPerStep},
+		{"t0+7s: upstream rejects again, the backoff restarts at 1 s", 0, false, http.StatusServiceUnavailable, 8, 8 + requestsPerStep},
+		{"t0+7.999s: inside the 1 s backoff", 999 * time.Millisecond, false, http.StatusServiceUnavailable, 8, 8 + requestsPerStep},
+		{"t0+8s: two tokens rejected", time.Millisecond, false, http.StatusServiceUnavailable, 10, 10 + requestsPerStep},
+	}
+	for _, step := range steps {
+		clock.advance(step.advanceBy)
+		upstreamAcceptsTokens.Store(step.upstreamAcceptsTokens)
+		for requestIndex := range requestsPerStep {
+			recorder := httptest.NewRecorder()
+			srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil))
+			require.Equal(t, step.wantStatus, recorder.Code, "%s: request %d", step.name, requestIndex)
+		}
+		assert.Equal(t, step.wantTokenFetches, endpoint.fetchCount.Load(), "%s: token fetches", step.name)
+		assert.Equal(t, step.wantUpstreamCalls, upstreamCalls.Load(), "%s: upstream calls", step.name)
+	}
+}

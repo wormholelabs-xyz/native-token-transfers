@@ -260,6 +260,8 @@ func TestOAuthTokenSource_RejectsBadResponses(t *testing.T) {
 		{name: "expires_in over the cap", status: http.StatusOK, body: `{"access_token":"tok","token_type":"Bearer","expires_in":99999999}`, wantErrSub: "expires_in"},
 		{name: "string expires_in", status: http.StatusOK, body: `{"access_token":"tok","token_type":"Bearer","expires_in":"60"}`, wantErrSub: "parse token response"},
 		{name: "oversize body", status: http.StatusOK, body: `{"access_token":"` + strings.Repeat("a", maxOAuthResponseBytes) + `"}`, wantErrSub: "exceeds"},
+		{name: "fractional expires_in", status: http.StatusOK, body: `{"access_token":"tok","token_type":"Bearer","expires_in":98765432123.5}`, wantErrSub: "parse token response"},
+		{name: "expires_in over int64", status: http.StatusOK, body: `{"access_token":"tok","token_type":"Bearer","expires_in":98765432123000000000000}`, wantErrSub: "parse token response"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,6 +278,7 @@ func TestOAuthTokenSource_RejectsBadResponses(t *testing.T) {
 			//SECURITY: errors reach logs and HTTP responses.
 			assert.NotContains(t, err.Error(), "first-secret")
 			assert.NotContains(t, err.Error(), "tok-leak")
+			assert.NotContains(t, err.Error(), "98765432123")
 		})
 	}
 }
@@ -669,5 +672,129 @@ func TestRunFailsOnStartupTokenError(t *testing.T) {
 			cancel()
 			require.NoError(t, <-done)
 		})
+	}
+}
+
+// A caller that ends its wait does not end the fetch; only the fetch result sets the backoff.
+func TestOAuthCanceledCallerLeavesBackoffToFetchResult(t *testing.T) {
+	cases := []struct {
+		name             string
+		endpointStatus   int
+		wantSecondErr    error
+		wantSecondToken  string
+		wantTokenFetches int64
+	}{
+		{name: "slow success", endpointStatus: http.StatusOK, wantSecondToken: "tok-1", wantTokenFetches: 1},
+		{name: "slow failure", endpointStatus: http.StatusServiceUnavailable, wantSecondErr: errOAuthTokenEndpointBackoff, wantTokenFetches: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseEndpoint := make(chan struct{})
+			endpoint := newFakeTokenEndpoint(t, func(w http.ResponseWriter, fetchNumber int64) {
+				select {
+				case <-releaseEndpoint:
+				case <-time.After(5 * time.Second):
+				}
+				scriptedTokenEndpoint(tc.endpointStatus)(w, fetchNumber)
+			})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseEndpoint) }) }
+			t.Cleanup(release)
+			source := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), newFakeClock().now)
+
+			canceledCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			startedAt := time.Now()
+			_, err := source.BearerToken(canceledCtx)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.Less(t, time.Since(startedAt), time.Second)
+
+			release()
+			token, err := source.BearerToken(context.Background())
+			if tc.wantSecondErr != nil {
+				require.ErrorIs(t, err, tc.wantSecondErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantSecondToken, token)
+			assert.Equal(t, tc.wantTokenFetches, endpoint.fetchCount.Load())
+		})
+	}
+}
+
+// The backoff runs from the failure time: a slow failed fetch still gets the full wait.
+func TestOAuthBackoffStartsAtFailureTime(t *testing.T) {
+	clock := newFakeClock()
+	endpoint := newFakeTokenEndpoint(t, func(w http.ResponseWriter, _ int64) {
+		clock.advance(10 * time.Second)
+		http.Error(w, `{"error":"temporarily_unavailable"}`, http.StatusServiceUnavailable)
+	})
+	source := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), clock.now)
+	steps := []struct {
+		name             string
+		advanceBy        time.Duration
+		wantBackoffErr   bool
+		wantTokenFetches int64
+	}{
+		{"t0: fetch fails at t0+10s", 0, false, 1},
+		{"t0+10s: inside the 1 s backoff", 0, true, 1},
+		{"t0+10.999s: inside the 1 s backoff", 999 * time.Millisecond, true, 1},
+		{"t0+11s: fetch again", time.Millisecond, false, 2},
+	}
+	for _, step := range steps {
+		clock.advance(step.advanceBy)
+		_, err := source.BearerToken(context.Background())
+		require.Error(t, err, step.name)
+		if step.wantBackoffErr {
+			assert.ErrorIs(t, err, errOAuthTokenEndpointBackoff, step.name)
+		} else {
+			assert.NotErrorIs(t, err, errOAuthTokenEndpointBackoff, step.name)
+		}
+		assert.Equal(t, step.wantTokenFetches, endpoint.fetchCount.Load(), step.name)
+	}
+}
+
+// Lifetime 100 s: refresh at 90 s; after a failed refresh the token stays in use until 95 s.
+func TestOAuthFailedRefreshKeepsValidCachedToken(t *testing.T) {
+	endpoint := newFakeTokenEndpoint(t, func(w http.ResponseWriter, fetchNumber int64) {
+		if fetchNumber == 1 {
+			bearerTokenResponse("tok", 100)(w, fetchNumber)
+			return
+		}
+		http.Error(w, `{"error":"temporarily_unavailable"}`, http.StatusServiceUnavailable)
+	})
+	clock := newFakeClock()
+	source := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), clock.now)
+	steps := []struct {
+		name             string
+		advanceBy        time.Duration
+		wantToken        string
+		wantErr          error
+		wantAnyErr       bool
+		wantTokenFetches int64
+	}{
+		{name: "t0: first fetch", wantToken: "tok-1", wantTokenFetches: 1},
+		{name: "t90: refresh fails, cached token", advanceBy: 90 * time.Second, wantToken: "tok-1", wantTokenFetches: 2},
+		{name: "t90.5: inside the 1 s backoff, cached token", advanceBy: 500 * time.Millisecond, wantToken: "tok-1", wantTokenFetches: 2},
+		{name: "t91: refresh fails, cached token", advanceBy: 500 * time.Millisecond, wantToken: "tok-1", wantTokenFetches: 3},
+		{name: "t93: refresh fails, cached token", advanceBy: 2 * time.Second, wantToken: "tok-1", wantTokenFetches: 4},
+		{name: "t95: inside the 4 s backoff, cached token too old", advanceBy: 2 * time.Second, wantErr: errOAuthTokenEndpointBackoff, wantAnyErr: true, wantTokenFetches: 4},
+		{name: "t97: refresh fails, no usable token", advanceBy: 2 * time.Second, wantAnyErr: true, wantTokenFetches: 5},
+	}
+	for _, step := range steps {
+		clock.advance(step.advanceBy)
+		token, err := source.BearerToken(context.Background())
+		assert.Equal(t, step.wantTokenFetches, endpoint.fetchCount.Load(), step.name)
+		assert.Equal(t, step.wantToken, token, step.name)
+		if !step.wantAnyErr {
+			require.NoError(t, err, step.name)
+			continue
+		}
+		require.Error(t, err, step.name)
+		if step.wantErr != nil {
+			assert.ErrorIs(t, err, step.wantErr, step.name)
+		} else {
+			assert.NotErrorIs(t, err, errOAuthTokenEndpointBackoff, step.name)
+		}
 	}
 }
