@@ -1,16 +1,16 @@
 -- | Per-deployment accounting for lock/unlock custody.
 --
--- A deployment's reserve is owned by its current @admin@ (transferable via
--- 'Wormhole.Ntt.Manager.TransferAdmin'; handing it to @guardianGovernance@ is
--- the quorum's custody opt-in). Each deployment keeps its own 'LockedLedger':
--- the manager credits it on every lock and debits it on every release, and
--- 'Debit' rejects any amount above the balance, so a deployment can release at
--- most what it locked. Reserves of distinct admins cannot mix; gg-adminned
--- reserves form one pot shared only among deployments the quorum accepted,
--- where the cap is what keeps a deployment with a hostile peer away from the
--- others' collateral: credits and debits are atomic with the corresponding
--- deposit and release, so the sum of those balances never exceeds gg's
--- physical holdings.
+-- A deployment's reserve is owned by the manager's @reserveCustodian@: the
+-- current @admin@, or @nttCustody@ after the admin role is handed to
+-- @guardianGovernance@ ('Wormhole.Ntt.Manager.TransferAdmin'). Each deployment
+-- keeps its own 'LockedLedger': the manager credits it on every lock and
+-- debits it on every release, and 'Debit' rejects any amount above the
+-- balance, so a deployment can release at most what it locked. Reserves of
+-- distinct custodians cannot mix; @nttCustody@ reserves form one pot shared
+-- only among deployments the quorum accepted, where the cap is what keeps a
+-- deployment with a hostile peer away from the others' collateral: credits
+-- and debits are atomic with the corresponding deposit and release, so the
+-- sum of those balances never exceeds @nttCustody@'s physical holdings.
 --
 -- The ledger is named by @managerAddress@, which is unique per deployment and
 -- bound to the registering admin (not the current, transferable one), so an
@@ -56,13 +56,12 @@ template LockedLedger
     -- one ledger per lock/unlock deployment. The manager checks the identity
     -- fields before using a caller-supplied ledger cid.
     --
-    -- The operator co-signature is defence in depth: gg's signature lands on
-    -- third-party registry code (a burn/mint factory at asset onboarding,
-    -- custody holdings via promotion or fee settlement), so a malicious or
-    -- buggy registry choice body runs with gg's authority in scope. Were gg
-    -- the sole signatory, such a body could create or mutate any deployment's
-    -- ledger; requiring the operator — whose signature never leaves this
-    -- codebase — makes that an authorization failure.
+    -- The operator co-signature is defence in depth: gg's authority reaches
+    -- code outside this package (the canonical burn/mint factory). Were gg
+    -- the sole signatory, a bug there could create or
+    -- mutate any deployment's ledger; requiring the operator — whose
+    -- signature never leaves this codebase — makes that an authorization
+    -- failure.
     signatory operator, guardianGovernance
     observer admin
     ensure balance >= 0.0

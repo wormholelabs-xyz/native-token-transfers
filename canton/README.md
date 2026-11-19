@@ -27,7 +27,7 @@ trie, disclosed-cid submission, the trust model) is in the core
 | --- | --- |
 | `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
 | `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
-| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR, the CIP-0056 interface DARs, and the previous `ntt` release (the `upgrades:` baseline). Provenance and sha256 in [`dars/README.md`](dars/README.md). |
+| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
 `TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
@@ -53,51 +53,84 @@ against a `dpm sandbox`.
 
 ## Versions and upgrades
 
-The `upgrades:` field in `ntt/daml.yaml` points to the last released `ntt`
-DAR in `dars/`. `damlc` compares each build with that DAR. The build fails
-when the new package is not upgrade-compatible with it.
-
 For each release, do these steps:
 
 1. Increase the `version:` field in `ntt/daml.yaml`.
 2. Build the release DAR.
 3. Copy the release DAR into `dars/`.
 4. Record its commit, package id, and sha256 in `dars/README.md`.
-5. Set the `upgrades:` field to the new DAR.
+5. Set the `upgrades:` field in `ntt/daml.yaml` to the new DAR.
+
+With an `upgrades:` field, `damlc` compares each build with the last release.
+The build fails when the new package is not upgrade-compatible with it.
 
 One version number identifies one build. Do not use a version number again
 for a different build. Participants use the package name and version to put
 the upgrades of a package in order.
 
-The current baseline is `ntt-0.2.0.dar` (package id `8b9c3ee1...`) from
-PR #74 (branch commit `1db4b3c`). The LocalNet rehearsals vetted an ntt 0.3.0 build (package
-id `291fcf92...`) before the `upgrades:` field existed. The field changes the
-package id, thus the source moved to version 0.3.1 (core 0.7.0, package id `5c4abb0d...`). Version 0.3.2
-builds against core 0.8.0 (`03a65dc3...`) and has the package id
-`f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71`. Version
-0.3.3 builds against core 0.8.1 (`5b256d13...`) and has the package id
-`6c5c17336e55cc8736c08118fdc86fd84d73044ecaef8b754f0160bfa4a45523`. Version
-0.3.4 builds against core 0.8.3 (`9d546b11...`) and has the package id
-`1c555ab22b096aa7bc780213eafbf95231bfe03bc4d669d9fe152a8eeff8293f`. An older 0.2.0 build (package id `36a58282...`) has the
-`minter` field. A later commit removed this field, thus that build is not
-upgrade-compatible with the baseline. A deployment of that build needs a
-migration to a new deployment.
+### Version 0.4.x is not upgrade-compatible
+
+Version 0.4.0 added the `nttCustody` signatory to `NttGovernance` and
+`NttManager`. It also added the `reserveCustodian` field to `NttManager`.
+An upgrade cannot add a signatory to an existing contract.
+Thus `ntt/daml.yaml` has no `upgrades:` field, and `dars/` has no earlier
+`ntt` DAR.
+
+An `Optional` field keeps the package upgrade-compatible.
+It gives no safe path for an existing deployment:
+
+- An existing root has no `nttCustody` signature. No manager of that root can
+  give its reserve to `nttCustody`.
+- The reserve of an existing gg-adminned deployment is a gg holding. To move
+  it, the registry runs one more transfer with gg as the sender.
+- With the value `None`, old contracts keep the state "gg owns the reserve".
+
+No production deployment uses an earlier version. The LocalNet rehearsals
+used 0.2.0 and 0.3.0. The earlier versions also include 0.3.1 (core 0.7.0),
+0.3.2 (core 0.8.0, package id `f77fe8a8...`) and 0.3.3 (core 0.8.1,
+package id `6c5c1733...`). Version 0.4.0 built against core 0.8.0. Version
+0.4.1 built against core 0.8.1 (`5b256d13...`) and has the package id
+`88e55a615a516145c7b4d8f0f754f0e95adc8a87bf8c4fa41cdf919cdbb4b7b1`. Version
+0.3.4 builds against core 0.8.3 (package id `1c555ab2...`). Version 0.4.2
+builds against core 0.8.3 (`9d546b11...`) and has the package id
+`1a3e3b0e78f9f08adac111bc44110469dc271f61a9c0e5ed2f7b0b20a569feb8`. Canton
+checks upgrade compatibility by
+package name when it receives a DAR. Thus a participant that has an earlier
+`ntt` package rejects the 0.4.x DAR. Use participants that have no earlier
+`ntt` package.
+
+To move a deployment from an earlier version, do these steps:
+
+1. Hold a new root ceremony. `gg`, `nttCustody`, and the operator sign the
+   new `NttGovernance`.
+2. Set `nextId` of the new root to the `nextId` of the old root. Thus no
+   manager address and no replay namespace occurs two times.
+3. Register each deployment again on the new root.
+4. On each peer chain, register the new manager and transceiver addresses.
+5. Move each reserve from its old custodian to the new `reserveCustodian`.
 
 ## Parties and the trust model
 
-Three parties sign every `NttManager`, and each signature has one job:
+Four parties sign every `NttManager`, and each signature has one job:
 
 - `operator` runs the core bridge instance and ties the deployment to it.
-- `admin` is the operational role: it maintains the peer table, rotates the
-  committed factory, and owns the lock/unlock reserve. It is transferable
-  (`TransferAdmin`, usually via the propose-accept `AdminTransferProposal`);
-  handing it to `gg` is the guardian quorum's custody opt-in.
+- `admin` is the operational role: it maintains the peer table and rotates
+  the committed factory. It is transferable (`TransferAdmin`, usually via the
+  propose-accept `AdminTransferProposal`); handing it to `gg` is the guardian
+  quorum's custody opt-in.
 - `guardianGovernance` (`gg`) is the guardians' k-of-n threshold party, the
   same party that anchors the core and receives message fees. It administers
   burn/mint instruments, owns the deployment's transceiver `Emitter`, is the
-  replay-trie consumer for every deployment, and a deployment whose admin role
-  was handed to it has a quorum-owned reserve and governance-run admin
-  operations.
+  replay-trie consumer for every deployment. When `gg` holds the admin role of
+  a deployment, its admin operations are governance actions.
+- `nttCustody` owns the lock/unlock reserve of each deployment whose admin
+  role is with `gg`. It is a second quorum party (see "Custody party" below).
+
+The manager field `reserveCustodian` names the owner of the lock/unlock
+reserve. It is equal to `admin` while `admin` is not `gg`. It is equal to
+`nttCustody` while `admin` is `gg`. The template precondition of the manager
+rejects `gg` as `reserveCustodian`. It also rejects `nttCustody` as `admin`.
+Registration and `TransferAdmin` assert the same two rules.
 
 The transceiver `Emitter` of each deployment has the owner `gg`, also for an
 admin-only lock/unlock registration. This owner does not show that the
@@ -122,22 +155,108 @@ deployment's identity to its creator, and `managerId` guarantees exactly one
 namespace per deployment (closing the corner case where two deployments would
 otherwise share both instrument and registering admin).
 
-`gg` acts exactly once: a guardian quorum ceremony (the same external-signing
-flow that creates the genesis `CoreState`) creates the `NttGovernance` root.
+`gg` and `nttCustody` act exactly once: a guardian quorum ceremony (the same
+external-signing flow that creates the genesis `CoreState`) creates the
+`NttGovernance` root.
 Everything afterwards runs on inherited authority. `RegisterManager` lends the
 root's signatures to create managers — and, atomically, to mint the
 deployment's `gg`-owned transceiver `Emitter` and claim its `gg`-scoped replay
 root — and the manager's choice bodies lend the manager's signatures to move
 tokens. Value can only move inside fixed template code, and every inbound
-movement first verifies and consumes a VAA, so no single signatory can move
+movement first checks and consumes a VAA, so no single signatory can move
 bridged value, and nobody has to co-sign at transfer time. That is what keeps
 both deployment and relaying permissionless.
 
-A rogue movement of a `gg`-owned reserve would take either a native spend by
-the guardian quorum or a new `gg`-signed contract, which is also a quorum act.
-The model ultimately rests on `gg`'s key namespace being quorum-governed at
-the topology layer, so its threshold cannot be quietly lowered. That is a
-deployment requirement; the contracts cannot check it.
+Before the root ceremony, compare the namespace of `nttCustody` with the
+namespace of `gg`. The namespace is the part of the party id after `::`. The
+two namespaces must be equal. If they are not equal, stop the ceremony. The
+contracts cannot check this rule. IDE ledger party ids have no namespace.
+Thus a template precondition with this rule rejects each test party.
+`partiesShareNamespace` in `Wormhole.Ntt.Manager` gives the rule.
+`testPartyNamespaceFromText` tests it.
+
+A rogue movement of an `nttCustody`-owned reserve takes a native spend by
+the guardian quorum, a new `nttCustody`-signed contract (also a quorum act),
+or code of a vetted registry (see "Custody party" below).
+The model rests on the key namespace of `gg` and `nttCustody`. The guardian
+quorum governs this namespace at the topology layer, so nobody can quietly
+lower its threshold. The contracts cannot check this deployment condition.
+
+### Custody party
+
+`gg` never owns a lock/unlock reserve. The reason is the CIP-0056 transfer
+interface:
+
+- `TransferFactory_Transfer` has the controller `transfer.sender`.
+- The reserve owner is the sender of each custody transfer: `Release`, the
+  lock merge in `Transfer`, `ConsolidateCustody`, and `TransferAdmin`.
+- Thus the registry code of a lock/unlock deployment runs with the authority
+  of the reserve owner.
+
+When `gg` owned the reserve, registry code had the authority of `gg`
+(`REDTEAM.md`, F1). A registry used it to mint each `gg`-administered
+instrument, to publish a payload from each NTT transceiver `Emitter`, and
+to change each manager whose admin is `gg`.
+
+`nttCustody` is a second party in the same guardian decentralized namespace
+as `gg`. The guardians control both parties with the same threshold. A
+rotation of the namespace owner keys applies to both parties. Each party has
+its own signing-key update in the same rotation script. A LocalNet rehearsal
+on three participants confirmed this procedure (wormhole PR #76). A rotation
+is three topology changes. Until all apply, a removed key can still sign for a
+party that is not yet updated. Rotate `nttCustody` first, then finish the
+rotation at once.
+
+`nttCustody` signs every manager, also burn/mint managers and managers that
+an ordinary admin holds. The reasons are:
+
+- The hand-off to `gg` runs with no live signature
+  (`AcceptAdminTransferByVaa`). The new manager has `nttCustody` as a
+  signatory. Only a signature on the old manager can supply this authority.
+- A signature on only the quorum-held managers needs a second source at
+  hand-off time, for example a choice on the root that `gg` controls and that
+  creates `nttCustody`-signed managers. Each hand-off then needs the root, and
+  each hand-off contends with registrations.
+- The extra signature gives registry code no authority. Registry code gets
+  the authority of the transfer sender only. The sender is `nttCustody` only
+  on lock/unlock deployments that the quorum holds.
+
+A malicious or defective registry that the quorum vetted can do these
+things with the authority of `nttCustody`:
+
+- Move each holding of `nttCustody`. This includes the reserves of other
+  quorum-held deployments, also in other instruments. The `LockedLedger` cap
+  does not stop it.
+- Make holdings of its own instrument with `nttCustody` as owner.
+
+Thus the quorum-held lock/unlock reserves are one risk pool. The owner
+accepts this risk (`REDTEAM.md`, F1, "Residual risk"). The guardian quorum obeys this
+rule for each transfer registry:
+
+1. Examine the registry before you sign an `AcceptAdminToGovernance` VAA.
+2. Examine each new version of the registry before a guardian participant
+   vets it.
+3. Examine the registry again before you sign a `SetFactory` VAA for it.
+4. Do not vet a registry version that you did not examine.
+
+The same registry cannot do these things:
+
+- Publish a message from an NTT transceiver `Emitter`. The `Emitter` owner is
+  `gg`.
+- Mint a `gg`-administered instrument through the canonical `CoinFactory`.
+- Change a manager: `SetPeer`, `SetFactory`, `SetPaused`, and `TransferAdmin`
+  need the admin, which is `gg`.
+- Change a `LockedLedger`. Its choices need `operator` and `gg`.
+- Make `nttCustody` the admin of a deployment.
+
+`TestRedTeam:testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority`
+and `TestRedTeam:testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument`
+show the rejections.
+
+The rule above is for transfer registries only. The fee registry runs with
+the authority of `feeCustody`, not `gg`. Core 0.8.3 (`wormholelabs-xyz/wormhole`
+PR #81) moved fee custody from `gg` to `feeCustody`. The fee instrument
+admin is not `gg` and not the operator.
 
 ## Deployment
 
@@ -375,8 +494,8 @@ checks, in order:
    below), so a relayer cannot steer the payout.
 
 `Release` (lock/unlock) then debits the deployment's `LockedLedger`, which
-rejects any amount above the balance, and transfers custody holdings from `gg`
-to the recipient. `Mint` (burn/mint) mints through the recipient's standing
+rejects any amount above the balance, and transfers custody holdings from the
+deployment's `reserveCustodian` to the recipient. `Mint` (burn/mint) mints through the recipient's standing
 `DepositPreapproval`. Any submitter can only cause the VAA-bound transfer to
 the VAA-bound recipient. The received wire amount is rescaled to the local
 token's decimals before paying out, truncating precision the token cannot
@@ -461,14 +580,19 @@ version that the submitter prefers. Thus, on each participant that hosts
 **Custody follows the admin.** A deployment registers with its reserve owned
 by its own `admin`: fully operational and explicitly custodial — the admin
 owns the reserve outright, so users trust it the way they would a custodial
-bridge, and wallets should surface who the admin is. The role is handed over
-with `TransferAdmin`, normally as propose-accept: the current admin leaves a
+bridge, and wallets must show who the admin is. `TransferAdmin` hands over the
+role, normally as propose-accept: the current admin leaves a
 standing `AdminTransferProposal`, and the new admin accepts at its own pace,
-naming the committed factory it vetted; the pot moves with the role. Handing
-the role to `gg` is the guardian quorum's custody opt-in: the reserve becomes
-quorum-owned — the old admin can no longer touch it, every inbound movement is
-VAA-gated, and all admin operations (peers, factory rotation, a further
-handoff) become governance actions. The handoff changes nothing on the wire:
+naming the committed factory it vetted. The ledger balance moves to the new
+`reserveCustodian`. The rest of the pot stays with the old custodian, because
+the pot can hold the reserves of other deployments of the same custodian
+(`ConsolidateCustody`). The registry must take exactly the balance from the
+old custodian and deliver exactly the balance to the new custodian. Handing
+the role to `gg` is the guardian quorum's custody opt-in: the reserve moves to `nttCustody` — the old admin can no longer touch
+it, every inbound movement is VAA-gated, and all admin operations (peers,
+factory rotation, a further handoff) become governance actions. A demotion
+from `gg` moves the ledger balance from `nttCustody` to the new admin.
+The handoff changes nothing on the wire:
 the manager and transceiver addresses are bound to the registering admin (not
 the current one), the replay scope is the derived `namespace` under `gg` (both
 unaffected by who currently holds `admin`), and the transceiver `Emitter`'s
@@ -506,33 +630,36 @@ same ceremony.
 
 **Why the partition is by owner.** Isolation between deployments follows from
 ownership, not from accounting or holding topology. Reserves of distinct
-admins cannot mix, no matter what any factory reports: a deployment that
+custodians cannot mix, no matter what any factory reports: a deployment that
 commits a dishonest factory can inflate only its own ledger and drain only its
-own admin-owned reserve. The `gg` pool is shared only among deployments whose
-admin role the quorum accepted, whose factories it vetted. Ownership is also
+own admin-owned reserve. Only deployments whose admin role the quorum
+accepted, and whose factories it vetted, share the `nttCustody` pool.
+Ownership is also
 the one partition a registry cannot churn away: registries reorganize holdings
 out from under the bridge (Canton Coin's rounds merge, expire, and recreate
 contracts), which erases any partition built out of specific contract ids — a
 pinned pot cid, an escrow — but never changes who owns the value. Finally,
-because every choice body carries all three signatures, the manager checks that
-each custody holding it spends is owned by the deployment's own current
-`admin`, so the ambient `gg` authority in another deployment's choices can
-never reach the `gg` pool.
+because every choice body carries all four signatures, the manager checks
+that the deployment's own `reserveCustodian` owns each custody holding that
+it spends. Thus the ambient `nttCustody` authority in the choices of another
+deployment can never reach the `nttCustody` pool.
 
-**The locked ledger.** Wormhole attests only that an emitter emitted bytes,
-not that a transfer is backed. A deployment that trusts a hostile peer must
-therefore not be able to release more than it locked: each deployment's
-`LockedLedger` is credited on every lock and debited on every release, and
-`Debit` rejects amounts above the balance. Within the `gg` pool, where
-reserves of one instrument are fungible across gg-adminned deployments, this
-cap is what keeps a hostile-peer deployment away from the others' collateral:
-credits and debits are atomic with the corresponding deposit and release, so
-the sum of those balances never exceeds `gg`'s physical holdings, and every
-deployment's cap stays satisfiable no matter which holdings a release spends.
-One consequence of the shared pool: `gg` also custodies message fees, so a
-release may physically spend fee holdings of the same instrument. That is
-value-neutral (change returns to `gg` and the cap still binds), but worth
-knowing when auditing `gg`'s holdings.
+**The locked ledger.** Wormhole attests only that an emitter emitted bytes.
+It does not attest that value backs a transfer. Thus a deployment that trusts
+a hostile peer must not release more than it locked:
+
+- The manager credits the `LockedLedger` of the deployment on each lock.
+- The manager debits the `LockedLedger` on each release.
+- `Debit` rejects amounts above the balance.
+
+In the `nttCustody` pool, reserves of one instrument are fungible across
+gg-adminned deployments. There, this cap keeps a hostile-peer deployment away
+from the collateral of the other deployments. Each credit is atomic with its
+deposit. Each debit is atomic with its release. Thus the sum of the balances
+never exceeds the physical holdings of `nttCustody`. The cap of each
+deployment stays satisfiable for each choice of holdings that a release
+spends. Message fees go to `feeCustody`, not to `gg` and not to
+`nttCustody`. Thus a release cannot spend fee holdings.
 
 **The custody pot (single-holding invariant).** Custody holdings are visible
 only to their stakeholders (the custodian and the registry admin), so an
@@ -595,8 +722,8 @@ custodian on lock, the recipient on unlock) still depends on registry-level
 receiver pre-approval (for example Amulet's own `TransferPreapproval`), which
 is outside NTT's control. One practical upside of admin custody: the lock's
 receiver is the admin itself, which can self-serve that pre-approval; a
-gg-adminned deployment needs it arranged for `gg`, which is part of what the
-quorum takes on by accepting the role.
+gg-adminned deployment needs it arranged for `nttCustody`, which is part of
+what the quorum takes on by accepting the role.
 
 ## Contention and contract churn
 
@@ -639,13 +766,12 @@ retried.
 - Never-opted-in recipients: a pending+claim fallback (mint a pending
   instruction the recipient later claims) would let delivery proceed before
   opt-in. Deliberately out of scope for now.
-- Foreign-admin lock/unlock against a real registry: the mock factory cannot
-  model a real registry's receiver pre-approval, so the tests make `gg` every
-  instrument's admin, run most lock tests with the sender as the deployment
-  admin, and hand the admin role to gg first in the different-user lock test.
-  A real lock/unlock deployment bridges a token whose admin is not `gg` and
-  relies on that registry's `TransferPreapproval`; exercising that end to end
-  is future work.
+- Foreign-admin lock/unlock against a real registry: the `Test.TestNtt` mock
+  factory models receiver pre-approval only as a co-signature
+  (`preapprovedReceivers`). `Test.TestRedTeam` runs lock, release,
+  consolidation, and the custody hand-off against an issuer `CoinFactory`
+  with `TransferPreapproval`. A LocalNet run of the `nttCustody` hand-off on
+  Canton Coin is future work.
 - Driving the VAA-gated governance actions (`AcceptAdminTransferByVaa`,
   `RegisterManagerByVaa`, `SetFactoryByVaa`) from the playground CLI
   (`vaagen`, `ntt-playground` deploy/accept commands) — playground-only

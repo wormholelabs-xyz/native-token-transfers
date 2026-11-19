@@ -11,6 +11,7 @@ Thus an inbound transfer can name a recipient party that the script allocates.
 Lock/unlock deployments bridge a `Coin` of a foreign issuer.
 The issuer's `CoinFactory` is the registry, so the registry checks each input holding.
 Burn/mint deployments use the canonical gg `CoinFactory`.
+The `NttGovernance` root has a separate custody party, `nttCustody`.
 
 ## Results
 
@@ -23,7 +24,10 @@ Burn/mint deployments use the canonical gg `CoinFactory`.
 | A11 | Wrong target chain, zero amount, dust, decimals overflow, maximum amount, wrong emitter, wrong source manager, wrong guardian set, foreign key, wrong recipient | `testRedTeamInboundEdgeCasesRejected` | Held |
 | A12 | Governance VAAs with a wrong emitter chain, emitter address, guardian set, epoch, manager, chain, or action; replay; stale epoch after a rotation | `testRedTeamGovernanceForgeriesRejected` | Held |
 | A13 | Operator, relayer, gg alone, or a stranger moves the admin role, a peer, the ledger, or custody | `testRedTeamUnauthorizedMovesRejected` | Held |
-| N1 | Registry code uses gg authority after the quorum accepts custody | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument` | Broken (F1) |
+| N1 | Registry code mints a gg-administered instrument after the quorum accepts custody | `testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument` | Fixed (F1) |
+| N1a | Under quorum custody, registry code forges a transfer from another transceiver or sets a peer on another gg-adminned manager | `testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority` | Fixed (F1) |
+| N1b | A root, manager, registration, or hand-off makes gg a custodian, `nttCustody` an admin, or the operator `nttCustody` | `testRedTeamReserveCustodianIsNeverGuardianGovernance` | Held |
+| N1c | A hand-off moves a pooled sibling reserve; a registry takes or delivers an incorrect hand-off amount | `testRedTeamAdminTransferMovesOnlyTheLedgerBalance` | Fixed (F1 follow-up) |
 | N2 | A third-party relayer delivers a release on a production registry | `testRedTeamThirdPartyRelayerReleasesOnCoinRegistry` | Fixed (F2) |
 | N2a | Registry takes an incorrect custodian outflow, misroutes change, or answers Pending; duplicate pot | `testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow` | Held |
 | N2b | Registry reports a bad deposit or change: wrong owner or instrument, locked, unsigned, duplicate, or an input | `testRedTeamRegistryMisreportedHoldingsRejected` | Held |
@@ -42,28 +46,33 @@ Thus each new `token-cip0056` version that a gg host vets is a decision about th
 
 ## F1: quorum custody gives gg authority to registry code
 
-Severity: High.
+Severity: Critical.
+Status: fixed in PR #75.
 The attack needs the quorum to accept custody of a lock/unlock deployment.
-After that, the registry can mint each burn/mint instrument with no limit.
+Before the fix, the registry can mint each burn/mint instrument with no limit.
+It can also publish each payload from each NTT transceiver.
+A forged `PublishMessage` on a gg-owned transceiver gives a VAA with no lock or burn behind it.
+The peer chain then mints or releases value that no deposit backs.
+It can also change each manager whose admin is gg.
 
 ### Cause
 
 - `TransferFactory_Transfer` has the controller `transfer.sender`.
-- After `AcceptAdminTransferByVaa`, the custodian is gg.
-- `ConsolidateCustody`, `Release`, `TransferAdmin`, and the lock merge in `Transfer` send with `sender = admin`, which is gg (`ntt/daml/Wormhole/Ntt/Manager.daml:597`, `:868`, `:980`, `:1032`).
+- Before the fix, the custodian after `AcceptAdminTransferByVaa` is gg.
+- `ConsolidateCustody`, `Release`, `TransferAdmin`, and the lock merge in `Transfer` send with `sender = admin`, which is gg.
 - Thus the body of the registry choice has the authority of gg.
 - The canonical `CoinFactory` has gg as its only signatory. `BurnMintFactory_BurnMint` needs only gg and the extra actors.
+- `Emitter.PublishMessage` needs the owner and the payer. The owner of each NTT transceiver is gg. The registry admin is the payer.
+- `SetPeer` needs the admin and the payer. The admin of each quorum-held manager is gg.
 - `TransferPreapproval_Receive` in `token-cip0056` needs only the instrument admin, which is gg.
-- `validateSettledHolding` accepts a holding that the instrument admin signs alone (`Cip56.daml:139`). Thus the registry admin can make holdings with `owner = gg` without gg.
+- `validateSettledHolding` accepts a holding that the instrument admin signs alone (`Cip56.daml`). Thus the registry admin can make holdings with `owner = gg` without gg.
 - `ConsolidateCustody` is permissionless. Thus the registry admin can start the merge at any time.
+- The registry reads the contract ids of its targets from `extraArgs`, which the caller of `ConsolidateCustody` supplies.
 
-The `SetFactory` comment stated that the lock/unlock factory never wields gg.
-This statement was false after the quorum accepts custody. The comment is now correct.
-
-### Reproduction
+### Reproduction (before the fix)
 
 1. Register a burn/mint deployment C with the canonical gg `CoinFactory`.
-2. As registry admin R, create `SenderAuthorityRegistryFactory`. This registry mints C's instrument when the sender is gg.
+2. As registry admin R, create `SenderAuthorityRegistryFactory`. This registry mints C's instrument with the authority of the sender.
 3. As R, register a lock/unlock deployment with this factory.
 4. As R, create an `AdminTransferProposal` to gg.
 5. As a relayer, submit `AcceptAdminTransferByVaa` with a valid `AcceptAdminToGovernance` VAA.
@@ -71,17 +80,68 @@ This statement was false after the quorum accepts custody. The comment is now co
 7. As R, submit `ConsolidateCustody` with these two holdings.
 8. Result: R owns 1000000.0 of C's bridged instrument.
 
-The same authority also lets the registry move each holding that gg owns.
-This includes other gg custody pots and collected message fees.
+`testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority` uses the same steps with `SenderAuthorityGovernanceRegistryFactory`.
+Before the fix, both of its attacks succeed (PR #75, first commit):
 
-### Proposed fix
+- The registry publishes a forged `NativeTokenTransfer` of 10000000.0 tokens from the transceiver of a different gg-adminned deployment.
+- The registry sets a peer on that deployment's manager.
 
-Do not use gg as the CIP-56 sender for third-party registry code.
-Possible changes:
+### Fix
 
-1. Give quorum custody to a dedicated custody party, separate from the gg mint authority.
-2. Make the mint authority a separate party, or make `CoinFactory` co-signed by the operator.
-3. Accept quorum custody only for registry templates on an allowlist, as `requireCanonicalFactory` does for burn/mint.
+gg never owns a lock/unlock reserve.
+
+1. The `NttGovernance` root has a second quorum party, `nttCustody`, as a signatory.
+2. Each `NttManager` inherits the `nttCustody` signature from the root.
+3. The new manager field `reserveCustodian` names the reserve owner. It is `admin` while `admin` is not gg. It is `nttCustody` while `admin` is gg.
+4. Each custody transfer sends with `sender = reserveCustodian`.
+5. `TransferAdmin` to gg moves the ledger balance to `nttCustody`. A demotion moves the ledger balance from `nttCustody` to the new admin.
+6. The template precondition of `NttManager` rejects gg as `reserveCustodian` and rejects `nttCustody` as `admin`. Registration and `TransferAdmin` assert the same rules.
+
+After the fix, the registry body has the authority of the registry admin and `nttCustody`.
+Each attack above fails with an authorization error that names gg.
+
+### Follow-up: a hand-off moves only the ledger balance
+
+Severity: High.
+Status: fixed in PR #75.
+
+`ConsolidateCustody` is permissionless.
+It can merge the reserves of two deployments with the same custodian into the pot of one deployment.
+All quorum-held deployments have the same custodian, `nttCustody`.
+Before the fix, `TransferAdmin` moved the full pot to the new custodian.
+Thus a demotion of one deployment moved the reserves of the other quorum-held deployments to the new admin.
+
+After the fix, `TransferAdmin` moves exactly the ledger balance.
+The rest of the pot stays with the old custodian.
+The hand-off uses `SenderOutflowAndReceiverInflowEqualAmount`.
+The registry must take exactly the balance from the old custodian.
+The registry must also deliver exactly the balance to the new custodian.
+Thus a registry fee cannot spend the reserves of other deployments.
+
+`testRedTeamAdminTransferMovesOnlyTheLedgerBalance` runs three cases: a quorum demotion, a quorum promotion, and a succession between admins.
+In each case, the other deployment releases its full balance after the hand-off.
+
+### Residual risk
+
+Status: accepted.
+
+A registry that the quorum vetted runs with the authority of `nttCustody`.
+It can move each holding of `nttCustody`.
+This includes the reserves of other quorum-held deployments, also in other instruments.
+The `LockedLedger` cap does not stop it.
+
+Rule for the guardian quorum:
+
+1. Examine the transfer registry before you sign an `AcceptAdminToGovernance` VAA.
+2. Examine each new version of that registry before a guardian participant vets it.
+3. Examine the registry again before you sign a `SetFactory` VAA for it.
+4. Do not vet a registry version that you did not examine.
+
+`README.md`, section "Custody party", lists what the registry cannot do.
+
+The fee registry runs with the authority of `feeCustody`, not `gg`.
+Core 0.8.3 (`wormholelabs-xyz/wormhole` PR #81) moved fee custody from `gg` to `feeCustody`.
+The fee instrument admin is not `gg` and not the operator.
 
 ## F2: a third-party relayer cannot deliver a release
 

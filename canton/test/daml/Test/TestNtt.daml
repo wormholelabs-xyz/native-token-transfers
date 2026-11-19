@@ -10,10 +10,11 @@
 -- through the standard interfaces exactly as it would a real registry. One
 -- simplification: the mock factory cannot model a real registry's receiver
 -- pre-approval, so it can only create a receiver holding when the receiver's
--- signature is otherwise reachable — the sender's own, or the factory-signing
--- @gg@'s. Most lock tests therefore use a sender who is also the deployment
--- admin (the custodian), and the different-user lock test hands the admin
--- role to gg first (custodian gg). Every instrument admin is gg for the same
+-- signature is otherwise reachable — the sender's own, or a factory
+-- co-signer's ('preapprovedReceivers', which 'deploy' sets to @nttCustody@).
+-- Most lock tests therefore use a sender who is also the deployment admin
+-- (the custodian), and the different-user lock test hands the admin role to
+-- gg first (custodian @nttCustody@). Every instrument admin is gg for the same
 -- reason (a real lock/unlock deployment would bridge a foreign token whose
 -- admin is not gg). 'Test.MockToken' is unrelated: it backs the separate fee
 -- instrument.
@@ -174,11 +175,12 @@ template MockTransferInstruction
 -- synchronous-settlement check.
 template MockTransferFactory
   with
-    admin   : Party
-    pending : Bool
-    skim    : Decimal
+    admin                : Party
+    pending              : Bool
+    skim                 : Decimal
+    preapprovedReceivers : [Party]  -- co-signers, so the mock can create their receiver holdings
   where
-    signatory admin
+    signatory admin, preapprovedReceivers
 
     interface instance TransferFactory for MockTransferFactory where
       view = TransferFactoryView with admin, meta = emptyMetadata
@@ -373,17 +375,29 @@ testNamespaceVector = do
 -- Setup + deployment
 ----------------------------------------------------------------------
 
--- | Bootstrap the core (CoreState + fee-0 EmitterRegistry) and the gg-signed
--- 'NttGovernance' root. @gg@ is both the trust anchor and the custody/mint
--- authority.
+-- | Bootstrap the core (CoreState + fee-0 EmitterRegistry) and the
+-- 'NttGovernance' root, signed by gg and a fresh @nttCustody@. @gg@ is the
+-- trust anchor and the mint authority; 'nttCustodyOf' reads the custody party.
 nttSetup : Script (Party, Party, ContractId CoreState)
 nttSetup = do
   (operator, _, csId) <- setup
   Some cs <- queryContractId operator csId
   let gg = cs.guardianGovernance
-  _ <- submit (actAs operator <> actAs gg) do
-    createCmd NttGovernance with operator, guardianGovernance = gg, nextId = 0, consumedGovernance = Set.empty
+  createNttGovernanceRoot operator gg
   pure (operator, gg, csId)
+
+createNttGovernanceRoot : Party -> Party -> Script ()
+createNttGovernanceRoot operator gg = do
+  nttCustody <- allocateParty "NttCustody"
+  _ <- submit (actAs operator <> actAs gg <> actAs nttCustody) do
+    createCmd NttGovernance with operator, guardianGovernance = gg, nttCustody, nextId = 0, consumedGovernance = Set.empty
+  pure ()
+
+-- | The custody party of @operator@'s 'NttGovernance' root.
+nttCustodyOf : Party -> Script Party
+nttCustodyOf operator = do
+  [(_, root)] <- query @NttGovernance operator
+  pure root.nttCustody
 
 -- | Bootstrap the genesis gg-owned canonical 'CoinFactory', separate from
 -- 'nttSetup' since most lock/unlock and mock-burn/mint tests never need it.
@@ -398,8 +412,7 @@ nttSetupFee = do
   (operator, _, csId) <- setupWithInstrument (Some inst)
   Some cs <- queryContractId operator csId
   let gg = cs.guardianGovernance
-  _ <- submit (actAs operator <> actAs gg) do
-    createCmd NttGovernance with operator, guardianGovernance = gg, nextId = 0, consumedGovernance = Set.empty
+  createNttGovernanceRoot operator gg
   pure (operator, gg, csId, mockAdmin, inst, cs.feeRecipient)
 
 -- | A registered deployment and the handles its tests need. @emitterCid@ is
@@ -457,7 +470,9 @@ deploy operator gg admin config csId = do
       fc <- nttCoinFactorySetup gg
       pure (inst, BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
-      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+      nttCustody <- nttCustodyOf operator
+      fc <- submit (actAs gg <> actAs nttCustody) do
+        createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = [nttCustody]
       pure (bridgedInstrument gg, TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
@@ -766,7 +781,7 @@ testRegistrationRejectsForeignRegistries = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "ForeignRegAdmin"
   rogue <- allocateParty "RogueOperator"
-  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = []
   let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
@@ -1109,7 +1124,7 @@ testRegisterManagerReturnsActiveEmitter : Script ()
 testRegisterManagerReturnsActiveEmitter = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RegisterActiveEmitterAdmin"
-  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = []
   let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
@@ -1144,7 +1159,7 @@ testRegisterManagerRejectsOutOfRangeConsistencyLevel : Script ()
 testRegisterManagerRejectsOutOfRangeConsistencyLevel = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RegisterCLAdmin"
-  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = []
   let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
   [(govCid, _)] <- query @NttGovernance operator
   govDisc <- fromSome <$> queryDisclosure operator govCid
@@ -1585,7 +1600,7 @@ testLockPendingSettlementRejected = do
   alice <- allocateParty "PendingAlice"
   (d, discs) <- sendScaffold operator gg alice LockUnlock csId
   holdingCid <- mkHolding gg alice d.instrumentId 0.01
-  pendingFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = True, skim = 0.0
+  pendingFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = True, skim = 0.0, preapprovedReceivers = []
   pendingDisc <- fromSome <$> queryDisclosure gg pendingFc
   let pendingFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory pendingFc)
   mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = pendingFactory
@@ -1617,7 +1632,7 @@ testLockShortDeliveryRejected = do
   (d, discs) <- sendScaffold operator gg alice LockUnlock csId
   holdingCid <- mkHolding gg alice d.instrumentId 0.01
   skimFc <- submit gg do
-    createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0001
+    createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0001, preapprovedReceivers = []
   skimDisc <- fromSome <$> queryDisclosure gg skimFc
   let skimFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory skimFc)
   mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = skimFactory
@@ -1641,7 +1656,7 @@ testSetFactory = do
   submitMustFail gg do exerciseCmd d.mgrCid SetFactory with newFactory = d.factory
 
   -- Admin repoints to a fresh (working) factory; the send routes through it.
-  freshFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+  freshFc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = []
   freshDisc <- fromSome <$> queryDisclosure gg freshFc
   let freshFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory freshFc)
   mgrCid <- submit alice do exerciseCmd d.mgrCid SetFactory with newFactory = freshFactory
@@ -1674,10 +1689,10 @@ testSetFactoryGgMintedRequiresGg = do
 -- Admin transfer (custody handoff)
 ----------------------------------------------------------------------
 
--- | Transferring the admin role to gg moves the reserve and preserves the
--- balance: a lock lands in admin-owned custody; after 'TransferAdmin' to gg
--- the pot is gg-owned and the ledger's hint tracks it; a later lock merges
--- into the gg pot. The ledger contract itself never churns on the handoff.
+-- | Transferring the admin role to gg moves the reserve to @nttCustody@ and
+-- preserves the balance: a lock lands in admin-owned custody; after
+-- 'TransferAdmin' to gg the pot is @nttCustody@-owned and the ledger's hint
+-- tracks it; a later lock merges into that pot. gg owns no custody holding.
 testTransferAdminToGg : Script ()
 testTransferAdminToGg = do
   (operator, gg, csId) <- nttSetup
@@ -1705,18 +1720,23 @@ testTransferAdminToGg = do
 
   Some ledger <- queryContractId operator ledgerCid
   ledger.balance === 0.01
+  nttCustody <- nttCustodyOf operator
+  Some mgr <- queryContractId operator mgrCid
+  mgr.admin === gg
+  mgr.reserveCustodian === nttCustody
   adminLeft <- cip56HoldingsOwnedBy gg alice
   adminLeft === []
-  ggCustody <- cip56HoldingsOwnedBy gg gg
-  potCid <- case ggCustody of
+  cip56HoldingsOwnedBy gg gg >>= (=== [])
+  quorumCustody <- cip56HoldingsOwnedBy gg nttCustody
+  potCid <- case quorumCustody of
     [(cid, h)] -> do
       h.amount === 0.01
       pure cid
-    _ -> abort ("expected one gg-owned custody holding, got: " <> show ggCustody)
+    _ -> abort ("expected one nttCustody-owned custody holding, got: " <> show quorumCustody)
   ledger.custodyHoldingCid === Some (toInterfaceContractId @Holding potCid)
 
-  -- A lock after the handoff merges into the gg pot; the emitter was already
-  -- gg-owned before the handoff, so the wire identity is unaffected by it.
+  -- A lock after the handoff merges into the nttCustody pot; the emitter was
+  -- already gg-owned before the handoff, so the wire identity is unaffected.
   holdingCid2 <- mkHolding gg alice d.instrumentId 0.005
   [(emitterCid2, _)] <- query @Emitter gg
   mgrDisc <- fromSome <$> queryDisclosure operator mgrCid
@@ -1742,10 +1762,10 @@ testTransferAdminToGg = do
 
   [(_, ledger2)] <- query @LockedLedger operator
   ledger2.balance === 0.015
-  ggCustody2 <- cip56HoldingsOwnedBy gg gg
-  case ggCustody2 of
+  quorumCustody2 <- cip56HoldingsOwnedBy gg nttCustody
+  case quorumCustody2 of
     [(_, h)] -> h.amount === 0.015
-    _ -> abort ("expected one merged gg custody holding, got: " <> show ggCustody2)
+    _ -> abort ("expected one merged nttCustody holding, got: " <> show quorumCustody2)
 
 -- | The property the whole rework exists for: replay protection is scoped to
 -- @(guardianGovernance, mgr.namespace)@, both of which are unaffected by
@@ -1909,7 +1929,7 @@ testTransferAdminRequiresConsolidatedReserve = do
   expectAbort "does not cover the locked balance" res
 
   -- The cure: the admin tops the pot up through 'ConsolidateCustody'; the
-  -- handoff then goes through and gg holds the whole reserve.
+  -- handoff then goes through and nttCustody holds the whole reserve.
   topUp <- mkHolding gg alice d.instrumentId 1.0
   factoryDisc <- discloseTransferFactory gg
   lcidDisc <- fromSome <$> queryDisclosure operator lcid
@@ -1922,10 +1942,10 @@ testTransferAdminRequiresConsolidatedReserve = do
   (_, Some lcid') <- submit (actAs alice <> actAs gg) do doTransfer lcid
   Some ledger' <- queryContractId operator lcid'
   ledger'.balance === 1.01
-  ggCustody <- cip56HoldingsOwnedBy gg gg
-  case ggCustody of
+  quorumCustody <- nttCustodyOf operator >>= cip56HoldingsOwnedBy gg
+  case quorumCustody of
     [(_, h)] -> h.amount === 1.01
-    _ -> abort ("expected the whole reserve with gg, got: " <> show ggCustody)
+    _ -> abort ("expected the whole reserve with nttCustody, got: " <> show quorumCustody)
 
 -- | The handoff needs both admins and pins the vetted factory: neither party
 -- alone can transfer, a wrong vetted factory is rejected, a transfer to the
@@ -2046,7 +2066,7 @@ testTransferAdminProposeAccept = do
       vettedFactory = d.factory
       extraArgs = emptyExtraArgs
 
-  -- A standing offer, accepted by gg alone: the pot moves to gg.
+  -- A standing offer, accepted by gg alone: the pot moves to nttCustody.
   propCid <- submit alice do
     createCmd AdminTransferProposal with
       admin = alice, newAdmin = gg, managerAddress = mgr.managerAddress
@@ -2056,10 +2076,10 @@ testTransferAdminProposeAccept = do
       ledgerCid = Some lcid
       vettedFactory = d.factory
       extraArgs = emptyExtraArgs
-  ggCustody <- cip56HoldingsOwnedBy gg gg
-  case ggCustody of
+  quorumCustody <- nttCustodyOf operator >>= cip56HoldingsOwnedBy gg
+  case quorumCustody of
     [(_, h)] -> h.amount === 0.01
-    _ -> abort ("expected the pot with gg, got: " <> show ggCustody)
+    _ -> abort ("expected the pot with nttCustody, got: " <> show quorumCustody)
 
   -- A stale offer by the old admin no longer applies: alice is not the
   -- deployment's current admin anymore.
@@ -2309,11 +2329,8 @@ testNttSend = do
 -- payer. The only extra requirement is visibility: every referenced contract
 -- is disclosed to bob.
 --
--- The admin role is handed to gg first so the custody receiver is gg. The
--- mock factory can only create a receiver holding when it can reach the
--- receiver's signature (it cannot model a real registry's receiver
--- pre-approval), which for a sender other than the custodian means the
--- gg-owned reserve.
+-- The admin role is handed to gg first so the custody receiver is
+-- nttCustody, which co-signs the mock factory as a pre-approved receiver.
 testNttTransferByDifferentUser : Script ()
 testNttTransferByDifferentUser = do
   (operator, gg, csId, mockAdmin, inst, feeRecipient) <- nttSetupFee
@@ -2372,12 +2389,22 @@ testNttTransferByDifferentUser = do
 
   [(_, em)] <- query @Emitter gg
   em.sequence === 3   -- deploy's TransceiverInit (0), SetPeer's registration (1), this Transfer (2)
-  custody <- cip56HoldingsOwnedBy gg gg
+  custody <- nttCustodyOf operator >>= cip56HoldingsOwnedBy gg
   case custody of
     [(_, h)] -> h.amount === 0.01
     _ -> abort ("expected exactly one locked holding, got: " <> show custody)
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal 1000
+  -- N75-2: the fee lands on feeCustody only, and the fee registry is not gg's.
+  nttCustody <- nttCustodyOf operator
+  assert (feeRecipient /= gg)
+  assert (feeRecipient /= nttCustody)
+  assert (inst.admin /= gg)
+  assert (inst.admin /= operator)
+  ggFeeBalance <- mockBalance mockAdmin gg inst
+  ggFeeBalance === 0.0
+  nttCustodyFeeBalance <- mockBalance mockAdmin nttCustody inst
+  nttCustodyFeeBalance === 0.0
 
 -- | Two negative cases: the admin alone cannot transfer on bob's behalf (bob
 -- is the controller), and bob without disclosures fails on visibility.
@@ -2454,7 +2481,7 @@ setupFixedManagerOn operator gg admin config chainId csId = do
       fc <- submit gg do createCmd MockBurnMintFactory with admin = gg, instrument = instrumentId
       pure (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory fc))
     LockUnlock -> do
-      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0
+      fc <- submit gg do createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = []
       pure (TransferFactoryCid (toInterfaceContractId @TransferFactory fc))
   -- A fixed-address deployment bypasses 'RegisterManager', so it needs its own
   -- directly-created transceiver Emitter for SetPeer's broadcast leg.
@@ -2466,12 +2493,15 @@ setupFixedManagerOn operator gg admin config chainId csId = do
       emitterId = 999
       emitterAddress = b32 "cc"
       sequence = 0
-  mgrCid <- submit (actAs operator <> actAs admin <> actAs gg) do
+  nttCustody <- nttCustodyOf operator
+  mgrCid <- submit (actAs operator <> actAs admin <> actAs gg <> actAs nttCustody) do
     createCmd NttManager with
       operator
       namespace
       admin
       guardianGovernance = gg
+      nttCustody
+      reserveCustodian = reserveCustodianFor ReserveCustodyParties with guardianGovernance = gg, nttCustody, admin
       chainId
       managerId = 999
       managerAddress = b32 "aa"
@@ -3791,9 +3821,10 @@ testRegisterManagerByVaaReplayRejected : Script ()
 testRegisterManagerByVaaReplayRejected = do
   (operator, gg, csId) <- nttSetup
   admin <- allocateParty "RegisterReplayAdmin"
-  govCid <- submit (actAs operator <> actAs gg) do
+  nttCustody <- nttCustodyOf operator
+  govCid <- submit (actAs operator <> actAs gg <> actAs nttCustody) do
     createCmd NttGovernance with
-      operator, guardianGovernance = gg, nextId = 0
+      operator, guardianGovernance = gg, nttCustody, nextId = 0
       consumedGovernance = Set.fromList [(parseVAA registerHappyVAA).hash]
   govDisc <- fromSome <$> queryDisclosure operator govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
