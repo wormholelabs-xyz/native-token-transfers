@@ -21,7 +21,9 @@ const (
 )
 
 // parseRequestPartyID accepts only "<hint>::1220<64 lowercase hex>". The hint is 1 to 185
-// characters of [A-Za-z0-9._-]. A malformed value is a 400 with a fixed reason.
+// characters of [A-Za-z0-9 :_-], split at the first "::" as Canton does
+// (UniqueIdentifier.fromProtoPrimitive_, Daml-LF Party in IdString.scala). A malformed value is a
+// 400 with a fixed reason.
 func parseRequestPartyID(rawParty, paramName string) (partyID, error) {
 	hint, fingerprint, hasSeparator := strings.Cut(rawParty, partyFingerprintSeparator)
 	if !hasSeparator {
@@ -32,8 +34,11 @@ func parseRequestPartyID(rawParty, paramName string) (partyID, error) {
 	}
 	for index := range len(hint) {
 		if !isPartyHintCharacter(hint[index]) {
-			return "", newPartyIDError(paramName, "the hint has a character outside [A-Za-z0-9._-]")
+			return "", newPartyIDError(paramName, "the hint has a character outside [A-Za-z0-9 :_-]")
 		}
+	}
+	if strings.Contains(hint, partyFingerprintSeparator) {
+		panic("disclosure-service: party hint contains the \"::\" separator after the split")
 	}
 	if len(fingerprint) != len(partyFingerprintPrefix)+partyFingerprintHexLength {
 		return "", newPartyIDError(paramName, fmt.Sprintf("the fingerprint is %d characters, it must be %d", len(fingerprint), len(partyFingerprintPrefix)+partyFingerprintHexLength))
@@ -61,7 +66,7 @@ func isPartyHintCharacter(character byte) bool {
 	case character >= 'a' && character <= 'z', character >= 'A' && character <= 'Z', character >= '0' && character <= '9':
 		return true
 	default:
-		return character == '.' || character == '_' || character == '-'
+		return character == ' ' || character == ':' || character == '_' || character == '-'
 	}
 }
 
