@@ -140,7 +140,8 @@ Rule for the guardian quorum:
 `README.md`, section "Custody party", lists what the registry cannot do.
 
 The fee registry runs with the authority of `feeCustody`, not `gg`.
-Core 0.8.1 (`wormholelabs-xyz/wormhole` PR #81) moved fee custody from `gg` to `feeCustody`.
+Core 0.8.3 (`wormholelabs-xyz/wormhole` PR #81) moved fee custody from `gg` to `feeCustody`.
+The fee instrument admin is not `gg` and not the operator.
 
 ## F2: a third-party relayer cannot deliver a release
 

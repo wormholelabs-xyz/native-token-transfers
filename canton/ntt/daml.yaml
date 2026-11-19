@@ -13,10 +13,10 @@
 # an interface implementer.
 sdk-version: 3.5.1
 name: ntt
-version: 0.4.1
+version: 0.4.2
 source: daml
 # 0.4.x is not upgrade-compatible with 0.3.x (README "Versions and
-# upgrades"). Set `upgrades:` to the vendored 0.4.1 release DAR before the
+# upgrades"). Set `upgrades:` to the vendored 0.4.2 release DAR before the
 # next release.
 dependencies:
   - daml-prim

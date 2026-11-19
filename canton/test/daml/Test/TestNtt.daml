@@ -2395,10 +2395,12 @@ testNttTransferByDifferentUser = do
     _ -> abort ("expected exactly one locked holding, got: " <> show custody)
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal 1000
-  -- N75-2: the fee lands on feeCustody only.
+  -- N75-2: the fee lands on feeCustody only, and the fee registry is not gg's.
   nttCustody <- nttCustodyOf operator
   assert (feeRecipient /= gg)
   assert (feeRecipient /= nttCustody)
+  assert (inst.admin /= gg)
+  assert (inst.admin /= operator)
   ggFeeBalance <- mockBalance mockAdmin gg inst
   ggFeeBalance === 0.0
   nttCustodyFeeBalance <- mockBalance mockAdmin nttCustody inst

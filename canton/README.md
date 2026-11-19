@@ -89,8 +89,11 @@ No production deployment uses an earlier version. The LocalNet rehearsals
 used 0.2.0 and 0.3.0. The earlier versions also include 0.3.1 (core 0.7.0),
 0.3.2 (core 0.8.0, package id `f77fe8a8...`) and 0.3.3 (core 0.8.1,
 package id `6c5c1733...`). Version 0.4.0 built against core 0.8.0. Version
-0.4.1 builds against core 0.8.1 (`5b256d13...`) and has the package id
-`88e55a615a516145c7b4d8f0f754f0e95adc8a87bf8c4fa41cdf919cdbb4b7b1`. Canton
+0.4.1 built against core 0.8.1 (`5b256d13...`) and has the package id
+`88e55a615a516145c7b4d8f0f754f0e95adc8a87bf8c4fa41cdf919cdbb4b7b1`. Version
+0.3.4 builds against core 0.8.3 (package id `1c555ab2...`). Version 0.4.2
+builds against core 0.8.3 (`9d546b11...`) and has the package id
+`1a3e3b0e78f9f08adac111bc44110469dc271f61a9c0e5ed2f7b0b20a569feb8`. Canton
 checks upgrade compatibility by
 package name when it receives a DAR. Thus a participant that has an earlier
 `ntt` package rejects the 0.4.x DAR. Use participants that have no earlier
@@ -251,8 +254,9 @@ and `TestRedTeam:testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument`
 show the rejections.
 
 The rule above is for transfer registries only. The fee registry runs with
-the authority of `feeCustody`, not `gg`. Core 0.8.1 (`wormholelabs-xyz/wormhole`
-PR #81) moved fee custody from `gg` to `feeCustody`.
+the authority of `feeCustody`, not `gg`. Core 0.8.3 (`wormholelabs-xyz/wormhole`
+PR #81) moved fee custody from `gg` to `feeCustody`. The fee instrument
+admin is not `gg` and not the operator.
 
 ## Deployment
 
