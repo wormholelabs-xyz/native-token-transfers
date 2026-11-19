@@ -226,3 +226,58 @@ func TestUpstreamHTTPErrorQuotesTheBodyExcerpt(t *testing.T) {
 	assert.NotContains(t, err.Error(), "\n")
 	assert.Contains(t, err.Error(), `"first\nsecond"`)
 }
+
+func TestPublicErrorsHideOAuth2Detail(t *testing.T) {
+	realmEndpoint := newFakeTokenEndpoint(t, func(w http.ResponseWriter, _ int64) {
+		http.Error(w, `{"error":"invalid_client","error_description":"realm internal-realm"}`, http.StatusUnauthorized)
+	})
+	stoppedEndpoint := newFakeTokenEndpoint(t, bearerTokenResponse("tok", 3600))
+	stoppedEndpoint.server.Close()
+
+	cases := []struct {
+		name             string
+		tokenURL         string
+		removeSecretFile bool
+		wantLoggedDetail string
+		forbiddenInBody  []string
+	}{
+		{"token endpoint down", stoppedEndpoint.server.URL + "/realms/internal-realm/token", false, "realms/internal-realm", []string{"realm", "127.0.0.1", "dial"}},
+		{"token endpoint 401", realmEndpoint.server.URL + "/realms/internal-realm/token", false, "invalid_client", []string{"realm", "127.0.0.1", "invalid_client"}},
+		{"client secret file removed after start", realmEndpoint.server.URL + "/token", true, "client-secret", []string{"client-secret", "127.0.0.1", "no such file"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clientConfig := newTestOAuthConfig(t, tc.tokenURL)
+			if tc.removeSecretFile {
+				require.NoError(t, os.Remove(clientConfig.clientSecretFile))
+			}
+			upstream, upstreamCalls, _ := countingJSONAPI(t)
+			tokens := newOAuthBearerTokenSource(clientConfig, newTestUpstreamHTTPClient(t), newFakeClock().now)
+			srv := newTestServerWithClient(t, newTestHTTPACSClient(upstream.URL, tokens))
+			logged := captureServerLog(srv)
+
+			recorder := httptest.NewRecorder()
+			srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
+			requirePublicErrorWithLoggedDetail(t, recorder, logged, http.StatusBadGateway, tc.wantLoggedDetail)
+			for _, forbidden := range tc.forbiddenInBody {
+				assert.NotContains(t, recorder.Body.String(), forbidden)
+			}
+			assert.Zero(t, upstreamCalls.Load())
+		})
+	}
+}
+
+func TestPublicErrorsHideUpstreamTLSDetail(t *testing.T) {
+	pki := newTestUpstreamPKI(t)
+	upstream := newMutualTLSJSONAPI(t, pki)
+	tlsConfig, err := loadUpstreamTLSConfig(upstreamTLSFiles{caFile: pki.untrustedCA.pemPath}, time.Now())
+	require.NoError(t, err)
+	srv := newTestServerWithClient(t, newHTTPACSClient(upstream.URL, newUpstreamHTTPClient(tlsConfig), nil))
+	logged := captureServerLog(srv)
+
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
+	requirePublicErrorWithLoggedDetail(t, recorder, logged, http.StatusBadGateway, "certificate signed by unknown authority")
+	assert.NotContains(t, recorder.Body.String(), "127.0.0.1")
+	assert.NotContains(t, recorder.Body.String(), "x509")
+}
