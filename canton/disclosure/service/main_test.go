@@ -291,10 +291,13 @@ func testPackageName(templateID string) string {
 // Test servers
 // ---------------------------------------------------------------------------
 
+// testPartyFingerprintSuffix is a well-formed "::1220" namespace fingerprint for test party ids.
+const testPartyFingerprintSuffix = "::1220" + "7d1a8b3c5e9f0a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b"
+
 const (
-	testGuardianGovernanceParty = "gg::1"
-	testNttCustodyParty         = "nttCustody::1"
-	testOperatorParty           = "operator::1"
+	testGuardianGovernanceParty = "gg" + testPartyFingerprintSuffix
+	testNttCustodyParty         = "nttCustody" + testPartyFingerprintSuffix
+	testOperatorParty           = "operator" + testPartyFingerprintSuffix
 )
 
 // testReaderParties holds the three test reader parties.
@@ -483,7 +486,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 // /v1/flows/{flow}: fixtures
 // ---------------------------------------------------------------------------
 
-const testRecipient = "recipient::1"
+const testRecipient = "recipient" + testPartyFingerprintSuffix
 
 // acsContractJSONWithArg is acsContractJSON plus a createArgument payload (raw JSON).
 func acsContractJSONWithArg(templateID, contractID, blob, synchronizerID, createArgument string) string {
@@ -566,12 +569,12 @@ func newBaseFixtures(tokenConfig string) baseFixtures {
 	}
 	return baseFixtures{
 		admin:                testRecipient, // distinct from gg, so custodian-vs-recipient preapproval owners differ
-		gg:                   "gg::1",
-		nttCustody:           "nttCustody::1",
+		gg:                   testGuardianGovernanceParty,
+		nttCustody:           testNttCustodyParty,
 		namespace:            "ntt:test-namespace",
 		managerAddr:          strings.Repeat("ab", 32),
 		digest:               strings.Repeat("cd", 32),
-		instrumentAdmin:      "gg::1",
+		instrumentAdmin:      testGuardianGovernanceParty,
 		instrumentID:         "wormhole-ntt:instrument-1",
 		transceiverEmitterID: 7,
 		tokenConfig:          tokenConfig,
@@ -1417,7 +1420,7 @@ func TestHandleFlows_Transfer_BurnMint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleFlows_Register_Basic(t *testing.T) {
-	const gg = "gg::1"
+	const gg = testGuardianGovernanceParty
 	fixtures := flowFixtures{
 		tailNttGovernance:      jsonArray(acsContractJSONWithArg("pkg:"+tailNttGovernance, "gov-cid-1", "Z292", "sync1", guardianAnchorArg(gg))),
 		tailEmitterRegistry:    jsonArray(acsContractJSONWithArg("pkg:"+tailEmitterRegistry, "emreg-cid-1", "ZW1yZWc=", "sync1", guardianAnchorArg(gg))),
@@ -1434,7 +1437,7 @@ func TestHandleFlows_Register_Basic(t *testing.T) {
 }
 
 func TestHandleFlows_Register_ByVaa(t *testing.T) {
-	const gg = "gg::1"
+	const gg = testGuardianGovernanceParty
 	fixtures := flowFixtures{
 		tailNttGovernance:      jsonArray(acsContractJSONWithArg("pkg:"+tailNttGovernance, "gov-cid-2", "Z292", "sync1", guardianAnchorArg(gg))),
 		tailEmitterRegistry:    jsonArray(acsContractJSONWithArg("pkg:"+tailEmitterRegistry, "emreg-cid-2", "ZW1yZWc=", "sync1", guardianAnchorArg(gg))),
@@ -1654,7 +1657,7 @@ func TestHandleFlows_Transfer_LockUnlock_CustodianPreapprovalIsReserveCustodians
 		wantPreapprovalCid string
 	}{
 		{"third-party admin", testRecipient, "pre-" + testRecipient},
-		{"gg admin", "gg::1", "pre-nttCustody::1"},
+		{"gg admin", testGuardianGovernanceParty, "pre-" + testNttCustodyParty},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

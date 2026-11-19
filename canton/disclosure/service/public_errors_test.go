@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -175,4 +177,48 @@ func TestTruncateForError(t *testing.T) {
 			assert.Equal(t, tc.want, truncateForError(tc.input))
 		})
 	}
+}
+
+func TestUpstreamListLimitIsAFixedPublicErrorAndCached(t *testing.T) {
+	const listLimitBody = `{"code":"LIST_LIMIT","cause":"matching elements 1025 exceed the limit 1024"}`
+	var activeContractsCalls atomic.Int64
+	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		activeContractsCalls.Add(1)
+		http.Error(w, listLimitBody, http.StatusRequestEntityTooLarge)
+	})
+	srv := newTestServerWithClient(t, newCachingACS(newHTTPACSClient(upstream.URL, ""), 5*time.Second))
+	logged := captureServerLog(srv)
+
+	for range 5 {
+		recorder := requestFlow(t, srv, "transfer", "manager="+strings.Repeat("ab", 32))
+		require.Equal(t, http.StatusBadGateway, recorder.Code, recorder.Body.String())
+		var body publicErrorBody
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+		assert.Equal(t, publicMessageUpstreamListLimit, body.Error)
+		assert.NotContains(t, recorder.Body.String(), "1024")
+		assert.NotContains(t, recorder.Body.String(), "NttManager")
+	}
+	assert.Equal(t, int64(1), activeContractsCalls.Load(), "a failed read is cached for the cache window")
+	assert.Contains(t, logged.String(), flowTemplateByTail[tailNttManager])
+	assert.Contains(t, logged.String(), "http-list-max-elements-limit")
+	assert.Contains(t, logged.String(), "limit 1024")
+}
+
+func TestLoggedClientValuesStayOnOneLine(t *testing.T) {
+	srv := newTestServerWithClient(t, &countingACS{offset: 42})
+	logged := captureServerLog(srv)
+	for range cap(srv.inboundSlots) {
+		srv.inboundSlots <- struct{}{}
+	}
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/x%0Aforged-line%0D%0Aanother", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Equal(t, 1, strings.Count(logged.String(), "\n"), logged.String())
+	assert.Contains(t, logged.String(), `"/v1/x\nforged-line\r\nanother"`)
+}
+
+func TestUpstreamHTTPErrorQuotesTheBodyExcerpt(t *testing.T) {
+	err := &upstreamHTTPError{operation: "active-contracts", statusCode: http.StatusBadRequest, bodyExcerpt: []byte("first\nsecond")}
+	assert.NotContains(t, err.Error(), "\n")
+	assert.Contains(t, err.Error(), `"first\nsecond"`)
 }

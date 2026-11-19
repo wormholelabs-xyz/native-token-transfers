@@ -61,7 +61,7 @@ func TestHandleFlows_AcceptAdmin(t *testing.T) {
 		wantProposalQueried  bool
 		wantMessageSubstring string
 	}{
-		{"admin is already guardianGovernance", "gg::1", http.StatusConflict, false, "already guardianGovernance"},
+		{"admin is already guardianGovernance", testGuardianGovernanceParty, http.StatusConflict, false, "already guardianGovernance"},
 		{"admin is a third party", testRecipient, http.StatusOK, true, ""},
 	}
 	for _, tc := range cases {

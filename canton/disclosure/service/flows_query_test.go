@@ -68,6 +68,10 @@ func TestParseFlowRequestRejectsBeforeUpstream(t *testing.T) {
 		{"empty recipient on mint", "mint", validManagerDigest + "&recipient=", http.StatusBadRequest},
 		{"missing recipient on mint", "mint", validManagerDigest, http.StatusBadRequest},
 		{"empty recipient on release", "release", validManagerDigest + "&recipient=", http.StatusBadRequest},
+		{"recipient without a fingerprint on mint", "mint", validManagerDigest + "&recipient=alice::1", http.StatusBadRequest},
+		{"recipient with a line feed on mint", "mint", validManagerDigest + "&recipient=" + testRecipient + "%0A", http.StatusBadRequest},
+		{"recipient with an uppercase fingerprint on release", "release", validManagerDigest + "&recipient=" + strings.ToUpper(testRecipient), http.StatusBadRequest},
+		{"gg without a fingerprint", "register", "gg=gg::1", http.StatusBadRequest},
 		{"by-vaa not a bool", "register", "by-vaa=yes", http.StatusBadRequest},
 		{"by-vaa true without gg", "register", "by-vaa=true", http.StatusBadRequest},
 		{"empty gg", "register", "gg=", http.StatusBadRequest},
@@ -138,10 +142,10 @@ func TestParseFlowRequestTypes(t *testing.T) {
 	}{
 		{"release without recipient", "release", "manager=" + strings.ToUpper(managerHex) + "&digest=" + digestHex,
 			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
-		{"release with recipient", "release", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=r::1",
-			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: "r::1"}},
-		{"mint", "mint", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=r::1",
-			mintRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: "r::1"}},
+		{"release with recipient", "release", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=" + testRecipient,
+			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: testRecipient}},
+		{"mint", "mint", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=" + testRecipient,
+			mintRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: testRecipient}},
 		{"set-peer", "set-peer", "manager=" + managerHex + "&digest=" + digestHex,
 			setPeerRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
 		{"accept-admin", "accept-admin", "manager=" + managerHex + "&digest=" + digestHex,
@@ -149,7 +153,7 @@ func TestParseFlowRequestTypes(t *testing.T) {
 		{"transfer", "transfer", "manager=" + managerHex, transferRequest{manager: managerAddressHex{hex: managerHex}}},
 		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{hex: managerHex}}},
 		{"register defaults", "register", "", registerRequest{}},
-		{"register by vaa", "register", "gg=gg::1&by-vaa=true", registerRequest{guardianGovernance: "gg::1", byVAA: true}},
+		{"register by vaa", "register", "gg=" + testGuardianGovernanceParty + "&by-vaa=true", registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

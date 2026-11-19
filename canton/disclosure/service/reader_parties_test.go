@@ -120,7 +120,7 @@ func TestRegisterFlowNeedsOperatorParty(t *testing.T) {
 	}{
 		{"no operator party", "", "", http.StatusNotFound},
 		{"no operator party, with gg", "", "gg=" + testGuardianGovernanceParty, http.StatusNotFound},
-		{"gg param differs from the configured gg", testOperatorParty, "gg=other-gg::1", http.StatusBadRequest},
+		{"gg param differs from the configured gg", testOperatorParty, "gg=other-gg" + testPartyFingerprintSuffix, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

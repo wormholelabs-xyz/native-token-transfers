@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -159,18 +160,38 @@ func TestCachingACS_KeysOnOffsetAndTemplate(t *testing.T) {
 	assert.Equal(t, int64(3), inner.acCalls.Load(), "distinct template/offset pairs are distinct keys")
 }
 
-// TestCachingACS_DoesNotCacheErrors keeps a transient upstream failure from being served for a
-// whole TTL window.
-func TestCachingACS_DoesNotCacheErrors(t *testing.T) {
-	inner := &countingACS{err: fmt.Errorf("upstream down")}
-	c := newCachingACS(inner, 5*time.Second)
+func TestCachingACS_CachesUpstreamFailuresForTTL(t *testing.T) {
+	cases := []struct {
+		name               string
+		upstreamErr        error
+		wantCallsWithinTTL int64
+	}{
+		{"upstream fault is cached", errors.New("upstream down"), 1},
+		{"participant list limit is cached", errUpstreamListLimitExceeded, 1},
+		{"local load shedding is not cached", errUpstreamBusy, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &countingACS{offset: 42, err: tc.upstreamErr}
+			cache := newCachingACS(inner, 5*time.Second)
+			now := time.Now()
+			cache.now = func() time.Time { return now }
 
-	_, err := c.LedgerEnd(context.Background())
-	require.Error(t, err)
-	_, err = c.LedgerEnd(context.Background())
-	require.Error(t, err)
+			for range 3 {
+				_, err := cache.LedgerEnd(context.Background())
+				require.ErrorIs(t, err, tc.upstreamErr)
+				_, err = cache.ActiveContracts(context.Background(), testQuery("T", 42))
+				require.ErrorIs(t, err, tc.upstreamErr)
+			}
+			assert.Equal(t, tc.wantCallsWithinTTL, inner.ledgerCalls.Load())
+			assert.Equal(t, tc.wantCallsWithinTTL, inner.acCalls.Load())
 
-	assert.Equal(t, int64(2), inner.ledgerCalls.Load(), "a failed fetch must not be cached")
+			now = now.Add(5 * time.Second)
+			_, err := cache.LedgerEnd(context.Background())
+			require.ErrorIs(t, err, tc.upstreamErr)
+			assert.Equal(t, tc.wantCallsWithinTTL+1, inner.ledgerCalls.Load(), "an expired failure is fetched again")
+		})
+	}
 }
 
 func TestCachingACS_EvictsWhenFull(t *testing.T) {
