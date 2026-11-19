@@ -1,6 +1,8 @@
 module github.com/wormholelabs-xyz/native-token-transfers/canton/disclosure/service
 
-go 1.25
+go 1.26
+
+toolchain go1.26.11
 
 require github.com/stretchr/testify v1.10.0
 
