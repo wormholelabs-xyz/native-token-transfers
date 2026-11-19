@@ -153,6 +153,7 @@ func TestUpstreamRepeated401BacksOffTokenRequests(t *testing.T) {
 	tokens := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), clock.now)
 	srv := newTestServerWithClient(t, newTestHTTPACSClient(upstream.URL, tokens))
 	srv.logger, _ = newCapturedLogger()
+	srv.readiness.resultTTL = 0 // each /v1/readyz reaches the token source
 
 	const requestsPerStep = 100
 	steps := []struct {

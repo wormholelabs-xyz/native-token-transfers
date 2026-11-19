@@ -190,7 +190,7 @@ func TestUpstreamListLimitIsAFixedPublicErrorAndCached(t *testing.T) {
 		activeContractsCalls.Add(1)
 		http.Error(w, listLimitBody, http.StatusRequestEntityTooLarge)
 	})
-	srv := newTestServerWithClient(t, newCachingACS(newHTTPACSClient(upstream.URL, ""), 5*time.Second))
+	srv := newTestServerWithClient(t, newCachingACS(newTestHTTPACSClient(upstream.URL, nil), 5*time.Second))
 	logged := captureServerLog(srv)
 
 	for range 5 {

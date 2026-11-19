@@ -245,7 +245,7 @@ func (source *oauthBearerTokenSource) recordFetchResult(requestedAt time.Time, t
 		if !cachedTokenUsable {
 			return oauthTokenFetchResult{err: fetchErr}
 		}
-		source.logger.Printf("disclosure-service: OAuth2 token refresh failed; the cached token stays in use until %s: %v", cachedTokenUsableUntil.UTC().Format(time.RFC3339), fetchErr)
+		source.logger.Printf("disclosure-service: OAuth2 token refresh failed; the cached token stays in use until %s: %q", cachedTokenUsableUntil.UTC().Format(time.RFC3339), fetchErr.Error())
 		return oauthTokenFetchResult{token: cachedToken}
 	}
 	if token == "" || lifetime <= 0 {

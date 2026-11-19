@@ -790,6 +790,7 @@ func TestOAuthFailedRefreshKeepsValidCachedToken(t *testing.T) {
 		assert.Equal(t, step.wantTokenFetches, endpoint.fetchCount.Load(), step.name)
 		assert.Equal(t, step.wantToken, token, step.name)
 		assert.Equal(t, step.wantFailureLogs, strings.Count(logged.String(), "OAuth2 token refresh failed"), step.name)
+		assert.Equal(t, step.wantFailureLogs, strings.Count(logged.String(), `: "disclosure-service: OAuth2 token endpoint: HTTP 503 (temporarily_unavailable)"`), step.name)
 		if !step.wantAnyErr {
 			require.NoError(t, err, step.name)
 			continue

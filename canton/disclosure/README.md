@@ -521,5 +521,3 @@ change the module and the checksum in the workflow together.
   - `synchronizerId` after a reassignment. The service reads the
     synchronizer of the create. After a reassignment, a correct set can
     have two synchronizers, and the flow returns 500.
-- Lock/unlock flows return 500 when `gg` cannot see the `CoinFactory`. PR
-  #76 puts that factory in `missing`.

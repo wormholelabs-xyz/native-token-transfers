@@ -183,9 +183,9 @@ func TestCommittedTransferFactoryMissingRule(t *testing.T) {
 		wantServed      bool
 		wantMissing     bool
 	}{
-		{"admin is gg, factory absent", "gg::1", false, http.StatusInternalServerError, false, false},
+		{"admin is gg, factory absent", testGuardianGovernanceParty, false, http.StatusInternalServerError, false, false},
 		{"admin is a third party (DSO), factory absent", "dso::1", false, http.StatusOK, false, true},
-		{"admin is gg, factory present", "gg::1", true, http.StatusOK, true, false},
+		{"admin is gg, factory present", testGuardianGovernanceParty, true, http.StatusOK, true, false},
 	}
 	for _, tc := range cases {
 		for _, flow := range []string{"consolidate", "transfer"} {
