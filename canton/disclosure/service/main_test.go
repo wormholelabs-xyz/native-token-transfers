@@ -1531,6 +1531,7 @@ func TestHandleFlows_Consolidate_LedgerAbsent_500(t *testing.T) {
 
 func TestHandleFlows_Consolidate_FactoryNotVisible_Missing(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
+	b.instrumentAdmin = "dso::1"
 	fixtures := flowFixtures{
 		tailNttManager:   jsonArray(b.managerJSON()),
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),

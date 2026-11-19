@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -663,13 +664,17 @@ func (s *server) fetchTransceiverEmitter(ctx context.Context, manager daNttManag
 // appendCommittedTransferFactoryOrMissing discloses a lock/unlock deployment's committed
 // TransferFactory, or names it missing when no reader party can see it. A registry factory such
 // as the Canton Coin factory comes from the transfer-factory API of that registry.
-func (s *server) appendCommittedTransferFactoryOrMissing(ctx context.Context, factory daNttFactory, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
-	factoryEntry, found, err := s.fetchCommittedFactoryIfVisible(ctx, factory, factoryTagTransfer)
+func (s *server) appendCommittedTransferFactoryOrMissing(ctx context.Context, manager daNttManager, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
+	factoryEntry, found, err := s.fetchCommittedFactoryIfVisible(ctx, manager.Factory, factoryTagTransfer)
 	if err != nil {
 		return nil, nil, err
 	}
 	if found {
 		return append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry)), missing, nil
+	}
+	//SECURITY: a factory that a reader party administers and cannot see is a broken ledger view, not a client gap.
+	if slices.Contains(s.readersFor(tailCoinFactory), partyID(manager.InstrumentId.Admin)) {
+		return nil, nil, newFlowError(http.StatusInternalServerError, "committed TransferFactory %s not visible to its admin %s", manager.Factory.Value, manager.InstrumentId.Admin)
 	}
 	return disclosures, append(missing, missingEntry(roleCommittedTransferFactory)), nil
 }
@@ -718,7 +723,7 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 		}
 	}
 
-	disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value.Factory, disclosures, missing)
+	disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, missing)
 	if err != nil {
 		return nil, err
 	}
@@ -867,7 +872,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 			} else {
 				missing = append(missing, missingEntry(roleCustodyPotHolding))
 			}
-			disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value.Factory, disclosures, missing)
+			disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, missing)
 			if err != nil {
 				return nil, err
 			}
@@ -932,7 +937,7 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 			}
 		}
 
-		disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value.Factory, disclosures, missing)
+		disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, missing)
 		if err != nil {
 			return nil, err
 		}
@@ -1017,7 +1022,7 @@ func (s *server) assembleConsolidate(ctx context.Context, request consolidateReq
 		discloseAs(roleNttManager, mgr.entry),
 		discloseAs(roleLockedLedger, ledger.entry),
 	}
-	disclosures, missing, err := s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value.Factory, disclosures, make([]flowMissingEntry, 0))
+	disclosures, missing, err := s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, make([]flowMissingEntry, 0))
 	if err != nil {
 		return nil, err
 	}
