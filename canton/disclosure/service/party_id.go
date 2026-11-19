@@ -21,7 +21,7 @@ const (
 )
 
 // parseRequestPartyID accepts only "<hint>::1220<64 lowercase hex>". The hint is 1 to 185
-// characters of [A-Za-z0-9._-]. A malformed value is a 400 that does not repeat the value.
+// characters of [A-Za-z0-9._-]. A malformed value is a 400 with a fixed reason.
 func parseRequestPartyID(rawParty, paramName string) (partyID, error) {
 	hint, fingerprint, hasSeparator := strings.Cut(rawParty, partyFingerprintSeparator)
 	if !hasSeparator {

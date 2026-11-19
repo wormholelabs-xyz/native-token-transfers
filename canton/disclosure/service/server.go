@@ -125,8 +125,8 @@ type probeResponse struct {
 	Status string `json:"status"`
 }
 
-// handleHealthz is liveness: 200 for each GET, also while the inbound cap is full. It reads no
-// upstream. The reader parties go to the startup log only.
+// handleHealthz is liveness: 200 for each GET, at a constant cost, also while the inbound cap is
+// full. The reader parties go to the startup log only.
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
