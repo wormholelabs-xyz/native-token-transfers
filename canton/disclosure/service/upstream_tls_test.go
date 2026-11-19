@@ -453,8 +453,8 @@ func TestTokenEndpointClientTrust(t *testing.T) {
 		wantErrSub  string
 	}{
 		{"token endpoint CA from --oauth-ca-file, participant CA from --json-api-ca-file", tokenEndpointPKI.trustedCA.pemPath, ""},
-		{"token endpoint CA absent from the system roots", "", "upstream bearer token"},
-		{"participant CA given as --oauth-ca-file", participantPKI.trustedCA.pemPath, "upstream bearer token"},
+		{"token endpoint CA absent from the system roots", "", "startup OAuth2 token"},
+		{"participant CA given as --oauth-ca-file", participantPKI.trustedCA.pemPath, "startup OAuth2 token"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,15 +467,16 @@ func TestTokenEndpointClientTrust(t *testing.T) {
 				caFile:           tc.oauthCAFile,
 			})
 			tokens, err := newBearerTokenSource(upstreamAuthOAuth2{clientConfig: clientConfig})
+			if tc.wantErrSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+				assert.Contains(t, err.Error(), "certificate")
+				return
+			}
 			require.NoError(t, err)
 			tlsConfig, err := loadUpstreamTLSConfig(participantTLS, time.Now())
 			require.NoError(t, err)
 			offset, err := newHTTPACSClient(participant.URL, newUpstreamHTTPClient(tlsConfig), tokens).LedgerEnd(context.Background())
-			if tc.wantErrSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrSub)
-				return
-			}
 			require.NoError(t, err)
 			assert.Equal(t, int64(42), offset)
 			assert.Zero(t, peerCertificateCount.Load(), "the token endpoint sees no client certificate")

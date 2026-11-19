@@ -428,8 +428,9 @@ func TestNewBearerTokenSource(t *testing.T) {
 	secretPath := filepath.Join(dir, "secret")
 	writeClientSecret(t, secretPath, "first-secret")
 	missingPath := filepath.Join(dir, "missing")
+	endpoint := newFakeTokenEndpoint(t, bearerTokenResponse("tok", 3600))
 	oauthWith := func(secretFile string) upstreamAuthOAuth2 {
-		return upstreamAuthOAuth2{clientConfig: mustParseOAuthClientConfig(t, oauthClientFlags{tokenURL: "https://idp.example/token", clientID: "c", clientSecretFile: secretFile, audience: "a"})}
+		return upstreamAuthOAuth2{clientConfig: mustParseOAuthClientConfig(t, oauthClientFlags{tokenURL: endpoint.server.URL + "/token", clientID: "c", clientSecretFile: secretFile, audience: "a"})}
 	}
 
 	cases := []struct {
@@ -620,4 +621,53 @@ func TestFlowRequestEndsAtDeadlineWhileTokenEndpointHangs(t *testing.T) {
 	assert.Less(t, time.Since(startedAt), time.Second)
 	assert.Equal(t, http.StatusGatewayTimeout, recorder.Code, recorder.Body.String())
 	assert.Zero(t, upstreamCalls.Load())
+}
+
+func TestRunFailsOnStartupTokenError(t *testing.T) {
+	cases := []struct {
+		name        string
+		respond     func(http.ResponseWriter, int64)
+		wantServing bool
+	}{
+		{"token endpoint 401", func(w http.ResponseWriter, _ int64) {
+			http.Error(w, `{"error":"invalid_client"}`, http.StatusUnauthorized)
+		}, false},
+		{"token endpoint 200", bearerTokenResponse("tok", 3600), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := newFakeTokenEndpoint(t, tc.respond)
+			upstream, _, _ := countingJSONAPI(t)
+			opts := &options{
+				listen:                  "127.0.0.1:0",
+				upstreamAuth:            upstreamAuthOAuth2{clientConfig: newTestOAuthConfig(t, endpoint.server.URL)},
+				jsonAPIBaseURL:          upstream.URL,
+				readerParties:           testReaderParties(),
+				maxContractsPerTemplate: defaultMaxContractsPerTemplate,
+				maxUpstreamConcurrency:  defaultMaxUpstreamConcurrency,
+			}
+			var out syncBuffer
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- run(ctx, opts, &out) }()
+			if !tc.wantServing {
+				select {
+				case err := <-done:
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "startup OAuth2 token")
+					assert.Contains(t, err.Error(), "invalid_client")
+				case <-time.After(3 * time.Second):
+					t.Fatal("run did not stop on the startup token error")
+				}
+				assert.Empty(t, listeningURL(out.String()))
+				assert.Equal(t, int64(1), endpoint.fetchCount.Load())
+				return
+			}
+			require.Eventually(t, func() bool { return listeningURL(out.String()) != "" }, 3*time.Second, 5*time.Millisecond)
+			assert.Equal(t, int64(1), endpoint.fetchCount.Load(), "one token at startup")
+			cancel()
+			require.NoError(t, <-done)
+		})
+	}
 }
