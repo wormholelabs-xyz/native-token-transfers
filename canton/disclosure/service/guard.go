@@ -65,11 +65,11 @@ func newBoundedACS(inner acsClient, limit int) *boundedACS {
 	return &boundedACS{inner: inner, sem: make(chan struct{}, limit), wait: upstreamAcquireTimeout}
 }
 
-func (b *boundedACS) acquire(ctx context.Context) error {
-	timer := time.NewTimer(b.wait)
+func (bounded *boundedACS) acquire(ctx context.Context) error {
+	timer := time.NewTimer(bounded.wait)
 	defer timer.Stop()
 	select {
-	case b.sem <- struct{}{}:
+	case bounded.sem <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -78,30 +78,30 @@ func (b *boundedACS) acquire(ctx context.Context) error {
 	}
 }
 
-func (b *boundedACS) release() { <-b.sem }
+func (bounded *boundedACS) release() { <-bounded.sem }
 
-func (b *boundedACS) LedgerEnd(ctx context.Context) (int64, error) {
-	if err := b.acquire(ctx); err != nil {
+func (bounded *boundedACS) LedgerEnd(ctx context.Context) (int64, error) {
+	if err := bounded.acquire(ctx); err != nil {
 		return 0, err
 	}
-	defer b.release()
-	return b.inner.LedgerEnd(ctx)
+	defer bounded.release()
+	return bounded.inner.LedgerEnd(ctx)
 }
 
-func (b *boundedACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
-	if err := b.acquire(ctx); err != nil {
+func (bounded *boundedACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
+	if err := bounded.acquire(ctx); err != nil {
 		return nil, err
 	}
-	defer b.release()
-	return b.inner.ActiveContracts(ctx, query)
+	defer bounded.release()
+	return bounded.inner.ActiveContracts(ctx, query)
 }
 
-func (b *boundedACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
-	if err := b.acquire(ctx); err != nil {
+func (bounded *boundedACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
+	if err := bounded.acquire(ctx); err != nil {
 		return acsEntry{}, false, err
 	}
-	defer b.release()
-	return b.inner.ActiveContractByID(ctx, readerParties, wantContractID)
+	defer bounded.release()
+	return bounded.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
 // ---------------------------------------------------------------------------
@@ -160,44 +160,44 @@ func newCachingACS(inner acsClient, ttl time.Duration) *cachingACS {
 // loadOrFetch returns key's cached answer, joins the call already fetching it, or starts the
 // fetch. The fetch runs under a service-owned deadline: each caller's cancel ends only its own
 // wait. Each caller stops waiting when its own ctx ends.
-func (c *cachingACS) loadOrFetch(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
-	c.mu.Lock()
-	if cached, ok := c.entries[key]; ok && c.now().Before(cached.expires) {
-		c.mu.Unlock()
+func (cache *cachingACS) loadOrFetch(ctx context.Context, key string, fetch func(context.Context) (any, error)) (any, error) {
+	cache.mu.Lock()
+	if cached, ok := cache.entries[key]; ok && cache.now().Before(cached.expires) {
+		cache.mu.Unlock()
 		return cached.result, cached.err
 	}
-	if call, ok := c.inflight[key]; ok {
-		c.mu.Unlock()
+	if call, ok := cache.inflight[key]; ok {
+		cache.mu.Unlock()
 		return awaitInflightCall(ctx, call)
 	}
 	call := &inflightCall{done: make(chan struct{})}
-	c.inflight[key] = call
-	c.mu.Unlock()
+	cache.inflight[key] = call
+	cache.mu.Unlock()
 
-	go c.runInflightFetch(key, call, fetch)
+	go cache.runInflightFetch(key, call, fetch)
 	return awaitInflightCall(ctx, call)
 }
 
 // runInflightFetch runs fetch under fetchTimeout. The deferred cleanup also runs on a panic.
-func (c *cachingACS) runInflightFetch(key string, call *inflightCall, fetch func(context.Context) (any, error)) {
-	fetchCtx, cancel := context.WithTimeout(context.Background(), c.fetchTimeout)
+func (cache *cachingACS) runInflightFetch(key string, call *inflightCall, fetch func(context.Context) (any, error)) {
+	fetchCtx, cancel := context.WithTimeout(context.Background(), cache.fetchTimeout)
 	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			call.result = nil
 			call.err = fmt.Errorf("%w: %v", errUpstreamFetchPanicked, recovered)
-			c.logger.Printf("disclosure-service: upstream fetch %q panic: %q\n%s", key, fmt.Sprint(recovered), debug.Stack())
+			cache.logger.Printf("disclosure-service: upstream fetch %q panic: %q\n%s", key, fmt.Sprint(recovered), debug.Stack())
 		}
-		c.mu.Lock()
-		if c.inflight[key] != call {
+		cache.mu.Lock()
+		if cache.inflight[key] != call {
 			panic("disclosure-service: inflight entry replaced while its fetch ran")
 		}
-		delete(c.inflight, key)
+		delete(cache.inflight, key)
 		if isCacheableFetchResult(call.err) {
-			c.sweepLocked()
-			c.entries[key] = cacheEntry{result: call.result, err: call.err, expires: c.now().Add(c.ttl)}
+			cache.sweepLocked()
+			cache.entries[key] = cacheEntry{result: call.result, err: call.err, expires: cache.now().Add(cache.ttl)}
 		}
-		c.mu.Unlock()
+		cache.mu.Unlock()
 		close(call.done)
 	}()
 	call.result, call.err = fetch(fetchCtx)
@@ -217,27 +217,27 @@ func awaitInflightCall(ctx context.Context, call *inflightCall) (any, error) {
 }
 
 // sweepLocked drops expired entries once the map reaches its cap, then drops arbitrary entries
-// if every one is still live. The caller holds c.mu.
-func (c *cachingACS) sweepLocked() {
-	if len(c.entries) < maxCacheEntries {
+// if every one is still live. The caller holds cache.mu.
+func (cache *cachingACS) sweepLocked() {
+	if len(cache.entries) < maxCacheEntries {
 		return
 	}
-	now := c.now()
-	for key, cached := range c.entries {
+	now := cache.now()
+	for key, cached := range cache.entries {
 		if !now.Before(cached.expires) {
-			delete(c.entries, key)
+			delete(cache.entries, key)
 		}
 	}
-	for key := range c.entries {
-		if len(c.entries) < maxCacheEntries {
+	for key := range cache.entries {
+		if len(cache.entries) < maxCacheEntries {
 			break
 		}
-		delete(c.entries, key)
+		delete(cache.entries, key)
 	}
 }
 
-func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
-	cachedValue, err := c.loadOrFetch(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return c.inner.LedgerEnd(fetchCtx) })
+func (cache *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
+	cachedValue, err := cache.loadOrFetch(ctx, "ledger-end", func(fetchCtx context.Context) (any, error) { return cache.inner.LedgerEnd(fetchCtx) })
 	if err != nil {
 		return 0, err
 	}
@@ -252,9 +252,9 @@ func (c *cachingACS) LedgerEnd(ctx context.Context) (int64, error) {
 }
 
 // ActiveContracts caches the filtered result, so an entry holds at most query.maxMatches contracts.
-func (c *cachingACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
-	cachedValue, err := c.loadOrFetch(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
-		return c.inner.ActiveContracts(fetchCtx, query)
+func (cache *cachingACS) ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error) {
+	cachedValue, err := cache.loadOrFetch(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+		return cache.inner.ActiveContracts(fetchCtx, query)
 	})
 	if err != nil {
 		return nil, err
@@ -272,7 +272,7 @@ type contractByIDResult struct {
 	found bool
 }
 
-func (c *cachingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
+func (cache *cachingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	encodedKey, err := json.Marshal(struct {
 		Kind       string
 		Readers    []partyID
@@ -281,8 +281,8 @@ func (c *cachingACS) ActiveContractByID(ctx context.Context, readerParties []par
 	if err != nil {
 		return acsEntry{}, false, fmt.Errorf("disclosure-service: encode cache key: %w", err)
 	}
-	cachedValue, err := c.loadOrFetch(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
-		entry, found, err := c.inner.ActiveContractByID(fetchCtx, readerParties, wantContractID)
+	cachedValue, err := cache.loadOrFetch(ctx, string(encodedKey), func(fetchCtx context.Context) (any, error) {
+		entry, found, err := cache.inner.ActiveContractByID(fetchCtx, readerParties, wantContractID)
 		return contractByIDResult{entry: entry, found: found}, err
 	})
 	if err != nil {

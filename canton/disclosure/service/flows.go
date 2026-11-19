@@ -74,12 +74,12 @@ const (
 // contract, so the client must supply it.
 const reasonNotVisible = "no matching contract visible to the reader parties"
 
-// --- Decode shapes: the templates' Daml-JSON createArgument payloads ---
+// --- Decode shapes: the prefix "da" marks a template's Daml-JSON createArgument payload ---
 
 // daInstrumentId decodes Splice.Api.Token.HoldingV1.InstrumentId.
 type daInstrumentId struct {
-	Admin string `json:"admin"`
-	Id    string `json:"id"`
+	Admin partyID `json:"admin"`
+	Id    string  `json:"id"`
 }
 
 // daNttFactory decodes NttFactory's variant encoding: {"tag": "...Cid", "value": "<contractId>"}.
@@ -89,10 +89,10 @@ type daNttFactory struct {
 }
 
 type daNttManager struct {
-	Admin                string         `json:"admin"`
-	GuardianGovernance   string         `json:"guardianGovernance"`
-	NttCustody           string         `json:"nttCustody"`
-	ReserveCustodian     string         `json:"reserveCustodian"`
+	Admin                partyID        `json:"admin"`
+	GuardianGovernance   partyID        `json:"guardianGovernance"`
+	NttCustody           partyID        `json:"nttCustody"`
+	ReserveCustodian     partyID        `json:"reserveCustodian"`
 	Namespace            string         `json:"namespace"`
 	ManagerAddress       string         `json:"managerAddress"`
 	ChainId              json.Number    `json:"chainId"`
@@ -110,36 +110,36 @@ type daLockedLedger struct {
 }
 
 type daReplayNode struct {
-	Consumer  string `json:"consumer"`
-	Namespace string `json:"namespace"`
-	Prefix    string `json:"prefix"`
+	Consumer  partyID `json:"consumer"`
+	Namespace string  `json:"namespace"`
+	Prefix    string  `json:"prefix"`
 }
 
 // daGuardianAnchor decodes the guardianGovernance field shared by CoreState, NttGovernance,
 // EmitterRegistry, and ReplayRootRegistry.
 type daGuardianAnchor struct {
-	GuardianGovernance string `json:"guardianGovernance"`
+	GuardianGovernance partyID `json:"guardianGovernance"`
 }
 
 type daEmitter struct {
-	Owner     string      `json:"owner"`
+	Owner     partyID     `json:"owner"`
 	EmitterId json.Number `json:"emitterId"`
 }
 
 // daPreapproval decodes both DepositPreapproval and TransferPreapproval: identical shape.
 type daPreapproval struct {
-	Owner        string         `json:"owner"`
+	Owner        partyID        `json:"owner"`
 	InstrumentId daInstrumentId `json:"instrumentId"`
 }
 
 type daAdminTransferProposal struct {
-	Admin          string `json:"admin"`
-	NewAdmin       string `json:"newAdmin"`
-	ManagerAddress string `json:"managerAddress"`
+	Admin          partyID `json:"admin"`
+	NewAdmin       partyID `json:"newAdmin"`
+	ManagerAddress string  `json:"managerAddress"`
 }
 
 type daCoinFactory struct {
-	Admin string `json:"admin"`
+	Admin partyID `json:"admin"`
 }
 
 // --- Wire response ---
@@ -236,6 +236,11 @@ func exactFieldMatch(wantValue string, fieldPath ...string) createArgumentFieldM
 	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantValue}}
 }
 
+// partyFieldMatch requires the party field at fieldPath to equal wantParty.
+func partyFieldMatch(wantParty partyID, fieldPath ...string) createArgumentFieldMatch {
+	return exactFieldMatch(string(wantParty), fieldPath...)
+}
+
 // hexFieldMatch is exactFieldMatch with both sides lowercased.
 func hexFieldMatch(wantHex string, fieldPath ...string) createArgumentFieldMatch {
 	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantHex}, compareHex: true}
@@ -312,7 +317,7 @@ func (s *server) fetchEntries(ctx context.Context, query activeContractsQuery) (
 
 // reserveCustodianFor mirrors Manager.daml's reserveCustodianFor: nttCustody while gg holds the
 // admin role, else admin.
-func reserveCustodianFor(guardianGovernance, nttCustody, admin string) string {
+func reserveCustodianFor(guardianGovernance, nttCustody, admin partyID) partyID {
 	if admin == guardianGovernance {
 		return nttCustody
 	}
@@ -394,7 +399,7 @@ func findGuardianAnchor(entries []decodedEntry[daGuardianAnchor], gg partyID, la
 // coveringReplayNode finds the one node of consumer's namespace trie that covers digest.
 // Exactly one node covers any digest (the trie partition invariant); more or fewer shows a
 // forked or broken trie.
-func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer, namespace string, digest vaaDigestHex) (decodedEntry[daReplayNode], error) {
+func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer partyID, namespace string, digest vaaDigestHex) (decodedEntry[daReplayNode], error) {
 	return exactlyOne(entries, roleCoveringReplayNode, func(entry decodedEntry[daReplayNode]) bool {
 		return entry.value.Consumer == consumer &&
 			entry.value.Namespace == namespace &&
@@ -410,7 +415,7 @@ func findLockedLedger(entries []decodedEntry[daLockedLedger], manager managerAdd
 
 // findTransceiverEmitter matches emitterId (Int, decoded via json.Number since the JSON API may
 // emit either a number or a numeric string) and owner.
-func findTransceiverEmitter(entries []decodedEntry[daEmitter], emitterID json.Number, owner string) (decodedEntry[daEmitter], error) {
+func findTransceiverEmitter(entries []decodedEntry[daEmitter], emitterID json.Number, owner partyID) (decodedEntry[daEmitter], error) {
 	want, err := emitterID.Int64()
 	if err != nil {
 		return decodedEntry[daEmitter]{}, newFlowError(http.StatusInternalServerError, "manager transceiverEmitterId %q is not an integer: %v", emitterID, err)
@@ -516,7 +521,7 @@ func (s *server) fetchCoreState(ctx context.Context, gg partyID, offset int64) (
 func (s *server) fetchGuardianAnchor(ctx context.Context, tail string, gg partyID, label string, offset int64) (decodedEntry[daGuardianAnchor], error) {
 	var fieldMatches []createArgumentFieldMatch
 	if gg != "" {
-		fieldMatches = append(fieldMatches, exactFieldMatch(string(gg), "guardianGovernance"))
+		fieldMatches = append(fieldMatches, partyFieldMatch(gg, "guardianGovernance"))
 	}
 	entries, err := fetchDecoded[daGuardianAnchor](ctx, s, tail, offset, fieldMatches...)
 	if err != nil {
@@ -525,9 +530,9 @@ func (s *server) fetchGuardianAnchor(ctx context.Context, tail string, gg partyI
 	return findGuardianAnchor(entries, gg, label)
 }
 
-func (s *server) fetchCoveringNode(ctx context.Context, consumer, namespace string, digest vaaDigestHex, offset int64) (decodedEntry[daReplayNode], error) {
+func (s *server) fetchCoveringNode(ctx context.Context, consumer partyID, namespace string, digest vaaDigestHex, offset int64) (decodedEntry[daReplayNode], error) {
 	entries, err := fetchDecoded[daReplayNode](ctx, s, tailReplayNode, offset,
-		exactFieldMatch(consumer, "consumer"),
+		partyFieldMatch(consumer, "consumer"),
 		exactFieldMatch(namespace, "namespace"),
 		createArgumentFieldMatch{fieldPath: []string{"prefix"}, wantValues: digestPrefixes(digest), compareHex: true})
 	if err != nil {
@@ -622,8 +627,8 @@ func (s *server) fetchPotHolding(ctx context.Context, potContractID contractID) 
 // preapprovalFieldMatches selects the DepositPreapproval or TransferPreapproval of owner for instrumentID.
 func preapprovalFieldMatches(owner partyID, instrumentID daInstrumentId) []createArgumentFieldMatch {
 	return []createArgumentFieldMatch{
-		exactFieldMatch(string(owner), "owner"),
-		exactFieldMatch(instrumentID.Admin, "instrumentId", "admin"),
+		partyFieldMatch(owner, "owner"),
+		partyFieldMatch(instrumentID.Admin, "instrumentId", "admin"),
 		exactFieldMatch(instrumentID.Id, "instrumentId", "id"),
 	}
 }
@@ -631,7 +636,7 @@ func preapprovalFieldMatches(owner partyID, instrumentID daInstrumentId) []creat
 // fetchTransceiverEmitter selects the manager's transceiver Emitter, owned by gg.
 func (s *server) fetchTransceiverEmitter(ctx context.Context, manager daNttManager, offset int64) (decodedEntry[daEmitter], error) {
 	emitters, err := fetchDecoded[daEmitter](ctx, s, tailEmitter, offset,
-		exactFieldMatch(manager.GuardianGovernance, "owner"),
+		partyFieldMatch(manager.GuardianGovernance, "owner"),
 		exactFieldMatch(manager.TransceiverEmitterId.String(), "emitterId"))
 	if err != nil {
 		return decodedEntry[daEmitter]{}, err
@@ -799,8 +804,8 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	missing := make([]flowMissingEntry, 0)
 
 	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset,
-		exactFieldMatch(mgr.value.Admin, "admin"),
-		exactFieldMatch(mgr.value.GuardianGovernance, "newAdmin"),
+		partyFieldMatch(mgr.value.Admin, "admin"),
+		partyFieldMatch(mgr.value.GuardianGovernance, "newAdmin"),
 		hexFieldMatch(mgr.value.ManagerAddress, "managerAddress"))
 	if err != nil {
 		return nil, err
@@ -1078,7 +1083,7 @@ type managerEntry struct {
 	ManagerId        json.Number    `json:"managerId"`
 	TokenConfig      string         `json:"tokenConfig"`
 	InstrumentId     daInstrumentId `json:"instrumentId"`
-	ReserveCustodian string         `json:"reserveCustodian"`
+	ReserveCustodian partyID        `json:"reserveCustodian"`
 	Paused           bool           `json:"paused"`
 }
 

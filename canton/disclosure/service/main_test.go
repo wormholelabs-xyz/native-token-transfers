@@ -584,7 +584,7 @@ func newBaseFixtures(tokenConfig string) baseFixtures {
 }
 
 func (b baseFixtures) reserveCustodian() string {
-	return reserveCustodianFor(b.gg, b.nttCustody, b.admin)
+	return string(reserveCustodianFor(partyID(b.gg), partyID(b.nttCustody), partyID(b.admin)))
 }
 
 func (b baseFixtures) managerJSON() string {
@@ -865,7 +865,7 @@ func TestFindManager(t *testing.T) {
 
 func TestFindGuardianAnchor(t *testing.T) {
 	anchorOf := func(gg string) decodedEntry[daGuardianAnchor] {
-		return decodedEntry[daGuardianAnchor]{entry: acsEntry{ContractID: "cid-" + gg}, value: daGuardianAnchor{GuardianGovernance: gg}}
+		return decodedEntry[daGuardianAnchor]{entry: acsEntry{ContractID: "cid-" + gg}, value: daGuardianAnchor{GuardianGovernance: partyID(gg)}}
 	}
 	t.Run("gg given, exactly one match", func(t *testing.T) {
 		match, err := findGuardianAnchor([]decodedEntry[daGuardianAnchor]{anchorOf("gg1"), anchorOf("gg2")}, "gg1", "CoreState")
@@ -893,7 +893,7 @@ func TestFindGuardianAnchor(t *testing.T) {
 
 func TestCoveringReplayNode(t *testing.T) {
 	replayNode := func(consumer, namespace, prefix string) decodedEntry[daReplayNode] {
-		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: consumer, Namespace: namespace, Prefix: prefix}}
+		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: prefix}}
 	}
 	digest := vaaDigestHex{hex: strings.Repeat("cd", 32)}
 
@@ -936,7 +936,7 @@ func TestFindLockedLedger(t *testing.T) {
 
 func TestFindTransceiverEmitter(t *testing.T) {
 	emitterOf := func(owner string, id json.Number) decodedEntry[daEmitter] {
-		return decodedEntry[daEmitter]{entry: acsEntry{ContractID: "emitter-cid"}, value: daEmitter{Owner: owner, EmitterId: id}}
+		return decodedEntry[daEmitter]{entry: acsEntry{ContractID: "emitter-cid"}, value: daEmitter{Owner: partyID(owner), EmitterId: id}}
 	}
 	t.Run("found, numeric emitterId", func(t *testing.T) {
 		match, err := findTransceiverEmitter([]decodedEntry[daEmitter]{emitterOf("gg1", json.Number("7"))}, json.Number("7"), "gg1")
@@ -959,7 +959,7 @@ func TestFindTransceiverEmitter(t *testing.T) {
 
 func TestFindCanonicalCoinFactory(t *testing.T) {
 	factoryAdminedBy := func(admin string) decodedEntry[daCoinFactory] {
-		return decodedEntry[daCoinFactory]{entry: acsEntry{ContractID: "cid-" + admin}, value: daCoinFactory{Admin: admin}}
+		return decodedEntry[daCoinFactory]{entry: acsEntry{ContractID: "cid-" + admin}, value: daCoinFactory{Admin: partyID(admin)}}
 	}
 	t.Run("found", func(t *testing.T) {
 		match, err := findCanonicalCoinFactory([]decodedEntry[daCoinFactory]{factoryAdminedBy("gg1")}, "gg1")
@@ -988,7 +988,7 @@ func TestRequireTokenConfig(t *testing.T) {
 func TestFindPreapproval(t *testing.T) {
 	inst := daInstrumentId{Admin: "gg1", Id: "instr-1"}
 	preapprovalOf := func(owner string) decodedEntry[daPreapproval] {
-		return decodedEntry[daPreapproval]{entry: acsEntry{ContractID: "cid-" + owner}, value: daPreapproval{Owner: owner, InstrumentId: inst}}
+		return decodedEntry[daPreapproval]{entry: acsEntry{ContractID: "cid-" + owner}, value: daPreapproval{Owner: partyID(owner), InstrumentId: inst}}
 	}
 	t.Run("found", func(t *testing.T) {
 		match, found, err := findPreapproval([]decodedEntry[daPreapproval]{preapprovalOf("alice")}, "alice", inst, "TransferPreapproval")
@@ -1009,7 +1009,7 @@ func TestFindPreapproval(t *testing.T) {
 
 func TestFindAdminTransferProposal(t *testing.T) {
 	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: strings.Repeat("aa", 32)}
-	proposal := func(contractID, admin, newAdmin, managerAddress string) decodedEntry[daAdminTransferProposal] {
+	proposal := func(contractID string, admin, newAdmin partyID, managerAddress string) decodedEntry[daAdminTransferProposal] {
 		return decodedEntry[daAdminTransferProposal]{
 			entry: acsEntry{ContractID: contractID},
 			value: daAdminTransferProposal{Admin: admin, NewAdmin: newAdmin, ManagerAddress: managerAddress},
@@ -1597,8 +1597,8 @@ func TestHandleManagers(t *testing.T) {
 	assert.Equal(t, strings.Repeat("b", 64), got.Managers[1].ManagerAddress)
 	assert.Equal(t, tokenConfigBurnMint, got.Managers[1].TokenConfig)
 	assert.Equal(t, "otherCoin", got.Managers[1].InstrumentId.Id)
-	assert.Equal(t, b.admin, got.Managers[0].ReserveCustodian)
-	assert.Equal(t, b.nttCustody, got.Managers[1].ReserveCustodian)
+	assert.Equal(t, partyID(b.admin), got.Managers[0].ReserveCustodian)
+	assert.Equal(t, partyID(b.nttCustody), got.Managers[1].ReserveCustodian)
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,7 +1607,8 @@ func TestHandleManagers(t *testing.T) {
 
 func TestReserveCustodianFor(t *testing.T) {
 	cases := []struct {
-		name, admin, want string
+		name        string
+		admin, want partyID
 	}{
 		{"third-party admin keeps its reserve", "admin::1", "admin::1"},
 		{"gg admin hands the reserve to nttCustody", "gg::1", "nttCustody::1"},
