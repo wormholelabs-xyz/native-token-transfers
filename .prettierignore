@@ -19,3 +19,7 @@ tsconfig.*.json
 evm/lib/**
 
 
+
+# Canton: vendored CIP-0056 OpenAPI specs and dpm build output
+canton/disclosure/service/openapi/**
+canton/**/.daml/**
