@@ -36,6 +36,13 @@ var flowTemplateByTail = map[string]string{
 	tailTransferPreapproval:   "#token-cip0056:Token.CIP0056.CoinTransfer:TransferPreapproval",
 }
 
+// custodyPotHoldingTemplateByTail is each template a custody pot can have. The service reads a
+// pot by the contract id that its LockedLedger names. The ACS of these templates is never scanned.
+var custodyPotHoldingTemplateByTail = map[string]string{
+	tailCoin:   "#token-cip0056:Token.CIP0056.Coin:Coin",
+	tailAmulet: "#splice-amulet:Splice.Amulet:Amulet",
+}
+
 // templateTail returns the trailing "Module:Entity" segment of a template id. It strips any
 // package qualifier ("#name:" or a hex package id). An unqualified value (already exactly
 // "Module:Entity") is returned unchanged. Module names always exclude ':', so the tail is always

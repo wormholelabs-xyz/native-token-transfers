@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -8,10 +9,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 )
 
 // maxAccessTokenFileBytes bounds the upstream bearer token file.
 const maxAccessTokenFileBytes = 16 << 10
+
+// secretFileForbiddenPermissions are group write, group execute, and every other-user bit. Group
+// read stays: a Kubernetes Secret volume with fsGroup sets it (defaultMode 0440).
+const secretFileForbiddenPermissions os.FileMode = 0o037
 
 var errReadLimitExceeded = errors.New("disclosure-service: input exceeds the read limit")
 
@@ -22,8 +28,8 @@ func isLoopbackIPAddress(host string) bool {
 }
 
 // checkJSONAPIURL enforces an http(s) URL with a host and no userinfo, query, or fragment.
-// upstreamAuthConfigured needs https, or http to a loopback IP address.
-func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool) error {
+// upstreamAuthConfigured needs https, or http to a loopback IP address. TLS files need https.
+func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool, upstreamTLS upstreamTLSFiles) error {
 	jsonAPIURL, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("disclosure-service: --json-api %q: %w", rawURL, err)
@@ -47,21 +53,44 @@ func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool) error {
 	if upstreamAuthConfigured && jsonAPIURL.Scheme == "http" && !isLoopbackIPAddress(jsonAPIURL.Hostname()) {
 		return fmt.Errorf("disclosure-service: --json-api %q: an upstream token needs https, or http to a loopback IP address", rawURL)
 	}
+	if err := upstreamTLS.checkClientPairComplete(); err != nil {
+		return err
+	}
+	//SECURITY: TLS flags on an http URL would leave the operator believing the link is encrypted.
+	if upstreamTLS.anySet() && jsonAPIURL.Scheme != "https" {
+		return fmt.Errorf("disclosure-service: --json-api-ca-file, --json-api-client-cert-file and --json-api-client-key-file require an https --json-api, got %q", rawURL)
+	}
 	return nil
 }
 
-// newDirectUpstreamHTTPClient connects to the JSON API directly and ignores proxy variables. It
-// returns a redirect to the caller as the response.
-func newDirectUpstreamHTTPClient() *http.Client {
+// newUpstreamHTTPClient is the client for the JSON Ledger API.
+func newUpstreamHTTPClient(tlsConfig *tls.Config) *http.Client {
+	return newDirectHTTPClient(tlsConfig, httpClientTimeout)
+}
+
+// newDirectHTTPClient connects directly with tlsConfig and ignores proxy variables. It returns a
+// redirect to the caller as the response.
+func newDirectHTTPClient(tlsConfig *tls.Config, timeout time.Duration) *http.Client {
+	if tlsConfig == nil {
+		panic("disclosure-service: newDirectHTTPClient: nil TLS config")
+	}
+	if tlsConfig.MinVersion < tls.VersionTLS12 {
+		panic("disclosure-service: newDirectHTTPClient: TLS minimum below 1.2")
+	}
+	if timeout <= 0 {
+		panic("disclosure-service: newDirectHTTPClient: non-positive timeout")
+	}
 	defaultTransport, isTransport := http.DefaultTransport.(*http.Transport)
 	if !isTransport {
 		panic("disclosure-service: http.DefaultTransport is not an *http.Transport")
 	}
 	transport := defaultTransport.Clone()
 	transport.Proxy = nil
+	transport.TLSClientConfig = tlsConfig
 	return &http.Client{
-		Timeout:   httpClientTimeout,
+		Timeout:   timeout,
 		Transport: transport,
+		//SECURITY: a 307/308 re-sends the request body, which can carry the OAuth2 client secret, to any scheme or host.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -90,5 +119,27 @@ func readFileAtMost(path string, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
+	return readAtMost(file, maxBytes)
+}
+
+// readSecretFileAtMost is readFileAtMost for a secret file. The file must be a regular file with
+// no group write, no group execute, and no permission for other users.
+func readSecretFileAtMost(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	//SECURITY: checked on the open descriptor, so a change of the path after the check has no effect.
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if permissions := fileInfo.Mode().Perm(); permissions&secretFileForbiddenPermissions != 0 {
+		return nil, fmt.Errorf("%s has mode %04o, which gives group write or execute, or other users a permission; set mode 0400, 0440, 0600, or 0640", path, permissions)
+	}
 	return readAtMost(file, maxBytes)
 }

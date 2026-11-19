@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,7 +60,7 @@ func TestActiveContractByID(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			entry, found, err := newHTTPACSClient(upstream.URL, "").ActiveContractByID(context.Background(), []partyID{"nttCustody::1"}, potContractID)
+			entry, found, err := newTestHTTPACSClient(upstream.URL, nil).ActiveContractByID(context.Background(), []partyID{"nttCustody::1"}, potContractID)
 			assert.Equal(t, potContractID, gotRequest.ContractID)
 			require.Contains(t, gotRequest.EventFormat.FiltersByParty, "nttCustody::1")
 			assert.True(t, gotRequest.EventFormat.Verbose)
@@ -170,5 +171,48 @@ func TestCommittedFactoryByContractID(t *testing.T) {
 			require.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
 			assert.NotContains(t, queriedTemplates.tails(), tailCoinFactory)
 		})
+	}
+}
+
+func TestCommittedTransferFactoryMissingRule(t *testing.T) {
+	cases := []struct {
+		name            string
+		instrumentAdmin string
+		factoryVisible  bool
+		wantStatus      int
+		wantServed      bool
+		wantMissing     bool
+	}{
+		{"admin is gg, factory absent", testGuardianGovernanceParty, false, http.StatusInternalServerError, false, false},
+		{"admin is a third party (DSO), factory absent", "dso::1", false, http.StatusOK, false, true},
+		{"admin is gg, factory present", testGuardianGovernanceParty, true, http.StatusOK, true, false},
+	}
+	for _, tc := range cases {
+		for _, flow := range []string{"consolidate", "transfer"} {
+			t.Run(tc.name+" "+flow, func(t *testing.T) {
+				lockUnlock := newBaseFixtures(tokenConfigLockUnlock)
+				lockUnlock.instrumentAdmin = tc.instrumentAdmin
+				fixtures := flowFixtures{
+					tailNttManager:          jsonArray(lockUnlock.managerJSON()),
+					tailEmitter:             jsonArray(lockUnlock.emitterJSON()),
+					tailCoreState:           jsonArray(lockUnlock.coreStateJSON()),
+					tailLockedLedger:        jsonArray(lockUnlock.ledgerJSON(nil)),
+					tailTransferPreapproval: jsonArray(lockUnlock.transferPreapprovalJSON(lockUnlock.reserveCustodian())),
+				}
+				if tc.factoryVisible {
+					fixtures[tailCoinFactory] = jsonArray(lockUnlock.factoryJSON())
+				}
+				srv := newFlowTestServer(t, fixtures)
+				srv.logger, _ = newCapturedLogger()
+				recorder := requestFlow(t, srv, flow, "manager="+lockUnlock.managerAddr)
+				require.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
+				if tc.wantStatus != http.StatusOK {
+					return
+				}
+				response := decodeFlowResponse(t, recorder)
+				assert.Equal(t, tc.wantServed, slices.Contains(rolesOf(response.Disclosures), roleCommittedTransferFactory))
+				assert.Equal(t, tc.wantMissing, slices.Contains(missingRolesOf(response.Missing), roleCommittedTransferFactory))
+			})
+		}
 	}
 }

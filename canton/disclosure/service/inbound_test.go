@@ -74,6 +74,7 @@ func TestParseFlags_NonLoopbackListenNeedsProxyFlag(t *testing.T) {
 func TestRun_NonLoopbackBindWithoutProxyFlagStops(t *testing.T) {
 	opts := &options{
 		listen:                  "0.0.0.0:0",
+		upstreamAuth:            upstreamAuthNone{},
 		jsonAPIBaseURL:          "http://127.0.0.1:1",
 		readerParties:           testReaderParties(),
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ func TestParseFlags_Defaults(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:7599", opts.listen)
 	assert.Equal(t, "http://127.0.0.1:6975", opts.jsonAPIBaseURL)
 	assert.Equal(t, readerPartiesByRole{guardianGovernance: testGuardianGovernanceParty, nttCustody: testNttCustodyParty}, opts.readerParties)
-	assert.Equal(t, "", opts.accessTokenFile)
+	assert.Equal(t, upstreamAuthNone{}, opts.upstreamAuth)
 	assert.Equal(t, 1000, opts.maxContractsPerTemplate)
 	assert.False(t, opts.verbose)
 }
@@ -66,7 +67,7 @@ func TestActiveContracts_MultiPartyFilter(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, "")
+	client := newTestHTTPACSClient(upstream.URL, nil)
 	_, err := client.ActiveContracts(context.Background(), activeContractsQuery{readerParties: []partyID{"Alice", "Bob"}, template: template, activeAtOffset: 42, maxMatches: maxMatchingContractsPerQuery})
 	require.NoError(t, err)
 
@@ -94,7 +95,7 @@ func TestActiveContracts_DedupsSharedContracts(t *testing.T) {
 		_, _ = w.Write([]byte("[" + shared + "," + shared + "," + only + "]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, "")
+	client := newTestHTTPACSClient(upstream.URL, nil)
 	entries, err := client.ActiveContracts(context.Background(), activeContractsQuery{readerParties: []partyID{"Alice", "Bob"}, template: template, activeAtOffset: 42, maxMatches: maxMatchingContractsPerQuery})
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
@@ -166,6 +167,19 @@ func TestFlowRejectsWrongPackageName(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Fake upstream JSON Ledger API v2
 // ---------------------------------------------------------------------------
+
+// newTestUpstreamHTTPClient is the production upstream client with default TLS files.
+func newTestUpstreamHTTPClient(t *testing.T) *http.Client {
+	t.Helper()
+	tlsConfig, err := loadUpstreamTLSConfig(upstreamTLSFiles{}, time.Now())
+	require.NoError(t, err)
+	return newUpstreamHTTPClient(tlsConfig)
+}
+
+// newTestHTTPACSClient is an ACS client with the default TLS config and the given token source.
+func newTestHTTPACSClient(baseURL string, tokens bearerTokenSource) *httpACSClient {
+	return newHTTPACSClient(baseURL, newUpstreamHTTPClient(&tls.Config{MinVersion: tls.VersionTLS12}), tokens)
+}
 
 // newFakeJSONAPI starts an httptest server that stands in for the JSON Ledger API v2. It answers
 // /v2/state/ledger-end with a fixed offset and routes /v2/state/active-contracts to acHandler.
@@ -282,6 +296,9 @@ func acsContractJSON(templateID, contractID, blob, synchronizerID string) string
 func testPackageName(templateID string) string {
 	qualifiedTemplate, known := flowTemplateByTail[templateTail(templateID)]
 	if !known {
+		qualifiedTemplate, known = custodyPotHoldingTemplateByTail[templateTail(templateID)]
+	}
+	if !known {
 		return "unknown-package"
 	}
 	return strings.TrimPrefix(strings.SplitN(qualifiedTemplate, ":", 2)[0], "#")
@@ -307,7 +324,7 @@ func testReaderParties() readerPartiesByRole {
 
 func newTestServer(t *testing.T, upstream *httptest.Server) *server {
 	t.Helper()
-	return newTestServerWithClient(t, newHTTPACSClient(upstream.URL, ""))
+	return newTestServerWithClient(t, newTestHTTPACSClient(upstream.URL, nil))
 }
 
 // newTestServerWithClient builds a server over acs with testReaderParties.
@@ -367,7 +384,7 @@ func TestBearerTokenFromFileForwardedUpstream(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, tokenPath)
+	client := newTestHTTPACSClient(upstream.URL, fileBearerTokenSource{path: tokenPath})
 	_, err = client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer secret-token-value", capture.get())
@@ -387,7 +404,7 @@ func TestBearerTokenRereadOnEveryRequest(t *testing.T) {
 		_, _ = w.Write([]byte("[]"))
 	})
 
-	client := newHTTPACSClient(upstream.URL, tokenPath)
+	client := newTestHTTPACSClient(upstream.URL, fileBearerTokenSource{path: tokenPath})
 	_, err := client.ActiveContracts(context.Background(), testQuery(template, 42))
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer first-token", capture.get())
@@ -441,6 +458,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 
 	opts := &options{
 		listen:                  "127.0.0.1:0",
+		upstreamAuth:            upstreamAuthNone{},
 		jsonAPIBaseURL:          upstream.URL,
 		readerParties:           testReaderParties(),
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
@@ -1511,15 +1529,30 @@ func TestHandleFlows_Consolidate_LedgerAbsent_500(t *testing.T) {
 	requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, roleLockedLedger)
 }
 
-func TestHandleFlows_Consolidate_FactoryAbsent_500(t *testing.T) {
+func TestHandleFlows_Consolidate_FactoryNotVisible_Missing(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
+	b.instrumentAdmin = "dso::1"
 	fixtures := flowFixtures{
 		tailNttManager:   jsonArray(b.managerJSON()),
 		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
 	}
 	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, []string{roleCommittedTransferFactory}, missingRolesOf(decodeFlowResponse(t, rr).Missing))
+}
+
+func TestHandleFlows_Consolidate_WrongFactoryTag_409(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	b.factoryTag = factoryTagBurnMint
+	fixtures := flowFixtures{
+		tailNttManager:   jsonArray(b.managerJSON()),
+		tailLockedLedger: jsonArray(b.ledgerJSON(nil)),
+		tailCoinFactory:  jsonArray(b.factoryJSON()),
+	}
+	srv := newFlowTestServer(t, fixtures)
+	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
+	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -1730,6 +1763,95 @@ func TestHandleFlows_ManagerPayloadBeforeNtt040_500(t *testing.T) {
 			logged := captureServerLog(srv)
 			rr := requestFlow(t, srv, tc.flow, tc.query)
 			requirePublicErrorWithLoggedDetail(t, rr, logged, http.StatusInternalServerError, "ntt 0.4.0 or later is required")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Canton Coin (Amulet) lock/unlock: the registry TransferFactory is a DSO contract the disclosing
+// parties cannot see; the reserve pot is an Amulet owned by the reserve custodian.
+// ---------------------------------------------------------------------------
+
+func TestHandleFlows_AmuletLockUnlock(t *testing.T) {
+	b := newBaseFixturesAdminedBy(tokenConfigLockUnlock, "gg::1")
+	b.instrumentAdmin = "dso::1"
+	b.instrumentID = "Amulet"
+	b.factoryCid = "amulet-external-party-rules-cid"
+	potCid := "amulet-pot-cid"
+	amuletPot := acsContractJSONWithArg("pkg:"+tailAmulet, potCid, "YW11bGV0", "sync1", "{}")
+	cases := []struct {
+		name            string
+		flow, query     string
+		wantDisclosures []string
+		wantMissing     []string
+	}{
+		{
+			name:            "release",
+			flow:            "release",
+			query:           "manager=" + b.managerAddr + "&digest=" + b.digest + "&recipient=" + testRecipient,
+			wantDisclosures: []string{roleNttManager, roleCoreState, roleCoveringReplayNode, roleLockedLedger, roleCustodyPotHolding},
+			wantMissing:     []string{roleCommittedTransferFactory, roleRecipientTransferPreapproval},
+		},
+		{
+			name:            "transfer",
+			flow:            "transfer",
+			query:           "manager=" + b.managerAddr,
+			wantDisclosures: []string{roleNttManager, roleTransceiverEmitter, roleCoreState, roleLockedLedger, roleCustodyPotHolding},
+			wantMissing:     []string{roleCommittedTransferFactory, roleCustodianTransferPreapproval},
+		},
+		{
+			name:            "consolidate",
+			flow:            "consolidate",
+			query:           "manager=" + b.managerAddr,
+			wantDisclosures: []string{roleNttManager, roleLockedLedger},
+			wantMissing:     []string{roleCommittedTransferFactory},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixtures := flowFixtures{
+				tailNttManager:   jsonArray(b.managerJSON()),
+				tailEmitter:      jsonArray(b.emitterJSON()),
+				tailCoreState:    jsonArray(b.coreStateJSON()),
+				tailReplayNode:   jsonArray(b.replayNodeJSON("")),
+				tailLockedLedger: jsonArray(b.ledgerJSON(&potCid)),
+				tailAmulet:       jsonArray(amuletPot),
+			}
+			srv := newFlowTestServer(t, fixtures)
+			rr := requestFlow(t, srv, tc.flow, tc.query)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			resp := decodeFlowResponse(t, rr)
+			assert.Equal(t, tc.wantDisclosures, rolesOf(resp.Disclosures))
+			assert.Equal(t, tc.wantMissing, missingRolesOf(resp.Missing))
+			for _, d := range resp.Disclosures {
+				if d.Role == roleCustodyPotHolding {
+					assert.Equal(t, potCid, d.ContractID)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleFlows_BurnMint_CanonicalCoinFactoryNotVisible_500(t *testing.T) {
+	b := newBaseFixtures(tokenConfigBurnMint)
+	cases := []struct {
+		flow, query string
+	}{
+		{"mint", "manager=" + b.managerAddr + "&digest=" + b.digest + "&recipient=" + testRecipient},
+		{"transfer", "manager=" + b.managerAddr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.flow, func(t *testing.T) {
+			fixtures := flowFixtures{
+				tailNttManager:         jsonArray(b.managerJSON()),
+				tailEmitter:            jsonArray(b.emitterJSON()),
+				tailCoreState:          jsonArray(b.coreStateJSON()),
+				tailReplayNode:         jsonArray(b.replayNodeJSON("")),
+				tailDepositPreapproval: jsonArray(acsContractJSONWithArg("pkg:"+tailDepositPreapproval, "dep-cid-1", "ZGVw", "sync1", preapprovalArg(testRecipient, b.instrumentAdmin, b.instrumentID))),
+			}
+			srv := newFlowTestServer(t, fixtures)
+			rr := requestFlow(t, srv, tc.flow, tc.query)
+			assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
 		})
 	}
 }

@@ -4,7 +4,8 @@
 //
 // Posture: the flow routes are public and serve each client. An edge proxy in front terminates
 // TLS and applies a rate limit and a WAF. A non-loopback --listen needs --behind-edge-proxy.
-// --access-token-file is the service's own credential for the upstream JSON API.
+// The service's own upstream credential is a bearer token file (--access-token-file) or an
+// OAuth2 client-credentials grant (--oauth-*).
 package main
 
 import (
@@ -52,7 +53,8 @@ type options struct {
 	listen                  string
 	jsonAPIBaseURL          string
 	readerParties           readerPartiesByRole
-	accessTokenFile         string
+	upstreamAuth            upstreamAuthMode
+	upstreamTLS             upstreamTLSFiles
 	maxContractsPerTemplate int
 	maxUpstreamConcurrency  int
 	cacheTTL                time.Duration
@@ -77,6 +79,15 @@ func parseFlags(args []string) (*options, error) {
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long, 0 to 60s; 0 turns the cache off")
 	behindEdgeProxy := fs.Bool("behind-edge-proxy", false, "state that an edge proxy terminates TLS and applies a rate limit and a WAF; required for a non-loopback --listen")
+	caFile := fs.String("json-api-ca-file", "", "PEM CA bundle that verifies the JSON Ledger API server certificate; replaces the system roots (https only)")
+	clientCertFile := fs.String("json-api-client-cert-file", "", "PEM client certificate for mutual TLS to the JSON Ledger API; needs --json-api-client-key-file (https only)")
+	clientKeyFile := fs.String("json-api-client-key-file", "", "PEM private key for --json-api-client-cert-file (https only)")
+	oauthTokenURL := fs.String("oauth-token-url", "", "OAuth2 token endpoint for a client-credentials grant; https, or http on loopback only; exclusive with --access-token-file")
+	oauthClientID := fs.String("oauth-client-id", "", "OAuth2 client id")
+	oauthSecretFile := fs.String("oauth-client-secret-file", "", "path to the OAuth2 client secret; re-read on every token refresh")
+	oauthAudience := fs.String("oauth-audience", "", "OAuth2 audience of the JSON Ledger API")
+	oauthScope := fs.String("oauth-scope", "", "OAuth2 scope (optional)")
+	oauthCAFile := fs.String("oauth-ca-file", "", "PEM CA bundle that verifies the OAuth2 token endpoint certificate; replaces the system roots (https only)")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -85,7 +96,12 @@ func parseFlags(args []string) (*options, error) {
 	if *jsonAPI == "" {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://127.0.0.1:6975)")
 	}
-	if err := checkJSONAPIURL(*jsonAPI, *tokenFile != ""); err != nil {
+	upstreamTLS := upstreamTLSFiles{caFile: *caFile, clientCertFile: *clientCertFile, clientKeyFile: *clientKeyFile}
+	upstreamAuth, err := parseUpstreamAuthMode(*tokenFile, oauthClientFlags{tokenURL: *oauthTokenURL, clientID: *oauthClientID, clientSecretFile: *oauthSecretFile, audience: *oauthAudience, scope: *oauthScope, caFile: *oauthCAFile})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkJSONAPIURL(*jsonAPI, upstreamAuth.sendsBearerToken(), upstreamTLS); err != nil {
 		return nil, err
 	}
 	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)
@@ -111,7 +127,8 @@ func parseFlags(args []string) (*options, error) {
 		listen:                  *listen,
 		jsonAPIBaseURL:          *jsonAPI,
 		readerParties:           readerParties,
-		accessTokenFile:         *tokenFile,
+		upstreamAuth:            upstreamAuth,
+		upstreamTLS:             upstreamTLS,
 		maxContractsPerTemplate: *maxContracts,
 		maxUpstreamConcurrency:  *maxUpstream,
 		cacheTTL:                *cacheTTL,
@@ -158,18 +175,23 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	if err := checkListenAddress(opts.listen, opts.behindEdgeProxy); err != nil {
 		return err
 	}
-	// Fail fast at startup when the token file is missing or unreadable. httpACSClient keeps
-	// only the path; see readAccessToken's call in authHeader.
-	if opts.accessTokenFile != "" {
-		if _, err := readAccessToken(opts.accessTokenFile); err != nil {
-			return err
-		}
+
+	// Fail fast at startup on an unreadable or invalid TLS file.
+	tlsConfig, err := loadUpstreamTLSConfig(opts.upstreamTLS, time.Now())
+	if err != nil {
+		return err
+	}
+	upstreamHTTPClient := newUpstreamHTTPClient(tlsConfig)
+
+	tokens, err := newBearerTokenSource(opts.upstreamAuth)
+	if err != nil {
+		return err
 	}
 
 	if opts.maxUpstreamConcurrency < 1 || opts.maxUpstreamConcurrency > maxUpstreamConcurrencyLimit {
 		return fmt.Errorf("disclosure-service: upstream concurrency %d is out of bounds", opts.maxUpstreamConcurrency)
 	}
-	var acs acsClient = newBoundedACS(newHTTPACSClient(opts.jsonAPIBaseURL, opts.accessTokenFile), opts.maxUpstreamConcurrency)
+	var acs acsClient = newBoundedACS(newHTTPACSClient(opts.jsonAPIBaseURL, upstreamHTTPClient, tokens), opts.maxUpstreamConcurrency)
 	if opts.cacheTTL > 0 {
 		acs = newCachingACS(acs, opts.cacheTTL)
 	}
@@ -187,6 +209,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 
 	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
 		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
+	fmt.Fprintf(stderr, "disclosure-service: upstream auth: %s; upstream TLS: %s\n", describeUpstreamAuth(opts.upstreamAuth), describeUpstreamTLS(opts.upstreamTLS))
 	fmt.Fprintln(stderr, "disclosure-service: public flow routes; put an edge proxy (TLS, rate limit, WAF) in front")
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 
@@ -209,6 +232,17 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		}
 		return nil
 	}
+}
+
+func describeUpstreamTLS(files upstreamTLSFiles) string {
+	roots := "system roots"
+	if files.caFile != "" {
+		roots = "custom CA"
+	}
+	if files.clientCertFile != "" {
+		return roots + ", mutual TLS"
+	}
+	return roots
 }
 
 func main() {

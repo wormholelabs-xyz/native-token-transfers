@@ -34,7 +34,7 @@ func TestLedgerEndOffset(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			offset, err := newHTTPACSClient(upstream.URL, "").LedgerEnd(context.Background())
+			offset, err := newTestHTTPACSClient(upstream.URL, nil).LedgerEnd(context.Background())
 			if tc.wantOffset == 0 {
 				require.Error(t, err)
 				if tc.wantErr != nil {

@@ -91,7 +91,7 @@ func newStaticACSUpstream(t *testing.T, body string) *httpACSClient {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(upstream.Close)
-	return newHTTPACSClient(upstream.URL, "")
+	return newTestHTTPACSClient(upstream.URL, nil)
 }
 
 func managerQuery() activeContractsQuery {
@@ -171,7 +171,7 @@ func TestActiveContractsStreamBounds(t *testing.T) {
 			assert.Len(t, entries, tc.wantLen)
 		})
 	}
-	assert.Equal(t, int64(maxUpstreamResponseBytes), newHTTPACSClient("http://127.0.0.1:1", "").maxResponseBytes)
+	assert.Equal(t, int64(maxUpstreamResponseBytes), newTestHTTPACSClient("http://127.0.0.1:1", nil).maxResponseBytes)
 }
 
 func withMaxMatches(query activeContractsQuery, maxMatches int) activeContractsQuery {

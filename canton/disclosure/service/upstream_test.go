@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,8 +38,8 @@ func TestCheckJSONAPIURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.rawURL, func(t *testing.T) {
-			errWithToken := checkJSONAPIURL(tc.rawURL, true)
-			errNoToken := checkJSONAPIURL(tc.rawURL, false)
+			errWithToken := checkJSONAPIURL(tc.rawURL, true, upstreamTLSFiles{})
+			errNoToken := checkJSONAPIURL(tc.rawURL, false, upstreamTLSFiles{})
 			assert.Equal(t, tc.wantErrWithToken, errWithToken != nil, "with token: %v", errWithToken)
 			assert.Equal(t, tc.wantErrNoToken, errNoToken != nil, "without token: %v", errNoToken)
 		})
@@ -53,9 +54,13 @@ func TestParseFlagsRejectsTokenOverCleartextToRemoteHost(t *testing.T) {
 }
 
 func TestNewHTTPACSClientAssertsURLRule(t *testing.T) {
-	assert.Panics(t, func() { newHTTPACSClient("http://10.0.0.5:7575", "/run/secrets/token") })
-	assert.NotPanics(t, func() { newHTTPACSClient("http://127.0.0.1:7575", "/run/secrets/token") })
-	assert.NotPanics(t, func() { newHTTPACSClient("http://10.0.0.5:7575", "") })
+	assert.Panics(t, func() {
+		newTestHTTPACSClient("http://10.0.0.5:7575", fileBearerTokenSource{path: "/run/secrets/token"})
+	})
+	assert.NotPanics(t, func() {
+		newTestHTTPACSClient("http://127.0.0.1:7575", fileBearerTokenSource{path: "/run/secrets/token"})
+	})
+	assert.NotPanics(t, func() { newTestHTTPACSClient("http://10.0.0.5:7575", nil) })
 }
 
 func TestIsLoopbackIPAddress(t *testing.T) {
@@ -78,7 +83,7 @@ func TestIsLoopbackIPAddress(t *testing.T) {
 }
 
 func TestDirectUpstreamHTTPClient(t *testing.T) {
-	client := newDirectUpstreamHTTPClient()
+	client := newUpstreamHTTPClient(&tls.Config{MinVersion: tls.VersionTLS12})
 	transport, isTransport := client.Transport.(*http.Transport)
 	require.True(t, isTransport)
 	assert.Nil(t, transport.Proxy, "the upstream client ignores HTTP_PROXY and HTTPS_PROXY")
@@ -99,7 +104,7 @@ func TestDirectUpstreamHTTPClient(t *testing.T) {
 	assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 	assert.Zero(t, redirectTargetHits.Load())
 
-	assert.NotNil(t, newHTTPACSClient("http://127.0.0.1:1", "").client.CheckRedirect, "the ACS client uses the direct client")
+	assert.NotNil(t, newTestHTTPACSClient("http://127.0.0.1:1", nil).client.CheckRedirect, "the ACS client uses the direct client")
 }
 
 func TestReadAccessTokenSize(t *testing.T) {
@@ -152,5 +157,47 @@ func TestReadAtMost(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.contents, string(got))
 		})
+	}
+}
+
+func TestParseFlagsJSONAPIURLRuleForEachAuthMode(t *testing.T) {
+	authModeFlags := map[string][]string{
+		"none":       nil,
+		"token file": {"--access-token-file", "/run/secrets/token"},
+		"OAuth2": {
+			"--oauth-token-url", "https://idp.example/token",
+			"--oauth-client-id", "gateway",
+			"--oauth-client-secret-file", "/run/secrets/client-secret",
+			"--oauth-audience", "https://ledger_api.example",
+		},
+	}
+	cases := []struct {
+		jsonAPIURL      string
+		wantErrNone     bool
+		wantErrWithAuth bool
+	}{
+		{"https://participant:7575", false, false},
+		{"http://participant.internal:7575", false, true},
+		{"http://127.0.0.1:7575", false, false},
+		{"http://[::1]:7575", false, false},
+		{"http://localhost:7575", false, true},
+	}
+	for _, tc := range cases {
+		for authModeName, flags := range authModeFlags {
+			t.Run(authModeName+" "+tc.jsonAPIURL, func(t *testing.T) {
+				args := append(append([]string{"--json-api", tc.jsonAPIURL}, testPartyFlags...), flags...)
+				_, err := parseFlags(args)
+				wantErr := tc.wantErrWithAuth
+				if authModeName == "none" {
+					wantErr = tc.wantErrNone
+				}
+				if wantErr {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "an upstream token needs https")
+					return
+				}
+				require.NoError(t, err)
+			})
+		}
 	}
 }

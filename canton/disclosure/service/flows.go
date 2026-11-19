@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -35,6 +36,7 @@ const (
 	tailCoinFactory           = "Token.CIP0056.CoinFactory:CoinFactory"
 	tailCoin                  = "Token.CIP0056.Coin:Coin"
 	tailTransferPreapproval   = "Token.CIP0056.CoinTransfer:TransferPreapproval"
+	tailAmulet                = "Splice.Amulet:Amulet"
 )
 
 // Role labels: one per set member, served to clients on each disclosure entry.
@@ -552,24 +554,37 @@ func (s *server) fetchLedger(ctx context.Context, manager managerAddressHex, off
 // fetchCommittedFactory checks factory's tag against wantTag, then reads the CoinFactory that
 // backs it by contract id.
 func (s *server) fetchCommittedFactory(ctx context.Context, factory daNttFactory, wantTag string) (decodedEntry[daCoinFactory], error) {
-	if err := requireFactoryTag(factory, wantTag); err != nil {
-		return decodedEntry[daCoinFactory]{}, err
-	}
-	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoinFactory), contractID(factory.Value))
+	factoryEntry, found, err := s.fetchCommittedFactoryIfVisible(ctx, factory, wantTag)
 	if err != nil {
-		return decodedEntry[daCoinFactory]{}, newFlowError(upstreamErrorStatus(err), "read committed factory %s: %v", factory.Value, err)
+		return decodedEntry[daCoinFactory]{}, err
 	}
 	if !found {
 		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "no CoinFactory found for committed factory contractId %s", factory.Value)
 	}
+	return factoryEntry, nil
+}
+
+// fetchCommittedFactoryIfVisible reads the committed factory by contract id. found is false when
+// no reader party can see it.
+func (s *server) fetchCommittedFactoryIfVisible(ctx context.Context, factory daNttFactory, wantTag string) (decodedEntry[daCoinFactory], bool, error) {
+	if err := requireFactoryTag(factory, wantTag); err != nil {
+		return decodedEntry[daCoinFactory]{}, false, err
+	}
+	factoryEntry, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoinFactory), contractID(factory.Value))
+	if err != nil {
+		return decodedEntry[daCoinFactory]{}, false, newFlowError(upstreamErrorStatus(err), "read committed factory %s: %v", factory.Value, err)
+	}
+	if !found {
+		return decodedEntry[daCoinFactory]{}, false, nil
+	}
 	if err := checkUpstreamTemplate(flowTemplateByTail[tailCoinFactory], factoryEntry.PackageName, factoryEntry.TemplateID); err != nil {
-		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "committed factory %s: %v", factory.Value, err)
+		return decodedEntry[daCoinFactory]{}, false, newFlowError(http.StatusInternalServerError, "committed factory %s: %v", factory.Value, err)
 	}
 	var coinFactory daCoinFactory
 	if err := json.Unmarshal(factoryEntry.CreateArgument, &coinFactory); err != nil {
-		return decodedEntry[daCoinFactory]{}, newFlowError(http.StatusInternalServerError, "decode committed factory %s createArgument: %v", factory.Value, err)
+		return decodedEntry[daCoinFactory]{}, false, newFlowError(http.StatusInternalServerError, "decode committed factory %s createArgument: %v", factory.Value, err)
 	}
-	return decodedEntry[daCoinFactory]{entry: factoryEntry, value: coinFactory}, nil
+	return decodedEntry[daCoinFactory]{entry: factoryEntry, value: coinFactory}, true, nil
 }
 
 // fetchCommittedCanonicalCoinFactory resolves a burn/mint deployment's committed factory and
@@ -604,11 +619,13 @@ func (s *server) appendTransferPreapprovalOrMissing(ctx context.Context, owner p
 
 // isCustodyPotHoldingTemplate reports whether pot has the package name and template of a custody holding.
 func isCustodyPotHoldingTemplate(pot acsEntry) bool {
-	return checkUpstreamTemplate(flowTemplateByTail[tailCoin], pot.PackageName, pot.TemplateID) == nil
+	qualifiedTemplate, isHoldingTail := custodyPotHoldingTemplateByTail[templateTail(pot.TemplateID)]
+	return isHoldingTail && checkUpstreamTemplate(qualifiedTemplate, pot.PackageName, pot.TemplateID) == nil
 }
 
-// fetchPotHolding reads the custody pot by the contract id its LockedLedger names, at the
-// latest ledger state; an archived pot gives a failed submission and a retry.
+// fetchPotHolding reads the custody pot (a CIP-56 Coin or a Canton Coin Amulet) by the contract
+// id its LockedLedger names, at the latest ledger state; an archived pot gives a failed
+// submission and a retry.
 func (s *server) fetchPotHolding(ctx context.Context, potContractID contractID) (acsEntry, bool, error) {
 	pot, found, err := s.acs.ActiveContractByID(ctx, s.readersFor(tailCoin), potContractID)
 	if err != nil {
@@ -644,6 +661,24 @@ func (s *server) fetchTransceiverEmitter(ctx context.Context, manager daNttManag
 	return findTransceiverEmitter(emitters, manager.TransceiverEmitterId, manager.GuardianGovernance)
 }
 
+// appendCommittedTransferFactoryOrMissing discloses a lock/unlock deployment's committed
+// TransferFactory, or names it missing when no reader party can see it. A registry factory such
+// as the Canton Coin factory comes from the transfer-factory API of that registry.
+func (s *server) appendCommittedTransferFactoryOrMissing(ctx context.Context, manager daNttManager, disclosures []flowDisclosureEntry, missing []flowMissingEntry) ([]flowDisclosureEntry, []flowMissingEntry, error) {
+	factoryEntry, found, err := s.fetchCommittedFactoryIfVisible(ctx, manager.Factory, factoryTagTransfer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if found {
+		return append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry)), missing, nil
+	}
+	//SECURITY: a factory that a reader party administers and cannot see is a broken ledger view, not a client gap.
+	if slices.Contains(s.readersFor(tailCoinFactory), partyID(manager.InstrumentId.Admin)) {
+		return nil, nil, newFlowError(http.StatusInternalServerError, "committed TransferFactory %s not visible to its admin %s", manager.Factory.Value, manager.InstrumentId.Admin)
+	}
+	return disclosures, append(missing, missingEntry(roleCommittedTransferFactory)), nil
+}
+
 // --- Per-flow assemblers ---
 
 // assembleRelease mirrors releaseDisclosures.
@@ -664,10 +699,6 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 		return nil, err
 	}
 	ledger, err := s.fetchLedger(ctx, request.manager, offset)
-	if err != nil {
-		return nil, err
-	}
-	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
 	if err != nil {
 		return nil, err
 	}
@@ -692,7 +723,10 @@ func (s *server) assembleRelease(ctx context.Context, request releaseRequest, of
 		}
 	}
 
-	disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
+	disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, missing)
+	if err != nil {
+		return nil, err
+	}
 
 	if request.recipient != "" {
 		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, request.recipient, mgr.value.InstrumentId, roleRecipientTransferPreapproval, offset, disclosures, missing)
@@ -838,11 +872,10 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 			} else {
 				missing = append(missing, missingEntry(roleCustodyPotHolding))
 			}
-			factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
+			disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, missing)
 			if err != nil {
 				return nil, err
 			}
-			disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
 			// AcceptAdminTransferByVaa requires newAdmin == gg, so the pot moves to nttCustody.
 			newCustodian := partyID(mgr.value.NttCustody)
@@ -904,11 +937,10 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 			}
 		}
 
-		factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
+		disclosures, missing, err = s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, missing)
 		if err != nil {
 			return nil, err
 		}
-		disclosures = append(disclosures, discloseAs(roleCommittedTransferFactory, factoryEntry.entry))
 
 		disclosures, missing, err = s.appendTransferPreapprovalOrMissing(ctx, partyID(mgr.value.ReserveCustodian), mgr.value.InstrumentId, roleCustodianTransferPreapproval, offset, disclosures, missing)
 		if err != nil {
@@ -986,17 +1018,15 @@ func (s *server) assembleConsolidate(ctx context.Context, request consolidateReq
 	if err != nil {
 		return nil, err
 	}
-	factoryEntry, err := s.fetchCommittedFactory(ctx, mgr.value.Factory, factoryTagTransfer)
-	if err != nil {
-		return nil, err
-	}
-
 	disclosures := []flowDisclosureEntry{
 		discloseAs(roleNttManager, mgr.entry),
 		discloseAs(roleLockedLedger, ledger.entry),
-		discloseAs(roleCommittedTransferFactory, factoryEntry.entry),
 	}
-	return &flowResponse{Flow: "consolidate", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
+	disclosures, missing, err := s.appendCommittedTransferFactoryOrMissing(ctx, mgr.value, disclosures, make([]flowMissingEntry, 0))
+	if err != nil {
+		return nil, err
+	}
+	return &flowResponse{Flow: "consolidate", Disclosures: disclosures, Missing: missing}, nil
 }
 
 // checkFlowEnabled refuses register without --operator-party, and a register gg other than the

@@ -13,6 +13,7 @@ COPY --from=build /disclosure-service /disclosure-service
 EXPOSE 7599
 # The binary defaults to loopback. Put an edge proxy (TLS, rate limit, WAF)
 # in front. Pass --listen 0.0.0.0:7599 --behind-edge-proxy so the proxy
-# reaches the port. Mount the token file read-only and pass
-# --access-token-file for an authenticated upstream.
+# reaches the port. For an authenticated upstream, mount the token file
+# read-only and pass --access-token-file, or mount the client secret and
+# pass the --oauth-* flags.
 ENTRYPOINT ["/disclosure-service"]
