@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -21,7 +22,14 @@ const (
 	maxOAuthRefreshMargin = 60 * time.Second
 	// maxOAuthErrorCodeLength caps the endpoint's "error" code echoed into our error message.
 	maxOAuthErrorCodeLength = 64
+	// oauthFailureBackoffInitial is the wait after the first failed fetch; it doubles to oauthFailureBackoffMax.
+	oauthFailureBackoffInitial = 1 * time.Second
+	oauthFailureBackoffMax     = 30 * time.Second
+	// oauthTokenFetchTimeout bounds one token fetch, inside the inbound request deadline.
+	oauthTokenFetchTimeout = 10 * time.Second
 )
+
+var errOAuthTokenEndpointBackoff = errors.New("disclosure-service: OAuth2 token endpoint failed recently; waiting before the next fetch")
 
 // oauthClientFlags are the raw --oauth-* flag values.
 type oauthClientFlags struct {
@@ -116,13 +124,17 @@ func readClientSecret(path string) (string, error) {
 // oauthBearerTokenSource caches one client-credentials access token and refreshes it before
 // expiry. One fetch runs at a time; concurrent callers wait for it and share its result.
 type oauthBearerTokenSource struct {
-	clientConfig validatedOAuthClientConfig
-	httpClient   *http.Client
-	now          func() time.Time
-	// fetchSlot is a one-slot semaphore. Holding it guards cachedToken and refreshAt.
+	clientConfig      validatedOAuthClientConfig
+	httpClient        *http.Client
+	now               func() time.Time
+	tokenFetchTimeout time.Duration
+	// fetchSlot is a one-slot semaphore. Holding it guards the fields below it.
 	fetchSlot   chan struct{}
 	cachedToken string
 	refreshAt   time.Time
+	// failureBackoff is zero after a success.
+	failureBackoff time.Duration
+	retryNotBefore time.Time
 }
 
 func newOAuthBearerTokenSource(clientConfig validatedOAuthClientConfig, httpClient *http.Client, now func() time.Time) *oauthBearerTokenSource {
@@ -136,14 +148,16 @@ func newOAuthBearerTokenSource(clientConfig validatedOAuthClientConfig, httpClie
 		panic("disclosure-service: newOAuthBearerTokenSource: unvalidated client config")
 	}
 	return &oauthBearerTokenSource{
-		clientConfig: clientConfig,
-		httpClient:   httpClient,
-		now:          now,
-		fetchSlot:    make(chan struct{}, 1),
+		clientConfig:      clientConfig,
+		httpClient:        httpClient,
+		now:               now,
+		tokenFetchTimeout: oauthTokenFetchTimeout,
+		fetchSlot:         make(chan struct{}, 1),
 	}
 }
 
-// BearerToken returns the cached token, or fetches a new one at or after the refresh point.
+// BearerToken returns the cached token, or fetches a new one at or after the refresh point. After
+// a failed fetch it returns errOAuthTokenEndpointBackoff until the backoff ends.
 func (source *oauthBearerTokenSource) BearerToken(ctx context.Context) (string, error) {
 	select {
 	case source.fetchSlot <- struct{}{}:
@@ -157,10 +171,19 @@ func (source *oauthBearerTokenSource) BearerToken(ctx context.Context) (string, 
 		return source.cachedToken, nil
 	}
 
-	token, lifetime, err := source.fetchToken(ctx)
+	if requestedAt.Before(source.retryNotBefore) {
+		return "", errOAuthTokenEndpointBackoff
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, source.tokenFetchTimeout)
+	defer cancel()
+	token, lifetime, err := source.fetchToken(fetchCtx)
 	if err != nil {
+		source.failureBackoff = min(max(2*source.failureBackoff, oauthFailureBackoffInitial), oauthFailureBackoffMax)
+		source.retryNotBefore = requestedAt.Add(source.failureBackoff)
 		return "", err
 	}
+	source.failureBackoff = 0
+	source.retryNotBefore = time.Time{}
 	if token == "" || lifetime <= 0 {
 		panic("disclosure-service: fetchToken returned an empty token or non-positive lifetime")
 	}

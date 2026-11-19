@@ -156,5 +156,5 @@ func newTokenEndpointHTTPClient(oauthCAFile string) (*http.Client, error) {
 	if len(tlsConfig.Certificates) != 0 {
 		panic("disclosure-service: the token endpoint client has a client certificate")
 	}
-	return newDirectHTTPClient(tlsConfig, httpClientTimeout), nil
+	return newDirectHTTPClient(tlsConfig, oauthTokenFetchTimeout), nil
 }
