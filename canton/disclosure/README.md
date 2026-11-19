@@ -33,13 +33,27 @@ The service does not start with a `--listen` address that is not a loopback
 IP address, unless you set `--behind-edge-proxy`. The name `localhost` is not
 a loopback IP address for this check.
 
+The service is not ready for public mainnet traffic. Public mainnet traffic
+waits for one of these changes:
+
+- The index of plan item N73-07.
+- Pages from `/v2/state/active-contracts-page` in place of one full list.
+
+The reason is the participant list limit. See [Bounds](#bounds).
+
 ## Endpoints
 
 - `GET /v1` — this endpoint list, as JSON.
-- `GET /v1/healthz` — liveness. It returns 200 and `{"status":"ok"}`. It does
-  not call the upstream.
+- `GET /v1/healthz` — liveness. It returns 200 and `{"status":"ok"}` while
+  the process serves HTTP. It does not call the upstream.
 - `GET /v1/readyz` — readiness. It returns 200 and `{"status":"ready"}` when
-  the upstream answers. Else it returns 503.
+  the last upstream ledger-end call succeeded. Else it returns 503. The
+  service makes one such call in 2 s or more, with a timeout of 3 s. Each
+  other caller in that time gets the last result.
+
+The inbound cap of 64 requests does not apply to `/v1`, `/v1/healthz`, and
+`/v1/readyz`. Thus an orchestrator gets a probe result when flow requests
+fill the cap.
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
   `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
@@ -58,7 +72,10 @@ a loopback IP address for this check.
   | `consolidate` | `manager` |
 
 `manager` is the manager address and `digest` is the VAA hash. Each is a hex
-string of 64 characters. Give each parameter one time only. The service
+string of 64 characters. `recipient` and `gg` are party ids with the format
+`<hint>::1220<fingerprint>`. The hint has 1 to 185 characters from
+`[A-Za-z0-9._-]`. The fingerprint has 64 lowercase hex characters. The
+service rejects a different value with 400 before it reads the ledger. Give each parameter one time only. The service
 rejects a repeated parameter and a parameter that the flow does not use. The
 query string is 1024 bytes or less.
 
@@ -103,6 +120,52 @@ A 5xx response has a fixed `error` message and a `requestId`. The service
 log has the detail for that `requestId`. The response does not contain
 upstream text.
 
+The service log quotes each value from a client, for example the path.
+Thus a client value cannot start a new log line.
+
+When the participant returns 413 for a template list, the flow returns 502
+with the fixed message `upstream ledger list limit reached`. The log line
+names the template and `http-list-max-elements-limit`. It also holds the
+start of the participant response body.
+
+Each response has `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`.
+
+## Cache
+
+The service keeps each upstream answer for `--cache-ttl`. This includes a
+failed read. Thus a template above a bound costs one upstream read in each
+cache window. A local `service busy` result is not kept.
+
+The cache key holds the parameter values of the request: `manager`,
+`digest`, `recipient`, and `gg`. This has a cost:
+
+- Each new value is a cache miss.
+- Each miss reads the full list of one template from the participant.
+- Thus one anonymous request of about 200 bytes can cause one full template
+  read.
+- The upstream cap of 8 protects the participant. Other callers can then
+  wait 2 s and get 503.
+- The cache holds 512 entries. Many new values push out the useful entries.
+
+The index of plan item N73-07 removes this cost.
+
+## Data that an anonymous caller can get
+
+The routes are public. The owner accepts this exposure by design:
+
+- A `mint` request tells if a known party has a `DepositPreapproval` for a
+  deployment. The service returns 404 when it has none. A `release` request
+  with `recipient` tells the same for a `TransferPreapproval`. The caller
+  must know the party id.
+- `/v1/managers` gives the `instrumentId.admin` and `reserveCustodian` party
+  ids of each deployment. The probes do not give party ids.
+- Each `NttManager` blob gives the admin, `gg`, `nttCustody`, the peers, the
+  limits, and the pause state.
+- Each `ReplayNode` of a namespace gives the consumed VAA digests.
+- The custody pot of a deployment gives the locked amount.
+- A pending `AdminTransferProposal` to `gg` is visible.
+
 ## Reader parties
 
 The service reads each template as one role only:
@@ -126,13 +189,23 @@ contract in `missing`.
 
 | Bound | Value |
 |---|---|
-| Inbound requests at one time | 64; the next request gets 503 |
+| Contracts in one upstream template list | The participant `http-list-max-elements-limit`. The Canton documentation gives 1024 as the default. Above it, the participant returns 413, and each flow that reads the template returns 502. |
+| Inbound requests at one time | 64, without `/v1`, `/v1/healthz`, and `/v1/readyz`; the next request gets 503 |
+| Upstream readiness calls | 1 in 2 s, with a 3 s timeout |
 | Time for one request | 60 s |
 | Bytes of blobs and ids in one flow response | 4 MiB |
 | Query string of a flow | 1024 bytes |
 | Matching contracts for one selector | 8 |
 | Contracts scanned in one upstream response | 100 000 |
 | Bytes of one upstream response | 64 MiB |
+
+A stranger can make the first bound fail. For example, a stranger can create
+1025 `DepositPreapproval` contracts with `instrumentId.admin = gg`. `gg` is an
+observer of each. Each `mint` flow then returns 502. `gg` cannot archive these
+contracts. The index of plan item N73-07 removes this failure.
+
+The service can hold 8 upstream responses at one time, each up to 64 MiB.
+Set the memory limit of the container to more than 512 MiB.
 
 ## Flags
 
@@ -167,3 +240,25 @@ Then run the container with `--listen 0.0.0.0:7599
 --behind-edge-proxy`, behind the edge proxy. Mount the
 token file read-only. The loopback default is not reachable through a
 published port.
+
+## CI vulnerability scan
+
+The CI job `disclosure service (go)` runs `govulncheck` v1.9.0. The job
+compares the module checksum of `golang.org/x/vuln@v1.9.0` with a fixed value
+in the workflow. `sum.golang.org` also checks the download. The `go.sum` file
+in that module pins the dependencies of `govulncheck`. To change the version,
+change the module and the checksum in the workflow together.
+
+## Open items
+
+- The index of plan item N73-07. Until it is in place, the participant list
+  limit stops a flow (see [Bounds](#bounds)). This blocks public mainnet
+  traffic.
+- Live checks that did not run:
+  - The list limit and its status code on a participant (plan item N73-28).
+  - The `events-by-contract-id` response shape on a live participant.
+  - `synchronizerId` after a reassignment. The service reads the
+    synchronizer of the create. After a reassignment, a correct set can
+    have two synchronizers, and the flow returns 500.
+- Lock/unlock flows return 500 when `gg` cannot see the `CoinFactory`. PR
+  #76 puts that factory in `missing`.
