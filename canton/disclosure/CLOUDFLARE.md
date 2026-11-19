@@ -101,6 +101,12 @@ route with the other method. It serves paths under `/v1` and
 `/registry/` only. It rejects a query string that is longer than 1024 bytes.
 It rejects a registry request body that is larger than 64 KiB.
 
+NOTE: The "Large request bodies" rule uses the field
+`http.request.body.size`. We did not confirm that each Cloudflare plan has
+this field. Before you publish the service, make sure that your plan accepts
+the rule. If your plan does not accept it, the service limit of 64 KiB and
+the read time of 10 s still apply.
+
 ## 6. Add rate limiting rules
 
 Add a rate limiting rule for `/v1/*` and `/registry/*`:

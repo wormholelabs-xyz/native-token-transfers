@@ -40,7 +40,8 @@ waits for one of these changes:
 - The index of plan item N73-07.
 - Pages from `/v2/state/active-contracts-page` in place of one full list.
 
-The reason is the participant list limit. See [Bounds](#bounds).
+The reason is the participant list limit. See [Bounds](#bounds). This
+applies to the flow routes and to the CIP-0056 registry routes.
 
 ## Endpoints
 
@@ -161,6 +162,10 @@ The cache key holds the parameter values of the request: `manager`,
   wait 2 s and get 503.
 - The cache holds 512 entries. Many new values push out the useful entries.
 
+The service keeps a read by contract ID that finds no contract for 1 s or
+less. These entries use 128 of the 512 entries or fewer. When 128 are in
+use, the service does not keep the next one.
+
 The index of plan item N73-07 removes this cost.
 
 ## Data that an anonymous caller can get
@@ -206,7 +211,8 @@ contract in `missing`.
 
 | Bound | Value |
 |---|---|
-| Contracts in one upstream template list | The participant `http-list-max-elements-limit`. The Canton documentation gives 1024 as the default. Above it, the participant returns 413, and each flow that reads the template returns 502. |
+| Contracts in one upstream template list | The participant `http-list-max-elements-limit`. The Canton documentation gives 1024 as the default. Above it, the participant returns 413, and each flow that reads the template returns 502. This is the first bound for the registry reads of `Coin` and `TransferPreapproval`. See "Registry reads at a bound". |
+| Time to read the headers and the body of one request | 10 s |
 | Inbound requests at one time | 64, without `/v1`, `/v1/healthz`, and `/v1/readyz`; the next request gets 503 |
 | Upstream readiness calls | 1 in 2 s, with a 3 s timeout |
 | Time for one request | 60 s |
@@ -218,6 +224,10 @@ contract in `missing`.
 | Instruments with a `Coin` total | 1000 |
 | Contracts scanned in one upstream response | 100 000 |
 | Bytes of one upstream response | 64 MiB |
+
+The list limit is a participant setting. Each deployment sets it on its own
+participant. The service cannot read the value. Record the value of each
+participant in the deployment notes.
 
 A stranger can make the first bound fail. For example, a stranger can create
 1025 `DepositPreapproval` contracts with `instrumentId.admin = gg`. `gg` is an
@@ -252,7 +262,9 @@ Set the memory limit of the container to more than 512 MiB.
   (1 to 64), `--cache-ttl` (0 to 60 s) — load bounds. They are the
   `NttManager` cap of `/v1/managers` and of the registry instrument list, the
   upstream query cap, and a short read cache.
-  `--cache-ttl 0` turns the cache off.
+  `--cache-ttl 0` turns the cache off. With `--registry-instruments-file`,
+  the minimum is 1 s. Without the cache, each instruments request reads the
+  full `Coin` list.
 - `--listen` — bind address. The default is `127.0.0.1:7599`.
 - `--registry-instruments-file` — serve the CIP-0056 registry API for the
   instruments that `--guardian-governance-party` administers. See "CIP-0056
@@ -368,7 +380,10 @@ The service can also serve the CIP-0056 off-ledger registry API, version 1.
 It serves the API for the burn/mint instruments that `gg` administers.
 Canton wallets use this API to show, send and receive the tokens that NTT
 mints on Canton. In this section, the Daml files are in
-`tokens/cip0056/daml/Token/CIP0056/` of the CantonExamples repository.
+`tokens/cip0056/daml/Token/CIP0056/` of the CantonExamples repository. The
+line numbers are for commit `b448589`. The sources in the vendored
+`canton/dars/token-cip0056-0.2.0.dar` are the same as the sources at that
+commit.
 
 ### Endpoints
 
@@ -402,17 +417,27 @@ The metadata of an instrument comes from these sources:
 | `id` | `NttManager.instrumentId.id` |
 | `name`, `symbol` | The instruments file |
 | `decimals` | `NttManager.tokenDecimals` |
-| `totalSupply` | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. The read keeps only the sums, and it requests no `createdEventBlob`. |
-| `totalSupplyAsOf` | The service clock at the time of the ledger read |
+| `totalSupply` | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. The read keeps only the sums, and it requests no `createdEventBlob`. The service omits the field when the `Coin` read stops at a bound. |
+| `totalSupplyAsOf` | The service clock at the start of the `Coin` read. A response from the cache keeps the time of its read. The service omits the field together with `totalSupply`. |
+
+`totalSupply` does not include value in transit. A `CoinTransferInstruction`
+and a `CoinAllocation` hold their amount directly. The choice that makes them
+archives the input `Coin` contracts (`CoinTransfer.daml:51-53`, `143`,
+`CoinAllocation.daml:10-11`). Thus `totalSupply` goes down by each pending
+amount until the receiver accepts, or the sender gets the value back. A
+holder can lower the shown value with an offer of its balance. Wallets must
+show `totalSupply` as the supply in `Coin` contracts only.
 
 Two `NttManager` contracts can have the same instrument. Then their
 `tokenDecimals` and their factory must be equal, or the request fails with
 HTTP 500.
 
 `pageSize` is an integer, with the default 25 and the range 1 to 100. A value
-outside the range moves to the nearest limit. `pageToken` is the last
-instrument ID of the previous page, 1 to 512 bytes. The next page starts at
-the first ID after it. Give each parameter one time only. The service rejects
+outside the range moves to the nearest limit. `pageToken` is the
+`nextPageToken` of the previous page. It is the last instrument ID of that
+page in unpadded base64url, 683 characters or less. Thus it needs no
+percent-encoding, and the query of a page stays below 1024 bytes. The next
+page starts at the first ID after it. Give each parameter one time only. The service rejects
 a repeated parameter, an unknown parameter, and a `pageSize` that is not an
 integer. The other registry routes accept no query parameter.
 
@@ -426,7 +451,8 @@ The registry API uses the same read rules as the flow routes:
   `tokenConfig`, `instrumentId.admin` and `guardianGovernance`. The filters
   apply before the `--max-contracts-per-template` cap.
 - It reads the receiver `TransferPreapproval` with exact filters on `owner`,
-  `instrumentId.admin` and `instrumentId.id`. The cap is 8 matches.
+  `instrumentId.admin` and `instrumentId.id`. The cap is 8 matches. Above
+  the cap, the transfer is an `offer`.
 - It reads the committed `CoinFactory`, a `CoinTransferInstruction` and a
   `CoinAllocation` by contract ID.
 - It checks the package name and the template of each contract that it
@@ -471,12 +497,12 @@ that the choice fetches and that the controller cannot see.
 
 | Endpoint | Choice body | `choiceContextData` | `disclosedContracts` |
 |---|---|---|---|
-| `transfer-factory`, `self` | `CoinFactory.daml:56-77`, `CoinTransfer.daml:160-163` | `{"values": {}}` | `CoinFactory` |
-| `transfer-factory`, `direct` | `CoinTransfer.daml:164-168`, `TransferPreapproval_Receive` at `CoinTransfer.daml:39-49` | `token-cip0056.transferPreapprovalCid` (see below) | `CoinFactory`, `TransferPreapproval` |
-| `transfer-factory`, `offer` | `CoinTransfer.daml:169`, `CoinFactory.daml:69-77` | `{"values": {}}` | `CoinFactory` |
-| `accept`, `reject`, `withdraw` | `CoinTransfer.daml:78-89` | `{"values": {}}` | None |
-| `allocation-factory` | `CoinFactory.daml:87-109` | `{"values": {}}` | `CoinFactory` |
-| `execute-transfer`, `withdraw`, `cancel` | `CoinAllocation.daml:24-38` | `{"values": {}}` | None |
+| `transfer-factory`, `self` | `CoinFactory.daml:56-77`, `CoinTransfer.daml:159-162` | `{"values": {}}` | `CoinFactory` |
+| `transfer-factory`, `direct` | `CoinTransfer.daml:163-167`, `TransferPreapproval_Receive` at `CoinTransfer.daml:39-49` | `token-cip0056.transferPreapprovalCid` (see below) | `CoinFactory`, `TransferPreapproval` |
+| `transfer-factory`, `offer` | `CoinTransfer.daml:168`, `CoinFactory.daml:69-77` | `{"values": {}}` | `CoinFactory` |
+| `accept`, `reject`, `withdraw` | `CoinTransfer.daml:77-88` | `{"values": {}}` | None |
+| `allocation-factory` | `CoinFactory.daml:87-104` | `{"values": {}}` | `CoinFactory` |
+| `execute-transfer`, `withdraw`, `cancel` | `CoinAllocation.daml:22-36` | `{"values": {}}` | None |
 
 The `CoinFactory` has the signatory `gg` only (`CoinFactory.daml:26`). Thus
 the sender cannot see it. The service returns the `CoinFactory` that the
@@ -490,9 +516,20 @@ the sender cannot see it. The service returns the `CoinFactory` that the
   instrument. The preapproval has the signatory `owner` and the observer
   `instrumentId.admin` (`CoinTransfer.daml:33-34`). Thus `gg` sees it, and the
   sender does not. With two to eight preapprovals, the service selects the
-  lowest contract ID. With more than eight, the request gets 502.
+  lowest contract ID.
 - `offer`: all other transfers. The choice creates a `CoinTransferInstruction`.
-  The receiver accepts it or rejects it.
+  The receiver accepts it or rejects it. The service also returns `offer` in
+  these conditions, and writes one log line:
+  - The receiver has more than eight preapprovals for the instrument.
+  - The preapproval is on a different synchronizer than the `CoinFactory`.
+  - The `TransferPreapproval` read stops at a bound. See "Registry reads at
+    a bound".
+
+An `offer` in place of a `direct` is safe. With no preapproval value,
+`lookupTransferPreapprovalCid` returns `None` (`CoinTransfer.daml:20-24`).
+Then `transferCore` returns `CorePendingNeeded` (`CoinTransfer.daml:168`),
+and the factory creates a `CoinTransferInstruction` for the receiver
+(`CoinFactory.daml:69-77`). The receiver gets the value when it accepts.
 
 For `direct`, `choiceContextData` is this value. `lookupTransferPreapprovalCid`
 (`CoinTransfer.daml:17-24`) reads it:
@@ -518,14 +555,19 @@ the detail for that request ID. The response does not contain upstream text.
 
 | Status | Cause |
 |---|---|
-| 400 | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. The value of `expectedAdmin`, `sender`, or `receiver` is not a party id `<hint>::1220<64 lowercase hex>`. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
+| 400 | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. `pageToken` is not a `nextPageToken` of this service. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. The value of `expectedAdmin`, `instrumentId.admin`, `sender`, or `receiver` is not a party id `<hint>::1220<64 lowercase hex>`. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
 | 404 | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of `token-cip0056` for a `gg` instrument. The registry API is off. |
 | 414 | The query string is larger than 1024 bytes. |
 | 500 | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument, or a choice context on two synchronizers. |
 | 502, 503, 504 | The upstream participant failed, a read passed a bound, the service shed the load, or the upstream timed out. |
 
-When the participant returns 413 for a template list, the registry returns
-502 with the fixed text `upstream ledger list limit reached`. The log line
+A 400 text repeats a client value of 32 bytes or less, in quotes. A body
+fault has a fixed text. All causes of a 404 for a contract ID have the same
+text. Thus a caller cannot learn if `gg` sees a contract with that ID. The
+log has the cause.
+
+When the participant returns 413 for the `NttManager` list, the registry
+returns 502 with the fixed text `upstream ledger list limit reached`. The log line
 names the template. Each registry response has `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`.
 
@@ -536,6 +578,30 @@ set. A receiver `TransferPreapproval` in a reassignment thus gives an
 The specification declares 200, 404 and 500 for the metadata routes. It
 declares 200, 400 and 404 for the other routes. The other statuses in the
 table above are not in the specification.
+
+### Registry reads at a bound
+
+The registry reads the full `Coin` list and the full `TransferPreapproval`
+list of `gg`. Each read can stop at one of these bounds:
+
+- The participant list limit. The participant returns 413.
+- 100 000 contracts scanned in one response.
+- 64 MiB in one response.
+- 1000 instruments with a `Coin` total (the `Coin` read only).
+- 8 matching preapprovals (the `TransferPreapproval` read only).
+
+When the `Coin` read stops at a bound, the metadata routes return 200. The
+service omits `totalSupply` and `totalSupplyAsOf`. Both fields are optional
+in the specification. When the `TransferPreapproval` read stops at a bound,
+`transfer-factory` returns 200 with `offer` and the `CoinFactory` only. In
+each case, the service writes one log line for each request.
+
+The cache keeps the failed read for `--cache-ttl`. Thus a repeat request in
+the same cache window does not read the participant again.
+
+These results occur in normal use. For example, NTT mints to more than 1024
+holders, or a stranger makes 1025 preapprovals with `instrumentId.admin =
+gg`. Any other upstream fault gives 502.
 
 ### Debug fields
 
@@ -573,10 +639,10 @@ transfer into an offer:
   A node cannot change the contents of a disclosed contract.
 - The `CoinFactory` code checks `expectedAdmin`
   (`CoinFactory.daml:57-58`) and the instrument admin
-  (`CoinTransfer.daml:156-157`).
+  (`CoinTransfer.daml:155-156`).
 - With no preapproval value, or a value with a different tag,
   `lookupTransferPreapprovalCid` returns `None`. The transfer then becomes an
-  offer (`CoinTransfer.daml:20-24`, `169`).
+  offer (`CoinTransfer.daml:20-24`, `168`).
 - A preapproval ID of an archived contract, or of a different template, makes
   the exercise fail.
 - A preapproval of a different owner or a different instrument fails the
