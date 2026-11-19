@@ -61,6 +61,7 @@ type server struct {
 	logger                 *log.Logger
 	inboundSlots           chan struct{}
 	inboundRequestDeadline time.Duration
+	readiness              *readinessProbe
 }
 
 const (
@@ -79,6 +80,7 @@ func newServer(opts *options, acs acsClient) *server {
 
 		inboundSlots:           make(chan struct{}, maxConcurrentInboundRequests),
 		inboundRequestDeadline: inboundRequestDeadline,
+		readiness:              newReadinessProbe(acs),
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1", s.handleIndex)
@@ -89,9 +91,23 @@ func newServer(opts *options, acs acsClient) *server {
 	return s
 }
 
+// pathsOutsideInboundCap are the routes with a constant cost or their own upstream bound
+// (readinessProbe). An orchestrator probe gets an answer while flow requests fill the cap.
+var pathsOutsideInboundCap = map[string]bool{
+	"/v1":         true,
+	"/v1/healthz": true,
+	"/v1/readyz":  true,
+}
+
 // ServeHTTP sheds a request past maxConcurrentInboundRequests with a 503 and bounds each request
 // by inboundRequestDeadline. The per-client rate limit belongs to the edge proxy.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if pathsOutsideInboundCap[r.URL.Path] {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
 	select {
 	case s.inboundSlots <- struct{}{}:
 	default:
@@ -109,7 +125,8 @@ type probeResponse struct {
 	Status string `json:"status"`
 }
 
-// handleHealthz is liveness: always 200. The reader parties go to the startup log only.
+// handleHealthz is liveness: 200 for each GET, also while the inbound cap is full. It reads no
+// upstream. The reader parties go to the startup log only.
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
@@ -118,13 +135,14 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, probeResponse{Status: "ok"})
 }
 
-// handleReadyz is 200 only when a ledger-end call succeeds; else 503 with the fixed public body.
+// handleReadyz is 200 only when the readiness probe's last ledger-end call succeeded; else 503
+// with the fixed public body.
 func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "disclosure-service: method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, err := s.acs.LedgerEnd(r.Context()); err != nil {
+	if err := s.readiness.checkLedgerEnd(r.Context()); err != nil {
 		s.writePublicError(w, r, http.StatusServiceUnavailable, fmt.Errorf("readyz: ledger-end: %w", err))
 		return
 	}
@@ -136,7 +154,7 @@ var apiIndex = map[string]any{
 	"service": "disclosure-service",
 	"endpoints": []map[string]any{
 		{"method": "GET", "path": "/v1", "about": "this index"},
-		{"method": "GET", "path": "/v1/healthz", "about": "liveness: always 200"},
+		{"method": "GET", "path": "/v1/healthz", "about": "liveness: 200 while the process serves HTTP"},
 		{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 when the upstream answers, else 503"},
 		{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
 		{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
