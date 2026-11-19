@@ -79,8 +79,21 @@ jobs:
           go test -race -count=1 ./...
 
       # Builds and scans with the go.mod toolchain (go1.26.11).
+      # Pin: the module checksum of golang.org/x/vuln v1.9.0 must equal GOVULNCHECK_MODULE_SUM.
+      # sum.golang.org also verifies the download; no variable may exempt the module from it.
+      # The go.sum inside that module pins the build dependencies of govulncheck.
       - name: govulncheck (disclosure service)
         working-directory: ./canton/disclosure/service
+        env:
+          GOVULNCHECK_MODULE: golang.org/x/vuln@v1.9.0
+          GOVULNCHECK_MODULE_SUM: h1:12VaqnI9kJfqwRoPptxoqsUhQtdfrSbdksT7X/KY/sc=
+          GOSUMDB: sum.golang.org
+          GONOSUMDB: ""
+          GONOPROXY: ""
+          GOPRIVATE: ""
+          GOINSECURE: ""
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          downloaded_sum="$(cd "$RUNNER_TEMP" && go mod download -json "$GOVULNCHECK_MODULE" | jq -r .Sum)"
+          test "$downloaded_sum" = "$GOVULNCHECK_MODULE_SUM"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_MODULE#*@}"
           "$(go env GOPATH)/bin/govulncheck" ./...
