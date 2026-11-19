@@ -170,6 +170,18 @@ func (source *oauthBearerTokenSource) BearerToken(ctx context.Context) (string, 
 	return token, nil
 }
 
+// DiscardRejectedBearerToken clears the cache when it still holds rejectedToken, so the next
+// BearerToken call fetches a new token. A token that another caller already replaced stays.
+func (source *oauthBearerTokenSource) DiscardRejectedBearerToken(rejectedToken string) {
+	source.fetchSlot <- struct{}{}
+	defer func() { <-source.fetchSlot }()
+	if rejectedToken == "" || source.cachedToken != rejectedToken {
+		return
+	}
+	source.cachedToken = ""
+	source.refreshAt = time.Time{}
+}
+
 // oauthRefreshMargin is min(60s, 10% of lifetime).
 func oauthRefreshMargin(lifetime time.Duration) time.Duration {
 	return min(maxOAuthRefreshMargin, lifetime/10)

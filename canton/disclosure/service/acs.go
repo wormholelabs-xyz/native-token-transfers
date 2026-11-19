@@ -285,21 +285,57 @@ func newHTTPACSClient(baseURL string, client *http.Client, tokens bearerTokenSou
 	}
 }
 
-// authHeader sets Authorization from the configured token source.
-func (c *httpACSClient) authHeader(req *http.Request) error {
+// maxUpstreamAttemptsPerRequest is one send plus one retry after an upstream 401.
+const maxUpstreamAttemptsPerRequest = 2
+
+// bearerToken returns the token for one request, or "" for an unauthenticated upstream.
+func (c *httpACSClient) bearerToken(ctx context.Context) (string, error) {
 	if c.tokens == nil {
-		return nil
+		return "", nil
 	}
-	token, err := c.tokens.BearerToken(req.Context())
+	token, err := c.tokens.BearerToken(ctx)
 	if err != nil {
-		return fmt.Errorf("disclosure-service: upstream bearer token: %w", err)
+		return "", fmt.Errorf("disclosure-service: upstream bearer token: %w", err)
 	}
-	//SECURITY: an auth mode is configured, so an empty token is an error, never an unauthenticated call.
+	//SECURITY: an auth mode is configured; an empty token is an error.
 	if token == "" {
-		return fmt.Errorf("disclosure-service: upstream bearer token is empty")
+		return "", fmt.Errorf("disclosure-service: upstream bearer token is empty")
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	return nil
+	return token, nil
+}
+
+// sendUpstreamRequest sends one request to the JSON API. On an upstream 401 it discards the
+// token it used and sends once more. The caller closes the response body.
+func (c *httpACSClient) sendUpstreamRequest(ctx context.Context, operation, method, path string, requestBody []byte) (*http.Response, error) {
+	for attempt := 1; attempt <= maxUpstreamAttemptsPerRequest; attempt++ {
+		var bodyReader io.Reader
+		if requestBody != nil {
+			bodyReader = bytes.NewReader(requestBody)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+		if err != nil {
+			return nil, fmt.Errorf("disclosure-service: build %s request: %w", operation, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		token, err := c.bearerToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("disclosure-service: %s request: %w", operation, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized || token == "" || attempt == maxUpstreamAttemptsPerRequest {
+			return resp, nil
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxLoggedUpstreamBodyBytes))
+		_ = resp.Body.Close()
+		c.tokens.DiscardRejectedBearerToken(token)
+	}
+	panic("disclosure-service: sendUpstreamRequest: the attempt loop returns on its last attempt")
 }
 
 // boundedBodyReader fails with errUpstreamResponseTooLarge once source yields more than
@@ -339,18 +375,9 @@ func newUpstreamHTTPError(operation string, resp *http.Response) error {
 
 // LedgerEnd calls GET /v2/state/ledger-end. This pins ActiveContracts' activeAtOffset.
 func (c *httpACSClient) LedgerEnd(ctx context.Context) (int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v2/state/ledger-end", nil)
+	resp, err := c.sendUpstreamRequest(ctx, "ledger-end", http.MethodGet, "/v2/state/ledger-end", nil)
 	if err != nil {
-		return 0, fmt.Errorf("disclosure-service: build ledger-end request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := c.authHeader(req); err != nil {
 		return 0, err
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("disclosure-service: ledger-end request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -400,18 +427,9 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 		return nil, fmt.Errorf("disclosure-service: marshal active-contracts request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v2/state/active-contracts", bytes.NewReader(bodyBytes))
+	resp, err := c.sendUpstreamRequest(ctx, "active-contracts", http.MethodPost, "/v2/state/active-contracts", bodyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("disclosure-service: build active-contracts request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := c.authHeader(req); err != nil {
 		return nil, err
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("disclosure-service: active-contracts request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusRequestEntityTooLarge {
@@ -450,17 +468,9 @@ func (c *httpACSClient) ActiveContractByID(ctx context.Context, readerParties []
 		return acsEntry{}, false, fmt.Errorf("disclosure-service: marshal events-by-contract-id request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v2/events/events-by-contract-id", bytes.NewReader(bodyBytes))
+	resp, err := c.sendUpstreamRequest(ctx, "events-by-contract-id", http.MethodPost, "/v2/events/events-by-contract-id", bodyBytes)
 	if err != nil {
-		return acsEntry{}, false, fmt.Errorf("disclosure-service: build events-by-contract-id request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := c.authHeader(req); err != nil {
 		return acsEntry{}, false, err
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return acsEntry{}, false, fmt.Errorf("disclosure-service: events-by-contract-id request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -615,6 +625,8 @@ func wrapStreamError(err error) error {
 // bearerTokenSource yields the bearer token for one upstream request.
 type bearerTokenSource interface {
 	BearerToken(ctx context.Context) (string, error)
+	// DiscardRejectedBearerToken drops rejectedToken after an upstream 401, if it is still cached.
+	DiscardRejectedBearerToken(rejectedToken string)
 }
 
 // fileBearerTokenSource re-reads the token file on every call, so a rotated file takes effect on
@@ -626,6 +638,9 @@ type fileBearerTokenSource struct {
 func (source fileBearerTokenSource) BearerToken(context.Context) (string, error) {
 	return readAccessToken(source.path)
 }
+
+// DiscardRejectedBearerToken is a no-op: BearerToken reads the file again for each request.
+func (fileBearerTokenSource) DiscardRejectedBearerToken(string) {}
 
 // readAccessToken reads and trims the bearer token file. It is separate from run() so the
 // trim-whitespace behavior is independently testable. A file saved with a trailing newline is
