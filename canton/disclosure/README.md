@@ -260,10 +260,95 @@ Then run the container with `--listen 0.0.0.0:7599
 token file read-only. The loopback default is not reachable through a
 published port.
 
-The container runs as UID 65532, the distroless `nonroot` user. Set the owner
-of the token file, the client secret file, and the client key file to UID
-65532. Set the mode of each file to 0400. The service refuses each of these
-files if its mode gives a permission to the group or to other users.
+### Secret files
+
+The container runs as UID 65532 and GID 65532, the distroless `nonroot`
+user. The service reads three secret files: the token file, the client
+secret file, and the client key file. Each secret file must be a regular
+file. The service accepts these modes: 0400, 0440, 0600, and 0640. The
+service refuses a secret file with the group write or the group execute
+permission. The service refuses a secret file with a permission for other
+users.
+
+Outside Kubernetes, set the owner of each secret file to UID 65532. Set the
+mode of each secret file to 0400.
+
+On Kubernetes, a Secret volume has no setting for the file owner. Thus UID
+65532 must read each secret file through the group read permission. Use this
+procedure:
+
+1. Set `fsGroup` to 65532 in the pod `securityContext`.
+2. Set `defaultMode` to 0440 in the Secret volume.
+3. Mount the Secret volume read-only.
+
+The kubelet sets the group of each secret file to 65532. The mode of each
+secret file is 0440. A Secret change replaces the files with the same group
+and mode.
+
+```yaml
+spec:
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+    runAsNonRoot: true
+    fsGroup: 65532
+  containers:
+    - name: disclosure-service
+      image: <disclosure-service image, pinned by digest>
+      args: ["--access-token-file", "/etc/disclosure/token"]
+      volumeMounts:
+        - name: disclosure-secrets
+          mountPath: /etc/disclosure
+          readOnly: true
+  volumes:
+    - name: disclosure-secrets
+      secret:
+        secretName: disclosure-secrets
+        defaultMode: 0440
+```
+
+YAML reads `0440` as an octal number. In JSON, write the decimal value 288.
+
+Alternative: an init container copies each secret file to a memory
+`emptyDir`. The copy has the owner 65532 and the mode 0400. The init container
+runs as UID 0. Thus set `runAsNonRoot` on the service container only. The init
+container copies the files one time, at pod start. Restart the pod after a
+Secret change.
+
+```yaml
+spec:
+  initContainers:
+    - name: copy-secrets
+      image: <shell image with install, pinned by digest>
+      securityContext:
+        runAsUser: 0
+      command: ["sh", "-c", "install -o 65532 -g 65532 -m 0400 /secrets/* /etc/disclosure/"]
+      volumeMounts:
+        - name: disclosure-secrets-source
+          mountPath: /secrets
+          readOnly: true
+        - name: disclosure-secrets
+          mountPath: /etc/disclosure
+  containers:
+    - name: disclosure-service
+      image: <disclosure-service image, pinned by digest>
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+      args: ["--access-token-file", "/etc/disclosure/token"]
+      volumeMounts:
+        - name: disclosure-secrets
+          mountPath: /etc/disclosure
+          readOnly: true
+  volumes:
+    - name: disclosure-secrets-source
+      secret:
+        secretName: disclosure-secrets
+    - name: disclosure-secrets
+      emptyDir:
+        medium: Memory
+```
 
 ## Deployment on a separate gateway
 
