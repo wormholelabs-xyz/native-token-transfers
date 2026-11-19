@@ -18,11 +18,14 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: built from wormhole integration/canton 7cc1fc369 (PR #81
-squash), full commit `7cc1fc3691c9ce32a391751d7f303fa28e1ebea5` in
-`wormholelabs-xyz/wormhole` (version 0.8.3), SDK 3.5.1. The main package id
-is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`. A
-build of `canton/core` at this commit gives this package id.
+Provenance: built from wormhole PR #81 commit
+`843c053387a0321d5dcaabdf3dfe982fb24a040d` in `wormholelabs-xyz/wormhole`
+(version 0.8.3), SDK 3.5.1. That commit stays reachable from
+`refs/pull/81/head`. The main package id is
+`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`. The PR #81
+squash on integration/canton, `7cc1fc3691c9ce32a391751d7f303fa28e1ebea5`,
+gives the same package id. Its DAR sha256 is different, because two source
+files differ in doc comments only.
 
 Version 0.8.3 declares 0.8.2 (`132d32bf...`) as its `upgrades:` baseline.
 Versions 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs
