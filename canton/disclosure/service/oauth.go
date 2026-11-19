@@ -115,7 +115,7 @@ func parseOAuthClientConfig(flags oauthClientFlags) (validatedOAuthClientConfig,
 
 // readClientSecret reads and trims the client secret file. An empty secret is an error.
 func readClientSecret(path string) (string, error) {
-	rawSecret, err := readOwnerOnlyFileAtMost(path, maxOAuthSecretFileBytes)
+	rawSecret, err := readSecretFileAtMost(path, maxOAuthSecretFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("disclosure-service: --oauth-client-secret-file: %w", err)
 	}

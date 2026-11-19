@@ -666,7 +666,7 @@ func (fileBearerTokenSource) RecordAcceptedBearerToken(string) {}
 // the common case. A file that trims to nothing is an error: it would send an empty bearer
 // token upstream.
 func readAccessToken(path string) (string, error) {
-	raw, err := readOwnerOnlyFileAtMost(path, maxAccessTokenFileBytes)
+	raw, err := readSecretFileAtMost(path, maxAccessTokenFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("disclosure-service: read access token file %s: %w", path, err)
 	}

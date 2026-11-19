@@ -15,8 +15,9 @@ import (
 // maxAccessTokenFileBytes bounds the upstream bearer token file.
 const maxAccessTokenFileBytes = 16 << 10
 
-// secretFileGroupAndOtherPermissions are the mode bits that a secret file must not set.
-const secretFileGroupAndOtherPermissions os.FileMode = 0o077
+// secretFileForbiddenPermissions are group write, group execute, and every other-user bit. Group
+// read stays: a Kubernetes Secret volume with fsGroup sets it (defaultMode 0440).
+const secretFileForbiddenPermissions os.FileMode = 0o037
 
 var errReadLimitExceeded = errors.New("disclosure-service: input exceeds the read limit")
 
@@ -121,9 +122,9 @@ func readFileAtMost(path string, maxBytes int64) ([]byte, error) {
 	return readAtMost(file, maxBytes)
 }
 
-// readOwnerOnlyFileAtMost is readFileAtMost for a secret file. The file must give no permission
-// to the group or to other users.
-func readOwnerOnlyFileAtMost(path string, maxBytes int64) ([]byte, error) {
+// readSecretFileAtMost is readFileAtMost for a secret file. The file must be a regular file with
+// no group write, no group execute, and no permission for other users.
+func readSecretFileAtMost(path string, maxBytes int64) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -137,8 +138,8 @@ func readOwnerOnlyFileAtMost(path string, maxBytes int64) ([]byte, error) {
 	if !fileInfo.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	if permissions := fileInfo.Mode().Perm(); permissions&secretFileGroupAndOtherPermissions != 0 {
-		return nil, fmt.Errorf("%s has mode %04o, which gives a permission to the group or other users; set mode 0400 or 0600", path, permissions)
+	if permissions := fileInfo.Mode().Perm(); permissions&secretFileForbiddenPermissions != 0 {
+		return nil, fmt.Errorf("%s has mode %04o, which gives group write or execute, or other users a permission; set mode 0400, 0440, 0600, or 0640", path, permissions)
 	}
 	return readAtMost(file, maxBytes)
 }

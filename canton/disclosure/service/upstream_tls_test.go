@@ -517,8 +517,9 @@ func TestNewTokenEndpointHTTPClient(t *testing.T) {
 	}
 }
 
-// The token file, the client secret file, and the client key file must give no right to the group or to other users.
-func TestSecretFilesRefuseGroupAndOtherPermissions(t *testing.T) {
+// The token file, the client secret file, and the client key file permit owner access and group
+// read only: the Kubernetes Secret mount with fsGroup and defaultMode 0440 passes.
+func TestSecretFilesRefuseGroupWriteAndOtherPermissions(t *testing.T) {
 	pki := newTestUpstreamPKI(t)
 	secretDirectory := t.TempDir()
 	secretReaders := []struct {
@@ -546,15 +547,21 @@ func TestSecretFilesRefuseGroupAndOtherPermissions(t *testing.T) {
 		wantErr bool
 	}{
 		{0o400, false},
+		{0o440, false},
 		{0o600, false},
-		{0o440, true},
+		{0o640, false},
+		{0o444, true},
 		{0o404, true},
-		{0o640, true},
 		{0o644, true},
+		{0o460, true},
 		{0o620, true},
+		{0o660, true},
+		{0o410, true},
+		{0o450, true},
+		{0o402, true},
+		{0o401, true},
 		{0o602, true},
 		{0o601, true},
-		{0o610, true},
 	}
 	for _, reader := range secretReaders {
 		for _, modeCase := range modes {
@@ -566,8 +573,43 @@ func TestSecretFilesRefuseGroupAndOtherPermissions(t *testing.T) {
 					return
 				}
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "group or other")
+				assert.Contains(t, err.Error(), "group write or execute, or other users")
 			})
 		}
+	}
+}
+
+// A Kubernetes Secret volume links token -> ..data/token -> ..<timestamp>/token. The check
+// applies to the mode of the final regular file.
+func TestSecretFileModeThroughKubernetesSymlinkChain(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{"defaultMode 0440 with fsGroup", 0o440, false},
+		{"defaultMode 0400", 0o400, false},
+		{"defaultMode 0444", 0o444, true},
+		{"defaultMode 0644", 0o644, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mountDirectory := t.TempDir()
+			timestampDirectory := filepath.Join(mountDirectory, "..2026_11_19_00_00_00.000000001")
+			require.NoError(t, os.Mkdir(timestampDirectory, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(timestampDirectory, "token"), []byte("tok\n"), 0o600))
+			require.NoError(t, os.Chmod(filepath.Join(timestampDirectory, "token"), tc.mode))
+			require.NoError(t, os.Symlink(filepath.Base(timestampDirectory), filepath.Join(mountDirectory, "..data")))
+			require.NoError(t, os.Symlink(filepath.Join("..data", "token"), filepath.Join(mountDirectory, "token")))
+
+			token, err := readAccessToken(filepath.Join(mountDirectory, "token"))
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "group write or execute, or other users")
+				return
+			}
+			require.NoError(t, err)
+			assert.NotEmpty(t, token)
+		})
 	}
 }

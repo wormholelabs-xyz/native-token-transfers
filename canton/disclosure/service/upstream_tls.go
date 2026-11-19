@@ -116,7 +116,7 @@ func loadClientKeyPair(files upstreamTLSFiles, now time.Time) (tls.Certificate, 
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: --json-api-client-cert-file: %w", err)
 	}
-	keyPEM, err := readOwnerOnlyFileAtMost(files.clientKeyFile, maxPEMFileBytes)
+	keyPEM, err := readSecretFileAtMost(files.clientKeyFile, maxPEMFileBytes)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: --json-api-client-key-file: %w", err)
 	}
