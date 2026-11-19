@@ -15,6 +15,9 @@ import (
 // maxAccessTokenFileBytes bounds the upstream bearer token file.
 const maxAccessTokenFileBytes = 16 << 10
 
+// secretFileGroupAndOtherPermissions are the mode bits that a secret file must not set.
+const secretFileGroupAndOtherPermissions os.FileMode = 0o077
+
 var errReadLimitExceeded = errors.New("disclosure-service: input exceeds the read limit")
 
 // isLoopbackIPAddress is true for a literal loopback IP. A host name is false: DNS can point it elsewhere.
@@ -115,5 +118,27 @@ func readFileAtMost(path string, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
+	return readAtMost(file, maxBytes)
+}
+
+// readOwnerOnlyFileAtMost is readFileAtMost for a secret file. The file must give no permission
+// to the group or to other users.
+func readOwnerOnlyFileAtMost(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	//SECURITY: checked on the open descriptor, so a change of the path after the check has no effect.
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if permissions := fileInfo.Mode().Perm(); permissions&secretFileGroupAndOtherPermissions != 0 {
+		return nil, fmt.Errorf("%s has mode %04o, which gives a permission to the group or other users; set mode 0400 or 0600", path, permissions)
+	}
 	return readAtMost(file, maxBytes)
 }

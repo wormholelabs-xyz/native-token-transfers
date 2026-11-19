@@ -305,7 +305,8 @@ func (c *httpACSClient) bearerToken(ctx context.Context) (string, error) {
 }
 
 // sendUpstreamRequest sends one request to the JSON API. On an upstream 401 it discards the
-// token it used and sends once more. The caller closes the response body.
+// token it used and sends once more. A 401 on the retry is a token source failure. The caller
+// closes the response body.
 func (c *httpACSClient) sendUpstreamRequest(ctx context.Context, operation, method, path string, requestBody []byte) (*http.Response, error) {
 	for attempt := 1; attempt <= maxUpstreamAttemptsPerRequest; attempt++ {
 		var bodyReader io.Reader
@@ -328,7 +329,16 @@ func (c *httpACSClient) sendUpstreamRequest(ctx context.Context, operation, meth
 		if err != nil {
 			return nil, fmt.Errorf("disclosure-service: %s request: %w", operation, err)
 		}
-		if resp.StatusCode != http.StatusUnauthorized || token == "" || attempt == maxUpstreamAttemptsPerRequest {
+		if token == "" {
+			return resp, nil
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			c.tokens.RecordAcceptedBearerToken(token)
+			return resp, nil
+		}
+		if attempt == maxUpstreamAttemptsPerRequest {
+			//SECURITY: bounds the token requests while the upstream rejects each new token.
+			c.tokens.RecordRejectedRetryBearerToken(token)
 			return resp, nil
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxLoggedUpstreamBodyBytes))
@@ -627,6 +637,10 @@ type bearerTokenSource interface {
 	BearerToken(ctx context.Context) (string, error)
 	// DiscardRejectedBearerToken drops rejectedToken after an upstream 401, if it is still cached.
 	DiscardRejectedBearerToken(rejectedToken string)
+	// RecordRejectedRetryBearerToken counts an upstream 401 on the retry as a token source failure.
+	RecordRejectedRetryBearerToken(rejectedToken string)
+	// RecordAcceptedBearerToken notes an upstream answer other than 401 for acceptedToken.
+	RecordAcceptedBearerToken(acceptedToken string)
 }
 
 // fileBearerTokenSource re-reads the token file on every call, so a rotated file takes effect on
@@ -642,12 +656,17 @@ func (source fileBearerTokenSource) BearerToken(context.Context) (string, error)
 // DiscardRejectedBearerToken is a no-op: BearerToken reads the file again for each request.
 func (fileBearerTokenSource) DiscardRejectedBearerToken(string) {}
 
+// RecordRejectedRetryBearerToken is a no-op: the file source sends no token endpoint request.
+func (fileBearerTokenSource) RecordRejectedRetryBearerToken(string) {}
+
+func (fileBearerTokenSource) RecordAcceptedBearerToken(string) {}
+
 // readAccessToken reads and trims the bearer token file. It is separate from run() so the
 // trim-whitespace behavior is independently testable. A file saved with a trailing newline is
 // the common case. A file that trims to nothing is an error: it would send an empty bearer
 // token upstream.
 func readAccessToken(path string) (string, error) {
-	raw, err := readFileAtMost(path, maxAccessTokenFileBytes)
+	raw, err := readOwnerOnlyFileAtMost(path, maxAccessTokenFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("disclosure-service: read access token file %s: %w", path, err)
 	}

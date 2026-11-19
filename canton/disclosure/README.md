@@ -262,7 +262,8 @@ published port.
 
 The container runs as UID 65532, the distroless `nonroot` user. Set the owner
 of the token file, the client secret file, and the client key file to UID
-65532. Set the mode of each file to 0400.
+65532. Set the mode of each file to 0400. The service refuses each of these
+files if its mode gives a permission to the group or to other users.
 
 ## Deployment on a separate gateway
 
@@ -362,10 +363,15 @@ The service keeps the OAuth2 token in memory. It gets a new token before the
 old token expires. The margin is 60 seconds or 10% of the token lifetime,
 whichever is shorter. One token request takes 10 seconds or less. After a
 failed token request, the service waits before the next one. The wait starts
-at 1 second and doubles after each failure, to 30 seconds or less.
+at the time of the failure. It is 1 second and doubles after each failure, to
+30 seconds or less. If a refresh fails, the service uses the old token until
+half the margin before its expiry. It logs each failed refresh.
 
 If the participant returns HTTP 401, the service discards the token. Then it
-gets a new token and sends the request one more time.
+gets a new token and sends the request one more time. If the participant
+also returns HTTP 401 for the new token, the service counts a failed token
+request and waits before the next token request, as for a token endpoint
+failure.
 
 If the token endpoint fails, the flow request fails with HTTP 502.
 `/v1/healthz` still returns 200. `/v1/readyz` returns 503. The service sends

@@ -765,6 +765,8 @@ func TestOAuthFailedRefreshKeepsValidCachedToken(t *testing.T) {
 	})
 	clock := newFakeClock()
 	source := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), clock.now)
+	var logged *syncBuffer
+	source.logger, logged = newCapturedLogger()
 	steps := []struct {
 		name             string
 		advanceBy        time.Duration
@@ -772,20 +774,22 @@ func TestOAuthFailedRefreshKeepsValidCachedToken(t *testing.T) {
 		wantErr          error
 		wantAnyErr       bool
 		wantTokenFetches int64
+		wantFailureLogs  int
 	}{
 		{name: "t0: first fetch", wantToken: "tok-1", wantTokenFetches: 1},
-		{name: "t90: refresh fails, cached token", advanceBy: 90 * time.Second, wantToken: "tok-1", wantTokenFetches: 2},
-		{name: "t90.5: inside the 1 s backoff, cached token", advanceBy: 500 * time.Millisecond, wantToken: "tok-1", wantTokenFetches: 2},
-		{name: "t91: refresh fails, cached token", advanceBy: 500 * time.Millisecond, wantToken: "tok-1", wantTokenFetches: 3},
-		{name: "t93: refresh fails, cached token", advanceBy: 2 * time.Second, wantToken: "tok-1", wantTokenFetches: 4},
-		{name: "t95: inside the 4 s backoff, cached token too old", advanceBy: 2 * time.Second, wantErr: errOAuthTokenEndpointBackoff, wantAnyErr: true, wantTokenFetches: 4},
-		{name: "t97: refresh fails, no usable token", advanceBy: 2 * time.Second, wantAnyErr: true, wantTokenFetches: 5},
+		{name: "t90: refresh fails, cached token", advanceBy: 90 * time.Second, wantToken: "tok-1", wantTokenFetches: 2, wantFailureLogs: 1},
+		{name: "t90.5: inside the 1 s backoff, cached token", advanceBy: 500 * time.Millisecond, wantToken: "tok-1", wantTokenFetches: 2, wantFailureLogs: 1},
+		{name: "t91: refresh fails, cached token", advanceBy: 500 * time.Millisecond, wantToken: "tok-1", wantTokenFetches: 3, wantFailureLogs: 2},
+		{name: "t93: refresh fails, cached token", advanceBy: 2 * time.Second, wantToken: "tok-1", wantTokenFetches: 4, wantFailureLogs: 3},
+		{name: "t95: inside the 4 s backoff, cached token too old", advanceBy: 2 * time.Second, wantErr: errOAuthTokenEndpointBackoff, wantAnyErr: true, wantTokenFetches: 4, wantFailureLogs: 3},
+		{name: "t97: refresh fails, no usable token", advanceBy: 2 * time.Second, wantAnyErr: true, wantTokenFetches: 5, wantFailureLogs: 3},
 	}
 	for _, step := range steps {
 		clock.advance(step.advanceBy)
 		token, err := source.BearerToken(context.Background())
 		assert.Equal(t, step.wantTokenFetches, endpoint.fetchCount.Load(), step.name)
 		assert.Equal(t, step.wantToken, token, step.name)
+		assert.Equal(t, step.wantFailureLogs, strings.Count(logged.String(), "OAuth2 token refresh failed"), step.name)
 		if !step.wantAnyErr {
 			require.NoError(t, err, step.name)
 			continue
@@ -796,5 +800,39 @@ func TestOAuthFailedRefreshKeepsValidCachedToken(t *testing.T) {
 		} else {
 			assert.NotErrorIs(t, err, errOAuthTokenEndpointBackoff, step.name)
 		}
+	}
+}
+
+// Discard and the rejection count take a short lock only: they return while a fetch runs.
+func TestRejectedTokenRecordsReturnDuringFetch(t *testing.T) {
+	releaseEndpoint := make(chan struct{})
+	endpoint := newFakeTokenEndpoint(t, func(w http.ResponseWriter, fetchNumber int64) {
+		if fetchNumber > 1 {
+			select {
+			case <-releaseEndpoint:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		bearerTokenResponse("tok", 3600)(w, fetchNumber)
+	})
+	t.Cleanup(func() { close(releaseEndpoint) })
+	source := newOAuthBearerTokenSource(newTestOAuthConfig(t, endpoint.server.URL), newTestUpstreamHTTPClient(t), newFakeClock().now)
+	firstToken, err := source.BearerToken(context.Background())
+	require.NoError(t, err)
+	source.DiscardRejectedBearerToken(firstToken)
+	go func() { _, _ = source.BearerToken(context.Background()) }()
+	require.Eventually(t, func() bool { return endpoint.fetchCount.Load() == 2 }, 3*time.Second, 5*time.Millisecond)
+
+	recordsReturned := make(chan struct{})
+	go func() {
+		source.DiscardRejectedBearerToken(firstToken)
+		source.RecordRejectedRetryBearerToken(firstToken)
+		source.RecordAcceptedBearerToken(firstToken)
+		close(recordsReturned)
+	}()
+	select {
+	case <-recordsReturned:
+	case <-time.After(time.Second):
+		t.Fatal("a token record waited for the running fetch")
 	}
 }
