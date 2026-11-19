@@ -110,11 +110,11 @@ func parseOAuthClientConfig(flags oauthClientFlags) (validatedOAuthClientConfig,
 
 // readClientSecret reads and trims the client secret file. An empty secret is an error.
 func readClientSecret(path string) (string, error) {
-	raw, err := readFileAtMost(path, maxOAuthSecretFileBytes)
+	rawSecret, err := readFileAtMost(path, maxOAuthSecretFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("disclosure-service: --oauth-client-secret-file: %w", err)
 	}
-	secret := strings.TrimSpace(string(raw))
+	secret := strings.TrimSpace(string(rawSecret))
 	if secret == "" {
 		return "", fmt.Errorf("disclosure-service: --oauth-client-secret-file %s is empty", path)
 	}
@@ -254,35 +254,35 @@ func (source *oauthBearerTokenSource) fetchToken(ctx context.Context) (string, t
 		return "", 0, fmt.Errorf("disclosure-service: OAuth2 token endpoint: HTTP %d%s", resp.StatusCode, oauthErrorCodeSuffix(body))
 	}
 
-	var parsed oauthTokenResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	var tokenResponse oauthTokenResponse
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
 		return "", 0, fmt.Errorf("disclosure-service: parse token response: %w", err)
 	}
-	if err := checkOAuthTokenResponse(parsed); err != nil {
+	if err := checkOAuthTokenResponse(tokenResponse); err != nil {
 		return "", 0, err
 	}
-	return parsed.AccessToken, time.Duration(parsed.ExpiresIn) * time.Second, nil
+	return tokenResponse.AccessToken, time.Duration(tokenResponse.ExpiresIn) * time.Second, nil
 }
 
 // checkOAuthTokenResponse enforces a non-empty header-safe Bearer token with a bounded lifetime.
-func checkOAuthTokenResponse(parsed oauthTokenResponse) error {
-	if parsed.AccessToken == "" {
+func checkOAuthTokenResponse(tokenResponse oauthTokenResponse) error {
+	if tokenResponse.AccessToken == "" {
 		return fmt.Errorf("disclosure-service: OAuth2 token response: missing access_token")
 	}
-	for _, character := range parsed.AccessToken {
+	for _, character := range tokenResponse.AccessToken {
 		if character <= ' ' || character > '~' {
 			return fmt.Errorf("disclosure-service: OAuth2 token response: access_token has a character outside printable ASCII")
 		}
 	}
 	//SECURITY: only a Bearer token is valid in the Authorization header the upstream checks.
-	if !strings.EqualFold(parsed.TokenType, "Bearer") {
-		return fmt.Errorf("disclosure-service: OAuth2 token response: token_type %q, want Bearer", truncateForError(parsed.TokenType))
+	if !strings.EqualFold(tokenResponse.TokenType, "Bearer") {
+		return fmt.Errorf("disclosure-service: OAuth2 token response: token_type %q, want Bearer", truncateForError(tokenResponse.TokenType))
 	}
-	if parsed.ExpiresIn <= 0 {
-		return fmt.Errorf("disclosure-service: OAuth2 token response: expires_in %d, want a positive value", parsed.ExpiresIn)
+	if tokenResponse.ExpiresIn <= 0 {
+		return fmt.Errorf("disclosure-service: OAuth2 token response: expires_in %d, want a positive value", tokenResponse.ExpiresIn)
 	}
-	if parsed.ExpiresIn > maxOAuthTokenLifetimeSeconds {
-		return fmt.Errorf("disclosure-service: OAuth2 token response: expires_in %d exceeds %d", parsed.ExpiresIn, maxOAuthTokenLifetimeSeconds)
+	if tokenResponse.ExpiresIn > maxOAuthTokenLifetimeSeconds {
+		return fmt.Errorf("disclosure-service: OAuth2 token response: expires_in %d exceeds %d", tokenResponse.ExpiresIn, maxOAuthTokenLifetimeSeconds)
 	}
 	return nil
 }

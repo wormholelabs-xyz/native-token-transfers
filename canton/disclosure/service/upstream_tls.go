@@ -47,7 +47,7 @@ func loadUpstreamTLSConfig(files upstreamTLSFiles, now time.Time) (*tls.Config, 
 	if now.IsZero() {
 		return nil, fmt.Errorf("disclosure-service: loadUpstreamTLSConfig: zero clock")
 	}
-	config := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	if files.caFile != "" {
 		roots, err := loadCABundle("--json-api-ca-file", files.caFile)
@@ -55,24 +55,24 @@ func loadUpstreamTLSConfig(files upstreamTLSFiles, now time.Time) (*tls.Config, 
 			return nil, err
 		}
 		//SECURITY: replaces the system roots; only this bundle can vouch for the upstream.
-		config.RootCAs = roots
+		tlsConfig.RootCAs = roots
 	}
 
 	if files.clientCertFile != "" {
-		pair, err := loadClientKeyPair(files, now)
+		clientKeyPair, err := loadClientKeyPair(files, now)
 		if err != nil {
 			return nil, err
 		}
-		config.Certificates = []tls.Certificate{pair}
+		tlsConfig.Certificates = []tls.Certificate{clientKeyPair}
 	}
 
-	if (files.caFile != "") != (config.RootCAs != nil) {
+	if (files.caFile != "") != (tlsConfig.RootCAs != nil) {
 		panic("disclosure-service: RootCAs disagrees with --json-api-ca-file")
 	}
-	if (files.clientCertFile != "") != (len(config.Certificates) == 1) {
+	if (files.clientCertFile != "") != (len(tlsConfig.Certificates) == 1) {
 		panic("disclosure-service: client certificate count disagrees with --json-api-client-cert-file")
 	}
-	return config, nil
+	return tlsConfig, nil
 }
 
 // loadCABundle parses every PEM block in path as a CA certificate. Any other block type or
@@ -120,14 +120,14 @@ func loadClientKeyPair(files upstreamTLSFiles, now time.Time) (tls.Certificate, 
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: --json-api-client-key-file: %w", err)
 	}
-	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	clientKeyPair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: client key pair %s, %s: %w", files.clientCertFile, files.clientKeyFile, err)
 	}
-	if len(pair.Certificate) == 0 {
+	if len(clientKeyPair.Certificate) == 0 {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: --json-api-client-cert-file %s: no certificate", files.clientCertFile)
 	}
-	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	leaf, err := x509.ParseCertificate(clientKeyPair.Certificate[0])
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: --json-api-client-cert-file %s: %w", files.clientCertFile, err)
 	}
@@ -137,12 +137,13 @@ func loadClientKeyPair(files upstreamTLSFiles, now time.Time) (tls.Certificate, 
 	if now.After(leaf.NotAfter) {
 		return tls.Certificate{}, fmt.Errorf("disclosure-service: --json-api-client-cert-file %s: expired at %s", files.clientCertFile, leaf.NotAfter.UTC().Format(time.RFC3339))
 	}
-	pair.Leaf = leaf
-	return pair, nil
+	clientKeyPair.Leaf = leaf
+	return clientKeyPair, nil
 }
 
 // newTokenEndpointHTTPClient is the client for the OAuth2 token endpoint: system roots or the
-// --oauth-ca-file bundle, TLS 1.2 minimum, and no client certificate.
+// --oauth-ca-file bundle and TLS 1.2 minimum. The participant client certificate stays on the
+// JSON API client.
 func newTokenEndpointHTTPClient(oauthCAFile string) (*http.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if oauthCAFile != "" {
