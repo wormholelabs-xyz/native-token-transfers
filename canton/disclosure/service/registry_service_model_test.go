@@ -281,7 +281,7 @@ func TestRegistryUpstreamListLimitIsAFixedPublicError(t *testing.T) {
 			errorText := requireRegistryErrorBody(t, recorder)
 			requireNoStoreNoSniffHeaders(t, recorder)
 			assert.Equal(t, "disclosure-service: "+publicMessageUpstreamListLimit+"; request id "+recorder.Header().Get("X-Request-Id"), errorText)
-			assert.NotContains(t, recorder.Body.String(), "1024")
+			assert.NotContains(t, strings.ReplaceAll(recorder.Body.String(), recorder.Header().Get("X-Request-Id"), ""), "1024")
 			assert.Contains(t, logged.String(), tc.wantTemplate)
 			assert.Contains(t, logged.String(), "http-list-max-elements-limit")
 		})

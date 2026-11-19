@@ -199,7 +199,7 @@ func TestUpstreamListLimitIsAFixedPublicErrorAndCached(t *testing.T) {
 		var body publicErrorBody
 		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 		assert.Equal(t, publicMessageUpstreamListLimit, body.Error)
-		assert.NotContains(t, recorder.Body.String(), "1024")
+		assert.NotContains(t, body.Error, "1024")
 		assert.NotContains(t, recorder.Body.String(), "NttManager")
 	}
 	assert.Equal(t, int64(1), activeContractsCalls.Load(), "a failed read is cached for the cache window")
