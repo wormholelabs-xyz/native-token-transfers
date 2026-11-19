@@ -35,12 +35,17 @@ const (
 	// fires only after parsing, so this byte ceiling is the earlier bound.
 	maxUpstreamResponseBytes = 64 << 20
 	serverReadHeaderTimeout  = 10 * time.Second
-	serverReadTimeout        = 30 * time.Second
-	serverIdleTimeout        = 2 * time.Minute
-	maxInboundHeaderBytes    = 8 << 10
+	// serverReadTimeout bounds the read of headers and body, so a slow body holds an inbound slot
+	// for at most this long.
+	serverReadTimeout     = 10 * time.Second
+	serverIdleTimeout     = 2 * time.Minute
+	maxInboundHeaderBytes = 8 << 10
 
-	maxUpstreamConcurrencyLimit  = 64
-	maxCacheTTL                  = 60 * time.Second
+	maxUpstreamConcurrencyLimit = 64
+	maxCacheTTL                 = 60 * time.Second
+	// minRegistryCacheTTL is the cache floor with the registry API: each instruments request
+	// without the cache is a full Coin read.
+	minRegistryCacheTTL          = 1 * time.Second
 	maxContractsPerTemplateLimit = 10_000
 )
 
@@ -59,6 +64,7 @@ type options struct {
 	maxUpstreamConcurrency  int
 	cacheTTL                time.Duration
 	behindEdgeProxy         bool
+	registryInstrumentsPath string // empty when the registry API is off
 	verbose                 bool
 }
 
@@ -75,7 +81,7 @@ func parseFlags(args []string) (*options, error) {
 	nttCustodyParty := fs.String("ntt-custody-party", "", "nttCustody: reads the custody pots and its own TransferPreapprovals (required)")
 	operatorParty := fs.String("operator-party", "", "operator: reads ReplayRootRegistry only; enables the register flow (optional)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
-	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers, 1 to 10000; more is an error")
+	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers and in the registry instrument list, 1 to 10000; more is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long, 0 to 60s; 0 turns the cache off")
 	behindEdgeProxy := fs.Bool("behind-edge-proxy", false, "state that an edge proxy terminates TLS and applies a rate limit and a WAF; required for a non-loopback --listen")
@@ -88,6 +94,7 @@ func parseFlags(args []string) (*options, error) {
 	oauthAudience := fs.String("oauth-audience", "", "OAuth2 audience of the JSON Ledger API")
 	oauthScope := fs.String("oauth-scope", "", "OAuth2 scope (optional)")
 	oauthCAFile := fs.String("oauth-ca-file", "", "PEM CA bundle that verifies the OAuth2 token endpoint certificate; replaces the system roots (https only)")
+	registryInstrumentsFile := fs.String("registry-instruments-file", "", "serve the CIP-0056 registry API (v1) for the instruments that --guardian-governance-party administers; JSON object keyed by instrument id, each value {\"name\": ..., \"symbol\": ...}")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -123,6 +130,9 @@ func parseFlags(args []string) (*options, error) {
 	if *cacheTTL < 0 || *cacheTTL > maxCacheTTL {
 		return nil, fmt.Errorf("disclosure-service: --cache-ttl must be 0 to %s, got %s", maxCacheTTL, *cacheTTL)
 	}
+	if *registryInstrumentsFile != "" && *cacheTTL < minRegistryCacheTTL {
+		return nil, fmt.Errorf("disclosure-service: --cache-ttl must be at least %s with --registry-instruments-file, got %s", minRegistryCacheTTL, *cacheTTL)
+	}
 	return &options{
 		listen:                  *listen,
 		jsonAPIBaseURL:          *jsonAPI,
@@ -133,6 +143,7 @@ func parseFlags(args []string) (*options, error) {
 		maxUpstreamConcurrency:  *maxUpstream,
 		cacheTTL:                *cacheTTL,
 		behindEdgeProxy:         *behindEdgeProxy,
+		registryInstrumentsPath: *registryInstrumentsFile,
 		verbose:                 *verbose,
 	}, nil
 }
@@ -176,6 +187,15 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return err
 	}
 
+	var registry *registryConfig
+	if opts.registryInstrumentsPath != "" {
+		loadedRegistry, err := loadRegistryConfig(opts)
+		if err != nil {
+			return err
+		}
+		registry = loadedRegistry
+	}
+
 	// Fail fast at startup on an unreadable or invalid TLS file.
 	tlsConfig, err := loadUpstreamTLSConfig(opts.upstreamTLS, time.Now())
 	if err != nil {
@@ -196,6 +216,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		acs = newCachingACS(acs, opts.cacheTTL)
 	}
 	srv := newServer(opts, acs)
+	srv.registry = registry
 
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
@@ -210,6 +231,9 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
 		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
 	fmt.Fprintf(stderr, "disclosure-service: upstream auth: %s; upstream TLS: %s\n", describeUpstreamAuth(opts.upstreamAuth), describeUpstreamTLS(opts.upstreamTLS))
+	if registry != nil {
+		fmt.Fprintf(stderr, "disclosure-service: CIP-0056 registry API on for admin %s, %d configured instrument(s)\n", registry.adminParty, len(registry.displayByInstrumentID))
+	}
 	fmt.Fprintln(stderr, "disclosure-service: public flow routes; put an edge proxy (TLS, rate limit, WAF) in front")
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 

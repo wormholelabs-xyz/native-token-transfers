@@ -49,6 +49,13 @@ const upstreamAcquireTimeout = 2 * time.Second
 // advances; a sweep on write keeps the map from growing without bound.
 const maxCacheEntries = 512
 
+// A contract-by-id miss is cached for at most maxNegativeCacheTTL, and misses fill at most
+// maxNegativeCacheEntries. Any client can name a new contract id.
+const (
+	maxNegativeCacheTTL     = 1 * time.Second
+	maxNegativeCacheEntries = maxCacheEntries / 4
+)
+
 // ---------------------------------------------------------------------------
 // Concurrency bound
 // ---------------------------------------------------------------------------
@@ -104,6 +111,14 @@ func (bounded *boundedACS) ActiveContractByID(ctx context.Context, readerParties
 	return bounded.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
+func (bounded *boundedACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsRead, error) {
+	if err := bounded.acquire(ctx); err != nil {
+		return amountTotalsRead{}, err
+	}
+	defer bounded.release()
+	return bounded.inner.ActiveContractAmountTotals(ctx, query)
+}
+
 // ---------------------------------------------------------------------------
 // TTL cache with single flight
 // ---------------------------------------------------------------------------
@@ -113,6 +128,20 @@ type cacheEntry struct {
 	result  any
 	err     error
 	expires time.Time
+	isMiss  bool // a contract-by-id read that found no contract
+}
+
+// cacheMissResult is a fetch result that can be a miss.
+type cacheMissResult interface {
+	isCacheMiss() bool
+}
+
+func isCacheMiss(result any, fetchErr error) bool {
+	if fetchErr != nil {
+		return false
+	}
+	missResult, canMiss := result.(cacheMissResult)
+	return canMiss && missResult.isCacheMiss()
 }
 
 // inflightCall lets concurrent callers for one key share a single upstream result. result and err
@@ -129,6 +158,9 @@ type inflightCall struct {
 // every request resolves the same offset, so their ActiveContracts keys collide and hit. A
 // caller can therefore receive a set up to ttl old; a contract archived inside that window
 // yields a blob whose submission fails, and the caller refetches.
+//
+// A contract-by-id miss is cached for at most maxNegativeCacheTTL, and misses use at most
+// maxNegativeCacheEntries of the entries.
 //
 // A failed fetch is cached for ttl also, so a template above an upstream bound costs one upstream
 // read per window. Two errors are not cached: errUpstreamBusy (local load shedding) and
@@ -194,13 +226,42 @@ func (cache *cachingACS) runInflightFetch(key string, call *inflightCall, fetch 
 		}
 		delete(cache.inflight, key)
 		if isCacheableFetchResult(call.err) {
-			cache.sweepLocked()
-			cache.entries[key] = cacheEntry{result: call.result, err: call.err, expires: cache.now().Add(cache.ttl)}
+			cache.storeLocked(key, call.result, call.err)
 		}
 		cache.mu.Unlock()
 		close(call.done)
 	}()
 	call.result, call.err = fetch(fetchCtx)
+}
+
+// storeLocked caches one fetch answer. A miss gets the shorter ttl, and is left out when misses
+// already fill their share. The caller holds cache.mu.
+func (cache *cachingACS) storeLocked(key string, result any, fetchErr error) {
+	ttl := cache.ttl
+	isMiss := isCacheMiss(result, fetchErr)
+	if isMiss {
+		ttl = min(cache.ttl, maxNegativeCacheTTL)
+		if cache.countLiveMissesLocked() >= maxNegativeCacheEntries {
+			return
+		}
+	}
+	cache.sweepLocked()
+	cache.entries[key] = cacheEntry{result: result, err: fetchErr, expires: cache.now().Add(ttl), isMiss: isMiss}
+	if len(cache.entries) > maxCacheEntries {
+		panic("disclosure-service: cache exceeds maxCacheEntries")
+	}
+}
+
+// countLiveMissesLocked counts the unexpired misses. The caller holds cache.mu.
+func (cache *cachingACS) countLiveMissesLocked() int {
+	now := cache.now()
+	liveMisses := 0
+	for _, cached := range cache.entries {
+		if cached.isMiss && now.Before(cached.expires) {
+			liveMisses++
+		}
+	}
+	return liveMisses
 }
 
 func isCacheableFetchResult(fetchErr error) bool {
@@ -272,6 +333,8 @@ type contractByIDResult struct {
 	found bool
 }
 
+func (result contractByIDResult) isCacheMiss() bool { return !result.found }
+
 func (cache *cachingACS) ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error) {
 	encodedKey, err := json.Marshal(struct {
 		Kind       string
@@ -293,4 +356,20 @@ func (cache *cachingACS) ActiveContractByID(ctx context.Context, readerParties [
 		return acsEntry{}, false, fmt.Errorf("disclosure-service: cached contract-by-id has type %T", cachedValue)
 	}
 	return result.entry, result.found, nil
+}
+
+// ActiveContractAmountTotals gives each caller its own copy of the cached totals. The copy keeps
+// the time of the upstream read.
+func (cache *cachingACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsRead, error) {
+	cachedValue, err := cache.loadOrFetch(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+		return cache.inner.ActiveContractAmountTotals(fetchCtx, query)
+	})
+	if err != nil {
+		return amountTotalsRead{}, err
+	}
+	read, ok := cachedValue.(amountTotalsRead)
+	if !ok {
+		return amountTotalsRead{}, fmt.Errorf("disclosure-service: cached amount totals has type %T", cachedValue)
+	}
+	return read.clone(), nil
 }
