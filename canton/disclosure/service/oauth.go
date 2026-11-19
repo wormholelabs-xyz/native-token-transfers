@@ -24,46 +24,66 @@ const (
 	maxOAuthErrorCodeLength = 64
 )
 
-// oauthClientConfig is an OAuth2 client-credentials grant against one token endpoint.
-type oauthClientConfig struct {
+// oauthClientFlags are the raw --oauth-* flag values.
+type oauthClientFlags struct {
 	tokenURL         string
+	clientID         string
+	clientSecretFile string
+	audience         string
+	scope            string
+}
+
+func (flags oauthClientFlags) anySet() bool {
+	return flags.tokenURL != "" || flags.clientID != "" || flags.clientSecretFile != "" || flags.audience != "" || flags.scope != ""
+}
+
+// validatedOAuthClientConfig is an OAuth2 client-credentials grant against one token endpoint.
+// Build it only with parseOAuthClientConfig.
+type validatedOAuthClientConfig struct {
+	tokenURL         *url.URL
 	clientID         string
 	clientSecretFile string
 	audience         string
 	scope            string // optional
 }
 
-// checkOAuthClientConfig enforces every required field and an https (or loopback http) token URL.
-func checkOAuthClientConfig(config oauthClientConfig) error {
+// parseOAuthClientConfig enforces every required field and an https (or loopback http) token URL.
+func parseOAuthClientConfig(flags oauthClientFlags) (validatedOAuthClientConfig, error) {
 	required := []struct{ flagName, flagValue string }{
-		{"--oauth-token-url", config.tokenURL},
-		{"--oauth-client-id", config.clientID},
-		{"--oauth-client-secret-file", config.clientSecretFile},
-		{"--oauth-audience", config.audience},
+		{"--oauth-token-url", flags.tokenURL},
+		{"--oauth-client-id", flags.clientID},
+		{"--oauth-client-secret-file", flags.clientSecretFile},
+		{"--oauth-audience", flags.audience},
 	}
 	for _, field := range required {
 		if field.flagValue == "" {
-			return fmt.Errorf("disclosure-service: OAuth2 mode needs %s (set all of --oauth-token-url, --oauth-client-id, --oauth-client-secret-file, --oauth-audience)", field.flagName)
+			return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: OAuth2 mode needs %s (set all of --oauth-token-url, --oauth-client-id, --oauth-client-secret-file, --oauth-audience)", field.flagName)
 		}
 	}
-	parsed, err := url.Parse(config.tokenURL)
+	tokenURL, err := url.Parse(flags.tokenURL)
 	if err != nil {
-		return fmt.Errorf("disclosure-service: --oauth-token-url %q: %w", config.tokenURL, err)
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: %w", flags.tokenURL, err)
 	}
-	if parsed.Hostname() == "" {
-		return fmt.Errorf("disclosure-service: --oauth-token-url %q: missing host", config.tokenURL)
+	if tokenURL.Hostname() == "" {
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: missing host", flags.tokenURL)
 	}
 	//SECURITY: the request body carries the client secret; plain http is only for a loopback test endpoint.
-	switch parsed.Scheme {
+	switch tokenURL.Scheme {
 	case "https":
 	case "http":
-		if !isLoopbackHost(parsed.Hostname()) {
-			return fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https (http only for a loopback host)", config.tokenURL)
+		if !isLoopbackHost(tokenURL.Hostname()) {
+			return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https (http only for a loopback host)", flags.tokenURL)
 		}
 	default:
-		return fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https", config.tokenURL)
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https", flags.tokenURL)
 	}
-	return nil
+	return validatedOAuthClientConfig{
+		tokenURL:         tokenURL,
+		clientID:         flags.clientID,
+		clientSecretFile: flags.clientSecretFile,
+		audience:         flags.audience,
+		scope:            flags.scope,
+	}, nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -90,27 +110,30 @@ func readClientSecret(path string) (string, error) {
 // oauthBearerTokenSource caches one client-credentials access token and refreshes it before
 // expiry. One fetch runs at a time; concurrent callers wait for it and share its result.
 type oauthBearerTokenSource struct {
-	config     oauthClientConfig
-	httpClient *http.Client
-	now        func() time.Time
+	clientConfig validatedOAuthClientConfig
+	httpClient   *http.Client
+	now          func() time.Time
 	// fetchSlot is a one-slot semaphore. Holding it guards cachedToken and refreshAt.
 	fetchSlot   chan struct{}
 	cachedToken string
 	refreshAt   time.Time
 }
 
-func newOAuthBearerTokenSource(config oauthClientConfig, httpClient *http.Client, now func() time.Time) *oauthBearerTokenSource {
+func newOAuthBearerTokenSource(clientConfig validatedOAuthClientConfig, httpClient *http.Client, now func() time.Time) *oauthBearerTokenSource {
 	if httpClient == nil {
 		panic("disclosure-service: newOAuthBearerTokenSource: nil http client")
 	}
 	if now == nil {
 		panic("disclosure-service: newOAuthBearerTokenSource: nil clock")
 	}
+	if clientConfig.tokenURL == nil {
+		panic("disclosure-service: newOAuthBearerTokenSource: unvalidated client config")
+	}
 	return &oauthBearerTokenSource{
-		config:     config,
-		httpClient: httpClient,
-		now:        now,
-		fetchSlot:  make(chan struct{}, 1),
+		clientConfig: clientConfig,
+		httpClient:   httpClient,
+		now:          now,
+		fetchSlot:    make(chan struct{}, 1),
 	}
 }
 
@@ -157,20 +180,20 @@ type oauthTokenResponse struct {
 //
 // SECURITY: do not put the secret or a token in a returned error; errors reach logs and HTTP responses.
 func (source *oauthBearerTokenSource) fetchToken(ctx context.Context) (string, time.Duration, error) {
-	secret, err := readClientSecret(source.config.clientSecretFile)
+	secret, err := readClientSecret(source.clientConfig.clientSecretFile)
 	if err != nil {
 		return "", 0, err
 	}
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
-		"client_id":     {source.config.clientID},
+		"client_id":     {source.clientConfig.clientID},
 		"client_secret": {secret},
-		"audience":      {source.config.audience},
+		"audience":      {source.clientConfig.audience},
 	}
-	if source.config.scope != "" {
-		form.Set("scope", source.config.scope)
+	if source.clientConfig.scope != "" {
+		form.Set("scope", source.clientConfig.scope)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, source.config.tokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, source.clientConfig.tokenURL.String(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", 0, fmt.Errorf("disclosure-service: build OAuth2 token request: %w", err)
 	}
@@ -241,31 +264,3 @@ func oauthErrorCodeSuffix(body []byte) string {
 	}
 	return " (" + errorBody.Error + ")"
 }
-
-// newBearerTokenSource picks the upstream auth mode. A nil source means an unauthenticated
-// upstream. It reads the token or secret file once, so a bad path fails at startup.
-func newBearerTokenSource(opts *options, httpClient *http.Client) (bearerTokenSource, error) {
-	//SECURITY: exactly one auth mode, or none. parseFlags enforces this too.
-	if opts.accessTokenFile != "" && opts.oauth != nil {
-		return nil, errBothAuthModes
-	}
-	switch {
-	case opts.oauth != nil:
-		if err := checkOAuthClientConfig(*opts.oauth); err != nil {
-			return nil, err
-		}
-		if _, err := readClientSecret(opts.oauth.clientSecretFile); err != nil {
-			return nil, err
-		}
-		return newOAuthBearerTokenSource(*opts.oauth, httpClient, time.Now), nil
-	case opts.accessTokenFile != "":
-		if _, err := readAccessToken(opts.accessTokenFile); err != nil {
-			return nil, err
-		}
-		return fileBearerTokenSource{path: opts.accessTokenFile}, nil
-	default:
-		return nil, nil
-	}
-}
-
-var errBothAuthModes = fmt.Errorf("disclosure-service: --access-token-file and the --oauth-* flags are mutually exclusive")

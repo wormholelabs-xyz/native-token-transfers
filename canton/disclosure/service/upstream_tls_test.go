@@ -395,6 +395,7 @@ func TestRun_FailsFastOnInvalidUpstreamTLSFile(t *testing.T) {
 	missingCA := filepath.Join(t.TempDir(), "missing-ca.pem")
 	opts := &options{
 		listen:                  "127.0.0.1:0",
+		upstreamAuth:            upstreamAuthNone{},
 		jsonAPIBaseURL:          "https://127.0.0.1:1",
 		readerParties:           testReaderParties(),
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,

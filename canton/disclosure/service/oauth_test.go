@@ -88,17 +88,24 @@ func writeClientSecret(t *testing.T, path, secret string) {
 	require.NoError(t, os.WriteFile(path, []byte(secret+"\n"), 0o600))
 }
 
-func newTestOAuthConfig(t *testing.T, tokenURL string) oauthClientConfig {
+func newTestOAuthConfig(t *testing.T, tokenURL string) validatedOAuthClientConfig {
 	t.Helper()
 	secretPath := filepath.Join(t.TempDir(), "client-secret")
 	writeClientSecret(t, secretPath, "first-secret")
-	return oauthClientConfig{
+	return mustParseOAuthClientConfig(t, oauthClientFlags{
 		tokenURL:         tokenURL,
 		clientID:         "disclosure-gateway",
 		clientSecretFile: secretPath,
 		audience:         "https://canton.network.global",
 		scope:            "daml_ledger_api",
-	}
+	})
+}
+
+func mustParseOAuthClientConfig(t *testing.T, flags oauthClientFlags) validatedOAuthClientConfig {
+	t.Helper()
+	clientConfig, err := parseOAuthClientConfig(flags)
+	require.NoError(t, err)
+	return clientConfig
 }
 
 // ---------------------------------------------------------------------------
@@ -365,25 +372,24 @@ func TestParseFlags_UpstreamAuthModes(t *testing.T) {
 		name       string
 		args       []string
 		wantErrSub string
-		wantOAuth  *oauthClientConfig
-		wantFile   string
+		wantMode   upstreamAuthMode
 	}{
-		{name: "no auth", args: nil},
-		{name: "access token file", args: []string{"--access-token-file", "token"}, wantFile: "token"},
+		{name: "no auth", args: nil, wantMode: upstreamAuthNone{}},
+		{name: "access token file", args: []string{"--access-token-file", "token"}, wantMode: upstreamAuthTokenFile{tokenFilePath: "token"}},
 		{
-			name:      "oauth",
-			args:      fullOAuth,
-			wantOAuth: &oauthClientConfig{tokenURL: "https://idp.example/oauth/token", clientID: "gateway", clientSecretFile: "secret", audience: "https://canton.network.global"},
+			name:     "oauth",
+			args:     fullOAuth,
+			wantMode: upstreamAuthOAuth2{clientConfig: mustParseOAuthClientConfig(t, oauthClientFlags{tokenURL: "https://idp.example/oauth/token", clientID: "gateway", clientSecretFile: "secret", audience: "https://canton.network.global"})},
 		},
 		{
-			name:      "oauth with scope",
-			args:      append(append([]string{}, fullOAuth...), "--oauth-scope", "daml_ledger_api"),
-			wantOAuth: &oauthClientConfig{tokenURL: "https://idp.example/oauth/token", clientID: "gateway", clientSecretFile: "secret", audience: "https://canton.network.global", scope: "daml_ledger_api"},
+			name:     "oauth with scope",
+			args:     append(append([]string{}, fullOAuth...), "--oauth-scope", "daml_ledger_api"),
+			wantMode: upstreamAuthOAuth2{clientConfig: mustParseOAuthClientConfig(t, oauthClientFlags{tokenURL: "https://idp.example/oauth/token", clientID: "gateway", clientSecretFile: "secret", audience: "https://canton.network.global", scope: "daml_ledger_api"})},
 		},
 		{
-			name:      "oauth over loopback http",
-			args:      []string{"--oauth-token-url", "http://127.0.0.1:8080/token", "--oauth-client-id", "gateway", "--oauth-client-secret-file", "secret", "--oauth-audience", "aud"},
-			wantOAuth: &oauthClientConfig{tokenURL: "http://127.0.0.1:8080/token", clientID: "gateway", clientSecretFile: "secret", audience: "aud"},
+			name:     "oauth over loopback http",
+			args:     []string{"--oauth-token-url", "http://127.0.0.1:8080/token", "--oauth-client-id", "gateway", "--oauth-client-secret-file", "secret", "--oauth-audience", "aud"},
+			wantMode: upstreamAuthOAuth2{clientConfig: mustParseOAuthClientConfig(t, oauthClientFlags{tokenURL: "http://127.0.0.1:8080/token", clientID: "gateway", clientSecretFile: "secret", audience: "aud"})},
 		},
 		{name: "both auth modes", args: append(append([]string{}, fullOAuth...), "--access-token-file", "token"), wantErrSub: "mutually exclusive"},
 		{name: "oauth missing audience", args: fullOAuth[:6], wantErrSub: "--oauth-audience"},
@@ -410,8 +416,7 @@ func TestParseFlags_UpstreamAuthModes(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantOAuth, opts.oauth)
-			assert.Equal(t, tc.wantFile, opts.accessTokenFile)
+			assert.Equal(t, tc.wantMode, opts.upstreamAuth)
 		})
 	}
 }
@@ -423,26 +428,25 @@ func TestNewBearerTokenSource(t *testing.T) {
 	secretPath := filepath.Join(dir, "secret")
 	writeClientSecret(t, secretPath, "first-secret")
 	missingPath := filepath.Join(dir, "missing")
-	oauthWith := func(secretFile string) *oauthClientConfig {
-		return &oauthClientConfig{tokenURL: "https://idp.example/token", clientID: "c", clientSecretFile: secretFile, audience: "a"}
+	oauthWith := func(secretFile string) upstreamAuthOAuth2 {
+		return upstreamAuthOAuth2{clientConfig: mustParseOAuthClientConfig(t, oauthClientFlags{tokenURL: "https://idp.example/token", clientID: "c", clientSecretFile: secretFile, audience: "a"})}
 	}
 
 	cases := []struct {
 		name       string
-		opts       options
+		mode       upstreamAuthMode
 		wantErrSub string
 		wantMode   string
 	}{
-		{name: "none", opts: options{}, wantMode: "none"},
-		{name: "file", opts: options{accessTokenFile: tokenPath}, wantMode: "file"},
-		{name: "oauth", opts: options{oauth: oauthWith(secretPath)}, wantMode: "oauth"},
-		{name: "missing token file", opts: options{accessTokenFile: missingPath}, wantErrSub: "read access token file"},
-		{name: "missing secret file", opts: options{oauth: oauthWith(missingPath)}, wantErrSub: "--oauth-client-secret-file"},
-		{name: "both modes", opts: options{accessTokenFile: tokenPath, oauth: oauthWith(secretPath)}, wantErrSub: "mutually exclusive"},
+		{name: "none", mode: upstreamAuthNone{}, wantMode: "none"},
+		{name: "file", mode: upstreamAuthTokenFile{tokenFilePath: tokenPath}, wantMode: "file"},
+		{name: "oauth", mode: oauthWith(secretPath), wantMode: "oauth"},
+		{name: "missing token file", mode: upstreamAuthTokenFile{tokenFilePath: missingPath}, wantErrSub: "read access token file"},
+		{name: "missing secret file", mode: oauthWith(missingPath), wantErrSub: "--oauth-client-secret-file"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			source, err := newBearerTokenSource(&tc.opts, newTestUpstreamHTTPClient(t))
+			source, err := newBearerTokenSource(tc.mode, newTestUpstreamHTTPClient(t))
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -460,26 +464,4 @@ func TestNewBearerTokenSource(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestRun_RejectsBothAuthModes(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "token")
-	require.NoError(t, os.WriteFile(tokenPath, []byte("tok\n"), 0o600))
-	secretPath := filepath.Join(dir, "secret")
-	writeClientSecret(t, secretPath, "first-secret")
-	opts := &options{
-		listen:                  "127.0.0.1:0",
-		jsonAPIBaseURL:          "http://127.0.0.1:1",
-		readerParties:           testReaderParties(),
-		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
-		maxUpstreamConcurrency:  defaultMaxUpstreamConcurrency,
-		accessTokenFile:         tokenPath,
-		oauth:                   &oauthClientConfig{tokenURL: "https://idp.example/token", clientID: "c", clientSecretFile: secretPath, audience: "a"},
-	}
-	var out syncBuffer
-	err := run(context.Background(), opts, &out)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mutually exclusive")
-	assert.Empty(t, listeningURL(out.String()))
 }

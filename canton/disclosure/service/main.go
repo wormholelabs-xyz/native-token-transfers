@@ -53,8 +53,7 @@ type options struct {
 	listen                  string
 	jsonAPIBaseURL          string
 	readerParties           readerPartiesByRole
-	accessTokenFile         string
-	oauth                   *oauthClientConfig // nil unless the --oauth-* flags are set
+	upstreamAuth            upstreamAuthMode
 	upstreamTLS             upstreamTLSFiles
 	maxContractsPerTemplate int
 	maxUpstreamConcurrency  int
@@ -100,15 +99,9 @@ func parseFlags(args []string) (*options, error) {
 	if err := checkJSONAPIURL(*jsonAPI, *tokenFile != "", upstreamTLS); err != nil {
 		return nil, err
 	}
-	var oauth *oauthClientConfig
-	if *oauthTokenURL != "" || *oauthClientID != "" || *oauthSecretFile != "" || *oauthAudience != "" || *oauthScope != "" {
-		oauth = &oauthClientConfig{tokenURL: *oauthTokenURL, clientID: *oauthClientID, clientSecretFile: *oauthSecretFile, audience: *oauthAudience, scope: *oauthScope}
-		if *tokenFile != "" {
-			return nil, errBothAuthModes
-		}
-		if err := checkOAuthClientConfig(*oauth); err != nil {
-			return nil, err
-		}
+	upstreamAuth, err := parseUpstreamAuthMode(*tokenFile, oauthClientFlags{tokenURL: *oauthTokenURL, clientID: *oauthClientID, clientSecretFile: *oauthSecretFile, audience: *oauthAudience, scope: *oauthScope})
+	if err != nil {
+		return nil, err
 	}
 	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)
 	if err != nil {
@@ -133,8 +126,7 @@ func parseFlags(args []string) (*options, error) {
 		listen:                  *listen,
 		jsonAPIBaseURL:          *jsonAPI,
 		readerParties:           readerParties,
-		accessTokenFile:         *tokenFile,
-		oauth:                   oauth,
+		upstreamAuth:            upstreamAuth,
 		upstreamTLS:             upstreamTLS,
 		maxContractsPerTemplate: *maxContracts,
 		maxUpstreamConcurrency:  *maxUpstream,
@@ -190,7 +182,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	}
 	upstreamHTTPClient := newUpstreamHTTPClient(tlsConfig)
 
-	tokens, err := newBearerTokenSource(opts, upstreamHTTPClient)
+	tokens, err := newBearerTokenSource(opts.upstreamAuth, upstreamHTTPClient)
 	if err != nil {
 		return err
 	}
@@ -216,7 +208,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 
 	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
 		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
-	fmt.Fprintf(stderr, "disclosure-service: upstream auth: %s; upstream TLS: %s\n", describeUpstreamAuth(opts), describeUpstreamTLS(opts.upstreamTLS))
+	fmt.Fprintf(stderr, "disclosure-service: upstream auth: %s; upstream TLS: %s\n", describeUpstreamAuth(opts.upstreamAuth), describeUpstreamTLS(opts.upstreamTLS))
 	fmt.Fprintln(stderr, "disclosure-service: public flow routes; put an edge proxy (TLS, rate limit, WAF) in front")
 	fmt.Fprintf(stderr, "disclosure-service: listening on http://%s\n", ln.Addr().String())
 
@@ -238,17 +230,6 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 			return fmt.Errorf("disclosure-service: serve: %w", err)
 		}
 		return nil
-	}
-}
-
-func describeUpstreamAuth(opts *options) string {
-	switch {
-	case opts.oauth != nil:
-		return fmt.Sprintf("OAuth2 client credentials (client id %s)", opts.oauth.clientID)
-	case opts.accessTokenFile != "":
-		return "bearer token file"
-	default:
-		return "none"
 	}
 }
 

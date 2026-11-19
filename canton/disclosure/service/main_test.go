@@ -33,7 +33,7 @@ func TestParseFlags_Defaults(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:7599", opts.listen)
 	assert.Equal(t, "http://127.0.0.1:6975", opts.jsonAPIBaseURL)
 	assert.Equal(t, readerPartiesByRole{guardianGovernance: testGuardianGovernanceParty, nttCustody: testNttCustodyParty}, opts.readerParties)
-	assert.Equal(t, "", opts.accessTokenFile)
+	assert.Equal(t, upstreamAuthNone{}, opts.upstreamAuth)
 	assert.Equal(t, 1000, opts.maxContractsPerTemplate)
 	assert.False(t, opts.verbose)
 }
@@ -458,6 +458,7 @@ func TestRun_BannerHealthzAndGracefulShutdown(t *testing.T) {
 
 	opts := &options{
 		listen:                  "127.0.0.1:0",
+		upstreamAuth:            upstreamAuthNone{},
 		jsonAPIBaseURL:          upstream.URL,
 		readerParties:           testReaderParties(),
 		maxContractsPerTemplate: defaultMaxContractsPerTemplate,
