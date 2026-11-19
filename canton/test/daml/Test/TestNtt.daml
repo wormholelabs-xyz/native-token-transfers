@@ -27,12 +27,14 @@ module Test.TestNtt where
 
 import Daml.Script hiding (AnyContractId)
 import DA.Assert ((===))
+import DA.Date (Month (..), date)
 import DA.Foldable (forA_)
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import DA.Set qualified as Set
 import DA.Text (isInfixOf, isPrefixOf)
 import DA.Text qualified as T
+import DA.Time (time)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding, HoldingView(..))
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
@@ -49,7 +51,7 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.GuardianSet (GuardianSet(..))
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
-import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.Setup (GenesisGuardianSet (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 import Wormhole.Core.State
   ( Emitter(..), CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
@@ -2632,10 +2634,12 @@ testReceivePinsGuardianGovernance = do
   recipient <- allocateParty "PinRecipient"
   rogueGov <- allocateParty "RogueGovernance"
   rogueFeeCustody <- allocateParty "RogueFeeCustody"
-  let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
+  rogueFeeInstrumentAdmin <- allocateParty "RogueFeeInstrumentAdmin"
+  let rogueInst = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 ["1111111111111111111111111111111111111111"] rogueInst rogueFeeCustody)
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = ["1111111111111111111111111111111111111111"])
+                 rogueInst rogueFeeCustody)
   (mgrCid, _, ledgerCid) <- setupFixedManager operator gg admin LockUnlock csId
   Some mgr <- queryContractId operator mgrCid
   (nodeCid, _) <- coveringDisclosure operator gg mgr.namespace nttTransferDigest
@@ -3030,6 +3034,12 @@ testAcceptAdminByVaaRejectsWrongEmitter = do
     acceptAdminByVaaCmd relayer fx csId nodeCid2 acceptAdminWrongEmitterAddressVAA
   expectAbort "wrong emitter address" res
 
+-- | Expiry of the superseded guardian set 0 in the stale-set tests. Core 0.8.3
+-- requires an expiry on each set below the current index; this one is later
+-- than the script clock, so set 0 still verifies.
+staleGuardianSetExpiry : Time
+staleGuardianSetExpiry = time (date 2100 Jan 1) 0 0 0
+
 -- | A VAA signed under a superseded-but-unexpired guardian set verifies fine
 -- (the old key is still recognized), but 'AcceptAdminTransferByVaa' requires
 -- the CURRENT guardian set and rejects it anyway.
@@ -3045,7 +3055,7 @@ testAcceptAdminByVaaRequiresCurrentGuardianSet = do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
-        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = Some staleGuardianSetExpiry)
         , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
         ]
 
@@ -3171,10 +3181,12 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
   admin <- allocateParty "AcceptPinAdmin"
   rogueGov <- allocateParty "AcceptPinRogueGovernance"
   rogueFeeCustody <- allocateParty "AcceptPinRogueFeeCustody"
-  let rogueInst = InstrumentId with admin = rogueGov, id = "UNUSED"
+  rogueFeeInstrumentAdmin <- allocateParty "AcceptPinRogueFeeInstrumentAdmin"
+  let rogueInst = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 ["1111111111111111111111111111111111111111"] rogueInst rogueFeeCustody)
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = ["1111111111111111111111111111111111111111"])
+                 rogueInst rogueFeeCustody)
   fx <- acceptAdminFixture operator gg admin BurnMint csId
   (nodeCid, _) <- coveringDisclosure operator gg fx.namespace (parseVAA acceptAdminHappyVAA).hash
   dProp <- fromSome <$> queryDisclosure admin fx.propCid
@@ -3313,7 +3325,7 @@ testSetPeerByVaaRequiresCurrentGuardianSet = do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
-        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = Some staleGuardianSetExpiry)
         , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
         ]
   (nodeCid, discs) <- setPeerByVaaDiscs operator gg staleCsId fx (parseVAA setPeerHappyVAA).hash
@@ -3745,7 +3757,7 @@ testRegisterManagerByVaaRequiresCurrentGuardianSet = do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
-        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = Some staleGuardianSetExpiry)
         , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
         ]
   fx <- registerByVaaFixture operator gg staleCsId

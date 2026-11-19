@@ -30,7 +30,7 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.Setup
-  ( mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
+  ( GenesisGuardianSet (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
   , solanaGovernanceChainId, defaultGovernanceContract )
 import Wormhole.Core.State (CoreState, Emitter, PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA, addressFromPubKey, spkiPrefixSecp256k1)
@@ -110,10 +110,11 @@ redTeamSetup = do
   gg <- allocateParty "RtGg"
   issuer <- allocateParty "RtIssuer"
   feeCustody <- allocateParty "RtFeeCustody"
+  feeInstrumentAdmin <- allocateParty "RtFeeInstrumentAdmin"
   coreStateCid <- submit (actAs operator <> actAs gg <> actAs feeCustody) do
     createCmd (mkInitialCoreState operator gg solanaGovernanceChainId defaultGovernanceContract
-                 [addressFromPubKey guardianKey.publicKey]
-                 (InstrumentId with admin = gg, id = "UNUSED") feeCustody)
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [addressFromPubKey guardianKey.publicKey])
+                 (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
   _ <- submit (actAs operator <> actAs gg) do
     createCmd (mkInitialEmitterRegistry operator gg 0)
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator gg 0)

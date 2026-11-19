@@ -76,7 +76,9 @@ package id, thus the source moved to version 0.3.1 (core 0.7.0, package id `5c4a
 builds against core 0.8.0 (`03a65dc3...`) and has the package id
 `f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71`. Version
 0.3.3 builds against core 0.8.1 (`5b256d13...`) and has the package id
-`6c5c17336e55cc8736c08118fdc86fd84d73044ecaef8b754f0160bfa4a45523`. An older 0.2.0 build (package id `36a58282...`) has the
+`6c5c17336e55cc8736c08118fdc86fd84d73044ecaef8b754f0160bfa4a45523`. Version
+0.3.4 builds against core 0.8.3 (`9d546b11...`) and has the package id
+`1c555ab22b096aa7bc780213eafbf95231bfe03bc4d669d9fe152a8eeff8293f`. An older 0.2.0 build (package id `36a58282...`) has the
 `minter` field. A later commit removed this field, thus that build is not
 upgrade-compatible with the baseline. A deployment of that build needs a
 migration to a new deployment.

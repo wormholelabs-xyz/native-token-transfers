@@ -20,23 +20,37 @@ interfaces below are.
 
 Provenance: built from `wormholelabs-xyz/wormhole` PR #81 (branch
 `canton/core-fee-custody`) at its head commit
-`fd66847d7658f8159d5850aee1a6857171c30fb6` (version 0.8.1), SDK 3.5.1. The
+`843c053387a0321d5dcaabdf3dfe982fb24a040d` (version 0.8.3), SDK 3.5.1. The
 main package id is
-`5b256d1377919ed618dffcf3f632dd05e97702ca99e4a3fe5320131b57ec690f`. The
+`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`. The
 package id identifies the build. A squash merge of PR #81 changes the commit
 id, but not the package id.
 
-Version 0.8.1 declares 0.7.0 (`7a22a1c4...`) as its `upgrades:` baseline.
-Version 0.8.0 (`03a65dc3...`) is withdrawn. `guardianGovernance` co-signs
-`EmitterRegistry` and `Emitter`. `RegisterEmitter` takes
-`expectedGuardianGovernance`; `ntt` passes `Some guardianGovernance`.
+Version 0.8.3 declares 0.8.2 (`132d32bf...`) as its `upgrades:` baseline.
+Versions 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs
+as `guardianGovernance`. The earlier NTT pin `5b256d13...` is a build of
+PR #81 before the core renumbered it to 0.8.3. That build is also withdrawn.
+`guardianGovernance` co-signs `EmitterRegistry` and `Emitter`.
+`RegisterEmitter` takes `expectedGuardianGovernance`; `ntt` passes
+`Some guardianGovernance`.
 
-Version 0.8.1 adds the fee recipient (`feeCustody`) as a signatory of
-`CoreState`. The `CoreState` precondition rejects a fee recipient that is
-`guardianGovernance` or the operator. When a fee is due, `chargeFee` rejects
-a payer that is `guardianGovernance` or the operator. Thus a deployment with
-`admin = gg` cannot pay a non-zero fee as `payer = admin`. 0.7.0 contracts
-cannot run under 0.8.1, so 0.8.1 starts from a fresh genesis.
+Version 0.8.3 adds the fee recipient (`feeCustody`) as a signatory of
+`CoreState`. `feeCustody` is not `guardianGovernance` and not the operator.
+The `CoreState` precondition has these rules:
+
+- The fee recipient is not `guardianGovernance` and not the operator.
+- The fee instrument admin is not `guardianGovernance` and not the operator.
+- The operator is not `guardianGovernance`.
+- The message fee is 0 or more.
+- The current guardian set exists and has no expiry. Each other set has a
+  lower index and an expiry.
+
+When a fee is due, `chargeFee` rejects a payer, a fee recipient or a fee
+instrument admin that is `guardianGovernance` or the operator. Thus a deployment with `admin = gg`
+cannot pay a non-zero fee as `payer = admin`. The test setups use a
+placeholder fee instrument admin that is a separate party. Version 0.8.3 has
+no payload size limit. A 0.8.2 `CoreState` cannot run under 0.8.3, so 0.8.3
+starts from a fresh genesis.
 
 `ntt` data-depends on `wormhole-core` by package id, so each NTT call into
 core runs the code of this exact package id. Do not vendor a core version
@@ -106,7 +120,7 @@ package id is reproducible.
 | DAR | consumed by | sha256 |
 | --- | --- | --- |
 | `ntt-0.2.0.dar` | `ntt` (`upgrades:`) | `12910821c7147b3b1702c82d473a027b73e1568b0fbb725477f18b09e08f6aec` |
-| `wormhole-core-0.8.1.dar` | `ntt`, `ntt-test` | `32dba2510c7140e5d2660ebc6ffe43386c694c392240780d5fe473e11d9bff80` |
+| `wormhole-core-0.8.3.dar` | `ntt`, `ntt-test` | `a41bd91de2ab5cdd5bd879d634476fa620d8b8a0b9f52d020c472ce083fb8458` |
 | `token-cip0056-0.2.0.dar` | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar` | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar` | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |

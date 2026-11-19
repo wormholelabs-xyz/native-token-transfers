@@ -40,16 +40,19 @@ setup = setupWithInstrument None
 
 -- | 'setup' with a caller-supplied fee instrument (plain 'setup' uses a
 -- placeholder, never validated since fees default to 0). Fee recipient is
--- @feeCustody@; core 0.8.1 rejects @guardianGovernance@ and @operator@.
+-- @feeCustody@. Core 0.8.3 rejects @guardianGovernance@ and @operator@ as the
+-- fee recipient and as the fee instrument admin.
 setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
 setupWithInstrument mInstrument = do
   operator <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
   feeCustody <- allocateParty "FeeCustody"
-  let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
+  placeholderFeeInstrumentAdmin <- allocateParty "FeeInstrumentAdmin"
+  let feeInstrument = fromOptional (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") mInstrument
   csId <- submit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian]
+                 defaultGovernanceContract
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
                  feeInstrument feeCustody)
   _ <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
@@ -179,20 +182,18 @@ testImpersonationBlocked = do
   Some m <- queryContractId mallory malloryEm
   assert (m.emitterAddress /= a.emitterAddress)
 
--- | Payloads larger than 750 bytes are rejected.
-testPayloadTooLarge : Script ()
-testPayloadTooLarge = do
+-- | A payload above the 750 bytes of whitepaper 0004 publishes (EVM parity,
+-- core 0.8.3).
+testPublishAcceptsPayloadAbove750Bytes : Script ()
+testPublishAcceptsPayloadAbove750Bytes = do
   (operator, _, csId) <- setup
   bob <- allocateParty "Bob"
   emitterId <- registerEmitter operator bob
-  csDisc <- fromSome <$> queryDisclosure operator csId
   -- 751 bytes = 1502 hex chars.
-  let bigPayload = mconcat (replicate 1502 "f")
-  submitMustFail (actAs bob <> disclose csDisc) do
-    exerciseCmd emitterId PublishMessage with
-      nonce = 0, payload = bigPayload, consistencyLevel = 0
-      coreStateCid = csId, payer = bob, feeAllocation = None
-  pure ()
+  let payloadOf751Bytes = mconcat (replicate 1502 "f")
+  message <- publishVia operator csId bob emitterId 0 payloadOf751Bytes 0
+  message.payload === payloadOf751Bytes
+  message.sequence === 0
 
 -- | Sanity check on quorum thresholds (EVM parity: floor(n*2/3)+1).
 testQuorum : Script ()
