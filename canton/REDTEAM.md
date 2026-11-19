@@ -139,9 +139,8 @@ Rule for the guardian quorum:
 
 `README.md`, section "Custody party", lists what the registry cannot do.
 
-The fee registry of core 0.8.0 runs with the authority of `gg`, because `gg` receives the message fees.
-The core-fee-custody change (`wormholelabs-xyz/wormhole`, branch `canton/core-fee-custody`) moves fee custody to a separate party, `feeCustody`.
-The NTT package re-pins to that core before PR #75 merges.
+The fee registry runs with the authority of `feeCustody`, not `gg`.
+Core 0.8.1 (`wormholelabs-xyz/wormhole` PR #81) moved fee custody from `gg` to `feeCustody`.
 
 ## F2: a third-party relayer cannot deliver a release
 

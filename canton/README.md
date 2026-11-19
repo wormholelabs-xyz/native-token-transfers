@@ -68,10 +68,10 @@ One version number identifies one build. Do not use a version number again
 for a different build. Participants use the package name and version to put
 the upgrades of a package in order.
 
-### Version 0.4.0 is not upgrade-compatible
+### Version 0.4.x is not upgrade-compatible
 
-Version 0.4.0 adds the `nttCustody` signatory to `NttGovernance` and
-`NttManager`. It also adds the `reserveCustodian` field to `NttManager`.
+Version 0.4.0 added the `nttCustody` signatory to `NttGovernance` and
+`NttManager`. It also added the `reserveCustodian` field to `NttManager`.
 An upgrade cannot add a signatory to an existing contract.
 Thus `ntt/daml.yaml` has no `upgrades:` field, and `dars/` has no earlier
 `ntt` DAR.
@@ -87,12 +87,13 @@ It gives no safe path for an existing deployment:
 
 No production deployment uses an earlier version. The LocalNet rehearsals
 used 0.2.0 and 0.3.0. The earlier versions also include 0.3.1 (core 0.7.0),
-0.3.2 (core 0.8.0, package id `f77fe8a8...`), 0.3.3 (core 0.8.1 build
-`5b256d13...`, package id `6c5c1733...`) and 0.3.4 (core 0.8.3, package id
-`1c555ab2...`). Version 0.4.0 builds against core 0.8.3 (`9d546b11...`).
-Canton checks upgrade compatibility by
+0.3.2 (core 0.8.0, package id `f77fe8a8...`) and 0.3.3 (core 0.8.1,
+package id `6c5c1733...`). Version 0.4.0 built against core 0.8.0. Version
+0.4.1 builds against core 0.8.1 (`5b256d13...`) and has the package id
+`88e55a615a516145c7b4d8f0f754f0e95adc8a87bf8c4fa41cdf919cdbb4b7b1`. Canton
+checks upgrade compatibility by
 package name when it receives a DAR. Thus a participant that has an earlier
-`ntt` package rejects the 0.4.0 DAR. Use participants that have no earlier
+`ntt` package rejects the 0.4.x DAR. Use participants that have no earlier
 `ntt` package.
 
 To move a deployment from an earlier version, do these steps:
@@ -249,11 +250,9 @@ The same registry cannot do these things:
 and `TestRedTeam:testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument`
 show the rejections.
 
-The rule above is for transfer registries only. The fee registry of core
-0.8.0 runs with the authority of `gg`, because `gg` receives the message
-fees. The core-fee-custody change in `wormholelabs-xyz/wormhole` (branch
-`canton/core-fee-custody`) moves fee custody from `gg` to a separate party,
-`feeCustody`. The NTT package re-pins to that core before PR #75 merges.
+The rule above is for transfer registries only. The fee registry runs with
+the authority of `feeCustody`, not `gg`. Core 0.8.1 (`wormholelabs-xyz/wormhole`
+PR #81) moved fee custody from `gg` to `feeCustody`.
 
 ## Deployment
 
@@ -655,9 +654,8 @@ from the collateral of the other deployments. Each credit is atomic with its
 deposit. Each debit is atomic with its release. Thus the sum of the balances
 never exceeds the physical holdings of `nttCustody`. The cap of each
 deployment stays satisfiable for each choice of holdings that a release
-spends. Message fees go to `gg` in core 0.8.0, and to `feeCustody` after
-the core-fee-custody change. They never go to `nttCustody`. Thus a release
-cannot spend fee holdings.
+spends. Message fees go to `feeCustody`, not to `gg` and not to
+`nttCustody`. Thus a release cannot spend fee holdings.
 
 **The custody pot (single-holding invariant).** Custody holdings are visible
 only to their stakeholders (the custodian and the registry admin), so an

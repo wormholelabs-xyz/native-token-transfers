@@ -57,8 +57,8 @@ template LockedLedger
     -- fields before using a caller-supplied ledger cid.
     --
     -- The operator co-signature is defence in depth: gg's authority reaches
-    -- code outside this package (the canonical burn/mint factory, fee
-    -- settlement). Were gg the sole signatory, a bug there could create or
+    -- code outside this package (the canonical burn/mint factory). Were gg
+    -- the sole signatory, a bug there could create or
     -- mutate any deployment's ledger; requiring the operator — whose
     -- signature never leaves this codebase — makes that an authorization
     -- failure.
