@@ -11,9 +11,10 @@ Mainnet base URL: `https://canton-disclosure.labsapis.com`.
 
 ## Deployment
 
-The flow routes are public, as the Splice Scan routes are. Clients do not
-authenticate. Each response holds only the contracts and data that a flow
-needs.
+The flow routes and the CIP-0056 registry routes are public, as the Splice
+Scan routes are. Clients do not authenticate. CIP-0056 requires registry
+routes without authentication. Each response holds only the contracts and
+data that a flow or a registry choice needs.
 
 Put an edge proxy in front of the service. You choose the edge. Cloudflare is
 one example. The edge proxy does these tasks:
@@ -188,6 +189,10 @@ The service reads each template as one role only:
 | `--ntt-custody-party` | `nttCustody` | The custody pots, and `TransferPreapproval` |
 | `--operator-party` | operator | `ReplayRootRegistry` (`register` flow only) |
 
+The registry API reads `NttManager`, `CoinFactory`, `Coin`,
+`TransferPreapproval`, `CoinTransferInstruction` and `CoinAllocation` as `gg`
+only. `gg` is a stakeholder of each of these templates.
+
 The three parties must be different. Without `--operator-party`, the
 `register` flow returns 404. The `gg` parameter of `register` must be the
 `--guardian-governance-party` value.
@@ -205,9 +210,12 @@ contract in `missing`.
 | Inbound requests at one time | 64, without `/v1`, `/v1/healthz`, and `/v1/readyz`; the next request gets 503 |
 | Upstream readiness calls | 1 in 2 s, with a 3 s timeout |
 | Time for one request | 60 s |
-| Bytes of blobs and ids in one flow response | 4 MiB |
-| Query string of a flow | 1024 bytes |
+| Bytes of blobs and ids in one flow response or choice context | 4 MiB |
+| Query string of a flow or a registry route | 1024 bytes |
+| Request body of a registry route | 64 KiB |
 | Matching contracts for one selector | 8 |
+| Instruments in one registry page | 100 |
+| Instruments with a `Coin` total | 1000 |
 | Contracts scanned in one upstream response | 100 000 |
 | Bytes of one upstream response | 64 MiB |
 
@@ -242,11 +250,13 @@ Set the memory limit of the container to more than 512 MiB.
   needs it.
 - `--max-contracts-per-template` (1 to 10 000), `--max-upstream-concurrency`
   (1 to 64), `--cache-ttl` (0 to 60 s) — load bounds. They are the
-  `/v1/managers` cap, the upstream query cap, and a short read cache.
+  `NttManager` cap of `/v1/managers` and of the registry instrument list, the
+  upstream query cap, and a short read cache.
   `--cache-ttl 0` turns the cache off.
 - `--listen` — bind address. The default is `127.0.0.1:7599`.
 - `--registry-instruments-file` — serve the CIP-0056 registry API for the
-  instruments that `gg` administers. See "CIP-0056 registry API".
+  instruments that `--guardian-governance-party` administers. See "CIP-0056
+  registry API".
 
 ## Build and run
 
@@ -373,7 +383,8 @@ mints on Canton. In this section, the Daml files are in
 | `POST /registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer,withdraw,cancel}` | The choice context of a `CoinAllocation`. |
 
 The responses agree with the OpenAPI specifications in `service/openapi/`.
-The Go tests validate each response against these files.
+The Go tests validate each response against these files. The registry
+admin is the `--guardian-governance-party` value.
 
 ### Instruments
 
@@ -391,16 +402,38 @@ The metadata of an instrument comes from these sources:
 | `id` | `NttManager.instrumentId.id` |
 | `name`, `symbol` | The instruments file |
 | `decimals` | `NttManager.tokenDecimals` |
-| `totalSupply` | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. |
+| `totalSupply` | The sum of the active `Coin` amounts of the instrument, as `gg` reads them. Daml `Decimal` text with 10 fraction digits. The read keeps only the sums, and it requests no `createdEventBlob`. |
 | `totalSupplyAsOf` | The service clock at the time of the ledger read |
 
 Two `NttManager` contracts can have the same instrument. Then their
 `tokenDecimals` and their factory must be equal, or the request fails with
 HTTP 500.
 
-`pageSize` has the default 25 and the range 1 to 100. A value outside the
-range moves to the nearest limit. `pageToken` is the last instrument ID of
-the previous page. The next page starts at the first ID after it.
+`pageSize` is an integer, with the default 25 and the range 1 to 100. A value
+outside the range moves to the nearest limit. `pageToken` is the last
+instrument ID of the previous page, 1 to 512 bytes. The next page starts at
+the first ID after it. Give each parameter one time only. The service rejects
+a repeated parameter, an unknown parameter, and a `pageSize` that is not an
+integer. The other registry routes accept no query parameter.
+
+### Reads
+
+The registry API uses the same read rules as the flow routes:
+
+- The service checks the query, the path and the body before it calls the
+  upstream.
+- It reads `NttManager` once for each request, with exact filters on
+  `tokenConfig`, `instrumentId.admin` and `guardianGovernance`. The filters
+  apply before the `--max-contracts-per-template` cap.
+- It reads the receiver `TransferPreapproval` with exact filters on `owner`,
+  `instrumentId.admin` and `instrumentId.id`. The cap is 8 matches.
+- It reads the committed `CoinFactory`, a `CoinTransferInstruction` and a
+  `CoinAllocation` by contract ID.
+- It checks the package name and the template of each contract that it
+  reads. A contract ID of a different template or package gets 404.
+- All contracts of one choice context are on one synchronizer.
+- `GET /registry/metadata/v1/instruments/{instrumentId}` returns 404 for an
+  instrument with no entry in the instruments file, before an upstream call.
 
 ### Instruments file
 
@@ -428,10 +461,8 @@ The service reads the file at startup. These conditions stop the service:
 An instrument with no entry in the file is not in the metadata responses.
 The service logs it one time. The transfer and allocation endpoints serve it.
 
-`--registry-admin-party` must be one of the `--disclosing-party` values. Give
-the two registry flags together. The allow-list must contain the `NttManager`,
-`CoinFactory`, `Coin`, `TransferPreapproval`, `CoinTransferInstruction` and
-`CoinAllocation` templates. The built-in list contains them.
+The ledger user of the service needs `readAs` for `gg` only for the registry
+API.
 
 ### Choice contexts and disclosures
 
@@ -458,8 +489,8 @@ the sender cannot see it. The service returns the `CoinFactory` that the
 - `direct`: the receiver has an active `TransferPreapproval` for the
   instrument. The preapproval has the signatory `owner` and the observer
   `instrumentId.admin` (`CoinTransfer.daml:33-34`). Thus `gg` sees it, and the
-  sender does not. With more than one preapproval, the service selects the
-  lowest contract ID.
+  sender does not. With two to eight preapprovals, the service selects the
+  lowest contract ID. With more than eight, the request gets 502.
 - `offer`: all other transfers. The choice creates a `CoinTransferInstruction`.
   The receiver accepts it or rejects it.
 
@@ -481,19 +512,25 @@ administers its instrument.
 ### Errors
 
 Each error response is the `ErrorResponse` of the specification:
-`{"error": "<text>"}`.
+`{"error": "<text>"}`. The `X-Request-Id` header has the request ID. A 5xx
+`error` is a fixed text that ends with the request ID. The service log has
+the detail for that request ID. The response does not contain upstream text.
 
 | Status | Cause |
 |---|---|
-| 400 | The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
-| 404 | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of a `gg` instrument. The registry API is off. |
-| 409 | A contract of the response is in a reassignment between synchronizers. |
-| 500 | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument. |
-| 502, 503 | The upstream participant failed, or the service shed the load. |
+| 400 | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
+| 404 | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of `token-cip0056` for a `gg` instrument. The registry API is off. |
+| 414 | The query string is larger than 1024 bytes. |
+| 500 | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument, or a choice context on two synchronizers. |
+| 502, 503, 504 | The upstream participant failed, a read passed a bound, the service shed the load, or the upstream timed out. |
 
-The service finds a reassignment from the `JsIncompleteUnassigned` and
-`JsIncompleteAssigned` entries of the active contract set. The other
-endpoints of the service ignore these entries.
+The service reads only the `JsActiveContract` entries of the active contract
+set. A receiver `TransferPreapproval` in a reassignment thus gives an
+`offer`.
+
+The specification declares 200, 404 and 500 for the metadata routes. It
+declares 200, 400 and 404 for the other routes. The other statuses in the
+table above are not in the specification.
 
 ### Debug fields
 
@@ -598,8 +635,9 @@ table.
 
 ### Edge
 
-The flow routes are public. Clients do not authenticate. The routes serve
-only the contracts and data that a flow needs.
+The flow routes and the registry routes are public. Clients do not
+authenticate. The routes serve only the contracts and data that a flow or a
+registry choice needs.
 
 Put an edge proxy in front of the service. The edge proxy ends TLS, applies
 a rate limit for each client, and applies a WAF. You choose the edge.
