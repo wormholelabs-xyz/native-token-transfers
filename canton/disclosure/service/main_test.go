@@ -271,8 +271,10 @@ func decodeRequestedTemplate(t *testing.T, r *http.Request) (parties []partyID, 
 	for party, partyFilter := range req.EventFormat.FiltersByParty {
 		parties = append(parties, partyID(party))
 		require.Len(t, partyFilter.Cumulative, 1, "expected exactly one cumulative filter")
-		require.True(t, partyFilter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob)
 		partyTemplate := partyFilter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.TemplateID
+		// The registry Coin totals read omits blobs; every other read includes them.
+		wantCreatedEventBlob := templateTail(partyTemplate) != tailCoin
+		require.Equal(t, wantCreatedEventBlob, partyFilter.Cumulative[0].IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob)
 		if template != "" {
 			require.Equal(t, template, partyTemplate, "party filters name different templates")
 		}

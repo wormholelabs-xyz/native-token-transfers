@@ -125,35 +125,9 @@ func (query activeContractsQuery) matchesCreateArgument(createArgument json.RawM
 // matchesCreateArgument compares the field at fieldPath. A string compares by its value, any
 // other scalar by its JSON text. A missing field, null, or a path through a non-object is false.
 func (fieldMatch createArgumentFieldMatch) matchesCreateArgument(createArgument json.RawMessage) bool {
-	if len(fieldMatch.fieldPath) == 0 {
-		panic("disclosure-service: createArgumentFieldMatch has an empty fieldPath")
-	}
-	fieldValue := createArgument
-	for _, fieldName := range fieldMatch.fieldPath {
-		var fieldsByName map[string]json.RawMessage
-		if err := json.Unmarshal(fieldValue, &fieldsByName); err != nil {
-			return false
-		}
-		next, present := fieldsByName[fieldName]
-		if !present {
-			return false
-		}
-		fieldValue = next
-	}
-	trimmedValue := bytes.TrimSpace(fieldValue)
-	if len(trimmedValue) == 0 || bytes.Equal(trimmedValue, []byte("null")) {
+	gotValue, found := lookupCreateArgumentScalar(createArgument, fieldMatch.fieldPath)
+	if !found {
 		return false
-	}
-	var gotValue string
-	if trimmedValue[0] == '"' {
-		if err := json.Unmarshal(trimmedValue, &gotValue); err != nil {
-			return false
-		}
-	} else {
-		if trimmedValue[0] == '{' || trimmedValue[0] == '[' {
-			return false
-		}
-		gotValue = string(trimmedValue)
 	}
 	if fieldMatch.compareHex {
 		gotValue = strings.ToLower(gotValue)
@@ -166,6 +140,42 @@ func (fieldMatch createArgumentFieldMatch) matchesCreateArgument(createArgument 
 	})
 }
 
+// lookupCreateArgumentScalar returns the scalar at fieldPath: a string by its value, any other
+// scalar by its JSON text. A missing field, null, an object, an array, or a path through a
+// non-object is not found.
+func lookupCreateArgumentScalar(createArgument json.RawMessage, fieldPath []string) (string, bool) {
+	if len(fieldPath) == 0 {
+		panic("disclosure-service: createArgument field path is empty")
+	}
+	fieldValue := createArgument
+	for _, fieldName := range fieldPath {
+		var fieldsByName map[string]json.RawMessage
+		if err := json.Unmarshal(fieldValue, &fieldsByName); err != nil {
+			return "", false
+		}
+		next, present := fieldsByName[fieldName]
+		if !present {
+			return "", false
+		}
+		fieldValue = next
+	}
+	trimmedValue := bytes.TrimSpace(fieldValue)
+	if len(trimmedValue) == 0 || bytes.Equal(trimmedValue, []byte("null")) {
+		return "", false
+	}
+	if trimmedValue[0] == '{' || trimmedValue[0] == '[' {
+		return "", false
+	}
+	if trimmedValue[0] != '"' {
+		return string(trimmedValue), true
+	}
+	var stringValue string
+	if err := json.Unmarshal(trimmedValue, &stringValue); err != nil {
+		return "", false
+	}
+	return stringValue, true
+}
+
 // acsClient is the minimal seam between the HTTP handlers and the upstream participant. Tests
 // can fake it in place of a real JSON Ledger API. httpACSClient is the only production
 // implementation. The handler resolves one LedgerEnd offset per request and passes it to every
@@ -174,6 +184,7 @@ type acsClient interface {
 	LedgerEnd(ctx context.Context) (int64, error)
 	ActiveContracts(ctx context.Context, query activeContractsQuery) ([]acsEntry, error)
 	ActiveContractByID(ctx context.Context, readerParties []partyID, wantContractID contractID) (acsEntry, bool, error)
+	ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error)
 }
 
 // activeContractsRequest mirrors the JSON Ledger API v2's POST /v2/state/active-contracts
@@ -422,21 +433,9 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 	if err := query.check(); err != nil {
 		return nil, err
 	}
-	var reqBody activeContractsRequest
-	reqBody.ActiveAtOffset = query.activeAtOffset
-	var cumulativeFilter acsCumulativeFilter
-	cumulativeFilter.IdentifierFilter.TemplateFilter.Value.TemplateID = query.template
-	cumulativeFilter.IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob = true
-	reqBody.EventFormat.FiltersByParty = make(map[string]acsPartyFilter, len(query.readerParties))
-	for _, party := range query.readerParties {
-		reqBody.EventFormat.FiltersByParty[string(party)] = acsPartyFilter{Cumulative: []acsCumulativeFilter{cumulativeFilter}}
-	}
-	// verbose:true so createArgument carries field labels; the field matches and selectors decode it.
-	reqBody.EventFormat.Verbose = true
-
-	bodyBytes, err := json.Marshal(reqBody)
+	bodyBytes, err := marshalActiveContractsRequest(query, true)
 	if err != nil {
-		return nil, fmt.Errorf("disclosure-service: marshal active-contracts request: %w", err)
+		return nil, err
 	}
 
 	resp, err := c.sendUpstreamRequest(ctx, "active-contracts", http.MethodPost, "/v2/state/active-contracts", bodyBytes)
@@ -455,6 +454,26 @@ func (c *httpACSClient) ActiveContracts(ctx context.Context, query activeContrac
 		return nil, fmt.Errorf("disclosure-service: active-contracts %s: %w", query.template, err)
 	}
 	return entries, nil
+}
+
+// marshalActiveContractsRequest builds the request body: one template filter per reader party.
+func marshalActiveContractsRequest(query activeContractsQuery, includeCreatedEventBlob bool) ([]byte, error) {
+	var reqBody activeContractsRequest
+	reqBody.ActiveAtOffset = query.activeAtOffset
+	var cumulativeFilter acsCumulativeFilter
+	cumulativeFilter.IdentifierFilter.TemplateFilter.Value.TemplateID = query.template
+	cumulativeFilter.IdentifierFilter.TemplateFilter.Value.IncludeCreatedEventBlob = includeCreatedEventBlob
+	reqBody.EventFormat.FiltersByParty = make(map[string]acsPartyFilter, len(query.readerParties))
+	for _, party := range query.readerParties {
+		reqBody.EventFormat.FiltersByParty[string(party)] = acsPartyFilter{Cumulative: []acsCumulativeFilter{cumulativeFilter}}
+	}
+	// verbose:true so createArgument carries field labels; the field matches and selectors decode it.
+	reqBody.EventFormat.Verbose = true
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("disclosure-service: marshal active-contracts request: %w", err)
+	}
+	return bodyBytes, nil
 }
 
 // ActiveContractByID calls POST /v2/events/events-by-contract-id. found means a created event and

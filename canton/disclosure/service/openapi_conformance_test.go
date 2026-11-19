@@ -389,8 +389,7 @@ func (spec *openAPISpec) operations() []string {
 	return out
 }
 
-// responseSchema returns the application/json schema of one declared response. A 409 uses the
-// spec's ErrorResponse: DisclosedContract.synchronizerId documents it, the v1 operations omit it.
+// responseSchema returns the application/json schema of one declared response.
 func (spec *openAPISpec) responseSchema(path, method string, status int) (map[string]any, error) {
 	operation, ok := lookupMapping(spec.root, "paths", path, strings.ToLower(method))
 	if !ok {
@@ -398,9 +397,6 @@ func (spec *openAPISpec) responseSchema(path, method string, status int) (map[st
 	}
 	response, declared := lookupMapping(operation, "responses", strconv.Itoa(status))
 	if !declared {
-		if status == 409 {
-			return spec.resolveLocalRef("#/components/schemas/ErrorResponse")
-		}
 		return nil, fmt.Errorf("%s: %s %s declares no %d response", spec.file, method, path, status)
 	}
 	if ref, isRef := response["$ref"].(string); isRef {

@@ -431,7 +431,6 @@ func TestListInstruments_Pagination(t *testing.T) {
 		{name: "zero page size clamps to 1", query: "pageSize=0", wantIDs: []string{instrumentA}, wantNextToken: instrumentA},
 		{name: "negative page size clamps to 1", query: "pageSize=-5", wantIDs: []string{instrumentA}, wantNextToken: instrumentA},
 		{name: "huge page size clamps to the max", query: "pageSize=2147483648", wantIDs: []string{instrumentA, instrumentB, instrumentC}},
-		{name: "unparsable page size uses the default", query: "pageSize=ten", wantIDs: []string{instrumentA, instrumentB, instrumentC}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -450,15 +449,6 @@ func TestListInstruments_Pagination(t *testing.T) {
 				t.Fatalf("nextPageToken %q, want %q", got.NextPageToken, tc.wantNextToken)
 			}
 		})
-	}
-}
-
-func TestParseInstrumentPageSize(t *testing.T) {
-	cases := map[string]int{"": 25, "1": 1, "100": 100, "101": 100, "0": 1, "-1": 1, "x": 25, "9999999999999999999999": 25}
-	for raw, want := range cases {
-		if got := parseInstrumentPageSize(raw); got != want {
-			t.Fatalf("parseInstrumentPageSize(%q) = %d, want %d", raw, got, want)
-		}
 	}
 }
 

@@ -76,7 +76,7 @@ func parseFlags(args []string) (*options, error) {
 	nttCustodyParty := fs.String("ntt-custody-party", "", "nttCustody: reads the custody pots and its own TransferPreapprovals (required)")
 	operatorParty := fs.String("operator-party", "", "operator: reads ReplayRootRegistry only; enables the register flow (optional)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
-	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers, 1 to 10000; more is an error")
+	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers and in the registry instrument list, 1 to 10000; more is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
 	cacheTTL := fs.Duration("cache-ttl", defaultCacheTTL, "serve repeat ledger reads from memory for this long, 0 to 60s; 0 turns the cache off")
 	behindEdgeProxy := fs.Bool("behind-edge-proxy", false, "state that an edge proxy terminates TLS and applies a rate limit and a WAF; required for a non-loopback --listen")

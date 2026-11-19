@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ type countingACS struct {
 	ledgerCalls atomic.Int64
 	acCalls     atomic.Int64
 	byIDCalls   atomic.Int64
+	totalsCalls atomic.Int64
 	offset      int64
 
 	release  chan struct{} // when non-nil, every call waits on it before returning
@@ -75,6 +77,16 @@ func (f *countingACS) ActiveContractByID(_ context.Context, _ []partyID, wantCon
 		return acsEntry{}, false, f.err
 	}
 	return acsEntry{ContractID: string(wantContractID)}, true, nil
+}
+
+// ActiveContractAmountTotals returns one group per call, named by the template and the offset.
+func (f *countingACS) ActiveContractAmountTotals(_ context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+	defer f.track()()
+	f.totalsCalls.Add(1)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return amountTotalsByGroup{fmt.Sprintf("%s@%d", query.contracts.template, query.contracts.activeAtOffset): big.NewInt(1)}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +337,10 @@ func (scripted *scriptedLedgerEndACS) ActiveContracts(context.Context, activeCon
 
 func (scripted *scriptedLedgerEndACS) ActiveContractByID(context.Context, []partyID, contractID) (acsEntry, bool, error) {
 	panic("scriptedLedgerEndACS: ActiveContractByID is not scripted")
+}
+
+func (scripted *scriptedLedgerEndACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
+	panic("scriptedLedgerEndACS: ActiveContractAmountTotals is not scripted")
 }
 
 type ledgerEndResult struct {

@@ -104,6 +104,14 @@ func (bounded *boundedACS) ActiveContractByID(ctx context.Context, readerParties
 	return bounded.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
+func (b *boundedACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+	if err := b.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer b.release()
+	return b.inner.ActiveContractAmountTotals(ctx, query)
+}
+
 // ---------------------------------------------------------------------------
 // TTL cache with single flight
 // ---------------------------------------------------------------------------
@@ -293,4 +301,19 @@ func (cache *cachingACS) ActiveContractByID(ctx context.Context, readerParties [
 		return acsEntry{}, false, fmt.Errorf("disclosure-service: cached contract-by-id has type %T", cachedValue)
 	}
 	return result.entry, result.found, nil
+}
+
+// ActiveContractAmountTotals gives each caller its own copy of the cached totals.
+func (c *cachingACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+	cachedValue, err := c.do(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+		return c.inner.ActiveContractAmountTotals(fetchCtx, query)
+	})
+	if err != nil {
+		return nil, err
+	}
+	totals, ok := cachedValue.(amountTotalsByGroup)
+	if !ok {
+		return nil, fmt.Errorf("disclosure-service: cached amount totals has type %T", cachedValue)
+	}
+	return totals.clone(), nil
 }
