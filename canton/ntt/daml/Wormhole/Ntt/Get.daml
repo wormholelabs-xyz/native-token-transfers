@@ -13,7 +13,10 @@ module Wormhole.Ntt.Get
   , getLengthPrefixed
   , remainingBytes
   , assertPrefix
+  , isHexByteString
   ) where
+
+import DA.Text qualified as T
 
 import Wormhole.Core.Bytes
 
@@ -43,19 +46,26 @@ instance Action Get where
     Right (a, o') -> case f a of
       Get g' -> g' b o'
 
--- | Run a parser from offset 0 and require it to consume the buffer exactly:
--- this is the single trailing-bytes check every decoder in
--- "Wormhole.Ntt.Payload" relies on instead of a hand-written length
--- assertion of its own.
+-- | An even number of hex digits, either case. 'byteLength' truncates a
+-- half byte, so every length computed from a buffer depends on this.
+isHexByteString : Bytes -> Bool
+isHexByteString b = T.length b % 2 == 0 && isLowerHex (normalizeHex b)
+
+-- | Run a parser from offset 0 over a buffer of whole hex bytes and require
+-- it to consume the buffer exactly: this is the single trailing-bytes check
+-- every decoder in "Wormhole.Ntt.Payload" relies on instead of a
+-- hand-written length assertion of its own.
 runGet : Get a -> Bytes -> Either Text a
-runGet (Get g) b = case g b 0 of
-  Left e -> Left e
-  Right (a, o) ->
-    let total = byteLength b
-    in if o == total
-         then Right a
-         else Left ("length: consumed " <> show o <> " of " <> show total
-           <> " bytes, " <> show (total - o) <> " left over")
+runGet (Get g) b
+  | not (isHexByteString b) = Left "malformed buffer: not whole bytes of hex"
+  | otherwise = case g b 0 of
+      Left e -> Left e
+      Right (a, o) ->
+        let total = byteLength b
+        in if o == total
+             then Right a
+             else Left ("length: consumed " <> show o <> " of " <> show total
+               <> " bytes, " <> show (total - o) <> " left over")
 
 -- | Failure is a 'Left', so a parser aborts with 'abort' and the rest of the
 -- 'do' block is skipped. Mirrors how the standard library treats

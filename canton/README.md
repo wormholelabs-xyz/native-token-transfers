@@ -27,7 +27,7 @@ trie, disclosed-cid submission, the trust model) is in the core
 | --- | --- |
 | `ntt` (`ntt`) | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
 | `test` (`ntt-test`) | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`. |
-| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md). |
+| `dars/` | Vendored DAR binaries: the pinned `wormhole-core` DAR, the CIP-0056 interface DARs, and the previous `ntt` release (the `upgrades:` baseline). Provenance and sha256 in [`dars/README.md`](dars/README.md). |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
 `TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
@@ -51,6 +51,38 @@ A live-sandbox Go integration harness (the recipient-binding match test) lives
 in [`testing/go/`](testing/go/); see its build tag and comments to run it
 against a `dpm sandbox`.
 
+## Versions and upgrades
+
+The `upgrades:` field in `ntt/daml.yaml` points to the last released `ntt`
+DAR in `dars/`. `damlc` compares each build with that DAR. The build fails
+when the new package is not upgrade-compatible with it.
+
+For each release, do these steps:
+
+1. Increase the `version:` field in `ntt/daml.yaml`.
+2. Build the release DAR.
+3. Copy the release DAR into `dars/`.
+4. Record its commit, package id, and sha256 in `dars/README.md`.
+5. Set the `upgrades:` field to the new DAR.
+
+One version number identifies one build. Do not use a version number again
+for a different build. Participants use the package name and version to put
+the upgrades of a package in order.
+
+The current baseline is `ntt-0.2.0.dar` (package id `8b9c3ee1...`) from
+PR #74 (branch commit `1db4b3c`). The LocalNet rehearsals vetted an ntt 0.3.0 build (package
+id `291fcf92...`) before the `upgrades:` field existed. The field changes the
+package id, thus the source moved to version 0.3.1 (core 0.7.0, package id `5c4abb0d...`). Version 0.3.2
+builds against core 0.8.0 (`03a65dc3...`) and has the package id
+`f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71`. Version
+0.3.3 builds against core 0.8.1 (`5b256d13...`) and has the package id
+`6c5c17336e55cc8736c08118fdc86fd84d73044ecaef8b754f0160bfa4a45523`. Version
+0.3.4 builds against core 0.8.3 (`9d546b11...`) and has the package id
+`1c555ab22b096aa7bc780213eafbf95231bfe03bc4d669d9fe152a8eeff8293f`. An older 0.2.0 build (package id `36a58282...`) has the
+`minter` field. A later commit removed this field, thus that build is not
+upgrade-compatible with the baseline. A deployment of that build needs a
+migration to a new deployment.
+
 ## Parties and the trust model
 
 Three parties sign every `NttManager`, and each signature has one job:
@@ -66,6 +98,11 @@ Three parties sign every `NttManager`, and each signature has one job:
   replay-trie consumer for every deployment, and a deployment whose admin role
   was handed to it has a quorum-owned reserve and governance-run admin
   operations.
+
+The transceiver `Emitter` of each deployment has the owner `gg`, also for an
+admin-only lock/unlock registration. This owner does not show that the
+guardian quorum approved the deployment. Peer chains decide which Canton
+deployment to trust.
 
 The deployment's stable identity is no longer a co-signing party. It is a
 derived `namespace : Text`, computed once at registration and stored on the
@@ -118,8 +155,9 @@ onboarding fees so `gg` is never made to fund a deployment's registration. For
 lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
 with the reserve starting admin-owned (see "Custody follows the admin"
 below). For burn/mint it checks the mint capability: `gg` must administer the
-instrument, and the instrument id must be bound to the registering admin (see
-"Instrument binding" below).
+instrument and co-sign the registration, the factory must be the canonical
+`CoinFactory` (see "gg is the only minter" below), and the instrument id must
+be bound to the registering admin (see "Instrument binding" below).
 
 Two key-derived identities, both bound to the REGISTERING admin — present as a
 controller at registration, and whose signature co-signs the created manager —
@@ -400,6 +438,26 @@ governance action. The other residual is liveness: if the registry rotates its
 factory before the committed cid is refreshed, transfers pause (they never
 mis-settle).
 
+**gg is the only minter.** A burn/mint deployment mints only instruments that
+`gg` administers, through the canonical `Token.CIP0056.CoinFactory` (vendored
+in `dars/`). Every path that commits a burn/mint factory (`RegisterManager`,
+`RegisterManagerByVaa`, `SetFactory`, `SetFactoryByVaa`) pins it to that
+template with admin `gg` (`requireCanonicalFactory`), and `gg` co-signs each
+live-signed path. External minters are not supported. The manager publishes a
+value-bearing VAA after each burn, so it must be able to verify the burn. A
+factory from another minter is code that NTT cannot verify: it can report a
+burn that did not occur. To bridge a token that `gg` does not administer, use
+lock/unlock.
+
+The canonical-factory pin uses the package name, not the package ID. Canton
+resolves a template by package name across upgrades, so
+`requireCanonicalFactory` accepts a `CoinFactory` of each vetted
+`token-cip0056` version. An interface choice runs the code of the vetted
+version that the submitter prefers. Thus, on each participant that hosts
+`gg`, the vetting of a new `token-cip0056` version is a decision about the
+`gg` mint authority. Vet a new version only after a review of its
+`CoinFactory` and `Coin` code.
+
 **Custody follows the admin.** A deployment registers with its reserve owned
 by its own `admin`: fully operational and explicitly custodial — the admin
 owns the reserve outright, so users trust it the way they would a custodial
@@ -436,7 +494,7 @@ appearing in the controller list) and rotating the committed factory
 (`NttManager.SetFactoryByVaa`). Both are VAA-gated the same way as the admin
 handoff — current-guardian-set-only verification, the deployment's own replay
 trie, and a factory template-pin to the canonical, gg-administered
-`NttCoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
+`CoinFactory` (a VAA cannot name a contract id, so a ByVaa path can only
 ever commit the one factory `gg` deployed at genesis) — so a gg-minted
 deployment needs no live `gg` signature at any point after the genesis
 `NttGovernance` ceremony: register, set peers, and hand admin to `gg` all flow
@@ -456,7 +514,7 @@ the one partition a registry cannot churn away: registries reorganize holdings
 out from under the bridge (Canton Coin's rounds merge, expire, and recreate
 contracts), which erases any partition built out of specific contract ids — a
 pinned pot cid, an escrow — but never changes who owns the value. Finally,
-because every choice body carries all four signatures, the manager checks that
+because every choice body carries all three signatures, the manager checks that
 each custody holding it spends is owned by the deployment's own current
 `admin`, so the ambient `gg` authority in another deployment's choices can
 never reach the `gg` pool.
@@ -492,10 +550,23 @@ holding cids as an override (validated the same way); and the permissionless
 `ConsolidateCustody` choice re-merges fragments and repoints the hint after a
 registry-side reorganization (registries may restructure their holdings
 without us, which is why the cid can go stale and why storing it is safe only
-as a hint). One open consideration for real registries: transfer fees charged
-out of custody inputs would bleed the physical pot below the ledger sum, so a
-fee-charging registry needs a per-registry answer (fee waivers, top-ups, or
-debiting fees from the ledger).
+as a hint). The manager also validates each holding that the registry reports
+back. Each receiver holding, release input, and release change holding must
+be the expected party's own, of this instrument, unlocked, and signed by the
+instrument admin. The first lock deposit, which becomes the pot, gets the
+custody validation too.
+
+**Zero sender fees (lock/unlock).** A lock/unlock deployment
+needs a registry that charges the sender zero fees on a transfer.
+`Release` asserts that the custodian gives up exactly the release amount
+(`SenderOutflowEqualsAmount`). A lock admits a sender fee, because its check
+reads only the custodian's new holdings. Thus, on a registry that charges
+the sender a fee, each lock succeeds and each `Release` aborts. The locked
+value then stays in custody with no release path. Canton Coin charges zero
+sender fees in Splice 0.10.2. Release 0.4.17 removed holding fees from
+transfers (CIP-78). Release 0.5.16 set all `AmuletConfig` fees to zero
+(CIP-107). `REDTEAM.md` (N4) records the source references and a LocalNet
+release from an aged pot.
 
 **Instrument binding (burn/mint exclusivity).** Burn/mint deployments are
 isolated by instrument: a manager only ever mints its own `instrumentId`. That

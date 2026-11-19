@@ -31,6 +31,7 @@
 module Wormhole.Ntt.Payload where
 
 import DA.Crypto.Text (keccak256, toHex)
+import DA.Text qualified as T
 
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 
@@ -39,12 +40,25 @@ import Wormhole.Ntt.Get
 
 ----------------------------------------------------------------------
 -- Big-endian encoding helpers. 'intToBytesN' / 'leftPadTo' live in
--- Wormhole.Core.Bytes; this module adds only the NTT uint16 length prefix.
+-- Wormhole.Core.Bytes; this module adds the NTT uint16 length prefix and the
+-- checked 32-byte field.
 ----------------------------------------------------------------------
 
 -- | Encode a length-prefixed field: uint16 length ‖ bytes.
 encodeLengthPrefixed : Bytes -> Bytes
-encodeLengthPrefixed b = intToBytesN (byteLength b) 2 <> normalizeHex b
+encodeLengthPrefixed b
+  | not (isHexByteString b) = error "ntt: length-prefixed field is not whole bytes of hex"
+  | otherwise = intToBytesN (byteLength b) 2 <> normalizeHex b
+
+-- | Encode a 32-byte field, left-padding a shorter value. 'leftPadTo' is the
+-- identity at or above 32 bytes, so a longer or half-byte value must abort
+-- here instead of shifting every later field.
+encodeBytes32 : Bytes32 -> Bytes
+encodeBytes32 b =
+  let padded = leftPadTo 32 b
+  in if T.length padded == 64 && isLowerHex padded
+       then padded
+       else error ("ntt: 32-byte field is not 32 bytes of hex: " <> b)
 
 ----------------------------------------------------------------------
 -- Prefixes
@@ -76,8 +90,8 @@ encodeNativeTokenTransfer n =
   nativeTokenTransferPrefix
     <> intToHexByte n.decimals
     <> intToBytesN n.amount 8
-    <> leftPadTo 32 n.sourceToken
-    <> leftPadTo 32 n.recipientAddress
+    <> encodeBytes32 n.sourceToken
+    <> encodeBytes32 n.recipientAddress
     <> intToBytesN n.recipientChain 2
     <> (if n.additionalPayload == "" then "" else encodeLengthPrefixed n.additionalPayload)
 
@@ -115,7 +129,7 @@ data NttManagerMessage = NttManagerMessage with
 
 encodeNttManagerMessage : NttManagerMessage -> Bytes
 encodeNttManagerMessage m =
-  leftPadTo 32 m.id <> leftPadTo 32 m.sender <> encodeLengthPrefixed m.payload
+  encodeBytes32 m.id <> encodeBytes32 m.sender <> encodeLengthPrefixed m.payload
 
 -- | The 'Get' counterpart of 'decodeNttManagerMessage'.
 getNttManagerMessage : Get NttManagerMessage
@@ -144,8 +158,8 @@ data WormholeTransceiverMessage = WormholeTransceiverMessage with
 encodeWormholeTransceiverMessage : WormholeTransceiverMessage -> Bytes
 encodeWormholeTransceiverMessage w =
   wormholeTransceiverPrefix
-    <> leftPadTo 32 w.sourceManager
-    <> leftPadTo 32 w.recipientManager
+    <> encodeBytes32 w.sourceManager
+    <> encodeBytes32 w.recipientManager
     <> encodeLengthPrefixed w.managerPayload
     <> encodeLengthPrefixed w.transceiverPayload
 
@@ -244,29 +258,29 @@ encodeNttGovernance = \case
     nttGovernanceModule
       <> intToHexByte nttGovernanceAcceptAdminAction
       <> intToBytesN chain 2
-      <> leftPadTo 32 managerAddress
+      <> encodeBytes32 managerAddress
       <> intToBytesN factoryEpoch 8
   RegisterBurnMintManager chain registrationBinding tokenDecimals ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceRegisterBurnMintManagerAction
       <> intToBytesN chain 2
-      <> leftPadTo 32 registrationBinding
+      <> encodeBytes32 registrationBinding
       <> intToHexByte tokenDecimals
   RotateToCanonicalFactory chain managerAddress factoryEpoch ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceRotateToCanonicalFactoryAction
       <> intToBytesN chain 2
-      <> leftPadTo 32 managerAddress
+      <> encodeBytes32 managerAddress
       <> intToBytesN factoryEpoch 8
   SetPeerByGovernance chain managerAddress peerEpoch peerChain peerManagerAddress peerTransceiverAddress peerDecimals ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceSetPeerAction
       <> intToBytesN chain 2
-      <> leftPadTo 32 managerAddress
+      <> encodeBytes32 managerAddress
       <> intToBytesN peerEpoch 8
       <> intToBytesN peerChain 2
-      <> leftPadTo 32 peerManagerAddress
-      <> leftPadTo 32 peerTransceiverAddress
+      <> encodeBytes32 peerManagerAddress
+      <> encodeBytes32 peerTransceiverAddress
       <> intToHexByte peerDecimals
 
 -- | The 'Get' counterpart of 'parseNttGovernance'. Each action reads its own
@@ -337,7 +351,7 @@ encodeTransceiverRegistration : TransceiverRegistration -> Bytes
 encodeTransceiverRegistration r =
   wormholePeerRegistrationPrefix
     <> intToBytesN r.peerChain 2
-    <> leftPadTo 32 r.peerAddress
+    <> encodeBytes32 r.peerAddress
 
 -- | The 'Get' counterpart of 'decodeTransceiverRegistration'. Its 38-byte
 -- fixed size follows from consuming exactly these fields plus 'runGet''s end
@@ -366,9 +380,9 @@ data TransceiverInit = TransceiverInit with
 encodeTransceiverInit : TransceiverInit -> Bytes
 encodeTransceiverInit i =
   wormholeTransceiverInitPrefix
-    <> leftPadTo 32 i.nttManagerAddress
+    <> encodeBytes32 i.nttManagerAddress
     <> intToHexByte i.nttManagerMode
-    <> leftPadTo 32 i.tokenAddress
+    <> encodeBytes32 i.tokenAddress
     <> intToHexByte i.tokenDecimals
 
 -- | The 'Get' counterpart of 'decodeTransceiverInit'. Its 70-byte fixed size

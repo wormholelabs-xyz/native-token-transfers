@@ -19,10 +19,10 @@
 --     reserve is quorum-owned and its admin operations are governance actions.
 --   * @operator@ ties the deployment to its core bridge instance.
 --
--- A burn/mint deployment whose instrument an external party administers
--- carries that party as a fourth signatory, @minter@; the burn and mint paths
--- then run on its authority instead of gg's (see 'effectiveMinter' and
--- 'BurnMintMinterProxy').
+-- gg is the only minter. A burn/mint deployment bridges a gg-administered
+-- instrument through the canonical 'Token.CIP0056.CoinFactory.CoinFactory'
+-- ('requireCanonicalFactory'). External minters are not supported: NTT cannot
+-- verify that a foreign factory's burn happened.
 --
 -- The deployment's stable identity is no longer a co-signing party — it is a
 -- derived @namespace : Text@ (see 'nttNamespaceFor'), committed at
@@ -59,12 +59,12 @@
 -- ('nttInstrumentIdFor'), so no second deployment can register against an
 -- instrument that is already bridged.
 --
--- The ledger cap is wire-level accounting, not physical solvency. On a
--- registry that charges the sender fees or ages holdings, every release and
--- consolidation pays those costs out of the reserve, so the pot drifts below
--- the ledger balance over time. The custodian covers the drift by passing
--- extra holdings of its own to 'ConsolidateCustody', and 'TransferAdmin'
--- refuses to hand over a reserve that no longer covers the balance.
+-- The ledger cap is wire-level accounting; the reserve can fall below it.
+-- Lock merges and consolidations pay registry sender fees from the reserve;
+-- 'Release' aborts on them ('SenderOutflowEqualsAmount'). Amulet's DSO can
+-- archive a holding once its accrued holding fee reaches its amount. The
+-- custodian tops up or refreshes the pot with 'ConsolidateCustody', and
+-- 'TransferAdmin' rejects a reserve that no longer covers the balance.
 --
 -- Because every choice body carries all of the manager's signatures, custody
 -- paths must never rely on ambient authority: 'sumCustodyHoldings' checks
@@ -80,14 +80,16 @@
 -- commitment is typed by mode ('NttFactory'), matched against 'NttTokenConfig'
 -- at registration and rotation, so no call site coerces a contract id. @admin@
 -- refreshes it with 'SetFactory' on the rare occasion the registry is
--- upgraded; for burn/mint the 'effectiveMinter' co-signs that rotation, so
--- the committed factory stays minter-vetted for the deployment's whole life.
+-- upgraded; for burn/mint gg co-signs that rotation and the new factory must
+-- be the canonical 'CoinFactory', for the deployment's whole life.
 module Wormhole.Ntt.Manager where
 
 import DA.Crypto.Text (keccak256, toHex)
 import DA.Map (Map)
+import DA.List (unique)
 import DA.Map qualified as Map
-import DA.Optional (fromSomeNote, fromOptional, optionalToList)
+import DA.Optional (fromSomeNote)
+import DA.Text qualified as T
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
@@ -148,11 +150,11 @@ requireBurnMintFactory = \case
   TransferFactoryCid _ -> abort "ntt: deployment's committed factory is not a burn/mint factory"
 
 -- | Pin a caller-supplied 'NttFactory' to the canonical, gg-administered
--- 'Token.CIP0056.CoinFactory.CoinFactory' — the only factory a VAA-gated
--- choice may ever commit, since a VAA cannot name a contract id and so cannot
--- vet an arbitrary factory. Checks the cid is genuinely backed by the
--- 'CoinFactory' template (not merely an interface implementer) and that its
--- @admin@ matches this deployment's guardianGovernance.
+-- 'Token.CIP0056.CoinFactory.CoinFactory' — the only burn/mint factory any
+-- path may commit. NTT cannot verify another factory's burn, and a VAA cannot
+-- name a contract id. Checks the cid is genuinely backed by the 'CoinFactory'
+-- template (not merely an interface implementer) and that its @admin@ matches
+-- this deployment's guardianGovernance.
 requireCanonicalFactory : Party -> NttFactory -> Update ()
 requireCanonicalFactory guardianGovernance factory = do
   bmCid <- requireBurnMintFactory factory
@@ -175,61 +177,6 @@ requireCommittedCoreState operator guardianGovernance coreStateCid = do
   assertMsg "ntt: core state operator mismatch"
     (cs.operator == operator)
   pure cs
-
--- | The party that administers this deployment's burn/mint instrument and
--- therefore authorizes minting/burning: the external @minter@ when present,
--- otherwise gg (the gg-minted case). Equal to @instrumentId.admin@ by
--- construction (see 'Wormhole.Ntt.Governance.RegisterManager'). It is always a
--- signatory of the manager, so the manager can drive the factory on its
--- authority.
-effectiveMinter : NttManager -> Party
-effectiveMinter mgr = fromOptional mgr.guardianGovernance mgr.minter
-
--- | A privilege-de-escalation proxy for the outbound burn.
---
--- The manager must not exercise a caller-committed 'BurnMintFactory'
--- directly. Its choice bodies always carry gg (a lifetime signatory), and
--- 'BurnMintFactory_BurnMint' is controlled by the factory's own interface
--- view admin — a value the implementation is free to report as gg. A direct
--- call would therefore hand gg's authority to arbitrary factory code.
---
--- Routing the burn through this @minter@-signed proxy resets the authority
--- at the choice boundary to @{minter, user}@. gg does not cross it, so a
--- lying @view.admin = gg@ controller can no longer be satisfied. For an
--- external minter this fully firewalls gg. For a gg-minted deployment
--- (@minter@ = gg) the proxy still carries gg — necessarily, since gg is the
--- real mint authority — which is why a gg-minted deployment can only ever
--- commit a gg-vetted factory (gg co-signs both
--- 'Wormhole.Ntt.Governance.RegisterManager' and every later 'SetFactory'
--- rotation).
---
--- Created and consumed inside 'NttManager.Transfer'; never persisted.
-template BurnMintMinterProxy
-  with
-    minter : Party
-  where
-    signatory minter
-
-    choice ProxyBurnMint : ()
-      with
-        factoryCid       : ContractId BurnMintFactory
-        instrumentId     : InstrumentId
-        inputHoldingCids : [ContractId Holding]
-        outputs          : [BurnMintOutput]
-        user             : Party
-        extraArgs        : ExtraArgs
-      -- Both the minter (mint authority) and the token owner authorize; gg is
-      -- deliberately absent from this body.
-      controller minter, user
-      do
-        _ <- exercise factoryCid BurnMintFactory_BurnMint with
-          expectedAdmin = minter
-          instrumentId
-          inputHoldingCids
-          outputs
-          extraActors = [user]
-          extraArgs
-        pure ()
 
 -- | A peer NTT deployment on another chain: its manager address (the
 -- @recipientManager@/@sourceManager@ in the transceiver message), its
@@ -255,6 +202,18 @@ isZeroAddress : Bytes32 -> Bool
 isZeroAddress b =
   normalizeHex (leftPadTo 32 b)
     == "0000000000000000000000000000000000000000000000000000000000000000"
+
+-- | Exactly 64 lowercase hex characters. 'leftPadTo' is the identity at or
+-- above 32 bytes and 'byteLength' truncates a half byte, so a 65-character
+-- address would otherwise reach the wire unchanged.
+isLowerHexBytes32 : Bytes32 -> Bool
+isLowerHexBytes32 address = T.length address == 64 && isLowerHex address
+
+isUint8 : Int -> Bool
+isUint8 wireField = wireField >= 0 && wireField <= 255
+
+isUint32 : Int -> Bool
+isUint32 wireField = wireField >= 0 && wireField <= 4294967295
 
 -- | Domain-separation tag for NTT manager addresses.
 nttManagerAddressTag : Text
@@ -390,31 +349,15 @@ resolveLedger mgr ledgerCid = do
   assertMsg "ntt: ledger admin observer out of sync" (ledger.admin == mgr.admin)
   pure ledger
 
--- | Validate one custody holding — owned by the deployment's current @admin@
--- (the custodian), this deployment's instrument, unlocked, and signed by the
--- instrument admin, which a template-computed view cannot forge — and return
--- its amount. Run over every custody holding the manager spends or points at:
--- the choice bodies carry all four signatures, so without this a caller could
+-- | Fetch and sum custody holdings, each validated as the deployment's
+-- current @admin@'s own (the custodian), of this deployment's instrument,
+-- unlocked, and signed by the instrument admin ('validateSettledHolding').
+-- Run over every custody holding the manager spends or points at: the
+-- choice bodies carry all three signatures, so without this a caller could
 -- steer a choice into spending another signatory's holdings on ambient
 -- authority alone.
-validateCustodyHolding : NttManager -> Holding -> Either Text Decimal
-validateCustodyHolding mgr holding = do
-  let hv = view holding
-  assertMsg "ntt: custody holding is not owned by the custodian"
-    (hv.owner == mgr.admin)
-  assertMsg "ntt: custody holding instrument mismatch"
-    (hv.instrumentId == mgr.instrumentId)
-  assertMsg "ntt: custody holding is locked" (hv.lock == None)
-  assertMsg "ntt: custody holding not signed by the instrument admin"
-    (mgr.instrumentId.admin `elem` signatory holding)
-  pure hv.amount
-
 sumCustodyHoldings : NttManager -> [ContractId Holding] -> Update Decimal
-sumCustodyHoldings mgr cids = do
-  amounts <- forA cids \cid -> do
-    holding <- fetch cid
-    either assertFail pure (validateCustodyHolding mgr holding)
-  pure (sum amounts)
+sumCustodyHoldings mgr = sumSettledHoldings CustodyHolding mgr.admin mgr.instrumentId
 
 -- | The hint stored back on the ledger after an operation: the single
 -- resulting holding, or 'None' when the registry returned zero or several
@@ -496,22 +439,12 @@ template NttManager
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
     factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa': 'SetFactory' bumps this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
     peerEpoch            : Int             -- freshness pin for 'SetPeerByVaa': every 'SetPeer' bumps this deployment-wide counter, so a withheld/superseded peer VAA can never reinstate a since-replaced peer
-    minter               : Optional Party  -- external burn/mint minter (Some) — see 'effectiveMinter'; None when gg mints
   where
     -- See the module header for what each signature contributes. All three
-    -- base signatures are inherited from the NttGovernance root at
-    -- registration (admin from the registering caller); no signatory acts per
-    -- transfer. @namespace@ is derived data, not a party.
-    --
-    -- @minter@, when present, co-signs too: it is the external party that
-    -- administers a burn/mint instrument (@instrumentId.admin@) and thereby
-    -- lends its mint authority to this deployment. It is committed at
-    -- registration and never mutated, so a conditional signatory over it is
-    -- stable across every re-creating choice, and it survives 'TransferAdmin'
-    -- (which changes @admin@, not @minter@). Making it a signatory is what lets
-    -- the manager drive burn/mint on the minter's authority instead of gg's —
-    -- see 'effectiveMinter' and the de-escalation in the burn/'Mint' paths.
-    signatory (operator :: admin :: guardianGovernance :: optionalToList minter)
+    -- signatures are inherited from the NttGovernance root at registration
+    -- (admin from the registering caller); no signatory acts per transfer.
+    -- @namespace@ is derived data, not a party.
+    signatory operator, admin, guardianGovernance
 
     -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
     -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
@@ -537,20 +470,17 @@ template NttManager
           (chainId /= this.chainId)
         assertMsg "ntt: peer decimals must be a positive uint8"
           (peer.decimals > 0 && peer.decimals <= 255)
-        -- 'leftPadTo' is the identity above 32 bytes, so an unchecked oversized
-        -- address would publish a malformed registration. Pre-normalization,
-        -- so uppercase hex is rejected rather than lowercased.
+        -- Pre-normalization, so uppercase hex is rejected rather than lowercased.
         assertMsg "ntt: peer manager address must be 32 bytes of lowercase hex"
-          (byteLength peer.managerAddress == 32 && isLowerHex peer.managerAddress)
+          (isLowerHexBytes32 peer.managerAddress)
         assertMsg "ntt: peer transceiver address must be 32 bytes of lowercase hex"
-          (byteLength peer.transceiverAddress == 32 && isLowerHex peer.transceiverAddress)
+          (isLowerHexBytes32 peer.transceiverAddress)
         assertMsg "ntt: peer manager address must be non-zero"
           (not (isZeroAddress peer.managerAddress))
         assertMsg "ntt: peer transceiver address must be non-zero"
           (not (isZeroAddress peer.transceiverAddress))
         -- Uint8 on the wire; the watcher drops out-of-range messages.
-        assertMsg "ntt: consistency level must be a uint8"
-          (consistencyLevel >= 0 && consistencyLevel <= 255)
+        assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
         let peer' = normalizePeer peer
         newMgrCid <- create this with peers = Map.insert chainId peer' peers, peerEpoch = peerEpoch + 1
         transceiver <- fetch transceiverEmitterCid
@@ -587,25 +517,27 @@ template NttManager
     -- is upgraded and re-creates its factory under a new cid; @admin@ resolves
     -- the new cid from the registry and commits it here.
     --
-    -- For burn/mint the 'effectiveMinter' — the party whose mint authority
-    -- the factory wields — co-signs the rotation, mirroring the co-signature
-    -- 'Wormhole.Ntt.Governance.RegisterManager' requires when the factory is
-    -- first committed. Without it a mutable @admin@ could later swap in a
-    -- look-alike factory; on a gg-minted deployment, where gg reaches the
-    -- factory body directly, that would re-open the authority leak the
-    -- de-escalation closes. The committed factory must stay minter-vetted
-    -- for the life of the deployment, not just at registration. Lock/unlock's
-    -- transfer factory never wields gg, so it stays @admin@-only.
+    -- For burn/mint gg — the party whose mint authority the factory wields —
+    -- co-signs the rotation, mirroring 'Wormhole.Ntt.Governance.RegisterManager',
+    -- and the new factory must be the canonical 'CoinFactory'. Without both, a
+    -- mutable @admin@ could later swap in a look-alike factory that captures
+    -- gg's authority. Lock/unlock's transfer factory receives the custodian's
+    -- authority as transfer sender, so it stays @admin@-only; on a
+    -- gg-adminned deployment the custodian is gg, and this rotation is a
+    -- governance action (REDTEAM.md F1).
     --
     -- Every rotation bumps @factoryEpoch@, invalidating any
     -- 'AcceptAdminTransferByVaa' VAA signed against the superseded factory.
     choice SetFactory : ContractId NttManager
       with
         newFactory : NttFactory
-      controller admin :: (if tokenConfig == BurnMint then [effectiveMinter this] else [])
+      controller admin :: (if tokenConfig == BurnMint then [guardianGovernance] else [])
       do
         assertMsg "ntt: factory type does not match the token config"
           (factoryMatchesConfig tokenConfig newFactory)
+        case tokenConfig of
+          BurnMint -> requireCanonicalFactory guardianGovernance newFactory
+          LockUnlock -> pure ()
         create this with factory = newFactory, factoryEpoch = factoryEpoch + 1
 
     -- | Hand the operational role — and, for lock/unlock, the reserve it owns —
@@ -666,6 +598,7 @@ template NttManager
                     receiver = newAdmin
                     amount = total
                     instrumentId
+                  ReceiverHoldingsSumToAmount
                   [pot]
                   extraArgs
                 exercise lcid SetCustodyHint with
@@ -798,13 +731,11 @@ template NttManager
           RegisterBurnMintManager {} -> abort "ntt governance: wrong action for SetPeerByVaa"
           RotateToCanonicalFactory {} -> abort "ntt governance: wrong action for SetPeerByVaa"
 
-    -- | Governance-VAA-gated factory rotation for gg-minted burn/mint
-    -- deployments: the guardian quorum vets a specific (chain, managerAddress,
-    -- factoryEpoch) rotation off-chain, and @admin@ relays it with no live gg
-    -- signature needed, mirroring 'AcceptAdminTransferByVaa'. Restricted to
-    -- gg-minted deployments (@tokenConfig == BurnMint && minter == None@);
-    -- an external minter rotates via a live-co-signed plain 'SetFactory'
-    -- instead, and lock/unlock's transfer factory never wields gg.
+    -- | Governance-VAA-gated factory rotation for burn/mint deployments: the
+    -- guardian quorum vets a specific (chain, managerAddress, factoryEpoch)
+    -- rotation off-chain, and @admin@ relays it with no live gg signature
+    -- needed, mirroring 'AcceptAdminTransferByVaa'. Lock/unlock rotates via
+    -- plain 'SetFactory', controlled by the current custodian.
     choice SetFactoryByVaa : ContractId NttManager
       with
         newFactory    : NttFactory
@@ -816,7 +747,7 @@ template NttManager
       controller admin
       do
         assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
-          (tokenConfig == BurnMint && minter == None)
+          (tokenConfig == BurnMint)
 
         cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
 
@@ -880,6 +811,13 @@ template NttManager
       controller user
       do
         assertMsg "ntt: deployment is paused" (not paused)
+        -- Uint8 and uint32 on the wire; the watcher drops out-of-range messages.
+        assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
+        assertMsg "ntt: nonce must be a uint32" (isUint32 nonce)
+        assertMsg "ntt: recipient address must be 32 bytes of lowercase hex"
+          (isLowerHexBytes32 recipientAddress)
+        assertMsg "ntt: recipient address must be non-zero"
+          (not (isZeroAddress recipientAddress))
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
                      (Map.lookup recipientChain peers)
             trimmed = trimAmountTo rawAmount tokenDecimals peer.decimals
@@ -912,6 +850,7 @@ template NttManager
                 receiver = custodian
                 amount
                 instrumentId
+              ReceiverHoldingsSumToAmount
               inputHoldingCids
               extraArgs
             let potCids = case ledger.custodyHoldingCid of
@@ -919,7 +858,9 @@ template NttManager
                   None -> depositCids
             newHint <- case potCids of
               -- Already a single holding (first lock, or an empty pot).
-              [single] -> pure (Some single)
+              [single] -> do
+                _ <- sumCustodyHoldings this [single]
+                pure (Some single)
               _ -> do
                 total <- sumCustodyHoldings this potCids
                 (mergedCids, _) <- executeSyncTransfer transferFactoryCid
@@ -928,6 +869,7 @@ template NttManager
                     receiver = custodian
                     amount = total
                     instrumentId
+                  ReceiverHoldingsSumToAmount
                   potCids
                   extraArgs
                 pure (custodyHintFrom mergedCids)
@@ -937,6 +879,7 @@ template NttManager
           -- return the rest as change.
           BurnMint -> do
             burnMintFactoryCid <- requireBurnMintFactory factory
+            assertMsg "ntt: duplicate input holding" (unique inputHoldingCids)
             holdingAmounts <- forA inputHoldingCids \cid -> do
               hv <- view <$> fetch cid
               assertMsg "ntt: burn holding not owned by sender" (hv.owner == user)
@@ -950,17 +893,17 @@ template NttManager
                   if change == 0.0
                     then []
                     else [ BurnMintOutput with owner = user, amount = change, context = extraArgs.context ]
-            -- Drive the factory through a minter-signed de-escalation proxy so
-            -- gg (a lifetime manager signatory) never crosses into the
-            -- caller-committed factory. The proxy carries only {minter, user}.
-            proxyCid <- create BurnMintMinterProxy with minter = effectiveMinter this
-            exercise proxyCid ProxyBurnMint with
-              factoryCid = burnMintFactoryCid
+            -- The choice's controllers are the factory's view admin plus
+            -- @extraActors@; the committed canonical 'CoinFactory' pins the
+            -- view admin to gg, so the factory body carries exactly {gg, user}.
+            _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
+              expectedAdmin = guardianGovernance
               instrumentId
               inputHoldingCids
               outputs
-              user
+              extraActors = [user]
               extraArgs
+            pure ()
         let ntt = NativeTokenTransfer with
               decimals = trimmed.decimals
               amount = trimmed.amount
@@ -994,6 +937,10 @@ template NttManager
     -- anything above the balance, so this deployment can never pay out more
     -- than it locked. Returns the successor ledger cid and the decoded
     -- transfer.
+    --
+    -- The settled amount is checked on the custodian side
+    -- ('SenderOutflowEqualsAmount'): only the recipient and the registry can
+    -- fetch the recipient's new holding.
     nonconsuming choice Release : (ContractId LockedLedger, NativeTokenTransfer)
       with
         executor         : Party
@@ -1034,6 +981,7 @@ template NttManager
             receiver = recipient
             amount = releaseAmount
             instrumentId
+          SenderOutflowEqualsAmount
           inputs
           extraArgs
         ledgerCid' <- exercise ledgerCid Debit with
@@ -1085,6 +1033,7 @@ template NttManager
                 receiver = custodian
                 amount = total
                 instrumentId
+              ReceiverHoldingsSumToAmount
               custodyHoldingCids
               extraArgs
             exercise ledgerCid SetCustodyHint with

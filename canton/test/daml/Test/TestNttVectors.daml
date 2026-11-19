@@ -315,6 +315,25 @@ testVectorTransceiverRegistrationExactLength =
   expectDecodeError "bad TransceiverRegistration length"
     (\() -> decodeTransceiverRegistration (transceiverRegistration1 <> "ff"))
 
+-- | A trailing half byte is rejected, not dropped.
+testVectorTransceiverRegistrationRejectsHalfByte : Script ()
+testVectorTransceiverRegistrationRejectsHalfByte =
+  expectDecodeError "not whole bytes of hex"
+    (\() -> decodeTransceiverRegistration (transceiverRegistration1 <> "f"))
+
+-- | The encoders reject a field that is not whole bytes, or a 32-byte field
+-- that is longer than 32 bytes, rather than writing a misaligned message.
+testEncodersRejectMalformedFields : Script ()
+testEncodersRejectMalformedFields = do
+  expectDecodeError "not whole bytes of hex"
+    (\() -> encodeLengthPrefixed "abc")
+  expectDecodeError "not 32 bytes of hex"
+    (\() -> encodeTransceiverRegistration vecTransceiverRegistration with
+      peerAddress = "0" <> vecPeerAddress)
+  expectDecodeError "not 32 bytes of hex"
+    (\() -> encodeTransceiverRegistration vecTransceiverRegistration with
+      peerAddress = "00" <> vecPeerAddress)
+
 ----------------------------------------------------------------------
 -- TransceiverInit vector (evm/test/payloads/transceiver_info_1.txt, 70 bytes:
 -- prefix ‖ manager hex"BABABABABABA" ‖ mode=LOCKING(0) ‖ token

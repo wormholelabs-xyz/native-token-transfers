@@ -7,6 +7,7 @@
 -- untrusted caller cannot substitute a look-alike factory.
 module Wormhole.Ntt.Cip56 where
 
+import DA.List (unique)
 import DA.Time (RelTime, hours, addRelTime)
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
@@ -30,43 +31,130 @@ data SyncTransfer = SyncTransfer with
     instrumentId : InstrumentId
   deriving (Eq, Show)
 
+-- | How 'executeSyncTransfer' proves that exactly the requested amount moved.
+-- Each check reads only holdings that the submitting transaction can fetch,
+-- so the caller picks the side whose stakeholders are authorizers.
+data SettledAmountCheck
+  = ReceiverHoldingsSumToAmount
+    -- ^ The receiver is an authorizer: its new holdings are distinct, each
+    -- passes 'validateSettledHolding' for the receiver, and they sum to the
+    -- amount. Admits a registry fee that the sender pays on top.
+  | SenderOutflowEqualsAmount
+    -- ^ The sender is an authorizer and the receiver may be a third party:
+    -- inputs and change each pass 'validateSettledHolding' for the sender,
+    -- the change is distinct and disjoint from the inputs, and the inputs
+    -- less the change equal the amount. Rejects a registry fee charged to
+    -- the sender. A registry can still report a pre-existing sender holding
+    -- as change: a holding carries no marker of the transaction that
+    -- created it.
+  deriving (Eq, Show)
+
 -- | Execute a CIP-56 'TIV1.TransferFactory_Transfer' that must settle in the
 -- current transaction. A registry that answers with a Pending or Failed result
 -- has not moved the tokens, so the whole transaction aborts instead of letting
 -- the bridge continue as if value had moved.
 --
 -- Returns the receiver's new holdings and the sender's change holdings, which
--- the manager uses to keep the custody pot consolidated. The receiver's
--- holdings are checked to sum to exactly the requested amount: the standard's
--- convention is that fees are charged to the sender on top, and a registry
--- that deducts them from the delivered amount instead would silently
--- under-collateralize the bridge on every lock.
+-- the manager uses to keep the custody pot consolidated. @settledAmountCheck@
+-- selects the exact-amount assertion; see 'SettledAmountCheck'.
 executeSyncTransfer
+  :  ContractId TIV1.TransferFactory
+  -> SyncTransfer
+  -> SettledAmountCheck
+  -> [ContractId Holding]
+  -> ExtraArgs
+  -> Update ([ContractId Holding], [ContractId Holding])
+executeSyncTransfer factoryCid syncTransfer settledAmountCheck inputHoldingCids extraArgs = do
+  assertMsg "ntt: duplicate input holding" (unique inputHoldingCids)
+  case settledAmountCheck of
+    ReceiverHoldingsSumToAmount -> do
+      settled@(receiverHoldingCids, _) <- settleSyncTransfer factoryCid syncTransfer inputHoldingCids extraArgs
+      assertMsg "ntt: duplicate receiver holding" (unique receiverHoldingCids)
+      delivered <- sumSettledHoldings ReceiverHolding syncTransfer.receiver syncTransfer.instrumentId receiverHoldingCids
+      assertMsg "ntt: registry did not deliver the exact transfer amount"
+        (delivered == syncTransfer.amount)
+      pure settled
+    SenderOutflowEqualsAmount -> do
+      -- Read before the exercise: the registry archives the inputs.
+      inputTotal <- sumSettledHoldings SenderHolding syncTransfer.sender syncTransfer.instrumentId inputHoldingCids
+      settled@(_, senderChangeCids) <- settleSyncTransfer factoryCid syncTransfer inputHoldingCids extraArgs
+      assertMsg "ntt: duplicate sender change holding" (unique senderChangeCids)
+      assertMsg "ntt: sender change reuses an input holding"
+        (all (`notElem` inputHoldingCids) senderChangeCids)
+      changeTotal <- sumSettledHoldings SenderHolding syncTransfer.sender syncTransfer.instrumentId senderChangeCids
+      assertMsg "ntt: registry did not take the exact transfer amount from the sender"
+        (inputTotal - changeTotal == syncTransfer.amount)
+      pure settled
+
+-- | Exercise the transfer; abort unless it completed in this transaction.
+-- Returns the receiver's new holdings and the sender's change holdings.
+settleSyncTransfer
   :  ContractId TIV1.TransferFactory
   -> SyncTransfer
   -> [ContractId Holding]
   -> ExtraArgs
   -> Update ([ContractId Holding], [ContractId Holding])
-executeSyncTransfer factoryCid t inputHoldingCids extraArgs = do
+settleSyncTransfer factoryCid syncTransfer inputHoldingCids extraArgs = do
   now <- getTime
   res <- exercise factoryCid TIV1.TransferFactory_Transfer with
-    expectedAdmin = t.instrumentId.admin
+    expectedAdmin = syncTransfer.instrumentId.admin
     transfer = TIV1.Transfer with
-      sender = t.sender
-      receiver = t.receiver
-      amount = t.amount
-      instrumentId = t.instrumentId
+      sender = syncTransfer.sender
+      receiver = syncTransfer.receiver
+      amount = syncTransfer.amount
+      instrumentId = syncTransfer.instrumentId
       requestedAt = now
       executeBefore = now `addRelTime` transferValidity
       inputHoldingCids
       meta = emptyMetadata
     extraArgs
   case res.output of
-    TIV1.TransferInstructionResult_Completed receiverHoldingCids -> do
-      delivered <- forA receiverHoldingCids \cid -> do
-        hv <- view <$> fetch cid
-        pure hv.amount
-      assertMsg "ntt: registry did not deliver the exact transfer amount"
-        (sum delivered == t.amount)
+    TIV1.TransferInstructionResult_Completed receiverHoldingCids ->
       pure (receiverHoldingCids, res.senderChangeCids)
     _ -> abort "ntt: transfer did not settle synchronously"
+
+-- | The side of a transfer a holding belongs to; names the holding in
+-- rejection messages.
+data SettledHoldingRole
+  = CustodyHolding
+  | SenderHolding
+  | ReceiverHolding
+  deriving (Eq, Show)
+
+holdingRoleName : SettledHoldingRole -> Text
+holdingRoleName = \case
+  CustodyHolding -> "custody holding"
+  SenderHolding -> "sender holding"
+  ReceiverHolding -> "receiver holding"
+
+holdingOwnerName : SettledHoldingRole -> Text
+holdingOwnerName = \case
+  CustodyHolding -> "custodian"
+  SenderHolding -> "sender"
+  ReceiverHolding -> "receiver"
+
+-- | Validate one holding as @expectedOwner@'s own, of @expectedInstrumentId@,
+-- unlocked, and signed by the instrument admin, which a template-computed
+-- view cannot forge; return its amount.
+validateSettledHolding
+  : SettledHoldingRole -> Party -> InstrumentId -> Holding -> Either Text Decimal
+validateSettledHolding role expectedOwner expectedInstrumentId holding = do
+  let holdingView = view holding
+      prefix = "ntt: " <> holdingRoleName role
+  assertMsg (prefix <> " is not owned by the " <> holdingOwnerName role)
+    (holdingView.owner == expectedOwner)
+  assertMsg (prefix <> " instrument mismatch")
+    (holdingView.instrumentId == expectedInstrumentId)
+  assertMsg (prefix <> " is locked") (holdingView.lock == None)
+  assertMsg (prefix <> " not signed by the instrument admin")
+    (expectedInstrumentId.admin `elem` signatory holding)
+  pure holdingView.amount
+
+-- | Fetch, validate ('validateSettledHolding'), and sum holdings.
+sumSettledHoldings
+  : SettledHoldingRole -> Party -> InstrumentId -> [ContractId Holding] -> Update Decimal
+sumSettledHoldings role expectedOwner expectedInstrumentId holdingCids = do
+  amounts <- forA holdingCids \cid -> do
+    holding <- fetch cid
+    either assertFail pure (validateSettledHolding role expectedOwner expectedInstrumentId holding)
+  pure (sum amounts)
