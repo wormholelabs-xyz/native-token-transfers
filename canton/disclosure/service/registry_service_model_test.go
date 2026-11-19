@@ -133,6 +133,12 @@ func TestRegistryRejectsBeforeUpstream(t *testing.T) {
 		{"accept with a body that is an array", http.MethodPost, "/registry/transfer-instruction/v1/" + cidInstructionA + "/choice-contexts/accept", `[]`, http.StatusBadRequest},
 		{"cancel with a parameter", http.MethodPost, "/registry/allocations/v1/" + cidAllocationA + "/choice-contexts/cancel?x=1", `{}`, http.StatusBadRequest},
 		{"allocation factory with an empty object", http.MethodPost, pathAllocationFactory, `{}`, http.StatusBadRequest},
+		{"transfer factory with a short-form sender", http.MethodPost, pathTransferFactory, transferFactoryBody(transferChoiceArguments(registryTestGG, "alice::1220a1", registryTestBob, "1", registryTestGG, instrumentA), false), http.StatusBadRequest},
+		{"transfer factory with a receiver without a fingerprint", http.MethodPost, pathTransferFactory, transferFactoryBody(transferChoiceArguments(registryTestGG, registryTestAlice, "bob", "1", registryTestGG, instrumentA), false), http.StatusBadRequest},
+		{"transfer factory with an uppercase-hex expectedAdmin", http.MethodPost, pathTransferFactory, transferFactoryBody(transferChoiceArguments(strings.ToUpper(registryTestGG), registryTestAlice, registryTestBob, "1", strings.ToUpper(registryTestGG), instrumentA), false), http.StatusBadRequest},
+		{"allocation factory with a short-form expectedAdmin", http.MethodPost, pathAllocationFactory, allocationFactoryTestBody(allocationChoiceArguments("gg::1220aa", registryTestAlice, "gg::1220aa", instrumentA)), http.StatusBadRequest},
+		{"allocation factory with a short-form sender", http.MethodPost, pathAllocationFactory, allocationFactoryTestBody(allocationChoiceArguments(registryTestGG, "alice::1220a1", registryTestGG, instrumentA)), http.StatusBadRequest},
+		{"allocation factory with a receiver hint above 185 bytes", http.MethodPost, pathAllocationFactory, allocationFactoryTestBody(strings.Replace(allocationChoiceArguments(registryTestGG, registryTestAlice, registryTestGG, instrumentA), `"receiver":"`+registryTestBob+`"`, `"receiver":"`+strings.Repeat("b", maxPartyHintBytes+1)+testPartyFingerprintSuffix+`"`, 1)), http.StatusBadRequest},
 		{"unknown registry path", http.MethodGet, "/registry/metadata/v2/info", "", http.StatusNotFound},
 		{"info by POST", http.MethodPost, pathRegistryInfo, `{}`, http.StatusNotFound},
 	}
@@ -142,6 +148,7 @@ func TestRegistryRejectsBeforeUpstream(t *testing.T) {
 			recorder := serveRegistry(t, srv, tc.method, tc.target, tc.body)
 			requireStatus(t, recorder, tc.wantStatus)
 			requireRegistryErrorBody(t, recorder)
+			requireNoStoreNoSniffHeaders(t, recorder)
 			assert.Zero(t, counter.totalCalls(), "upstream calls before the request checks passed")
 		})
 	}
@@ -222,6 +229,7 @@ func TestRegistryErrorPolicy(t *testing.T) {
 			recorder := serveRegistry(t, srv, tc.method, tc.target, tc.body)
 			requireStatus(t, recorder, tc.wantStatus)
 			errorText := requireRegistryErrorBody(t, recorder)
+			requireNoStoreNoSniffHeaders(t, recorder)
 			requestID := recorder.Header().Get("X-Request-Id")
 			if tc.wantPublicText == "" {
 				assert.NotContains(t, errorText, "request id")
@@ -235,6 +243,101 @@ func TestRegistryErrorPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func requireNoStoreNoSniffHeaders(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+	require.Equal(t, "nosniff", recorder.Header().Get("X-Content-Type-Options"))
+}
+
+func allocationFactoryTestBody(choiceArguments string) string {
+	return fmt.Sprintf(`{"choiceArguments":%s,"excludeDebugFields":false}`, choiceArguments)
+}
+
+// amountTotalsFailingACS serves every read from acsClient except the Coin totals, which fail with err.
+type amountTotalsFailingACS struct {
+	acsClient
+	err error
+}
+
+func (failing amountTotalsFailingACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
+	return nil, failing.err
+}
+
+func TestRegistryUpstreamListLimitIsAFixedPublicError(t *testing.T) {
+	coinListLimitErr := fmt.Errorf("%w: template %s: %w", errUpstreamListLimitExceeded, registryQualifiedTemplate(tailCoin),
+		&upstreamHTTPError{operation: "active-contracts", statusCode: http.StatusRequestEntityTooLarge, bodyExcerpt: []byte("matching elements 1025 exceed the limit 1024")})
+	const listLimitBody = `{"code":"LIST_LIMIT","cause":"matching elements 1025 exceed the limit 1024"}`
+	cases := []struct {
+		name         string
+		newServer    func(t *testing.T) *server
+		wantTemplate string
+	}{
+		{"NttManager list above the participant limit", func(t *testing.T) *server {
+			upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, listLimitBody, http.StatusRequestEntityTooLarge)
+			})
+			srv := newTestServerWithClient(t, newCachingACS(newTestHTTPACSClient(upstream.URL, nil), 5*time.Second))
+			useRegistryTestParties(srv)
+			srv.registry = newRegistryConfig(registryTestGG, registryTestDisplay())
+			return srv
+		}, registryQualifiedTemplate(tailNttManager)},
+		{"Coin totals above the participant limit", func(t *testing.T) *server {
+			srv := newRegistryTestServer(t, registryTestFixtures())
+			srv.acs = amountTotalsFailingACS{acsClient: srv.acs, err: coinListLimitErr}
+			return srv
+		}, registryQualifiedTemplate(tailCoin)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.newServer(t)
+			logged := captureServerLog(srv)
+			recorder := serveRegistry(t, srv, http.MethodGet, pathInstruments, "")
+			requireStatus(t, recorder, http.StatusBadGateway)
+			errorText := requireRegistryErrorBody(t, recorder)
+			requireNoStoreNoSniffHeaders(t, recorder)
+			assert.Equal(t, "disclosure-service: "+publicMessageUpstreamListLimit+"; request id "+recorder.Header().Get("X-Request-Id"), errorText)
+			assert.NotContains(t, recorder.Body.String(), "1024")
+			assert.Contains(t, logged.String(), tc.wantTemplate)
+			assert.Contains(t, logged.String(), "http-list-max-elements-limit")
+		})
+	}
+}
+
+func TestHTTPACSClientAmountTotalsMapsUpstream413ToListLimit(t *testing.T) {
+	upstream, _ := newFakeJSONAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"code":"LIST_LIMIT"}`, http.StatusRequestEntityTooLarge)
+	})
+	query := amountTotalsQuery{
+		contracts: activeContractsQuery{
+			readerParties:  []partyID{registryTestGG},
+			template:       registryQualifiedTemplate(tailCoin),
+			activeAtOffset: 42,
+			maxMatches:     maxMatchingContractsPerQuery,
+			fieldMatches:   []createArgumentFieldMatch{partyFieldMatch(registryTestGG, "instrumentId", "admin")},
+		},
+		groupFieldPath:  []string{"instrumentId", "id"},
+		amountFieldPath: []string{"amount"},
+		maxGroups:       maxRegistryInstruments,
+	}
+	_, err := newTestHTTPACSClient(upstream.URL, nil).ActiveContractAmountTotals(context.Background(), query)
+	require.ErrorIs(t, err, errUpstreamListLimitExceeded)
+	assert.Contains(t, err.Error(), registryQualifiedTemplate(tailCoin))
+	var httpError *upstreamHTTPError
+	require.ErrorAs(t, err, &httpError)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, httpError.statusCode)
+}
+
+func TestRegistryErrorLogQuotesThePathAndTheError(t *testing.T) {
+	srv := newRegistryTestServer(t, registryTestFixtures())
+	logged := captureServerLog(srv)
+	recorder := httptest.NewRecorder()
+	srv.writeRegistryError(recorder, httptest.NewRequest(http.MethodGet, "/registry/x%0Aforged-line%0D%0Aanother", nil), errors.New("first\nsecond"))
+	requireStatus(t, recorder, http.StatusInternalServerError)
+	assert.Equal(t, 1, strings.Count(logged.String(), "\n"), logged.String())
+	assert.Contains(t, logged.String(), `"/registry/x\nforged-line\r\nanother"`)
+	assert.Contains(t, logged.String(), `"first\nsecond"`)
 }
 
 func TestRegistryReadsAsGuardianGovernanceOnly(t *testing.T) {

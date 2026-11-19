@@ -104,12 +104,12 @@ func (bounded *boundedACS) ActiveContractByID(ctx context.Context, readerParties
 	return bounded.inner.ActiveContractByID(ctx, readerParties, wantContractID)
 }
 
-func (b *boundedACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
-	if err := b.acquire(ctx); err != nil {
+func (bounded *boundedACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+	if err := bounded.acquire(ctx); err != nil {
 		return nil, err
 	}
-	defer b.release()
-	return b.inner.ActiveContractAmountTotals(ctx, query)
+	defer bounded.release()
+	return bounded.inner.ActiveContractAmountTotals(ctx, query)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,9 +304,9 @@ func (cache *cachingACS) ActiveContractByID(ctx context.Context, readerParties [
 }
 
 // ActiveContractAmountTotals gives each caller its own copy of the cached totals.
-func (c *cachingACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
-	cachedValue, err := c.do(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
-		return c.inner.ActiveContractAmountTotals(fetchCtx, query)
+func (cache *cachingACS) ActiveContractAmountTotals(ctx context.Context, query amountTotalsQuery) (amountTotalsByGroup, error) {
+	cachedValue, err := cache.loadOrFetch(ctx, query.cacheKey(), func(fetchCtx context.Context) (any, error) {
+		return cache.inner.ActiveContractAmountTotals(fetchCtx, query)
 	})
 	if err != nil {
 		return nil, err

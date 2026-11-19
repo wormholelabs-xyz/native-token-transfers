@@ -19,13 +19,13 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	registryTestGG             = "gg::1220aa"
-	registryTestNttCustody     = "nttCustody::1220bb"
-	registryTestOperator       = "operator::1220cc"
-	registryTestIssuer         = "issuer::1220dd"
-	registryTestAlice          = "alice::1220a1"
-	registryTestBob            = "bob::1220b0"
-	registryTestExecutor       = "venue::1220e0"
+	registryTestGG             = "gg" + testPartyFingerprintSuffix
+	registryTestNttCustody     = "nttCustody" + testPartyFingerprintSuffix
+	registryTestOperator       = "operator" + testPartyFingerprintSuffix
+	registryTestIssuer         = "issuer" + testPartyFingerprintSuffix
+	registryTestAlice          = "alice" + testPartyFingerprintSuffix
+	registryTestBob            = "bob" + testPartyFingerprintSuffix
+	registryTestExecutor       = "venue" + testPartyFingerprintSuffix
 	registryTestSynchronizerID = "global-domain::1220sync"
 	registryTestCreatedAt      = "2026-11-18T09:00:00.123456Z"
 	registryTestPackageName    = "token-cip0056"

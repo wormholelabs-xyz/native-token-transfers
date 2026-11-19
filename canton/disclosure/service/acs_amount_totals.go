@@ -83,6 +83,9 @@ func (c *httpACSClient) ActiveContractAmountTotals(ctx context.Context, query am
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		return nil, fmt.Errorf("%w: template %s: %w", errUpstreamListLimitExceeded, query.contracts.template, newUpstreamHTTPError("active-contracts", resp))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, newUpstreamHTTPError("active-contracts", resp)
 	}

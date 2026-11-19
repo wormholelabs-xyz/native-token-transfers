@@ -41,6 +41,10 @@ func (blocking *blockingActiveContractsACS) ActiveContractByID(context.Context, 
 	return acsEntry{}, false, nil
 }
 
+func (blocking *blockingActiveContractsACS) ActiveContractAmountTotals(context.Context, amountTotalsQuery) (amountTotalsByGroup, error) {
+	return amountTotalsByGroup{}, nil
+}
+
 func TestProbesAnswerWhileInboundCapIsFull(t *testing.T) {
 	flowPath := "/v1/flows/transfer?manager=" + strings.Repeat("ab", 32)
 	upstream := &blockingActiveContractsACS{release: make(chan struct{})}

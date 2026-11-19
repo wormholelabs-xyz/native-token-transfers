@@ -518,11 +518,16 @@ the detail for that request ID. The response does not contain upstream text.
 
 | Status | Cause |
 |---|---|
-| 400 | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
+| 400 | The query has a repeated parameter, an unknown parameter, or a parameter of the wrong type. The body is not a JSON object, or it is larger than 64 KiB. A field has the wrong type, or a required field is missing. The value of `expectedAdmin`, `sender`, or `receiver` is not a party id `<hint>::1220<64 lowercase hex>`. `expectedAdmin` is not `instrumentId.admin`. A contract ID is not hex. The amount is not a positive `Decimal`. |
 | 404 | The instrument is not in the instrument set. The instrument admin is not `gg`. The contract ID is not an active `CoinTransferInstruction` or `CoinAllocation` of `token-cip0056` for a `gg` instrument. The registry API is off. |
 | 414 | The query string is larger than 1024 bytes. |
 | 500 | The ledger data breaks an invariant, for example two `tokenDecimals` values for one instrument, or a choice context on two synchronizers. |
 | 502, 503, 504 | The upstream participant failed, a read passed a bound, the service shed the load, or the upstream timed out. |
+
+When the participant returns 413 for a template list, the registry returns
+502 with the fixed text `upstream ledger list limit reached`. The log line
+names the template. Each registry response has `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`.
 
 The service reads only the `JsActiveContract` entries of the active contract
 set. A receiver `TransferPreapproval` in a reassignment thus gives an

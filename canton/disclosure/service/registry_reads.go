@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -28,7 +29,7 @@ func (s *server) registryReaderParties(registry *registryConfig) []partyID {
 	if guardianGovernance == "" {
 		panic("disclosure-service: the registry API runs without a guardianGovernance party")
 	}
-	if string(guardianGovernance) != registry.adminParty {
+	if guardianGovernance != registry.adminParty {
 		panic("disclosure-service: the registry admin is not the guardianGovernance party")
 	}
 	return []partyID{guardianGovernance}
@@ -58,8 +59,8 @@ func (s *server) registryQuery(registry *registryConfig, tail string, offset int
 func registryInstrumentFieldMatches(registry *registryConfig) []createArgumentFieldMatch {
 	return []createArgumentFieldMatch{
 		exactFieldMatch(tokenConfigBurnMint, "tokenConfig"),
-		exactFieldMatch(registry.adminParty, "instrumentId", "admin"),
-		exactFieldMatch(registry.adminParty, "guardianGovernance"),
+		partyFieldMatch(registry.adminParty, "instrumentId", "admin"),
+		partyFieldMatch(registry.adminParty, "guardianGovernance"),
 	}
 }
 
@@ -134,7 +135,7 @@ func (s *server) fetchTotalSupplies(ctx context.Context, registry *registryConfi
 			readerParties:  s.registryReaderParties(registry),
 			template:       registryQualifiedTemplate(tailCoin),
 			activeAtOffset: offset,
-			fieldMatches:   []createArgumentFieldMatch{exactFieldMatch(registry.adminParty, "instrumentId", "admin")},
+			fieldMatches:   []createArgumentFieldMatch{partyFieldMatch(registry.adminParty, "instrumentId", "admin")},
 		},
 		groupFieldPath:  []string{"instrumentId", "id"},
 		amountFieldPath: []string{"amount"},
@@ -142,7 +143,7 @@ func (s *server) fetchTotalSupplies(ctx context.Context, registry *registryConfi
 	}
 	totals, err := s.acs.ActiveContractAmountTotals(ctx, query)
 	if err != nil {
-		return nil, newFlowError(upstreamErrorStatus(err), "Coin totals: %v", err)
+		return nil, &flowError{status: upstreamErrorStatus(err), msg: fmt.Sprintf("disclosure-service: Coin totals: %v", err), cause: err}
 	}
 	return totals, nil
 }
@@ -152,7 +153,7 @@ func (s *server) fetchTotalSupplies(ctx context.Context, registry *registryConfi
 func fetchRegistryContractByID[T any](ctx context.Context, s *server, registry *registryConfig, tail string, wantContractID contractID) (decodedEntry[T], error) {
 	entry, found, err := s.acs.ActiveContractByID(ctx, s.registryReaderParties(registry), wantContractID)
 	if err != nil {
-		return decodedEntry[T]{}, newFlowError(upstreamErrorStatus(err), "read %s %s: %v", tail, wantContractID, err)
+		return decodedEntry[T]{}, &flowError{status: upstreamErrorStatus(err), msg: fmt.Sprintf("disclosure-service: read %s %s: %v", tail, wantContractID, err), cause: err}
 	}
 	if !found {
 		return decodedEntry[T]{}, newFlowError(http.StatusNotFound, "no active %s %s visible to the registry", templateTail(tail), truncateForError(string(wantContractID)))
@@ -182,7 +183,7 @@ func (s *server) fetchCanonicalFactory(ctx context.Context, registry *registryCo
 		return decodedEntry[daCoinFactory]{}, err
 	}
 	//SECURITY: CoinFactory.daml:32-33 serves only instruments whose admin is the factory admin.
-	if err := checkCoinFactoryAdminIsGuardianGovernance(factory, partyID(registry.adminParty)); err != nil {
+	if err := checkCoinFactoryAdminIsGuardianGovernance(factory, registry.adminParty); err != nil {
 		return decodedEntry[daCoinFactory]{}, err
 	}
 	return factory, nil

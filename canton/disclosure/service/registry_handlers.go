@@ -53,16 +53,16 @@ func (s *server) writeRegistryError(w http.ResponseWriter, r *http.Request, err 
 	if flowErr != nil && flowErr.status >= 500 && flowErr.status <= 599 {
 		status = flowErr.status
 	}
-	s.logger.Printf("disclosure-service: request %s %s: status %d: %v", requestID, r.URL.Path, status, err)
-	writeJSON(w, status, registryErrorResponse{Error: registryPublicErrorText(status, requestID)})
+	s.logger.Printf("disclosure-service: request %s %q: status %d: %q", requestID, r.URL.Path, status, err.Error())
+	writeJSON(w, status, registryErrorResponse{Error: registryPublicErrorText(status, err, requestID)})
 }
 
 // registryPublicErrorText is the fixed client text of a 5xx registry error.
-func registryPublicErrorText(status int, requestID string) string {
+func registryPublicErrorText(status int, err error, requestID string) string {
 	if status < 500 || status > 599 {
 		panic(fmt.Sprintf("disclosure-service: registryPublicErrorText needs a 5xx status, got %d", status))
 	}
-	return fmt.Sprintf("disclosure-service: %s; request id %s", publicMessageForStatus(status), requestID)
+	return fmt.Sprintf("disclosure-service: %s; request id %s", publicMessageFor(status, err), requestID)
 }
 
 func (s *server) handleRegistryUnknownPath(w http.ResponseWriter, r *http.Request) {
@@ -194,12 +194,12 @@ func checkPositiveAmount(field string, amount json.Number) error {
 
 // checkInstrumentOfRegistry mirrors the factory choice bodies' admin asserts: expectedAdmin must
 // equal the instrument admin (400), and the instrument admin must be this registry's admin (404).
-func checkInstrumentOfRegistry(expectedAdmin string, instrument daInstrumentId, registryAdmin string) error {
+func checkInstrumentOfRegistry(expectedAdmin partyID, instrument daInstrumentId, registryAdmin partyID) error {
 	if expectedAdmin != instrument.Admin {
-		return newFlowError(http.StatusBadRequest, "expectedAdmin %s does not match instrumentId.admin %s", truncateForError(expectedAdmin), truncateForError(instrument.Admin))
+		return newFlowError(http.StatusBadRequest, "expectedAdmin %s does not match instrumentId.admin %s", truncateForError(string(expectedAdmin)), truncateForError(string(instrument.Admin)))
 	}
 	if instrument.Admin != registryAdmin {
-		return newFlowError(http.StatusNotFound, "instrument admin %s is not this registry's admin", truncateForError(instrument.Admin))
+		return newFlowError(http.StatusNotFound, "instrument admin %s is not this registry's admin", truncateForError(string(instrument.Admin)))
 	}
 	return nil
 }
@@ -221,14 +221,15 @@ func parseFactoryRequest(w http.ResponseWriter, r *http.Request, arguments any) 
 
 // requestedTransfer is the validated part of a TransferFactory_Transfer request.
 type requestedTransfer struct {
-	expectedAdmin string
+	expectedAdmin partyID
 	sender        partyID
 	receiver      partyID
 	instrument    daInstrumentId
 }
 
 func checkTransferFactoryChoiceArguments(arguments transferFactoryChoiceArguments) (requestedTransfer, error) {
-	if err := checkRegistryIdentifier("choiceArguments.expectedAdmin", arguments.ExpectedAdmin); err != nil {
+	expectedAdmin, err := parseRequestPartyID(arguments.ExpectedAdmin, "choiceArguments.expectedAdmin")
+	if err != nil {
 		return requestedTransfer{}, err
 	}
 	transfer := arguments.Transfer
@@ -238,31 +239,32 @@ func checkTransferFactoryChoiceArguments(arguments transferFactoryChoiceArgument
 	if transfer.InstrumentID == nil {
 		return requestedTransfer{}, newFlowError(http.StatusBadRequest, "choiceArguments.transfer.instrumentId is required")
 	}
-	fields := []struct{ name, value string }{
-		{"choiceArguments.transfer.sender", transfer.Sender},
-		{"choiceArguments.transfer.receiver", transfer.Receiver},
-		{"choiceArguments.transfer.instrumentId.admin", transfer.InstrumentID.Admin},
-		{"choiceArguments.transfer.instrumentId.id", transfer.InstrumentID.Id},
+	sender, err := parseRequestPartyID(transfer.Sender, "choiceArguments.transfer.sender")
+	if err != nil {
+		return requestedTransfer{}, err
 	}
-	for _, field := range fields {
-		if err := checkRegistryIdentifier(field.name, field.value); err != nil {
-			return requestedTransfer{}, err
-		}
+	receiver, err := parseRequestPartyID(transfer.Receiver, "choiceArguments.transfer.receiver")
+	if err != nil {
+		return requestedTransfer{}, err
+	}
+	if err := checkRegistryInstrumentIdentifiers("choiceArguments.transfer.instrumentId", *transfer.InstrumentID); err != nil {
+		return requestedTransfer{}, err
 	}
 	if err := checkPositiveAmount("choiceArguments.transfer.amount", transfer.Amount); err != nil {
 		return requestedTransfer{}, err
 	}
 	return requestedTransfer{
-		expectedAdmin: arguments.ExpectedAdmin,
-		sender:        partyID(transfer.Sender),
-		receiver:      partyID(transfer.Receiver),
+		expectedAdmin: expectedAdmin,
+		sender:        sender,
+		receiver:      receiver,
 		instrument:    *transfer.InstrumentID,
 	}, nil
 }
 
 // checkAllocationFactoryChoiceArguments returns expectedAdmin and the leg's instrument.
-func checkAllocationFactoryChoiceArguments(arguments allocationFactoryChoiceArguments) (string, daInstrumentId, error) {
-	if err := checkRegistryIdentifier("choiceArguments.expectedAdmin", arguments.ExpectedAdmin); err != nil {
+func checkAllocationFactoryChoiceArguments(arguments allocationFactoryChoiceArguments) (partyID, daInstrumentId, error) {
+	expectedAdmin, err := parseRequestPartyID(arguments.ExpectedAdmin, "choiceArguments.expectedAdmin")
+	if err != nil {
 		return "", daInstrumentId{}, err
 	}
 	if arguments.Allocation == nil || arguments.Allocation.TransferLeg == nil {
@@ -272,21 +274,28 @@ func checkAllocationFactoryChoiceArguments(arguments allocationFactoryChoiceArgu
 	if leg.InstrumentID == nil {
 		return "", daInstrumentId{}, newFlowError(http.StatusBadRequest, "choiceArguments.allocation.transferLeg.instrumentId is required")
 	}
-	fields := []struct{ name, value string }{
-		{"choiceArguments.allocation.transferLeg.sender", leg.Sender},
-		{"choiceArguments.allocation.transferLeg.receiver", leg.Receiver},
-		{"choiceArguments.allocation.transferLeg.instrumentId.admin", leg.InstrumentID.Admin},
-		{"choiceArguments.allocation.transferLeg.instrumentId.id", leg.InstrumentID.Id},
+	if _, err := parseRequestPartyID(leg.Sender, "choiceArguments.allocation.transferLeg.sender"); err != nil {
+		return "", daInstrumentId{}, err
 	}
-	for _, field := range fields {
-		if err := checkRegistryIdentifier(field.name, field.value); err != nil {
-			return "", daInstrumentId{}, err
-		}
+	if _, err := parseRequestPartyID(leg.Receiver, "choiceArguments.allocation.transferLeg.receiver"); err != nil {
+		return "", daInstrumentId{}, err
+	}
+	if err := checkRegistryInstrumentIdentifiers("choiceArguments.allocation.transferLeg.instrumentId", *leg.InstrumentID); err != nil {
+		return "", daInstrumentId{}, err
 	}
 	if err := checkPositiveAmount("choiceArguments.allocation.transferLeg.amount", leg.Amount); err != nil {
 		return "", daInstrumentId{}, err
 	}
-	return arguments.ExpectedAdmin, *leg.InstrumentID, nil
+	return expectedAdmin, *leg.InstrumentID, nil
+}
+
+// checkRegistryInstrumentIdentifiers requires a non-empty, bounded admin and id. The admin must
+// then equal expectedAdmin (checkInstrumentOfRegistry).
+func checkRegistryInstrumentIdentifiers(fieldPrefix string, instrument daInstrumentId) error {
+	if err := checkRegistryIdentifier(fieldPrefix+".admin", string(instrument.Admin)); err != nil {
+		return err
+	}
+	return checkRegistryIdentifier(fieldPrefix+".id", instrument.Id)
 }
 
 // beginRegistryRequest runs the checks of every registry route: the registry API is on, and the
@@ -417,7 +426,7 @@ func (s *server) handleRegistryInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, registryInfoResponse{AdminID: registry.adminParty, SupportedApis: registrySupportedApis()})
+	writeJSON(w, http.StatusOK, registryInfoResponse{AdminID: string(registry.adminParty), SupportedApis: registrySupportedApis()})
 }
 
 // instrumentMetadata renders one instrument. A missing supply total is zero.

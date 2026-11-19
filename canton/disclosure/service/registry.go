@@ -76,14 +76,14 @@ type registryInstrumentDisplay struct {
 }
 
 type registryConfig struct {
-	adminParty            string
+	adminParty            partyID
 	displayByInstrumentID map[string]registryInstrumentDisplay
 
 	unconfiguredLogMutex sync.Mutex
 	unconfiguredLogged   map[string]bool
 }
 
-func newRegistryConfig(adminParty string, displayByInstrumentID map[string]registryInstrumentDisplay) *registryConfig {
+func newRegistryConfig(adminParty partyID, displayByInstrumentID map[string]registryInstrumentDisplay) *registryConfig {
 	if adminParty == "" {
 		panic("disclosure-service: newRegistryConfig: empty admin party")
 	}
@@ -118,7 +118,7 @@ func loadRegistryConfig(opts *options) (*registryConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("disclosure-service: %s: %w", opts.registryInstrumentsPath, err)
 	}
-	return newRegistryConfig(string(opts.readerParties.guardianGovernance), display), nil
+	return newRegistryConfig(opts.readerParties.guardianGovernance, display), nil
 }
 
 // parseRegistryInstrumentsFile parses {"<instrumentId>": {"name": "...", "symbol": "..."}, ...}.
