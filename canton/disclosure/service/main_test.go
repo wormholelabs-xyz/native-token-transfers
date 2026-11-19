@@ -1623,15 +1623,53 @@ func TestHandleFlows_BadHexParam_400(t *testing.T) {
 	}
 }
 
-func TestHandleIndex(t *testing.T) {
-	srv := newServer(&options{readerParties: testReaderParties(), maxContractsPerTemplate: 10}, nil)
-	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1", nil))
-	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Contains(t, rr.Body.String(), "/v1/managers")
-	assert.Contains(t, rr.Body.String(), "/v1/flows/{flow}")
-	assert.Contains(t, rr.Body.String(), "accept-admin")
-	assert.NotContains(t, rr.Body.String(), "/v1/disclosures")
+func TestHandleIndexListsRegistryRoutesOnlyWhenRegistryIsOn(t *testing.T) {
+	flowPaths := []string{"/v1", "/v1/healthz", "/v1/readyz", "/v1/managers", "/v1/flows/{flow}"}
+	registryPaths := []string{
+		"/registry/metadata/v1/info",
+		"/registry/metadata/v1/instruments",
+		"/registry/metadata/v1/instruments/{instrumentId}",
+		"/registry/transfer-instruction/v1/transfer-factory",
+		"/registry/transfer-instruction/v1/{transferInstructionId}/choice-contexts/{accept|reject|withdraw}",
+		"/registry/allocation-instruction/v1/allocation-factory",
+		"/registry/allocations/v1/{allocationId}/choice-contexts/{execute-transfer|withdraw|cancel}",
+	}
+	cases := []struct {
+		name        string
+		registry    *registryConfig
+		wantPaths   []string
+		absentPaths []string
+	}{
+		{"registry off", nil, flowPaths, registryPaths},
+		{"registry on", newRegistryConfig(registryTestGG, registryTestDisplay()), append(append([]string{}, flowPaths...), registryPaths...), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(&options{readerParties: testReaderParties(), maxContractsPerTemplate: 10}, nil)
+			srv.registry = tc.registry
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1", nil))
+			require.Equal(t, http.StatusOK, rr.Code)
+			var index struct {
+				Service   string `json:"service"`
+				Endpoints []struct {
+					Path string `json:"path"`
+				} `json:"endpoints"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &index))
+			assert.Equal(t, "disclosure-service", index.Service)
+			gotPaths := make([]string, 0, len(index.Endpoints))
+			for _, endpoint := range index.Endpoints {
+				gotPaths = append(gotPaths, endpoint.Path)
+			}
+			assert.Equal(t, tc.wantPaths, gotPaths)
+			for _, absent := range tc.absentPaths {
+				assert.NotContains(t, gotPaths, absent)
+			}
+			assert.Contains(t, rr.Body.String(), "accept-admin")
+			assert.NotContains(t, rr.Body.String(), "/v1/disclosures")
+		})
+	}
 }
 
 func TestHandleManagers(t *testing.T) {
