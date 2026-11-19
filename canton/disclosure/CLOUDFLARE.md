@@ -8,6 +8,10 @@ In this example, a `cloudflared` tunnel connects the gateway host to
 Cloudflare. The tunnel uses outbound connections only. Thus the gateway host
 needs no inbound port.
 
+Cloudflare is the edge proxy. It ends TLS, applies the WAF rules, and
+applies the rate limits. The flow routes stay public. Relayers do not
+authenticate.
+
 ```
 relayer -> Cloudflare (WAF, rate limits) -> cloudflared tunnel (outbound)
         -> 127.0.0.1:7599 disclosure-service -> participant JSON Ledger API
@@ -16,9 +20,11 @@ relayer -> Cloudflare (WAF, rate limits) -> cloudflared tunnel (outbound)
 ## 1. Start the service on loopback
 
 1. Keep the default `--listen 127.0.0.1:7599`.
-2. Start the service with the upstream TLS and auth flags from `README.md`.
-3. Run `curl http://127.0.0.1:7599/v1/healthz` on the gateway host.
-4. Make sure that the response shows a `ledgerEnd` value.
+2. Do not set `--behind-edge-proxy`. `cloudflared` connects to the loopback
+   address.
+3. Start the service with the upstream TLS and auth flags from `README.md`.
+4. Run `curl http://127.0.0.1:7599/v1/readyz` on the gateway host.
+5. Make sure that the response is `{"status":"ready"}`.
 
 ## 2. Close the inbound ports
 
@@ -56,11 +62,11 @@ The catch-all rule returns HTTP 404 for each request that the first rule
 does not match. Keep the credentials file secret. It authenticates the
 tunnel.
 
-## 4. Decide on Cloudflare Access
+## 4. Keep the flow routes public
 
-The service is public by design. Relayers do not log in. Thus Cloudflare
-Access is optional. Add Access only to limit the service to known clients,
-for example with service tokens.
+The flow routes are public, as the Splice Scan routes are. Relayers do not
+authenticate. Do not put Cloudflare Access in front of `/v1`. TLS, the WAF
+rules, and the rate limits are the edge controls.
 
 ## 5. Add WAF custom rules
 
@@ -70,8 +76,10 @@ Add these custom rules for the hostname. Set the action to Block.
 |---|---|
 | Methods other than GET | `http.host eq "canton-disclosure.example.com" and http.request.method ne "GET"` |
 | Paths outside `/v1` | `http.host eq "canton-disclosure.example.com" and not starts_with(http.request.uri.path, "/v1")` |
+| Long query strings | `http.host eq "canton-disclosure.example.com" and len(http.request.uri.query) gt 1024` |
 
-The service accepts GET only. It serves paths under `/v1` only.
+The service accepts GET only. It serves paths under `/v1` only. It rejects a
+flow query string that is longer than 1024 bytes.
 
 ## 6. Add rate limiting rules
 
@@ -97,10 +105,12 @@ participant.
 
 1. Run `curl https://canton-disclosure.example.com/v1`.
 2. Make sure that the response is the endpoint list.
-3. Run `curl -X POST https://canton-disclosure.example.com/v1/healthz`.
-4. Make sure that Cloudflare blocks the request.
-5. Run `curl https://canton-disclosure.example.com/other`.
+3. Run `curl https://canton-disclosure.example.com/v1/readyz`.
+4. Make sure that the response is `{"status":"ready"}`.
+5. Run `curl -X POST https://canton-disclosure.example.com/v1/healthz`.
 6. Make sure that Cloudflare blocks the request.
-7. From a host outside the operator network, try to connect to port 7599 of
+7. Run `curl https://canton-disclosure.example.com/other`.
+8. Make sure that Cloudflare blocks the request.
+9. From a host outside the operator network, try to connect to port 7599 of
    the gateway host.
-8. Make sure that the connection fails.
+10. Make sure that the connection fails.

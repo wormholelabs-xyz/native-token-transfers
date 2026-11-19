@@ -222,8 +222,8 @@ Set the memory limit of the container to more than 512 MiB.
 ## Flags
 
 - `--json-api` (required) — base URL of the JSON Ledger API v2. With
-  `--access-token-file`, use `https`. Plain `http` works only to a loopback
-  IP address.
+  `--access-token-file` or the `--oauth-*` flags, use `https`. Plain `http`
+  works only to a loopback IP address.
 - `--guardian-governance-party`, `--ntt-custody-party` (required),
   `--operator-party` — the reader parties. The token must grant `readAs` for
   each. One participant must host all of them.
@@ -231,8 +231,9 @@ Set the memory limit of the container to more than 512 MiB.
   service reads the file again for each request. Thus you can replace the
   token without a restart.
 - `--oauth-token-url`, `--oauth-client-id`, `--oauth-client-secret-file`,
-  `--oauth-audience`, `--oauth-scope` — OAuth2 client-credentials grant for
-  the upstream token. See "Deployment on a separate gateway".
+  `--oauth-audience`, `--oauth-scope`, `--oauth-ca-file` — OAuth2
+  client-credentials grant for the upstream token. See "Deployment on a
+  separate gateway".
 - `--json-api-ca-file`, `--json-api-client-cert-file`,
   `--json-api-client-key-file` — TLS to the upstream: a private CA and a
   client certificate for mutual TLS. See "Deployment on a separate gateway".
@@ -259,6 +260,10 @@ Then run the container with `--listen 0.0.0.0:7599
 token file read-only. The loopback default is not reachable through a
 published port.
 
+The container runs as UID 65532, the distroless `nonroot` user. Set the owner
+of the token file, the client secret file, and the client key file to UID
+65532. Set the mode of each file to 0400.
+
 ## Deployment on a separate gateway
 
 The service can run on a gateway host. The gateway host is not the guardian
@@ -266,8 +271,8 @@ node. Only the gateway host has a public IP address.
 
 ```
 relayer
-  -> operator edge (for example Cloudflare, a load balancer, or a proxy)
-  -> gateway host, public IP address: disclosure-service
+  -> edge proxy: TLS, rate limit, WAF (for example Cloudflare)
+  -> gateway host: disclosure-service
   -> private link or mutual TLS
   -> participant JSON Ledger API: admits the gateway source address only
 ```
@@ -286,25 +291,43 @@ rights only:
 - `CanReadAs` for the operator, only to serve the `register` flow.
 
 Do not give this user `CanActAs` for a party. Do not give it an admin right.
-The service reads the ledger only. It calls `GET /v2/state/ledger-end` and
-`POST /v2/state/active-contracts`.
+The service reads the ledger only. It calls these endpoints:
+
+- `GET /v2/state/ledger-end`.
+- `POST /v2/state/active-contracts`.
+- `POST /v2/events/events-by-contract-id`, for the custody pot and the
+  committed factory.
+
+The service reads `ReplayRootRegistry` as the operator. It reads each other
+template as `gg` or `nttCustody`. The section "Reader parties" gives the
+table.
 
 ### Edge
 
-The operator selects the edge. The service is public by design. The edge
-adds rate limits and filters requests. `CLOUDFLARE.md` gives one example
-setup.
+The flow routes are public. Clients do not authenticate. The routes serve
+only the contracts and data that a flow needs.
+
+Put an edge proxy in front of the service. The edge proxy ends TLS, applies
+a rate limit for each client, and applies a WAF. You choose the edge.
+`CLOUDFLARE.md` gives one example setup.
+
+Set `--behind-edge-proxy` only when the service listens on an address that
+is not loopback. A tunnel agent on the gateway host, such as `cloudflared`,
+connects to the loopback address. Then keep the loopback default and do not
+set the flag.
 
 ### Flags for the gateway
 
 | Flag | Value on the gateway |
 |---|---|
 | `--listen` | The address that the edge connects to. With a local tunnel, keep the loopback default. |
+| `--behind-edge-proxy` | Set it only with a `--listen` address that is not loopback. |
 | `--json-api` | The `https://` URL of the participant JSON Ledger API. |
 | `--json-api-ca-file` | The PEM CA bundle of the participant server certificate. It replaces the system roots. |
 | `--json-api-client-cert-file` | The PEM client certificate for mutual TLS. |
 | `--json-api-client-key-file` | The PEM private key of that certificate. |
-| `--oauth-token-url` | The token endpoint of the identity provider. It must use `https`. |
+| `--oauth-token-url` | The token endpoint of the identity provider. It must use `https`. Plain `http` works only to a loopback IP address, for a test. |
+| `--oauth-ca-file` | Optional. The PEM CA bundle of the token endpoint certificate. It replaces the system roots. |
 | `--oauth-client-id` | The client ID of the gateway ledger user. |
 | `--oauth-client-secret-file` | The file that holds the client secret. |
 | `--oauth-audience` | The audience of the participant Ledger API. |
@@ -312,22 +335,41 @@ setup.
 
 Rules for these flags:
 
-- The TLS flags need an `https://` value for `--json-api`.
+- The `--json-api-*` TLS flags need an `https://` value for `--json-api`.
+- `--oauth-ca-file` needs an `https://` value for `--oauth-token-url`.
 - Give the client certificate and the client key together.
 - The minimum TLS version is 1.2.
-- The OAuth2 token request uses the same CA bundle and client certificate.
+- The token request uses the system roots, or the `--oauth-ca-file` bundle.
+  The client certificate goes to the participant only.
+- The token URL must not contain user information, a query, or a fragment.
 - Use the `--oauth-*` flags or `--access-token-file`. Do not use both.
 - With no auth flag, the service sends no token. Use this for a local
   development participant only.
 
 The service reads each file at startup. A missing or bad file stops the
-service. The service reads the client secret file again on each token
-refresh. Thus you can replace the secret with no restart.
+service. In OAuth2 mode, the service also gets one token at startup. A
+token error stops the service.
+
+The service reads the client secret file again for each token request. Thus
+you can replace the secret with no restart. The service reads the client
+certificate and key one time, at startup. After you replace them, restart
+the service.
+
+The token response must contain `expires_in`. An identity provider that does
+not send it fails each token request.
 
 The service keeps the OAuth2 token in memory. It gets a new token before the
 old token expires. The margin is 60 seconds or 10% of the token lifetime,
-whichever is shorter. If the token endpoint fails, the request fails with
-HTTP 502. The service does not send an upstream request without a token.
+whichever is shorter. One token request takes 10 seconds or less. After a
+failed token request, the service waits before the next one. The wait starts
+at 1 second and doubles after each failure, to 30 seconds or less.
+
+If the participant returns HTTP 401, the service discards the token. Then it
+gets a new token and sends the request one more time.
+
+If the token endpoint fails, the flow request fails with HTTP 502.
+`/v1/healthz` still returns 200. `/v1/readyz` returns 503. The service sends
+each upstream request with a token.
 
 Example:
 
@@ -348,8 +390,10 @@ Example:
 ### What a gateway compromise exposes
 
 An attacker who controls the gateway host gets its credentials. These
-credentials give read access as `gg` and `nttCustody`. Thus the attacker
-can read the bridge state that these parties see. The attacker can also
+credentials give read access as `gg`, `nttCustody`, and the operator, if
+you set `--operator-party`. Thus the attacker can read the bridge state that
+these parties see. As the operator, the attacker can read each contract
+that the operator sees, not only `ReplayRootRegistry`. The attacker can also
 change or stop the responses of the gateway. The ledger user has no
 `CanActAs` right, so its credentials cannot submit a command.
 
@@ -376,19 +420,19 @@ the authority of that party.
 
 `gg` never owns a lock/unlock reserve. In this section, `Manager.daml` is
 `canton/ntt/daml/Wormhole/Ntt/Manager.daml`. `reserveCustodianFor`
-(`Manager.daml:344`) gives the reserve owner. It is `nttCustody` when `gg`
+(`Manager.daml:352`) gives the reserve owner. It is `nttCustody` when `gg`
 is the admin. It is the admin in all other cases. The `NttManager`
-precondition (`Manager.daml:465-469`) rejects `gg` as `reserveCustodian`.
+precondition (`Manager.daml:489-494`) rejects `gg` as `reserveCustodian`.
 
 These custody transfers send with `sender = reserveCustodian`:
 
-- The pot merge in `Transfer` (`Manager.daml:896`).
-- `Release` (`Manager.daml:1008`).
-- `ConsolidateCustody` (`Manager.daml:1060`).
-- `TransferAdmin` (`Manager.daml:625`).
+- The pot merge in `Transfer` (`Manager.daml:930`).
+- `Release` (`Manager.daml:1042`).
+- `ConsolidateCustody` (`Manager.daml:1094`).
+- `TransferAdmin` (`Manager.daml:659`).
 
 A lock in `Transfer` sends from the user to `reserveCustodian`
-(`Manager.daml:877-878`).
+(`Manager.daml:911-912`).
 
 A registry that the guardians vetted thus runs with the authority of
 `nttCustody`. It can move each holding of `nttCustody`. This includes the
@@ -398,10 +442,10 @@ things:
 - Publish a message from an NTT transceiver `Emitter`. Its owner is `gg`.
 - Mint a `gg`-administered instrument through the canonical `CoinFactory`.
   `BurnMintFactory_BurnMint` needs `gg` as the factory admin
-  (`Manager.daml:927-928`).
-- Change a manager. `SetPeer` (`Manager.daml:487`), `SetPaused`
-  (`Manager.daml:535`), `SetFactory` (`Manager.daml:556`), and
-  `TransferAdmin` (`Manager.daml:598`) need the admin, which is `gg`.
+  (`Manager.daml:961-962`).
+- Change a manager. `SetPeer` (`Manager.daml:503`), `SetPaused`
+  (`Manager.daml:557`), `SetFactory` (`Manager.daml:578`), and
+  `TransferAdmin` (`Manager.daml:621`) need the admin, which is `gg`.
 
 Thus the quorum-held lock/unlock reserves are one risk pool. Accept quorum
 custody only for a registry that you examined.
@@ -409,7 +453,7 @@ custody only for a registry that you examined.
 ### Burn/mint uses the canonical `CoinFactory`
 
 A burn/mint deployment uses the canonical `CoinFactory` of the
-`token-cip0056` package. `requireCanonicalFactory` (`Manager.daml:164-172`)
+`token-cip0056` package. `requireCanonicalFactory` (`Manager.daml:164-173`)
 checks this. Its admin must be `gg`. The check uses the package name, not the package ID. Thus it
 accepts a `CoinFactory` of each vetted `token-cip0056` version. An interface
 choice runs the code of the vetted version that the submitter prefers.
@@ -418,12 +462,14 @@ Thus, on each participant that hosts `gg`, the vetting of a new
 `token-cip0056` version gives mint authority to that code. Vet a new version
 only after a review of its `CoinFactory` and `Coin` code.
 
-### The core fee path runs fee registry code as `gg`
+### The core fee path runs fee registry code as `feeCustody`
 
 `chargeFee` in `Wormhole.Core.Fees` executes the payer allocation with
-`Allocation_ExecuteTransfer`. The receiver is the fee recipient. In
-production, the fee recipient is `gg` and the fee instrument is Canton Coin
-(Amulet). Thus the Amulet registry code runs with the authority of `gg`.
+`Allocation_ExecuteTransfer`. The receiver is the fee recipient. Core 0.8.1
+(`wormholelabs-xyz/wormhole` PR #81) makes the fee recipient the
+`feeCustody` party, not `gg`. In production, the fee instrument is Canton
+Coin (Amulet). Thus the Amulet registry code runs with the authority of
+`feeCustody` and of the payer.
 
 ### Package vetting is a participant decision
 
