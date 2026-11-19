@@ -446,7 +446,7 @@ func TestNewBearerTokenSource(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			source, err := newBearerTokenSource(tc.mode, newTestUpstreamHTTPClient(t))
+			source, err := newBearerTokenSource(tc.mode)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -483,6 +483,11 @@ func TestParseOAuthClientConfigTokenURL(t *testing.T) {
 		{"ftp://idp.example/token", "https"},
 		{"https:///token", "host"},
 	}
+	t.Run("--oauth-ca-file needs https", func(t *testing.T) {
+		_, err := parseOAuthClientConfig(oauthClientFlags{tokenURL: "http://127.0.0.1:8080/token", clientID: "c", clientSecretFile: "s", audience: "a", caFile: "ca.pem"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--oauth-ca-file")
+	})
 	for _, tc := range cases {
 		t.Run(tc.tokenURL, func(t *testing.T) {
 			_, err := parseOAuthClientConfig(oauthClientFlags{tokenURL: tc.tokenURL, clientID: "c", clientSecretFile: "s", audience: "a"})

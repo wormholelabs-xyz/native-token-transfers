@@ -87,6 +87,7 @@ func parseFlags(args []string) (*options, error) {
 	oauthSecretFile := fs.String("oauth-client-secret-file", "", "path to the OAuth2 client secret; re-read on every token refresh")
 	oauthAudience := fs.String("oauth-audience", "", "OAuth2 audience of the JSON Ledger API")
 	oauthScope := fs.String("oauth-scope", "", "OAuth2 scope (optional)")
+	oauthCAFile := fs.String("oauth-ca-file", "", "PEM CA bundle that verifies the OAuth2 token endpoint certificate; replaces the system roots (https only)")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -96,7 +97,7 @@ func parseFlags(args []string) (*options, error) {
 		return nil, fmt.Errorf("disclosure-service: --json-api is required (base URL of the JSON Ledger API v2, e.g. http://127.0.0.1:6975)")
 	}
 	upstreamTLS := upstreamTLSFiles{caFile: *caFile, clientCertFile: *clientCertFile, clientKeyFile: *clientKeyFile}
-	upstreamAuth, err := parseUpstreamAuthMode(*tokenFile, oauthClientFlags{tokenURL: *oauthTokenURL, clientID: *oauthClientID, clientSecretFile: *oauthSecretFile, audience: *oauthAudience, scope: *oauthScope})
+	upstreamAuth, err := parseUpstreamAuthMode(*tokenFile, oauthClientFlags{tokenURL: *oauthTokenURL, clientID: *oauthClientID, clientSecretFile: *oauthSecretFile, audience: *oauthAudience, scope: *oauthScope, caFile: *oauthCAFile})
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +183,7 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 	}
 	upstreamHTTPClient := newUpstreamHTTPClient(tlsConfig)
 
-	tokens, err := newBearerTokenSource(opts.upstreamAuth, upstreamHTTPClient)
+	tokens, err := newBearerTokenSource(opts.upstreamAuth)
 	if err != nil {
 		return err
 	}

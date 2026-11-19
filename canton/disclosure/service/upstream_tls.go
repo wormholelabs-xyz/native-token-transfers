@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -49,7 +50,7 @@ func loadUpstreamTLSConfig(files upstreamTLSFiles, now time.Time) (*tls.Config, 
 	config := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	if files.caFile != "" {
-		roots, err := loadCABundle(files.caFile)
+		roots, err := loadCABundle("--json-api-ca-file", files.caFile)
 		if err != nil {
 			return nil, err
 		}
@@ -75,11 +76,11 @@ func loadUpstreamTLSConfig(files upstreamTLSFiles, now time.Time) (*tls.Config, 
 }
 
 // loadCABundle parses every PEM block in path as a CA certificate. Any other block type or
-// trailing bytes are an error.
-func loadCABundle(path string) (*x509.CertPool, error) {
+// trailing bytes are an error. flagName names the flag in each error.
+func loadCABundle(flagName, path string) (*x509.CertPool, error) {
 	pemBytes, err := readFileAtMost(path, maxPEMFileBytes)
 	if err != nil {
-		return nil, fmt.Errorf("disclosure-service: --json-api-ca-file: %w", err)
+		return nil, fmt.Errorf("disclosure-service: %s: %w", flagName, err)
 	}
 	roots := x509.NewCertPool()
 	remaining := pemBytes
@@ -91,20 +92,20 @@ func loadCABundle(path string) (*x509.CertPool, error) {
 		}
 		remaining = rest
 		if block.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("disclosure-service: --json-api-ca-file %s: PEM block of type %q, want CERTIFICATE", path, block.Type)
+			return nil, fmt.Errorf("disclosure-service: %s %s: PEM block of type %q, want CERTIFICATE", flagName, path, block.Type)
 		}
 		certificate, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("disclosure-service: --json-api-ca-file %s: parse certificate %d: %w", path, certificateCount+1, err)
+			return nil, fmt.Errorf("disclosure-service: %s %s: parse certificate %d: %w", flagName, path, certificateCount+1, err)
 		}
 		roots.AddCert(certificate)
 		certificateCount++
 	}
 	if certificateCount == 0 {
-		return nil, fmt.Errorf("disclosure-service: --json-api-ca-file %s: no PEM certificate found", path)
+		return nil, fmt.Errorf("disclosure-service: %s %s: no PEM certificate found", flagName, path)
 	}
 	if len(bytes.TrimSpace(remaining)) != 0 {
-		return nil, fmt.Errorf("disclosure-service: --json-api-ca-file %s: trailing data after certificate %d (or more than %d certificates)", path, certificateCount, maxCABundleCertificates)
+		return nil, fmt.Errorf("disclosure-service: %s %s: trailing data after certificate %d (or more than %d certificates)", flagName, path, certificateCount, maxCABundleCertificates)
 	}
 	return roots, nil
 }
@@ -138,4 +139,22 @@ func loadClientKeyPair(files upstreamTLSFiles, now time.Time) (tls.Certificate, 
 	}
 	pair.Leaf = leaf
 	return pair, nil
+}
+
+// newTokenEndpointHTTPClient is the client for the OAuth2 token endpoint: system roots or the
+// --oauth-ca-file bundle, TLS 1.2 minimum, and no client certificate.
+func newTokenEndpointHTTPClient(oauthCAFile string) (*http.Client, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if oauthCAFile != "" {
+		roots, err := loadCABundle("--oauth-ca-file", oauthCAFile)
+		if err != nil {
+			return nil, err
+		}
+		//SECURITY: replaces the system roots; only this bundle can vouch for the token endpoint.
+		tlsConfig.RootCAs = roots
+	}
+	if len(tlsConfig.Certificates) != 0 {
+		panic("disclosure-service: the token endpoint client has a client certificate")
+	}
+	return newDirectHTTPClient(tlsConfig, httpClientTimeout), nil
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 )
 
@@ -70,10 +69,14 @@ func describeUpstreamAuth(mode upstreamAuthMode) string {
 
 // newBearerTokenSource builds the token source of mode. A nil source means an unauthenticated
 // upstream. It reads the token or secret file once, so a bad path fails at startup.
-func newBearerTokenSource(mode upstreamAuthMode, tokenEndpointClient *http.Client) (bearerTokenSource, error) {
+func newBearerTokenSource(mode upstreamAuthMode) (bearerTokenSource, error) {
 	switch typedMode := mode.(type) {
 	case upstreamAuthOAuth2:
 		if _, err := readClientSecret(typedMode.clientConfig.clientSecretFile); err != nil {
+			return nil, err
+		}
+		tokenEndpointClient, err := newTokenEndpointHTTPClient(typedMode.clientConfig.caFile)
+		if err != nil {
 			return nil, err
 		}
 		return newOAuthBearerTokenSource(typedMode.clientConfig, tokenEndpointClient, time.Now), nil

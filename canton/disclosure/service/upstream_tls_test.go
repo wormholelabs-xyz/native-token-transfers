@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -407,4 +408,109 @@ func TestRun_FailsFastOnInvalidUpstreamTLSFile(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--json-api-ca-file")
 	assert.Empty(t, listeningURL(out.String()))
+}
+
+// ---------------------------------------------------------------------------
+// Token endpoint client
+// ---------------------------------------------------------------------------
+
+// newTLSTokenEndpoint serves bearer tokens over TLS with serverCertificate. It requests a client
+// certificate and records how many the client sent.
+func newTLSTokenEndpoint(t *testing.T, serverCertificate *testIssuedCertificate, peerCertificateCount *atomic.Int64) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerCertificateCount.Store(int64(len(r.TLS.PeerCertificates)))
+		bearerTokenResponse("tok", 3600)(w, 1)
+	}))
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCertificate.tlsPair},
+		ClientAuth:   tls.RequestClientCert,
+		MinVersion:   tls.VersionTLS12,
+	}
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestTokenEndpointClientTrust(t *testing.T) {
+	tokenEndpointPKI := newTestUpstreamPKI(t)
+	participantPKI := newTestUpstreamPKI(t)
+	participant := newMutualTLSJSONAPI(t, participantPKI)
+	var peerCertificateCount atomic.Int64
+	tokenEndpoint := newTLSTokenEndpoint(t, tokenEndpointPKI.serverCertificate, &peerCertificateCount)
+	secretPath := filepath.Join(t.TempDir(), "client-secret")
+	writeClientSecret(t, secretPath, "secret")
+	participantTLS := upstreamTLSFiles{
+		caFile:         participantPKI.trustedCA.pemPath,
+		clientCertFile: participantPKI.validClient.certPEMPath,
+		clientKeyFile:  participantPKI.validClient.keyPEMPath,
+	}
+
+	cases := []struct {
+		name        string
+		oauthCAFile string
+		wantErrSub  string
+	}{
+		{"token endpoint CA from --oauth-ca-file, participant CA from --json-api-ca-file", tokenEndpointPKI.trustedCA.pemPath, ""},
+		{"token endpoint CA absent from the system roots", "", "upstream bearer token"},
+		{"participant CA given as --oauth-ca-file", participantPKI.trustedCA.pemPath, "upstream bearer token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			peerCertificateCount.Store(-1)
+			clientConfig := mustParseOAuthClientConfig(t, oauthClientFlags{
+				tokenURL:         tokenEndpoint.URL + "/token",
+				clientID:         "gateway",
+				clientSecretFile: secretPath,
+				audience:         "aud",
+				caFile:           tc.oauthCAFile,
+			})
+			tokens, err := newBearerTokenSource(upstreamAuthOAuth2{clientConfig: clientConfig})
+			require.NoError(t, err)
+			tlsConfig, err := loadUpstreamTLSConfig(participantTLS, time.Now())
+			require.NoError(t, err)
+			offset, err := newHTTPACSClient(participant.URL, newUpstreamHTTPClient(tlsConfig), tokens).LedgerEnd(context.Background())
+			if tc.wantErrSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, int64(42), offset)
+			assert.Zero(t, peerCertificateCount.Load(), "the token endpoint sees no client certificate")
+		})
+	}
+}
+
+func TestNewTokenEndpointHTTPClient(t *testing.T) {
+	pki := newTestUpstreamPKI(t)
+	cases := []struct {
+		name        string
+		oauthCAFile string
+		wantRootCAs bool
+		wantErrSub  string
+	}{
+		{"system roots", "", false, ""},
+		{"CA bundle", pki.trustedCA.pemPath, true, ""},
+		{"missing CA bundle", filepath.Join(pki.dir, "missing.pem"), false, "--oauth-ca-file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := newTokenEndpointHTTPClient(tc.oauthCAFile)
+			if tc.wantErrSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+				return
+			}
+			require.NoError(t, err)
+			transport, isTransport := client.Transport.(*http.Transport)
+			require.True(t, isTransport)
+			assert.Nil(t, transport.Proxy, "the token client ignores HTTP_PROXY and HTTPS_PROXY")
+			assert.Empty(t, transport.TLSClientConfig.Certificates)
+			assert.Equal(t, uint16(tls.VersionTLS12), transport.TLSClientConfig.MinVersion)
+			assert.Equal(t, tc.wantRootCAs, transport.TLSClientConfig.RootCAs != nil)
+			assert.NotNil(t, client.CheckRedirect)
+		})
+	}
 }

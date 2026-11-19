@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 )
 
 // maxAccessTokenFileBytes bounds the upstream bearer token file.
@@ -58,14 +59,22 @@ func checkJSONAPIURL(rawURL string, upstreamAuthConfigured bool, upstreamTLS ups
 	return nil
 }
 
-// newUpstreamHTTPClient connects to the JSON API directly with tlsConfig and ignores proxy
-// variables. It returns a redirect to the caller as the response.
+// newUpstreamHTTPClient is the client for the JSON Ledger API.
 func newUpstreamHTTPClient(tlsConfig *tls.Config) *http.Client {
+	return newDirectHTTPClient(tlsConfig, httpClientTimeout)
+}
+
+// newDirectHTTPClient connects directly with tlsConfig and ignores proxy variables. It returns a
+// redirect to the caller as the response.
+func newDirectHTTPClient(tlsConfig *tls.Config, timeout time.Duration) *http.Client {
 	if tlsConfig == nil {
-		panic("disclosure-service: newUpstreamHTTPClient: nil TLS config")
+		panic("disclosure-service: newDirectHTTPClient: nil TLS config")
 	}
 	if tlsConfig.MinVersion < tls.VersionTLS12 {
-		panic("disclosure-service: newUpstreamHTTPClient: TLS minimum below 1.2")
+		panic("disclosure-service: newDirectHTTPClient: TLS minimum below 1.2")
+	}
+	if timeout <= 0 {
+		panic("disclosure-service: newDirectHTTPClient: non-positive timeout")
 	}
 	defaultTransport, isTransport := http.DefaultTransport.(*http.Transport)
 	if !isTransport {
@@ -75,9 +84,9 @@ func newUpstreamHTTPClient(tlsConfig *tls.Config) *http.Client {
 	transport.Proxy = nil
 	transport.TLSClientConfig = tlsConfig
 	return &http.Client{
-		Timeout:   httpClientTimeout,
+		Timeout:   timeout,
 		Transport: transport,
-		//SECURITY: a 307/308 re-sends the request body to any scheme or host.
+		//SECURITY: a 307/308 re-sends the request body, which can carry the OAuth2 client secret, to any scheme or host.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

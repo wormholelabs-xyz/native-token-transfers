@@ -30,10 +30,11 @@ type oauthClientFlags struct {
 	clientSecretFile string
 	audience         string
 	scope            string
+	caFile           string
 }
 
 func (flags oauthClientFlags) anySet() bool {
-	return flags.tokenURL != "" || flags.clientID != "" || flags.clientSecretFile != "" || flags.audience != "" || flags.scope != ""
+	return flags.tokenURL != "" || flags.clientID != "" || flags.clientSecretFile != "" || flags.audience != "" || flags.scope != "" || flags.caFile != ""
 }
 
 // validatedOAuthClientConfig is an OAuth2 client-credentials grant against one token endpoint.
@@ -44,6 +45,7 @@ type validatedOAuthClientConfig struct {
 	clientSecretFile string
 	audience         string
 	scope            string // optional
+	caFile           string // optional; empty uses the system roots
 }
 
 // parseOAuthClientConfig enforces every required field and an https (or loopback http) token URL.
@@ -85,12 +87,16 @@ func parseOAuthClientConfig(flags oauthClientFlags) (validatedOAuthClientConfig,
 	default:
 		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-token-url %q: must be https", flags.tokenURL)
 	}
+	if flags.caFile != "" && tokenURL.Scheme != "https" {
+		return validatedOAuthClientConfig{}, fmt.Errorf("disclosure-service: --oauth-ca-file requires an https --oauth-token-url, got %q", flags.tokenURL)
+	}
 	return validatedOAuthClientConfig{
 		tokenURL:         tokenURL,
 		clientID:         flags.clientID,
 		clientSecretFile: flags.clientSecretFile,
 		audience:         flags.audience,
 		scope:            flags.scope,
+		caFile:           flags.caFile,
 	}, nil
 }
 
