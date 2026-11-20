@@ -1,93 +1,194 @@
-// Pure unit tests for the recipient-resolution helpers in commands.ts.
-// Offline, no network — these never touch CantonClient/evm.ts/solana.ts.
 import { describe, expect, test } from "bun:test";
-import { loadConfig } from "../config.js";
-import { resolveRedeemCantonRecipient, resolveSendRecipient } from "../commands.js";
 
-const config = loadConfig();
-const canton = config.canton;
+import { validateRegistry } from "../config.js";
+import {
+  requireTypedConfirmation,
+  type SubmitConfirmation,
+} from "../confirmation.js";
+import { resolveSendRecipient } from "../recipient.js";
+import { parseHex32 } from "../types.js";
+import {
+  RETIRED_CANTON_NAMESPACE,
+  retiredCanburnRegistryJson,
+} from "./fixtures/registry.js";
 
-const ALICE_BINDING = "b57bfe41337237d696834be81e491c78099971fc2bc1ad6eedd032583350a516";
-const OPERATOR_BINDING = "efd963b986b976980dc83bfc06974761a4fb4498683abe194242da93222e4051";
+const registry = validateRegistry(retiredCanburnRegistryJson());
+const ALICE = `alice::${RETIRED_CANTON_NAMESPACE}`;
+const ALICE_BINDING =
+  "b57bfe41337237d696834be81e491c78099971fc2bc1ad6eedd032583350a516";
 
-describe("resolveSendRecipient: Canton destination", () => {
-  test("defaults to the registry user party, bound", () => {
-    const r = resolveSendRecipient("Canton", canton, {}, {});
-    expect(r.recipient32Hex).toBe(ALICE_BINDING);
-    expect(r.cantonParty).toBe(`alice::${canton.namespace}`);
-    expect(r.dangerousRaw).toBe(false);
+describe("resolveSendRecipient", () => {
+  test("Canton default: the registry user party, bound", () => {
+    const resolved = resolveSendRecipient("Canton", registry, {}, {});
+    expect(resolved.recipient as string).toBe(ALICE_BINDING);
+    expect(resolved.cantonPartyId as string | undefined).toBe(ALICE);
   });
 
-  test("--recipient overrides the party hint", () => {
-    const r = resolveSendRecipient("Canton", canton, { recipient: "operator" }, {});
-    expect(r.recipient32Hex).toBe(OPERATOR_BINDING);
-    expect(r.cantonParty).toBe(`operator::${canton.namespace}`);
+  test("Canton: a complete party id is used unchanged", () => {
+    expect(
+      resolveSendRecipient("Canton", registry, { recipient: ALICE }, {})
+        .recipient as string
+    ).toBe(ALICE_BINDING);
   });
 
-  test("--recipient-raw bypasses the binding entirely and is flagged dangerous", () => {
-    const raw = "11".repeat(32);
-    const r = resolveSendRecipient("Canton", canton, { recipientRaw: `0x${raw}` }, {});
-    expect(r.recipient32Hex).toBe(raw);
-    expect(r.dangerousRaw).toBe(true);
-    expect(r.cantonParty).toBeUndefined();
-  });
-
-  test("--recipient-raw of the wrong length is rejected", () => {
+  test.each([
+    ["bob"],
+    [`bob::${RETIRED_CANTON_NAMESPACE}::${RETIRED_CANTON_NAMESPACE}`],
+  ])("Canton: %s rejects and returns no binding", (recipientText) => {
     expect(() =>
-      resolveSendRecipient("Canton", canton, { recipientRaw: "0x1234" }, {})
-    ).toThrow(/32 bytes/);
+      resolveSendRecipient("Canton", registry, { recipient: recipientText }, {})
+    ).toThrow(/party/);
   });
-});
 
-describe("resolveSendRecipient: Ethereum destination", () => {
-  const ETH_ADDR = "0x06803b132816e8F6d277Ad7984305B2F590b038D";
-
-  test("defaults to the derived wallet address, pad32'd", () => {
-    const r = resolveSendRecipient("Ethereum", canton, {}, { ethereumAddress: ETH_ADDR });
-    expect(r.recipient32Hex).toBe(
+  test("Ethereum: checksummed address", () => {
+    const resolved = resolveSendRecipient(
+      "Ethereum",
+      registry,
+      { recipient: "0x06803b132816e8F6d277Ad7984305B2F590b038D" },
+      {}
+    );
+    expect(resolved.recipient as string).toBe(
       "00000000000000000000000006803b132816e8f6d277ad7984305b2f590b038d"
     );
-    expect(r.dangerousRaw).toBe(false);
   });
 
-  test("--recipient overrides the default", () => {
-    const other = "0xD10d649a5BeB2cf5Bf0C086c82Ed1B1BbdF43BB0";
-    const r = resolveSendRecipient("Ethereum", canton, { recipient: other }, { ethereumAddress: ETH_ADDR });
-    expect(r.recipient32Hex).toBe(
-      "000000000000000000000000d10d649a5beb2cf5bf0c086c82ed1b1bbdf43bb0"
+  test("Ethereum: lowercase without the flag rejects", () => {
+    expect(() =>
+      resolveSendRecipient(
+        "Ethereum",
+        registry,
+        { recipient: "0x06803b132816e8f6d277ad7984305b2f590b038d" },
+        {}
+      )
+    ).toThrow(/checksum/);
+  });
+
+  test("Solana: 2 characters lost rejects", () => {
+    expect(() =>
+      resolveSendRecipient(
+        "Solana",
+        registry,
+        { recipient: "HxzGfiD91zPh6eYoP8363a8eDom4tpCoNWwSo7C1Gc" },
+        {}
+      )
+    ).toThrow(/32 bytes/);
+  });
+
+  test.each([["Canton"], ["Ethereum"], ["Solana"]] as const)(
+    "--recipient-raw without --i-accept-raw-recipient rejects for %s",
+    (destinationChain) => {
+      expect(() =>
+        resolveSendRecipient(
+          destinationChain,
+          registry,
+          { recipientRaw: "11".repeat(32) },
+          {}
+        )
+      ).toThrow(/i-accept-raw-recipient/);
+    }
+  );
+
+  test("--recipient-raw with the flag is used and marked raw", () => {
+    const resolved = resolveSendRecipient(
+      "Ethereum",
+      registry,
+      { recipientRaw: `0x${"11".repeat(32)}`, acceptRawRecipient: true },
+      {}
     );
-  });
-
-  test("throws when there is no default and no override", () => {
-    expect(() => resolveSendRecipient("Ethereum", canton, {}, {})).toThrow(/ETH_PRIVATE_KEY/);
+    expect(resolved.isRaw).toBe(true);
+    expect(resolved.recipient as string).toBe("11".repeat(32));
   });
 });
 
-describe("resolveSendRecipient: Solana destination", () => {
-  const SOL_PUBKEY = "HxzGfiD91zPh6eYoP8363a8eDom4tpCoNWwSo7C1Gciw";
+const confirmation: SubmitConfirmation = {
+  network: "Mainnet",
+  operation: "send",
+  deploymentName: "canburn",
+  route: "Ethereum -> Canton",
+  amountText: "1.5",
+  recipientDescription: "test",
+  recipient: parseHex32("ab".repeat(28) + "12345678"),
+};
 
-  test("defaults to the derived payer pubkey, base58-decoded", () => {
-    const r = resolveSendRecipient("Solana", canton, {}, { solanaPubkey: SOL_PUBKEY });
-    expect(r.recipient32Hex).toBe(
-      "fc12b0dc42b4d8b280cf13e2ee66fb6b2e6a206b5776b3c8ec17830bd35ba524"
-    );
+function scriptedPrompt(answers: string[]) {
+  const questions: string[] = [];
+  return {
+    questions,
+    prompt: async (question: string) => {
+      questions.push(question);
+      return answers.shift() ?? "";
+    },
+  };
+}
+
+describe("requireTypedConfirmation", () => {
+  test("correct network and suffix: confirmed", async () => {
+    const scripted = scriptedPrompt(["Mainnet", "12345678"]);
+    await expect(
+      requireTypedConfirmation(confirmation, {
+        assumeYes: false,
+        stdinIsTty: true,
+        prompt: scripted.prompt,
+      })
+    ).resolves.toBeUndefined();
   });
 
-  test("throws when there is no default and no override", () => {
-    expect(() => resolveSendRecipient("Solana", canton, {}, {})).toThrow(/SOLANA_PRIVATE_KEY/);
+  test.each([
+    ["wrong network", ["Testnet", "12345678"]],
+    ["wrong suffix", ["Mainnet", "12345679"]],
+  ])("%s: refused", async (_caseName, answers) => {
+    const scripted = scriptedPrompt(answers);
+    await expect(
+      requireTypedConfirmation(confirmation, {
+        assumeYes: false,
+        stdinIsTty: true,
+        prompt: scripted.prompt,
+      })
+    ).rejects.toThrow(/nothing has been submitted/);
   });
-});
 
-describe("resolveRedeemCantonRecipient", () => {
-  test("defaults to the registry user party", () => {
-    const r = resolveRedeemCantonRecipient(canton, undefined);
-    expect(r.party).toBe(`alice::${canton.namespace}`);
-    expect(r.binding).toBe(ALICE_BINDING);
+  test("Canton recipient: the full party id must be typed", async () => {
+    const cantonConfirmation = {
+      ...confirmation,
+      cantonRecipientPartyId: ALICE as never,
+    };
+    const wrong = scriptedPrompt(["Mainnet", "alice"]);
+    await expect(
+      requireTypedConfirmation(cantonConfirmation, {
+        assumeYes: false,
+        stdinIsTty: true,
+        prompt: wrong.prompt,
+      })
+    ).rejects.toThrow();
+    const right = scriptedPrompt(["Mainnet", ALICE]);
+    await expect(
+      requireTypedConfirmation(cantonConfirmation, {
+        assumeYes: false,
+        stdinIsTty: true,
+        prompt: right.prompt,
+      })
+    ).resolves.toBeUndefined();
   });
 
-  test("respects an explicit party hint", () => {
-    const r = resolveRedeemCantonRecipient(canton, "operator");
-    expect(r.party).toBe(`operator::${canton.namespace}`);
-    expect(r.binding).toBe(OPERATOR_BINDING);
+  test("--yes: no prompt", async () => {
+    const scripted = scriptedPrompt([]);
+    await requireTypedConfirmation(confirmation, {
+      assumeYes: true,
+      stdinIsTty: false,
+      prompt: scripted.prompt,
+    });
+    expect(scripted.questions.length).toBe(0);
+  });
+
+  test("not a TTY and no --yes: refused", async () => {
+    const scripted = scriptedPrompt(["Mainnet", "12345678"]);
+    await expect(
+      requireTypedConfirmation(confirmation, {
+        assumeYes: false,
+        stdinIsTty: false,
+        prompt: scripted.prompt,
+      })
+    ).rejects.toThrow(/--yes/);
+    expect(scripted.questions.length).toBe(0);
   });
 });

@@ -1,79 +1,79 @@
 import { describe, expect, test } from "bun:test";
-import { checkDust, fromRaw, toRaw } from "../amounts.js";
 
-describe("toRaw / fromRaw", () => {
-  test("whole units at 18 decimals", () => {
-    expect(toRaw("1", 18)).toBe(1000000000000000000n);
-    expect(fromRaw(1000000000000000000n, 18)).toBe("1");
+import {
+  checkAmountHasNoDust,
+  formatRawAmount,
+  parseHumanAmount,
+} from "../amounts.js";
+import { parseRawAmount, parseTokenDecimals } from "../types.js";
+
+const decimals = (value: number) => parseTokenDecimals(value);
+
+describe("parseHumanAmount", () => {
+  test.each([
+    ["1", 8, 100000000n],
+    ["1.5", 8, 150000000n],
+    ["0.00000001", 8, 1n],
+    ["1.10", 1, 11n],
+    ["7", 0, 7n],
+  ])("%s at %d decimals -> %p", (human, decimalCount, expectedRaw) => {
+    expect(parseHumanAmount(human, decimals(decimalCount)) as bigint).toBe(
+      expectedRaw
+    );
   });
 
-  test("exact string math avoids float artifacts (0.1 * 1e18 in floats is not exact)", () => {
-    expect(toRaw("0.1", 18)).toBe(100000000000000000n);
-  });
-
-  test("max-precision string at 10 decimals", () => {
-    expect(toRaw("0.0000000001", 10)).toBe(1n);
-    expect(fromRaw(1n, 10)).toBe("0.0000000001");
-  });
-
-  test("max-precision string at 9 decimals", () => {
-    expect(toRaw("0.000000001", 9)).toBe(1n);
-    expect(fromRaw(1n, 9)).toBe("0.000000001");
-  });
-
-  test("round trip at 8 decimals with trailing-zero trimming", () => {
-    const raw = toRaw("123.456789", 8);
-    expect(raw).toBe(12345678900n);
-    expect(fromRaw(raw, 8)).toBe("123.456789");
-  });
-
-  test("trailing zeros beyond decimals are dropped, not rejected", () => {
-    expect(toRaw("0.100000000", 8)).toBe(toRaw("0.1", 8));
-  });
-
-  test("rejects sub-unit precision that would be lost", () => {
-    expect(() => toRaw("0.12345678901", 8)).toThrow(/more precision/);
-  });
-
-  test("rejects negative amounts", () => {
-    expect(() => toRaw("-1", 18)).toThrow();
-  });
-
-  test("rejects non-numeric input", () => {
-    expect(() => toRaw("abc", 18)).toThrow();
+  test.each([
+    ["0", 8],
+    ["0.0", 8],
+    ["0.0000000000", 10],
+    ["-1", 8],
+    ["1e3", 8],
+    ["1.123", 2],
+    ["", 8],
+    [".5", 8],
+  ])("rejects %p at %d decimals", (human, decimalCount) => {
+    expect(() => parseHumanAmount(human, decimals(decimalCount))).toThrow();
   });
 });
 
-describe("checkDust", () => {
-  test("18 -> 10 route rejects sub-1e-8 excess", () => {
-    // min(8, 18, 10) = 8, step = 0.00000001; this amount has a 10th-decimal remainder.
-    expect(() => checkDust("0.0000000001", 18, 10)).toThrow(
-      /multiple of 0\.00000001/
-    );
+describe("formatRawAmount", () => {
+  test.each([
+    [150000000n, 8, "1.5"],
+    [1n, 8, "0.00000001"],
+    [0n, 8, "0"],
+    [7n, 0, "7"],
+  ])("%p at %d -> %s", (raw, decimalCount, expected) => {
+    expect(formatRawAmount(raw, decimalCount)).toBe(expected);
   });
+  test("rejects a negative value", () => {
+    expect(() => formatRawAmount(-1n, 8)).toThrow();
+  });
+});
 
-  test("18 -> 10 route accepts the exact step boundary", () => {
-    expect(() => checkDust("0.00000001", 18, 10)).not.toThrow();
+describe("checkAmountHasNoDust", () => {
+  test("accepts a multiple of the 8-decimal step", () => {
+    expect(() =>
+      checkAmountHasNoDust(
+        parseRawAmount(10n ** 10n),
+        decimals(18),
+        decimals(10)
+      )
+    ).not.toThrow();
   });
-
-  test("Canton(10) -> Solana(9) route rejects sub-1e-8 excess", () => {
-    // min(8, 10, 9) = 8.
-    expect(() => checkDust("0.000000001", 10, 9)).toThrow(
-      /multiple of 0\.00000001/
-    );
-  });
-
-  test("Canton(10) -> Solana(9) route accepts the exact step boundary", () => {
-    expect(() => checkDust("0.00000001", 10, 9)).not.toThrow();
-  });
-
-  test("whole-unit amounts always pass regardless of decimals", () => {
-    expect(() => checkDust("42", 18, 6)).not.toThrow();
-  });
-
-  test("low-decimal destination narrows the step below 8", () => {
-    // min(8, 18, 2) = 2, step = 0.01.
-    expect(() => checkDust("1.001", 18, 2)).toThrow(/multiple of 0\.01/);
-    expect(() => checkDust("1.01", 18, 2)).not.toThrow();
-  });
+  test.each([
+    [1n, 18, 10],
+    [10n ** 10n + 1n, 18, 18],
+    [5n, 10, 9],
+  ])(
+    "rejects %p from %d to %d decimals",
+    (raw, sourceDecimals, destinationDecimals) => {
+      expect(() =>
+        checkAmountHasNoDust(
+          parseRawAmount(raw),
+          decimals(sourceDecimals),
+          decimals(destinationDecimals)
+        )
+      ).toThrow(/multiple of/);
+    }
+  );
 });

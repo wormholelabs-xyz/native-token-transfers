@@ -2,138 +2,184 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+
 import {
-  DEPLOYMENT_NAMES,
-  loadConfig,
-  parseChainAlias,
-  resolveConfigPath,
-  validateConfig,
+  REPOSITORY_REGISTRY_PATH,
+  loadRegistry,
+  requireDeployment,
+  resolveRegistryPath,
+  validateRegistry,
 } from "../config.js";
+import { retiredCanburnRegistryJson } from "./fixtures/registry.js";
 
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../../.."
-);
-const REGISTRY_PATH = path.join(REPO_ROOT, "private-deployments.json");
-
-function loadValidRaw(): any {
-  return JSON.parse(fs.readFileSync(REGISTRY_PATH, "utf8"));
+function withChange(change: (registryJson: any) => void): any {
+  const registryJson = retiredCanburnRegistryJson();
+  change(registryJson);
+  return registryJson;
 }
 
-describe("committed private-deployments.json", () => {
-  test("parses and validates", () => {
-    const config = validateConfig(loadValidRaw());
-    expect(config.network).toBe("Mainnet");
-    expect(config.canton.namespace).toBe(
-      "122085bf64156420a95663eb8b8cce516858de1d531d95850debe9ec8d15e3f6263e"
+describe("validateRegistry", () => {
+  test("loads the fixture with one deployment", () => {
+    const registry = validateRegistry(retiredCanburnRegistryJson());
+    expect([...registry.deployments.keys()]).toEqual(["canburn" as never]);
+    expect(registry.canton.participant?.jsonApiUrl.href).toBe(
+      "https://participant.example.test/"
     );
   });
 
-  test("all four deployments are present", () => {
-    const config = validateConfig(loadValidRaw());
-    for (const name of DEPLOYMENT_NAMES) {
-      expect(config.deployments[name]).toBeDefined();
+  test("loads a registry with no deployments and no participant", () => {
+    const registry = validateRegistry(
+      withChange((registryJson) => {
+        registryJson.deployments = {};
+        delete registryJson.canton.participant;
+      })
+    );
+    expect(registry.deployments.size).toBe(0);
+    expect(() => requireDeployment(registry, "canburn")).toThrow(
+      /no deployments/
+    );
+  });
+
+  test("unknown --deployment lists the registry keys", () => {
+    expect(() =>
+      requireDeployment(
+        validateRegistry(retiredCanburnRegistryJson()),
+        "canhub"
+      )
+    ).toThrow(/canburn/);
+  });
+
+  test.each([
+    ["schemaVersion 1", (r: any) => (r.schemaVersion = 1)],
+    ["v1 namespace field", (r: any) => (r.canton.namespace = "1220")],
+    ["v1 guardianPubkey field", (r: any) => (r.canton.guardianPubkey = "04")],
+    [
+      "http disclosure URL",
+      (r: any) =>
+        (r.canton.disclosureServiceUrl = "http://disclosure.example.test"),
+    ],
+    [
+      "user info in the JSON API URL",
+      (r: any) =>
+        (r.canton.participant.jsonApiUrl =
+          "https://user:pw@participant.example.test"),
+    ],
+    [
+      "query in the token URL",
+      (r: any) =>
+        (r.canton.participant.oauthTokenUrl =
+          "https://idp.example.test/token?x=1"),
+    ],
+    [
+      "bare party hint",
+      (r: any) => (r.canton.participant.userPartyId = "alice"),
+    ],
+    [
+      "decimals 19",
+      (r: any) => (r.deployments.canburn.chains.Canton.decimals = 19),
+    ],
+    [
+      "decimals -1",
+      (r: any) => (r.deployments.canburn.chains.Ethereum.decimals = -1),
+    ],
+    ["chain id 0", (r: any) => (r.chainIds.Solana = 0)],
+    ["chain id 65536", (r: any) => (r.chainIds.Solana = 65536)],
+    ["duplicate chain ids", (r: any) => (r.chainIds.Solana = 2)],
+    [
+      "bad EVM checksum",
+      (r: any) =>
+        (r.deployments.canburn.chains.Ethereum.manager =
+          "0xFd2322c8b9D79c605A4263F1baCeC9a0B4Ff6d42"),
+    ],
+    [
+      "31-byte Solana mint",
+      (r: any) =>
+        (r.deployments.canburn.chains.Solana.mint =
+          "HxzGfiD91zPh6eYoP8363a8eDom4tpCoNWwSo7C1G"),
+    ],
+    [
+      "uppercase manager hex",
+      (r: any) =>
+        (r.deployments.canburn.chains.Canton.manager =
+          "D03C78C99B240126E5E18BF07BAE40847BB41B345B1850C71AFB75E809F24D08"),
+    ],
+    [
+      "deployment name with a capital",
+      (r: any) => (r.deployments.CanBurn = r.deployments.canburn),
+    ],
+    [
+      "one-chain deployment",
+      (r: any) =>
+        (r.deployments.canburn.chains = {
+          Canton: r.deployments.canburn.chains.Canton,
+        }),
+    ],
+    ["network Devnet", (r: any) => (r.network = "Devnet")],
+  ])("rejects %s", (_caseName, change) => {
+    expect(() => validateRegistry(withChange(change))).toThrow();
+  });
+
+  test("accepts http for a loopback participant", () => {
+    const registry = validateRegistry(
+      withChange(
+        (r) => (r.canton.participant.jsonApiUrl = "http://localhost:7575")
+      )
+    );
+    expect(registry.canton.participant?.jsonApiUrl.hostname).toBe("localhost");
+  });
+});
+
+describe("resolveRegistryPath", () => {
+  test("explicit path wins", () => {
+    expect(resolveRegistryPath("/tmp/a.json", "/tmp/b.json")).toBe(
+      "/tmp/a.json"
+    );
+  });
+  test("environment path is next", () => {
+    expect(resolveRegistryPath(undefined, "/tmp/b.json")).toBe("/tmp/b.json");
+  });
+  test("a registry file in the working directory is ignored", () => {
+    const workingDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "ntt-registry-")
+    );
+    const previousDirectory = process.cwd();
+    try {
+      fs.writeFileSync(
+        path.join(workingDirectory, "private-deployments.json"),
+        "{}"
+      );
+      process.chdir(workingDirectory);
+      expect(resolveRegistryPath(undefined, undefined)).toBe(
+        REPOSITORY_REGISTRY_PATH
+      );
+    } finally {
+      process.chdir(previousDirectory);
+      fs.rmSync(workingDirectory, { recursive: true });
     }
   });
-
-  test("canlock has no Solana leg; the other three do", () => {
-    const config = validateConfig(loadValidRaw());
-    expect(config.deployments.canlock.chains.Solana).toBeUndefined();
-    expect(config.deployments.canhub.chains.Solana).toBeDefined();
-    expect(config.deployments.ethlock.chains.Solana).toBeDefined();
-    expect(config.deployments.canburn.chains.Solana).toBeDefined();
-  });
-
-  test("loadConfig resolves the same file via explicit path", () => {
-    const config = loadConfig(REGISTRY_PATH);
-    expect(config.deployments.canburn.chains.Canton.mode).toBe("burning");
-  });
 });
 
-describe("validateConfig rejects broken registries", () => {
-  test("bad hex in a 32-byte field", () => {
-    const raw = loadValidRaw();
-    raw.deployments.canlock.chains.Canton.manager = "not-hex";
-    expect(() => validateConfig(raw)).toThrow(/32-byte hex/);
+describe("loadRegistry", () => {
+  test("the repository registry loads and is marked as the repository file", () => {
+    const { registry, source } = loadRegistry(undefined, undefined);
+    expect(source.isRepositoryFile).toBe(true);
+    expect(source.sha256Hex).toMatch(/^[0-9a-f]{64}$/);
+    expect(registry.network).toBe("Mainnet");
   });
 
-  test("missing chain (Ethereum) in a deployment", () => {
-    const raw = loadValidRaw();
-    delete raw.deployments.canlock.chains.Ethereum;
-    expect(() => validateConfig(raw)).toThrow(/missing chain "Ethereum"/);
-  });
-
-  test("unknown mode value", () => {
-    const raw = loadValidRaw();
-    raw.deployments.canhub.chains.Ethereum.mode = "wrapping";
-    expect(() => validateConfig(raw)).toThrow(/mode "locking" or "burning"/);
-  });
-
-  test("missing deployment entirely", () => {
-    const raw = loadValidRaw();
-    delete raw.deployments.ethlock;
-    expect(() => validateConfig(raw)).toThrow(
-      /missing required deployment "ethlock"/
-    );
-  });
-
-  test("non-integer decimals", () => {
-    const raw = loadValidRaw();
-    raw.deployments.canburn.chains.Solana.decimals = "9";
-    expect(() => validateConfig(raw)).toThrow(/expected an integer/);
-  });
-
-  test("malformed Ethereum address", () => {
-    const raw = loadValidRaw();
-    raw.deployments.canlock.chains.Ethereum.token = "0xnotanaddress";
-    expect(() => validateConfig(raw)).toThrow(/20-byte address/);
-  });
-});
-
-describe("parseChainAlias", () => {
-  test("accepts canonical names and short aliases, case-insensitively", () => {
-    expect(parseChainAlias("Canton")).toBe("Canton");
-    expect(parseChainAlias("canton")).toBe("Canton");
-    expect(parseChainAlias("ETHEREUM")).toBe("Ethereum");
-    expect(parseChainAlias("eth")).toBe("Ethereum");
-    expect(parseChainAlias("Solana")).toBe("Solana");
-    expect(parseChainAlias("SOL")).toBe("Solana");
-  });
-
-  test("rejects unknown chains", () => {
-    expect(() => parseChainAlias("sui")).toThrow(/unknown chain/);
-  });
-});
-
-describe("resolveConfigPath precedence", () => {
-  test("explicit path wins over everything else", () => {
-    expect(resolveConfigPath("/some/explicit/path.json")).toBe(
-      "/some/explicit/path.json"
-    );
-  });
-
-  test("NTT_PRIVATE_DEPLOYMENTS env var is used when no explicit path is given", () => {
-    const prev = process.env.NTT_PRIVATE_DEPLOYMENTS;
-    process.env.NTT_PRIVATE_DEPLOYMENTS = "/env/path.json";
+  test("an explicit file is used, hashed, and marked as not the repository file", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ntt-registry-"));
     try {
-      expect(resolveConfigPath()).toBe("/env/path.json");
+      const registryPath = path.join(directory, "local.json");
+      fs.writeFileSync(
+        registryPath,
+        JSON.stringify(retiredCanburnRegistryJson())
+      );
+      const { source } = loadRegistry(registryPath, undefined);
+      expect(source.absolutePath).toBe(registryPath);
+      expect(source.isRepositoryFile).toBe(false);
     } finally {
-      if (prev === undefined) delete process.env.NTT_PRIVATE_DEPLOYMENTS;
-      else process.env.NTT_PRIVATE_DEPLOYMENTS = prev;
-    }
-  });
-
-  test("falls back to walking up from the module directory to the repo root", () => {
-    const prevEnv = process.env.NTT_PRIVATE_DEPLOYMENTS;
-    const prevCwd = process.cwd();
-    delete process.env.NTT_PRIVATE_DEPLOYMENTS;
-    process.chdir(os.tmpdir());
-    try {
-      expect(resolveConfigPath()).toBe(REGISTRY_PATH);
-    } finally {
-      process.chdir(prevCwd);
-      if (prevEnv !== undefined) process.env.NTT_PRIVATE_DEPLOYMENTS = prevEnv;
+      fs.rmSync(directory, { recursive: true });
     }
   });
 });
