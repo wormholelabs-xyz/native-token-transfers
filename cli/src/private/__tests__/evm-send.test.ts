@@ -39,11 +39,23 @@ interface FakeOptions {
   peer?: Hex32;
   quoteReverts?: boolean;
   failWaitFor?: Set<"approve" | "transfer">;
+  broadcastThrowsFor?: Set<"approve" | "transfer">;
+  tokenDecimals?: number;
+  managerToken?: string;
 }
+
+const tokenReadAbi = new Interface([
+  "function decimals() view returns (uint8)",
+]);
+const managerTokenAbi = new Interface([
+  "function token() view returns (address)",
+]);
 
 function fakeSigner(options: FakeOptions) {
   const broadcasts: { kind: string; request: EthereumTransactionRequest }[] =
     [];
+  const signedKinds = new Map<string, string>();
+  let signCount = 0;
   const signer: EthereumSigner = {
     async getAddress() {
       return SENDER;
@@ -70,46 +82,61 @@ function fakeSigner(options: FakeOptions) {
           options.allowance ?? 0n,
         ]);
       }
+      if (selector === tokenReadAbi.getFunction("decimals")!.selector) {
+        return tokenReadAbi.encodeFunctionResult("decimals", [
+          options.tokenDecimals ?? ethereum.decimals,
+        ]);
+      }
+      if (selector === managerTokenAbi.getFunction("token")!.selector) {
+        return managerTokenAbi.encodeFunctionResult("token", [
+          options.managerToken ?? ethereum.token,
+        ]);
+      }
       return "0x";
     },
     async estimateGas() {
       return 21000n;
     },
-    async broadcast(request) {
+    async signTransaction(request) {
+      signCount++;
       const kind = request.data.startsWith(
         tokenAbi.getFunction("approve")!.selector
       )
         ? "approve"
         : "transfer";
+      const hash = `0x${String(signCount).padStart(64, "0")}`;
+      signedKinds.set(hash, kind);
       broadcasts.push({ kind, request });
-      const hash = `0x${String(broadcasts.length).padStart(64, "0")}`;
-      return {
-        hash,
-        async waitForReceipt(): Promise<EthereumReceiptSummary> {
-          if (options.failWaitFor?.has(kind as "approve" | "transfer"))
-            throw new Error("timeout");
-          const logs =
-            kind === "transfer"
-              ? [
-                  {
-                    address: "0x98f3c9e6E3fAce36bAAd05FE09d375Ef1464288B",
-                    topics: [
-                      LOG_MESSAGE_PUBLISHED_TOPIC,
-                      AbiCoder.defaultAbiCoder().encode(
-                        ["address"],
-                        [ethereum.transceiver]
-                      ),
-                    ],
-                    data: AbiCoder.defaultAbiCoder().encode(
-                      ["uint64", "uint32", "bytes", "uint8"],
-                      [42n, 0, "0x", 1]
-                    ),
-                  },
-                ]
-              : [];
-          return { hash, status: 1, logs };
-        },
-      };
+      return { signedTransactionHex: `0xsigned${signCount}`, hash };
+    },
+    async broadcastSignedTransaction(signed) {
+      const kind = signedKinds.get(signed.hash) as "approve" | "transfer";
+      if (options.broadcastThrowsFor?.has(kind))
+        throw new Error("proxy timeout after the node accepted it");
+    },
+    async waitForReceipt(hash): Promise<EthereumReceiptSummary> {
+      const kind = signedKinds.get(hash) as "approve" | "transfer";
+      if (options.failWaitFor?.has(kind)) throw new Error("timeout");
+      const logs =
+        kind === "transfer"
+          ? [
+              {
+                address: "0x98f3c9e6E3fAce36bAAd05FE09d375Ef1464288B",
+                topics: [
+                  LOG_MESSAGE_PUBLISHED_TOPIC,
+                  AbiCoder.defaultAbiCoder().encode(
+                    ["address"],
+                    [ethereum.transceiver]
+                  ),
+                ],
+                data: AbiCoder.defaultAbiCoder().encode(
+                  ["uint64", "uint32", "bytes", "uint8"],
+                  [42n, 0, "0x", 1]
+                ),
+              },
+            ]
+          : [];
+      return { hash, status: 1, logs };
     },
   };
   return { signer, broadcasts };
@@ -160,6 +187,32 @@ describe("evmSendWithSigner", () => {
     }
   );
 
+  test.each([
+    ["transfer", 10n ** 30n, ["transfer"], `0x${"1".padStart(64, "0")}`],
+    ["approve", 0n, ["approve"], `0x${"1".padStart(64, "0")}`],
+  ] as const)(
+    "%s broadcast call throws after signing: unconfirmed error with the hash, no further send",
+    async (failingKind, allowance, expectedKinds, expectedHash) => {
+      const { signer, broadcasts } = fakeSigner({
+        allowance,
+        broadcastThrowsFor: new Set([failingKind]),
+      });
+      const sendPromise = evmSendWithSigner(signer, sendParameters, {
+        dryRun: false,
+      });
+      await expect(sendPromise).rejects.toBeInstanceOf(
+        TransferBroadcastUnconfirmedError
+      );
+      await sendPromise.catch((err: TransferBroadcastUnconfirmedError) => {
+        expect(err.txHash).toBe(expectedHash);
+        expect(err.message).toMatch(/do not re-run; check the hash/);
+      });
+      expect(broadcasts.map((broadcast) => broadcast.kind)).toEqual([
+        ...expectedKinds,
+      ]);
+    }
+  );
+
   test("approve wait fails: stop after the approve, no transfer", async () => {
     const { signer, broadcasts } = fakeSigner({
       allowance: 0n,
@@ -178,6 +231,16 @@ describe("evmSendWithSigner", () => {
       "peer differs by 1 byte",
       { peer: parseHex32("00" + CANTON_MANAGER.slice(2)) },
       /peer/,
+    ],
+    [
+      "token decimals differ from the registry",
+      { tokenDecimals: 6 },
+      /decimals/,
+    ],
+    [
+      "manager token differs from the registry",
+      { managerToken: "0x000000000000000000000000000000000000bEEF" },
+      /token/,
     ],
   ])("%s: 0 broadcasts", async (_caseName, options, expectedError) => {
     const { signer, broadcasts } = fakeSigner({
