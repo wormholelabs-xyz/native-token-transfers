@@ -37,6 +37,7 @@ export function retiredCanburnRegistryJson(): any {
               admin: `guardianGovernance::${RETIRED_CANTON_NAMESPACE}`,
               id: "wormhole-ntt:d8740ea9950b48eb490f6aa9bd91e5ccb4066971482e476a6bb98cbff10a4e7d",
             },
+            reserveCustodian: `nttCustody::${RETIRED_CANTON_NAMESPACE}`,
             vettedPackageIds: {
               ntt: TEST_NTT_PACKAGE_ID,
               core: TEST_CORE_PACKAGE_ID,

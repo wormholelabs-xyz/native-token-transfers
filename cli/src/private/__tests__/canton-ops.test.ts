@@ -4,6 +4,7 @@ import { requireDeployment, validateRegistry } from "../config.js";
 import {
   cantonRedeem,
   cantonSend,
+  extractTransferSequence,
   redeemCommandId,
   transferCommandId,
 } from "../canton-ops.js";
@@ -82,6 +83,7 @@ function fakes(options: {
   flow: unknown;
   flowStatus?: 404;
   managerContractNumber?: number;
+  reserveCustodian?: string;
 }) {
   const { registry, deployment } = registryWithMode(options.mode);
   const canton = deployment.chains.Canton!;
@@ -104,6 +106,9 @@ function fakes(options: {
           ),
           tokenConfig: options.mode === "burning" ? "BurnMint" : "LockUnlock",
           instrumentId: canton.instrument,
+          reserveCustodian: parseCantonPartyId(
+            options.reserveCustodian ?? canton.reserveCustodian
+          ),
           paused: false,
         },
       ];
@@ -278,6 +283,103 @@ describe("cantonSend", () => {
       })
     ).toBeUndefined();
     expect(setup.submitted.length).toBe(0);
+  });
+});
+
+describe("cantonSend result handling", () => {
+  test("submit error: result unknown, names the command id and the nonce", async () => {
+    const setup = fakes({
+      mode: "burning",
+      flow: flowJson("transfer", SEND_ROLES),
+    });
+    setup.ledger.submitAndWaitForTransaction = async (request) => {
+      setup.submitted.push(request);
+      throw new Error("POST timed out after 120000 ms");
+    };
+    const sending = cantonSend(
+      setup.ledger,
+      setup.disclosure,
+      sendInput(setup),
+      { dryRun: false }
+    );
+    await expect(sending).rejects.toThrow(/result unknown/);
+    await sending.catch((err: Error) => {
+      expect(err.message).toContain("--transfer-nonce 7");
+      expect(err.message).toContain(setup.submitted[0].commands.commandId);
+    });
+  });
+
+  test("committed with an unreadable result: returns the command id without a sequence", async () => {
+    const setup = fakes({
+      mode: "burning",
+      flow: flowJson("transfer", SEND_ROLES),
+    });
+    setup.ledger.submitAndWaitForTransaction = async () => ({ events: [] });
+    const result = await cantonSend(
+      setup.ledger,
+      setup.disclosure,
+      sendInput(setup),
+      { dryRun: false }
+    );
+    expect(result?.commandId).toMatch(/^ntt-private-send-/);
+    expect(result?.sequence).toBeUndefined();
+  });
+
+  test("reserveCustodian differs from the registry: 0 submits", async () => {
+    const setup = fakes({
+      mode: "burning",
+      flow: flowJson("transfer", SEND_ROLES),
+      reserveCustodian: `someoneElse::${RETIRED_CANTON_NAMESPACE}`,
+    });
+    await expect(
+      cantonSend(setup.ledger, setup.disclosure, sendInput(setup), {
+        dryRun: false,
+      })
+    ).rejects.toThrow(/reserveCustodian/);
+    expect(setup.submitted.length).toBe(0);
+  });
+});
+
+describe("extractTransferSequence", () => {
+  const managerTemplate = NTT_TEMPLATE;
+  test.each([
+    ["no events", []],
+    [
+      "two Transfer events",
+      [1, 2].map(() => ({
+        ExercisedEvent: {
+          templateId: managerTemplate,
+          choice: "Transfer",
+          exerciseResult: { sequence: "1" },
+        },
+      })),
+    ],
+    [
+      "sequence not a number text",
+      [
+        {
+          ExercisedEvent: {
+            templateId: managerTemplate,
+            choice: "Transfer",
+            exerciseResult: { sequence: 5 },
+          },
+        },
+      ],
+    ],
+    [
+      "other template",
+      [
+        {
+          ExercisedEvent: {
+            templateId: `${"ab".repeat(32)}:Other.Module:Thing`,
+            choice: "Transfer",
+            exerciseResult: { sequence: "1" },
+          },
+        },
+      ],
+    ],
+  ])("rejects %s", (_caseName, events) => {
+    expect(() => extractTransferSequence({ events })).toThrow();
   });
 });
 
