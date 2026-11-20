@@ -29,6 +29,7 @@ It has no deployments. Put the deployments and the participant settings in a loc
 | `canton.participant.oauthClientId` | The OAuth client id. The secret is `CANTON_OAUTH_CLIENT_SECRET`.      |
 | `canton.participant.userPartyId`   | Complete party id `<hint>::1220<64 hex>`. The CLI acts as this party. |
 | `chains.Canton.instrument`         | `{ admin, id }` of the token instrument.                              |
+| `chains.Canton.reserveCustodian`   | Complete party id of the reserve custodian.                           |
 | `chains.Canton.vettedPackageIds`   | `ntt` and `core` package ids that you vetted.                         |
 | `chains.Ethereum` addresses        | EIP-55 checksummed.                                                   |
 | `chains.Solana` addresses          | Base58 values that decode to exactly 32 bytes.                        |
@@ -44,16 +45,46 @@ The loader rejects an unknown field. Thus a schema 1 file fails.
   - For a Canton recipient, type the complete party id.
   - For other recipients, type the last 8 hex characters of the recipient bytes32.
 - `--yes` skips the typed confirmation. Without `--yes`, a submit from a non-terminal input stops.
+- For a Canton recipient, `--yes` also needs `--yes-recipient` with the same complete party id.
 - `--recipient-raw` needs `--i-accept-raw-recipient`.
-- An Ethereum send checks the RPC chain id and the peer manager of the destination chain.
+- An Ethereum send checks the RPC chain id, the manager token, the token decimals and the destination peer.
+- A Solana send checks the manager mint, the mint decimals and the destination peer.
+- The registry chain ids must equal the SDK chain ids.
+- `SOLANA_PAYER_PATH` must have mode 600 or 400.
 - A Canton operation gets its contracts from the disclosure service flow routes.
-  It compares the `NttManager` with `/v1/managers` and the registry before it submits.
 - A Canton command acts as the user party only. It uses no `readAs` party.
+
+## Trust in the disclosure service
+
+The CLI trusts the disclosure service to name the correct `NttManager` contract. The reason is that
+the user's participant cannot read the `NttManager`. Only its stakeholders can read it.
+
+The CLI compares the `NttManager` role with these values:
+
+- The `/v1/managers` entry of the registry manager address: contract id, token mode, instrument,
+  `reserveCustodian` and pause state.
+- The vetted `ntt` and `core` package ids of the registry.
+
+`/v1/managers` comes from the same service. Thus a changed service can name a different `NttManager`
+contract of the vetted package with the same values. The ledger binds each disclosed blob to its
+contract id, but the CLI cannot decode the blob.
+
+Limits:
+
+- The CLI does not check that a Canton recipient party exists. The flow routes need a VAA digest, thus
+  no recipient check exists before a send. The typed party id is the control.
+- `/v1/managers` gives no token decimals. The CLI does not compare the Canton decimals with the ledger.
+- `feeAllocation` is always empty. A core message fee above zero makes each Canton send fail. No funds move.
 
 ## Retries
 
-- After an Ethereum broadcast, the CLI does not send again. If the receipt does not come, the CLI shows the hash.
-  Examine the hash before you run the command again.
+- The CLI signs an Ethereum transaction first. It prints the hash, then it broadcasts.
+  After the signature, each error gives the hash and "do not re-run; check the hash".
+- The CLI signs a Solana transaction first. It prints the signature, then it sends.
+  After the signature, an error gives "result unknown". The CLI reports "expired, safe to retry" only
+  when a second status read after the block-height limit finds no transaction.
 - A Canton send prints its transfer nonce. To retry the same transfer, use `--transfer-nonce` with that value.
   The command id is then the same, and the participant rejects a duplicate.
+- A Canton submit waits up to 120 s. A timeout or another submit error gives "result unknown" with the
+  command id and the `--transfer-nonce` value.
 - A Canton redeem uses a command id from the VAA digest.

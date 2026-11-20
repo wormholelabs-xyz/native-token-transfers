@@ -1,5 +1,5 @@
-// Client of the NTT disclosure service flow routes (canton/disclosure/README.md). The service is
-// untrusted: callers compare its answers with the registry before a submit.
+// Client of the NTT disclosure service flow routes (canton/disclosure/README.md). Callers compare
+// its answers with the registry before a submit; see cli/src/private/README.md for the trust limit.
 import type { CantonInstrumentId } from "../config.js";
 import {
   parseCantonContractId,

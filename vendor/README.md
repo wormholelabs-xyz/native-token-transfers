@@ -9,6 +9,7 @@ The upstream SDK does not include Canton.
 The root `package.json` `overrides` entry replaces `sdk-base` with this tarball in every workspace.
 The root `devDependencies` entry names the same tarball. Bun 1.3.4 does not extract a `file:` tarball that only an override names.
 The `bun.lock` entry records its SHA-512 integrity.
+The `minimumReleaseAgeExcludes` entry for `sdk-base` in `bunfig.toml` has no effect on a `file:` source.
 
 ### Provenance
 
