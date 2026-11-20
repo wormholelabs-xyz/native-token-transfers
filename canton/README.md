@@ -142,8 +142,8 @@ The operator does the deployment work. The guardians sign one transaction.
 rejects these parameters:
 
 - `feeCustody` or `nttCustody` is `gg`, or `feeCustody` is `nttCustody`.
-- The governance chain is not 1, or the governance contract is not
-  `0000…0004`.
+- The governance chain is not 1 to 65535, or the governance contract is not
+  32 bytes of lowercase hex.
 - A `FirstGenesis` with an id floor above 0 or with a consumed digest.
 
 It then creates these contracts:
