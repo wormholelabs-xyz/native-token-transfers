@@ -17,15 +17,15 @@ module Wormhole.Ntt.Bytes
 
 import Wormhole.Core.Bytes
 
-nttAddressByteWidth : Int
-nttAddressByteWidth = 32
+nttFixedFieldByteWidth : Int
+nttFixedFieldByteWidth = 32
 
-parseNttAddressHex : Text -> Text -> Either Text Text
-parseNttAddressHex typeName hexText = case parseHexText @HexBytes hexText of
+parseNtt32ByteHex : Text -> Text -> Either Text Text
+parseNtt32ByteHex typeName hexText = case parseHexText @HexBytes hexText of
   Left _ -> Left (typeName <> ": not whole bytes of lowercase hex")
   Right hexBytes
-    | byteLength hexBytes == nttAddressByteWidth -> Right hexText
-    | otherwise -> Left (typeName <> ": expected " <> show nttAddressByteWidth <> " bytes, got "
+    | byteLength hexBytes == nttFixedFieldByteWidth -> Right hexText
+    | otherwise -> Left (typeName <> ": expected " <> show nttFixedFieldByteWidth <> " bytes, got "
         <> show (byteLength hexBytes))
 
 -- | The 32-byte address of an NTT manager on any chain: this deployment's
@@ -33,28 +33,28 @@ parseNttAddressHex typeName hexText = case parseHexText @HexBytes hexText of
 data NttManagerAddress = NttManagerAddress Text deriving (Eq, Ord, Show)
 instance HexEncodedValue NttManagerAddress where
   hexTextOf (NttManagerAddress hexText) = hexText
-  parseHexText = fmap NttManagerAddress . parseNttAddressHex "NttManagerAddress"
+  parseHexText = fmap NttManagerAddress . parseNtt32ByteHex "NttManagerAddress"
 instance HexEncodedBytes NttManagerAddress
 
 -- | The 32-byte id of an 'Wormhole.Ntt.Payload.NttManagerMessage'.
 data NttMessageId = NttMessageId Text deriving (Eq, Ord, Show)
 instance HexEncodedValue NttMessageId where
   hexTextOf (NttMessageId hexText) = hexText
-  parseHexText = fmap NttMessageId . parseNttAddressHex "NttMessageId"
+  parseHexText = fmap NttMessageId . parseNtt32ByteHex "NttMessageId"
 instance HexEncodedBytes NttMessageId
 
 -- | The 32-byte registration binding that a RegisterBurnMintManager VAA carries.
 data NttRegistrationBinding = NttRegistrationBinding Text deriving (Eq, Ord, Show)
 instance HexEncodedValue NttRegistrationBinding where
   hexTextOf (NttRegistrationBinding hexText) = hexText
-  parseHexText = fmap NttRegistrationBinding . parseNttAddressHex "NttRegistrationBinding"
+  parseHexText = fmap NttRegistrationBinding . parseNtt32ByteHex "NttRegistrationBinding"
 instance HexEncodedBytes NttRegistrationBinding
 
 -- | The 32-byte identity of one 'Wormhole.Ntt.Governance.NttGovernance' root lineage.
 data NttGovernanceRootIdentity = NttGovernanceRootIdentity Text deriving (Eq, Ord, Show)
 instance HexEncodedValue NttGovernanceRootIdentity where
   hexTextOf (NttGovernanceRootIdentity hexText) = hexText
-  parseHexText = fmap NttGovernanceRootIdentity . parseNttAddressHex "NttGovernanceRootIdentity"
+  parseHexText = fmap NttGovernanceRootIdentity . parseNtt32ByteHex "NttGovernanceRootIdentity"
 instance HexEncodedBytes NttGovernanceRootIdentity
 
 -- | Every byte is zero: the unset address that the reference @setPeer@ rejects.

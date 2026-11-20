@@ -74,10 +74,11 @@ the upgrades of a package in order.
 
 ### Version 0.6.x is not upgrade-compatible
 
-Version 0.6.0 builds against core 0.12.0 (`aec76d21...`, SDK 3.7.3) and has
+Version 0.6.1 builds against core 0.12.2 (`e162e0c0...`, SDK 3.7.3) and has
 the package id
-`79a1cc2c865653eafc03a39a2d81ed0f8bdafb86aa2cc7e9d3f17464faeb9536`.
-`ntt/daml.yaml` has no `upgrades:` field. Use participants that have no
+`23d8ac9ca0c2bcfcc88988e63996eef5d15016bfcd4356df4ecaaa0820c19457`.
+Version 0.6.0 built against core 0.12.0 (`aec76d21...`) and has the package
+id `79a1cc2c...`. `ntt/daml.yaml` has no `upgrades:` field. Use participants that have no
 earlier `ntt` package.
 
 Version 0.6.0 changes these values:
@@ -94,6 +95,10 @@ Version 0.6.0 changes these values:
   digests or fewer, with an eviction floor.
 - The registration binding of a `RegisterBurnMintManager` VAA holds the root
   identity (tag `wormhole:ntt-registration:v2`).
+
+Version 0.6.1 has the templates and choices of 0.6.0. A re-genesis merges the
+NTT replay record with the core function
+`tryGovernanceReplayRecordForRegenesisFromRecords`.
 
 ### Version 0.5.x is not upgrade-compatible
 
@@ -135,9 +140,12 @@ do not hold another instance discriminator. The guardians must sign one
 The registration binding holds the `rootIdentity` of one `NttGovernance`
 root. A first genesis sets it to
 `keccak256(tag ‖ lp(utf8(gg)) ‖ uint64(ledger time in microseconds))`. A
-re-genesis keeps the identity of the earlier root. Thus a second first genesis
-under one `gg` makes a root that rejects each registration VAA of the first
-root. Before the guardians sign a registration VAA, they read the
+re-genesis keeps the identity of the earlier root. A first genesis at another
+ledger time makes a root with another identity. That root rejects each
+registration VAA of the first root. Two first geneses at one ledger time, for
+example in one transaction, make two roots with one identity. Then each root
+accepts the registration VAAs of the other root. This is a residual risk. One
+root for each `gg` is a guardian rule. Before the guardians sign a registration VAA, they read the
 `rootIdentity` of their root.
 
 NTT must be final at genesis. An upgrade-compatible NTT version needs only
@@ -146,7 +154,7 @@ new `NttGovernance` root, and thus one more `gg` transaction. That
 transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Then one
 manager address gets two managers, and each inbound transfer mints two times.
-For roots of `ntt` 0.6.0 and core 0.12.0, a re-genesis (`ReGenesisReplacing`,
+For roots of `ntt` 0.6.1 and core 0.12.2, a re-genesis (`ReGenesisReplacing`,
 see "Genesis") is this transaction. It replaces the core roots and the NTT
 root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
@@ -164,11 +172,15 @@ registration VAA in the `NttGovernance` replay record. The record uses the
 core rules (`recordGovernanceDigest`, `checkConsumedGovernanceIsBounded`):
 
 - The record holds 32 digests or fewer.
-- On a full record, `recordGovernanceDigest` removes the digest with the
+- On a full record, `recordGovernanceDigest` removes each digest at the
   lowest timestamp. The floor (`evictedGovernanceMaxTimestampSeconds`)
   increases to that timestamp.
 - The ledger rejects a registration VAA with a timestamp at or below the
   floor.
+
+After 32 registrations with newer timestamps, a pending registration VAA can
+be at or below the floor. Then the ledger rejects it, and the guardians sign
+the registration again with a newer timestamp.
 
 A registration has no other replay protection. A second registration with
 one VAA makes a second manager for the same instrument. Thus the floor
@@ -237,8 +249,8 @@ from the same contracts:
 
 - `coreGovernanceReplayRecord`: `tryGovernanceReplayRecordForRegenesis` of
   the earlier `CoreState`.
-- `nttGovernanceReplayRecord`: `tryNttGovernanceReplayRecordForRegenesis` of
-  the earlier `NttGovernance`.
+- `nttGovernanceReplayRecord`: `tryGovernanceReplayRecordForRegenesisFromRecords`
+  of the record of the earlier `NttGovernance` (`nttGovernanceReplayRecordOf`).
 - `genesisGuardianSet`: the index and the current set of the earlier
   `CoreState`, with the public key of each guardian.
 - `firstEmitterId`: the `nextId` of the earlier `EmitterRegistry`.
@@ -248,8 +260,13 @@ A replay record is the consumed digests (digest to VAA timestamp) and the
 eviction floor. For one earlier root, it equals the record of that root.
 
 `AcceptGenesis` fetches the earlier roots. It rejects the re-genesis if a
-root has another `gg` or custody party, or if a value differs from what the
-earlier roots give. It then archives the four earlier roots and creates the
+root has another `gg` or custody party. It also rejects the re-genesis if one
+of these values differs from what the earlier roots give: the two id floors,
+the two replay records, the guardian set index, the guardian sets and the
+genesis guardians. The ledger compares only these values. Each guardian must
+compare each other parameter with the earlier roots: the governance chain,
+the governance contract, the fee instrument, each fee, `onboardingFeeAdmin`.
+`AcceptGenesis` then archives the four earlier roots and creates the
 new roots in the same transaction. The new `CoreState` gets the guardian set
 index and the stored sets of the earlier `CoreState`
 (`tryGuardianSetsForRegenesis`). The new `NttGovernance` gets the earlier
@@ -320,9 +337,12 @@ To move a deployment from an earlier version, do these steps:
 2. In the same transaction, set `nextId` of the new root to the `nextId` of
    the archived root. Thus no manager address and no replay namespace occurs
    two times.
-3. In the same transaction, copy `rootIdentity`, `consumedGovernance` and
-   `evictedGovernanceMaxTimestampSeconds` of the archived root to the new
-   root. Thus no earlier registration VAA applies again.
+3. In the same transaction, set the `rootIdentity` of the new root as a first
+   genesis does. A root before 0.6.0 has no `rootIdentity`, and its digests
+   have no timestamps. Set `consumedGovernance` to empty. Set
+   `evictedGovernanceMaxTimestampSeconds` to the latest timestamp of a
+   registration VAA of the archived root. Thus no earlier registration VAA
+   applies again.
 4. Register each deployment again on the new root.
 5. On each peer chain, register the new manager and transceiver addresses.
 6. Move each reserve from its old custodian to the new `reserveCustodian`.
