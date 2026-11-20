@@ -75,7 +75,7 @@ data GenesisParameters = GenesisParameters with
     firstEmitterId             : Int                     -- EmitterRegistry nextId; the earlier registry's nextId on a re-genesis
     firstNttManagerId          : Int                     -- NttGovernance nextId; the earlier root's nextId on a re-genesis
     coreGovernanceReplayRecord : GovernanceReplayRecord  -- empty at a first genesis; tryGovernanceReplayRecordForRegenesis of the earlier CoreState
-    nttGovernanceReplayRecord  : GovernanceReplayRecord  -- empty at a first genesis; tryGovernanceReplayRecordForRegenesisFromRecords of the earlier NttGovernance
+    nttGovernanceReplayRecord  : GovernanceReplayRecord  -- empty at a first genesis; tryGovernanceReplayRecordForRegenesisFromRecords [nttGovernanceReplayRecordOf earlierNttGovernance]
     genesisKind                : GenesisKind
   deriving (Eq, Show)
 
