@@ -16,6 +16,7 @@
         "@types/jest": "^29.5.12",
         "@types/node": "^20.12.2",
         "@wormhole-foundation/sdk": "6.1.6",
+        "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz",
         "@wormhole-foundation/wormchain-sdk": "^0.0.1",
         "ethers": "^6.5.1",
         "prettier": "3.6.2",

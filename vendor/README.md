@@ -7,6 +7,7 @@ The Canton values are: chain id 75, platform `Canton`, address format `hex`, 10 
 The upstream SDK does not include Canton.
 
 The root `package.json` `overrides` entry replaces `sdk-base` with this tarball in every workspace.
+The root `devDependencies` entry names the same tarball. Bun 1.3.4 does not extract a `file:` tarball that only an override names.
 The `bun.lock` entry records its SHA-512 integrity.
 
 ### Provenance
@@ -60,6 +61,6 @@ Use the frozen lockfile only:
 1. Apply the Canton patch to the new upstream tag.
 2. Do the rebuild procedure.
 3. Replace the tarball and the patch.
-4. Update the override entry in the root `package.json`.
+4. Update the override and the `devDependencies` entry in the root `package.json`.
 5. Update the `bun.lock` entries for the override and for `sdk-base`.
 6. Update the values in this file and in the `Vendor provenance` workflow.
