@@ -79,7 +79,6 @@ func parseFlags(args []string) (*options, error) {
 	jsonAPI := fs.String("json-api", "", "base URL of the JSON Ledger API v2 (required)")
 	guardianGovernanceParty := fs.String("guardian-governance-party", "", "gg: reads the bridge state (required)")
 	nttCustodyParty := fs.String("ntt-custody-party", "", "nttCustody: reads the custody pots and its own TransferPreapprovals (required)")
-	operatorParty := fs.String("operator-party", "", "operator: reads ReplayRootRegistry only; enables the register flow (optional)")
 	tokenFile := fs.String("access-token-file", "", "path to a file holding a bearer token forwarded upstream; re-read on every upstream request")
 	maxContracts := fs.Int("max-contracts-per-template", defaultMaxContractsPerTemplate, "cap on NttManager contracts in /v1/managers and in the registry instrument list, 1 to 10000; more is an error")
 	maxUpstream := fs.Int("max-upstream-concurrency", defaultMaxUpstreamConcurrency, "cap on in-flight upstream ledger queries, 1 to 64; excess requests wait briefly, then get a 503")
@@ -111,7 +110,7 @@ func parseFlags(args []string) (*options, error) {
 	if err := checkJSONAPIURL(*jsonAPI, upstreamAuth.sendsBearerToken(), upstreamTLS); err != nil {
 		return nil, err
 	}
-	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty, *operatorParty)
+	readerParties, err := parseReaderParties(*guardianGovernanceParty, *nttCustodyParty)
 	if err != nil {
 		return nil, err
 	}
@@ -228,8 +227,8 @@ func run(ctx context.Context, opts *options, stderr io.Writer) error {
 		return err
 	}
 
-	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s operator=%q, %d flow template(s)\n",
-		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, opts.readerParties.operator, len(flowTemplateByTail))
+	fmt.Fprintf(stderr, "disclosure-service: reader parties guardianGovernance=%s nttCustody=%s, %d flow template(s)\n",
+		opts.readerParties.guardianGovernance, opts.readerParties.nttCustody, len(flowTemplateByTail))
 	fmt.Fprintf(stderr, "disclosure-service: upstream auth: %s; upstream TLS: %s\n", describeUpstreamAuth(opts.upstreamAuth), describeUpstreamTLS(opts.upstreamTLS))
 	if registry != nil {
 		fmt.Fprintf(stderr, "disclosure-service: CIP-0056 registry API on for admin %s, %d configured instrument(s)\n", registry.adminParty, len(registry.displayByInstrumentID))

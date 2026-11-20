@@ -1030,15 +1030,11 @@ func (s *server) assembleConsolidate(ctx context.Context, request consolidateReq
 	return &flowResponse{Flow: "consolidate", Disclosures: disclosures, Missing: missing}, nil
 }
 
-// checkFlowEnabled refuses register without --operator-party, and a register gg other than the
-// configured guardianGovernance party.
+// checkFlowEnabled refuses a register gg other than the configured guardianGovernance party.
 func (s *server) checkFlowEnabled(request flowRequest) error {
 	register, isRegister := request.(registerRequest)
 	if !isRegister {
 		return nil
-	}
-	if s.opts.readerParties.operator == "" {
-		return newFlowError(http.StatusNotFound, "flow register not enabled: the service has no operator party")
 	}
 	if register.guardianGovernance != "" && register.guardianGovernance != s.opts.readerParties.guardianGovernance {
 		return newFlowError(http.StatusBadRequest, "gg must be the service's guardianGovernance party")

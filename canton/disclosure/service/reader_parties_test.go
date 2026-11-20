@@ -128,9 +128,9 @@ func TestRegisterFlowChecksGuardianGovernanceParam(t *testing.T) {
 				assert.Zero(t, counter.totalCalls())
 				return
 			}
-			assert.NotEqual(t, http.StatusNotFound, recorder.Code, recorder.Body.String())
-			assert.NotEqual(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
-			assert.NotZero(t, counter.totalCalls())
+			assert.NotContains(t, recorder.Body.String(), "not enabled")
+			assert.NotContains(t, recorder.Body.String(), "gg must be")
+			assert.NotZero(t, counter.totalCalls(), "the register flow reads the ledger")
 		})
 	}
 }
