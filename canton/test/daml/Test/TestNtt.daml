@@ -521,15 +521,15 @@ testNttDeployment = do
   ledger.managerAddress === ma.managerAddress
   dB.ledgerCid === None
 
-  -- Pin the manager-address encoding against the cross-language vector, and
+  -- Pin the manager-address encoding against a fixed vector, and
   -- confirm the emitter/manager domain tags separate identical ordinals.
-  derivedAddressFromText (DomainTag nttManagerAddressTag) (RegistrarText "vector-operator::1220deadbeef") (OwnerText "vector-owner::1220cafebabe") (RegistryId 7)
-    === "27d9c172814411dbdacf4842ae5de98cf78ce21e77def6f76f0f75387a28c93b"
+  derivedAddressFromText (DomainTag nttManagerAddressTag) (RegistrarText "vector-registrar::1220deadbeef") (OwnerText "vector-owner::1220cafebabe") (RegistryId 7)
+    === "52734ae3caf51e70510fa464245ddfd9be378b04d7b0422a740bb3d9581bc769"
   assert (derivedAddressFromText (DomainTag emitterAddressTag) (RegistrarText "p::1") (OwnerText "q::2") (RegistryId 0)
             /= derivedAddressFromText (DomainTag nttManagerAddressTag) (RegistrarText "p::1") (OwnerText "q::2") (RegistryId 0))
 
 -- | Registration mints one fresh gg-owned transceiver per deployment: two
--- deployments' emitters share the same owner (gg) and operator but carry
+-- deployments' emitters share the same owner and registrar (gg) but carry
 -- distinct emitter ids, and 'Transfer' rejects a foreign deployment's
 -- emitter — the emitterId check binds the transceiver to THIS manager even
 -- though ownership alone cannot tell the two apart.
@@ -1442,8 +1442,8 @@ testConsolidateCustody = do
 
   -- A stale hint over an intact single pot: one supplied holding just
   -- repoints the hint, with no registry transfer — note the submission
-  -- carries no factory disclosure, so a merge could not even run. The ledger
-  -- is gg's and operator's alone now, so alice's authority is unneeded here.
+  -- carries no factory disclosure, so a merge could not even run. gg alone
+  -- controls the ledger choices.
   staleLedgerCid <- submit (actAs gg) do
     exerciseCmd freshLedgerCid SetCustodyHint with newCustodyHint = None
   staleLedgerDisc <- fromSome <$> queryDisclosure gg staleLedgerCid
@@ -2872,8 +2872,8 @@ acceptAdminFixture gg admin config csId = do
 
 -- | Disclosures a stakeholder-less @executor@ needs to relay
 -- 'AcceptAdminTransferByVaa': manager, core state, covering replay node, and
--- the standing proposal (queried as @admin@ — @operator@ is not a
--- stakeholder of 'AdminTransferProposal'), plus the ledger for lock/unlock.
+-- the standing proposal (queried as @admin@, its signatory), plus the
+-- ledger for lock/unlock.
 acceptAdminDiscs
   : Party -> Party -> ContractId CoreState -> AcceptAdminFixture -> Text
   -> Script (ContractId ReplayNode, [Disclosure])
@@ -3832,12 +3832,11 @@ testRegisterManagerByVaaBounds = do
     registerManagerByVaaCmd admin fx csId 0 dummyFactory registerDecimalsOutOfRangeVAA
   expectAbort "tokenDecimals must be between 0 and 10" res
 
--- | The binding mismatch is the deepest gate any static VAA can ever reach:
--- 'nttRegistrationBindingFor' commits to the genuinely-allocated (operator,
--- admin) parties' fingerprints, which no pre-signed fixture can predict. The
--- factory template-pin and happy path are downstream of this gate and so
--- unreachable in Daml Script; they're exercised by the LocalNet Go
--- integration test, which can sign against real, just-allocated party ids.
+-- | The binding mismatch is the deepest gate a static VAA reaches:
+-- 'nttRegistrationBindingFor' commits to the allocated (guardianGovernance,
+-- admin) parties' fingerprints, which a pre-signed fixture cannot predict.
+-- The happy path signs in the script ('Test.TestNttOperatorIndependence')
+-- and live in the Go integration test.
 testRegisterManagerByVaaBindingMismatch : Script ()
 testRegisterManagerByVaaBindingMismatch = do
   (gg, csId) <- nttSetup

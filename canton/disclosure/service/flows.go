@@ -1030,8 +1030,8 @@ func (s *server) assembleConsolidate(ctx context.Context, request consolidateReq
 	return &flowResponse{Flow: "consolidate", Disclosures: disclosures, Missing: missing}, nil
 }
 
-// checkFlowEnabled refuses a register gg other than the configured guardianGovernance party.
-func (s *server) checkFlowEnabled(request flowRequest) error {
+// checkRegisterGuardianGovernanceParam refuses a register gg other than the configured guardianGovernance party.
+func (s *server) checkRegisterGuardianGovernanceParam(request flowRequest) error {
 	register, isRegister := request.(registerRequest)
 	if !isRegister {
 		return nil
@@ -1054,7 +1054,7 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		s.writeFlowError(w, r, err)
 		return
 	}
-	if err := s.checkFlowEnabled(request); err != nil {
+	if err := s.checkRegisterGuardianGovernanceParam(request); err != nil {
 		s.writeFlowError(w, r, err)
 		return
 	}

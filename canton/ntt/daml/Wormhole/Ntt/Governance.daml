@@ -1,9 +1,8 @@
 -- | The NTT bootstrap root and manager registry.
 --
 -- 'NttGovernance' is created once per @guardianGovernance@ (gg) by the
--- guardian quorum, in the genesis transaction that also creates the core
--- @CoreState@. That transaction is the only time gg and @nttCustody@ actively
--- sign for NTT. Afterwards, 'RegisterManager' lends the root's
+-- guardian quorum: gg and @nttCustody@ sign its create. That create is the
+-- only time gg and @nttCustody@ actively sign for NTT. Afterwards, 'RegisterManager' lends the root's
 -- inherited signatures to create a fully co-signed 'NttManager' per
 -- deployment, so deployment stays permissionless and crankless: any admin
 -- with a disclosure of this root can register (for burn/mint, co-signed by

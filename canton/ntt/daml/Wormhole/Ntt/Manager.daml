@@ -172,15 +172,21 @@ requireCanonicalFactory guardianGovernance factory = do
       (cf.admin == guardianGovernance)
 
 -- | Pin a caller-supplied 'CoreState' to the deployment's committed trust
--- anchor, then fetch it. guardianGovernance is a CoreState signatory, so the
--- equality also proves gg authorized the contract's creation. The pin runs
--- before the fetch: a 'CoreState' of another gg fails the pin, not the fetch
--- authorization.
-requireCommittedCoreState : Party -> ContractId CoreState -> Update CoreState
-requireCommittedCoreState guardianGovernance coreStateCid = do
-  committedGuardianGovernance <- exercise coreStateCid GetGuardianGovernance with reader = guardianGovernance
+-- anchor through 'GetGuardianGovernance'. @reader@ is the controller of that
+-- read. guardianGovernance is a CoreState signatory, so the equality also
+-- proves gg authorized the contract's creation.
+pinCommittedCoreState : Party -> Party -> ContractId CoreState -> Update ()
+pinCommittedCoreState reader guardianGovernance coreStateCid = do
+  committedGuardianGovernance <- exercise coreStateCid GetGuardianGovernance with reader
   assertMsg "ntt: core state is not the committed guardian trust anchor"
     (committedGuardianGovernance == guardianGovernance)
+
+-- | 'pinCommittedCoreState' with gg as the reader, then fetch the contract.
+-- The pin runs before the fetch: a 'CoreState' of another gg fails the pin,
+-- not the fetch authorization.
+requireCommittedCoreState : Party -> ContractId CoreState -> Update CoreState
+requireCommittedCoreState guardianGovernance coreStateCid = do
+  pinCommittedCoreState guardianGovernance guardianGovernance coreStateCid
   cs <- fetch coreStateCid
   assertMsg "ntt: fetched core state is not the committed guardian trust anchor"
     (cs.guardianGovernance == guardianGovernance)
@@ -432,9 +438,7 @@ verifyInboundTransfer
   -> Party                    -- ^ recipient, bound against the VAA
   -> Update NativeTokenTransfer
 verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys recipient = do
-  csGg <- exercise coreStateCid GetGuardianGovernance with reader = executor
-  assertMsg "ntt: core state is not the committed guardian trust anchor"
-    (csGg == mgr.guardianGovernance)
+  pinCommittedCoreState executor mgr.guardianGovernance coreStateCid
   (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
     encodedVAA = vaaBytes
     pubKeys
