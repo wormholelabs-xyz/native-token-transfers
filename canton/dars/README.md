@@ -18,40 +18,35 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: built from wormhole PR #81 commit
-`843c053387a0321d5dcaabdf3dfe982fb24a040d` in `wormholelabs-xyz/wormhole`
-(version 0.8.3), SDK 3.5.1. That commit stays reachable from
-`refs/pull/81/head`. The main package id is
-`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`. The PR #81
-squash on integration/canton, `7cc1fc3691c9ce32a391751d7f303fa28e1ebea5`,
-gives the same package id. Its DAR sha256 is different, because two source
-files differ in doc comments only.
+Provenance: built from `wormholelabs-xyz/wormhole` branch `integration/canton`
+at commit `9c7b639e7` (the PR #84 squash), version 0.9.0, SDK 3.5.1. The PR
+#84 head `f6ac7ac0d` has the same tree. The main package id is
+`bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`.
 
-Version 0.8.3 declares 0.8.2 (`132d32bf...`) as its `upgrades:` baseline.
-Versions 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs
-as `guardianGovernance`. The earlier NTT pin `5b256d13...` is a build of
-PR #81 before the core renumbered it to 0.8.3. That build is also withdrawn.
-`guardianGovernance` co-signs `EmitterRegistry` and `Emitter`.
-`RegisterEmitter` takes `expectedGuardianGovernance`; `ntt` passes
-`Some guardianGovernance`.
+Version 0.9.0 has no `upgrades:` baseline. It removes the operator from each
+core template, so it is not upgrade-compatible with 0.8.x. Versions 0.8.0 to
+0.8.3 are withdrawn. A 0.8.x contract cannot run under 0.9.0, so 0.9.0
+starts from a fresh genesis.
 
-Version 0.8.3 adds the fee recipient (`feeCustody`) as a signatory of
-`CoreState`. `feeCustody` is not `guardianGovernance` and not the operator.
+`guardianGovernance` (`gg`) is the only core anchor. It signs `CoreState`,
+`EmitterRegistry`, `ReplayRootRegistry`, each `Emitter` and each
+`ReplayNode`. The fee recipient (`feeCustody`) also signs `CoreState`.
+`RegisterEmitter` and `ClaimReplayRoot` take `expectedGuardianGovernance`.
+`ntt` passes `guardianGovernance`. Any party can submit a governance VAA.
+A delegated `onboardingFeeAdmin` sets the registration fee and the claim fee.
+
 The `CoreState` precondition has these rules:
 
-- The fee recipient is not `guardianGovernance` and not the operator.
-- The fee instrument admin is not `guardianGovernance` and not the operator.
-- The operator is not `guardianGovernance`.
+- The fee recipient is not `guardianGovernance`.
+- The fee instrument admin is not `guardianGovernance`.
+- The fee instrument admin is not the fee recipient.
 - The message fee is 0 or more.
 - The current guardian set exists and has no expiry. Each other set has a
   lower index and an expiry.
 
-When a fee is due, `chargeFee` rejects a payer, a fee recipient or a fee
-instrument admin that is `guardianGovernance` or the operator. Thus a deployment with `admin = gg`
-cannot pay a non-zero fee as `payer = admin`. The test setups use a
-placeholder fee instrument admin that is a separate party. Version 0.8.3 has
-no payload size limit. A 0.8.2 `CoreState` cannot run under 0.8.3, so 0.8.3
-starts from a fresh genesis.
+When a fee is due, `chargeFee` repeats the rules for the payer, the fee
+recipient and the fee instrument admin. The test setups use a placeholder
+fee instrument admin that is a separate party.
 
 `ntt` data-depends on `wormhole-core` by package id, so each NTT call into
 core runs the code of this exact package id. Do not vendor a core version
@@ -102,7 +97,7 @@ version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
 | DAR                                                    | consumed by       | sha256                                                             |
 | ------------------------------------------------------ | ----------------- | ------------------------------------------------------------------ |
-| `wormhole-core-0.8.3.dar`                              | `ntt`, `ntt-test` | `a41bd91de2ab5cdd5bd879d634476fa620d8b8a0b9f52d020c472ce083fb8458` |
+| `wormhole-core-0.9.0.dar`                              | `ntt`, `ntt-test` | `b4717e4fa9c7f9332a8847cee3d2f0fbfccb5e5b67456e006810da95a81a9ca2` |
 | `token-cip0056-0.2.0.dar`                              | `ntt`, `ntt-test` | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar`               | `ntt`, `ntt-test` | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar`                | `ntt`, `ntt-test` | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |
