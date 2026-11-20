@@ -49,7 +49,7 @@ The loader rejects an unknown field. Thus a schema 1 file fails.
 - `--recipient-raw` needs `--i-accept-raw-recipient`.
 - An Ethereum send checks the RPC chain id, the manager token, the token decimals and the destination peer.
 - A Solana send checks the manager mint, the mint decimals and the destination peer.
-- The registry chain ids must equal the SDK chain ids.
+- The registry chain ids must equal the SDK chain ids. On Testnet, `chainIds.Ethereum` is 10002 (Sepolia).
 - `SOLANA_PAYER_PATH` must have mode 600 or 400.
 - A Canton operation gets its contracts from the disclosure service flow routes.
 - A Canton command acts as the user party only. It uses no `readAs` party.
@@ -81,8 +81,10 @@ Limits:
 - The CLI signs an Ethereum transaction first. It prints the hash, then it broadcasts.
   After the signature, each error gives the hash and "do not re-run; check the hash".
 - The CLI signs a Solana transaction first. It prints the signature, then it sends.
-  After the signature, an error gives "result unknown". The CLI reports "expired, safe to retry" only
-  when a second status read after the block-height limit finds no transaction.
+  After the signature, a send error gives "result unknown; do not re-run; check the signature".
+  A read error during the wait continues the bounded poll. A poll that ends without an answer gives the same message.
+  The CLI reports "expired, safe to retry" only when a second status read after the block-height limit finds no transaction.
+  If the sequence read fails after the confirmation, the CLI shows the signature without a sequence.
 - A Canton send prints its transfer nonce. To retry the same transfer, use `--transfer-nonce` with that value.
   The command id is then the same, and the participant rejects a duplicate.
 - A Canton submit waits up to 120 s. A timeout or another submit error gives "result unknown" with the
