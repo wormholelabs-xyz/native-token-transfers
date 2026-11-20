@@ -86,6 +86,10 @@ describe("validateRegistry", () => {
     ["chain id 65536", (r: any) => (r.chainIds.Solana = 65536)],
     ["duplicate chain ids", (r: any) => (r.chainIds.Solana = 2)],
     [
+      "Ethereum chain id 3 differs from the SDK id 2",
+      (r: any) => (r.chainIds.Ethereum = 3),
+    ],
+    [
       "bad EVM checksum",
       (r: any) =>
         (r.deployments.canburn.chains.Ethereum.manager =

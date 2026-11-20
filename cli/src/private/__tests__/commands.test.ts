@@ -63,6 +63,17 @@ describe("resolveSendRecipient", () => {
     ).toThrow(/checksum/);
   });
 
+  test("Solana: no recipient names --recipient only", () => {
+    let message = "";
+    try {
+      resolveSendRecipient("Solana", registry, {}, {});
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/--recipient/);
+    expect(message).not.toMatch(/SOLANA_PRIVATE_KEY/);
+  });
+
   test("Solana: 2 characters lost rejects", () => {
     expect(() =>
       resolveSendRecipient(
@@ -122,6 +133,45 @@ function scriptedPrompt(answers: string[]) {
 }
 
 describe("requireTypedConfirmation", () => {
+  test.each([
+    ["no --yes-recipient", undefined, /--yes-recipient/],
+    [
+      "a different party",
+      `bob::${RETIRED_CANTON_NAMESPACE}`,
+      /--yes-recipient/,
+    ],
+  ])(
+    "--yes with a Canton recipient and %s: refused",
+    async (_caseName, confirmedCantonRecipient, expectedError) => {
+      const scripted = scriptedPrompt([]);
+      await expect(
+        requireTypedConfirmation(
+          { ...confirmation, cantonRecipientPartyId: ALICE as never },
+          {
+            assumeYes: true,
+            stdinIsTty: false,
+            prompt: scripted.prompt,
+            confirmedCantonRecipient,
+          }
+        )
+      ).rejects.toThrow(expectedError);
+    }
+  );
+
+  test("--yes with --yes-recipient equal to the Canton recipient: no prompt", async () => {
+    const scripted = scriptedPrompt([]);
+    await requireTypedConfirmation(
+      { ...confirmation, cantonRecipientPartyId: ALICE as never },
+      {
+        assumeYes: true,
+        stdinIsTty: false,
+        prompt: scripted.prompt,
+        confirmedCantonRecipient: ALICE,
+      }
+    );
+    expect(scripted.questions.length).toBe(0);
+  });
+
   test("correct network and suffix: confirmed", async () => {
     const scripted = scriptedPrompt(["Mainnet", "12345678"]);
     await expect(
