@@ -83,16 +83,13 @@ func TestReaderPartiesPerTemplate(t *testing.T) {
 		{tailAdminTransferProposal, []partyID{testGuardianGovernanceParty}},
 		{tailTransferPreapproval, []partyID{testGuardianGovernanceParty, testNttCustodyParty}},
 		{tailCoin, []partyID{testNttCustodyParty}},
-		{tailReplayRootRegistry, []partyID{testOperatorParty}},
+		{tailReplayRootRegistry, []partyID{testGuardianGovernanceParty}},
 	}
 	require.Len(t, expectedReaders, len(flowTemplateByTail))
 	for _, expected := range expectedReaders {
 		t.Run(expected.tail, func(t *testing.T) {
 			require.Contains(t, readersByTail, expected.tail, "no flow read %s", expected.tail)
 			assert.Equal(t, sortedParties(expected.readers), sortedPartySet(readersByTail[expected.tail]))
-			if expected.tail != tailReplayRootRegistry {
-				assert.NotContains(t, readersByTail[expected.tail], partyID(testOperatorParty), "the operator reads ReplayRootRegistry only")
-			}
 		})
 	}
 }
@@ -111,24 +108,29 @@ func sortedPartySet(partySet map[partyID]bool) []partyID {
 	return sortedParties(parties)
 }
 
-func TestRegisterFlowNeedsOperatorParty(t *testing.T) {
+func TestRegisterFlowChecksGuardianGovernanceParam(t *testing.T) {
 	cases := []struct {
-		name          string
-		operatorParty partyID
-		query         string
-		wantStatus    int
+		name           string
+		query          string
+		wantRejected   bool
+		wantStatusCode int
 	}{
-		{"no operator party", "", "", http.StatusNotFound},
-		{"no operator party, with gg", "", "gg=" + testGuardianGovernanceParty, http.StatusNotFound},
-		{"gg param differs from the configured gg", testOperatorParty, "gg=other-gg" + testPartyFingerprintSuffix, http.StatusBadRequest},
+		{"gg param differs from the configured gg", "gg=other-gg" + testPartyFingerprintSuffix, true, http.StatusBadRequest},
+		{"no gg param", "", false, 0},
+		{"gg param equals the configured gg", "gg=" + testGuardianGovernanceParty, false, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, counter := newCountedFlowTestServer(t, flowFixtures{})
-			srv.opts.readerParties.operator = tc.operatorParty
 			recorder := requestFlow(t, srv, "register", tc.query)
-			assert.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
-			assert.Zero(t, counter.totalCalls())
+			if tc.wantRejected {
+				assert.Equal(t, tc.wantStatusCode, recorder.Code, recorder.Body.String())
+				assert.Zero(t, counter.totalCalls())
+				return
+			}
+			assert.NotEqual(t, http.StatusNotFound, recorder.Code, recorder.Body.String())
+			assert.NotEqual(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.NotZero(t, counter.totalCalls())
 		})
 	}
 }
@@ -143,18 +145,15 @@ func TestParseFlagsReaderParties(t *testing.T) {
 	}{
 		{"gg and nttCustody", []string{"--guardian-governance-party", "gg::1", "--ntt-custody-party", "custody::1"},
 			readerPartiesByRole{guardianGovernance: "gg::1", nttCustody: "custody::1"}, ""},
-		{"all three roles", []string{"--guardian-governance-party", "gg::1", "--ntt-custody-party", "custody::1", "--operator-party", "operator::1"},
-			readerPartiesByRole{guardianGovernance: "gg::1", nttCustody: "custody::1", operator: "operator::1"}, ""},
 		{"gg missing", []string{"--ntt-custody-party", "custody::1"}, readerPartiesByRole{}, "--guardian-governance-party"},
 		{"nttCustody missing", []string{"--guardian-governance-party", "gg::1"}, readerPartiesByRole{}, "--ntt-custody-party"},
 		{"gg equals nttCustody", []string{"--guardian-governance-party", "gg::1", "--ntt-custody-party", "gg::1"}, readerPartiesByRole{}, "distinct"},
-		{"operator equals gg", []string{"--guardian-governance-party", "gg::1", "--ntt-custody-party", "custody::1", "--operator-party", "gg::1"}, readerPartiesByRole{}, "distinct"},
-		{"operator equals nttCustody", []string{"--guardian-governance-party", "gg::1", "--ntt-custody-party", "custody::1", "--operator-party", "custody::1"}, readerPartiesByRole{}, "distinct"},
 		{"party with surrounding space", []string{"--guardian-governance-party", " gg::1", "--ntt-custody-party", "custody::1"}, readerPartiesByRole{}, "--guardian-governance-party"},
 		{"party with a comma", []string{"--guardian-governance-party", "gg::1,custody::1", "--ntt-custody-party", "custody::1"}, readerPartiesByRole{}, "--guardian-governance-party"},
 		{"party at the length limit", []string{"--guardian-governance-party", strings.Repeat("g", maxPartyIDBytes), "--ntt-custody-party", "custody::1"},
 			readerPartiesByRole{guardianGovernance: partyID(strings.Repeat("g", maxPartyIDBytes)), nttCustody: "custody::1"}, ""},
 		{"party over the length limit", []string{"--guardian-governance-party", strings.Repeat("g", maxPartyIDBytes+1), "--ntt-custody-party", "custody::1"}, readerPartiesByRole{}, "--guardian-governance-party"},
+		{"removed --operator-party flag", []string{"--guardian-governance-party", "gg::1", "--ntt-custody-party", "custody::1", "--operator-party", "operator::1"}, readerPartiesByRole{}, "operator-party"},
 		{"removed --disclosing-party flag", []string{"--disclosing-party", "gg::1", "--guardian-governance-party", "gg::1", "--ntt-custody-party", "custody::1"}, readerPartiesByRole{}, "disclosing-party"},
 	}
 	for _, tc := range cases {

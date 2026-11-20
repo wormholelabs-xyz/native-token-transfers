@@ -22,7 +22,6 @@ import (
 const (
 	registryTestGG             = "gg" + testPartyFingerprintSuffix
 	registryTestNttCustody     = "nttCustody" + testPartyFingerprintSuffix
-	registryTestOperator       = "operator" + testPartyFingerprintSuffix
 	registryTestIssuer         = "issuer" + testPartyFingerprintSuffix
 	registryTestAlice          = "alice" + testPartyFingerprintSuffix
 	registryTestBob            = "bob" + testPartyFingerprintSuffix
@@ -74,8 +73,8 @@ func registryTestPackageNameOf(tail string) string {
 
 func registryManagerArg(instrumentAdmin, instrumentID, tokenConfig string, tokenDecimals int, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"operator":%q,"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"managerAddress":%q,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"tokenDecimals":"%d","factory":{"tag":%q,"value":%q},"paused":false}`,
-		registryTestOperator, registryTestGG, registryTestGG, registryTestNttCustody, registryTestNttCustody,
+		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"managerAddress":%q,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"tokenDecimals":"%d","factory":{"tag":%q,"value":%q},"paused":false}`,
+		registryTestGG, registryTestGG, registryTestNttCustody, registryTestNttCustody,
 		fmt.Sprintf("%x", instrumentID), instrumentAdmin, instrumentID, tokenConfig, tokenDecimals, factoryTag, factoryCid,
 	)
 }
@@ -160,7 +159,7 @@ func useRegistryTestReadClock(srv *server) {
 // useRegistryTestParties makes registryTestGG the guardianGovernance reader party.
 func useRegistryTestParties(srv *server) {
 	opts := *srv.opts
-	opts.readerParties = readerPartiesByRole{guardianGovernance: registryTestGG, nttCustody: registryTestNttCustody, operator: registryTestOperator}
+	opts.readerParties = readerPartiesByRole{guardianGovernance: registryTestGG, nttCustody: registryTestNttCustody}
 	srv.opts = &opts
 }
 
