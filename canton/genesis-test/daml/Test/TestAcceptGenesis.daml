@@ -240,6 +240,22 @@ testAcceptGenesisCreatesEveryRoot = do
   operatorNttRoots <- query @NttGovernance parties.operator
   operatorNttRoots === []
 
+-- | A well-formed governance emitter other than chain 1 and 0x00..04 is
+-- accepted, at both ends of the chain id range.
+testAcceptGenesisAcceptsWellFormedGovernanceEmitter : Script ()
+testAcceptGenesisAcceptsWellFormedGovernanceEmitter = do
+  let governanceEmitters =
+        [ (1, digestOf "governance emitter at chain 1")
+        , (65535, digestOf "governance emitter at chain 65535")
+        ]
+  forA_ (zip [0 .. length governanceEmitters - 1] governanceEmitters) \(position, (governanceChainId, governanceContract)) -> do
+    parties <- allocateGenesisParties ("Emitter" <> show position)
+    let parameters = (parametersFor parties [guardianAddressA]) with governanceChainId, governanceContract
+    roots <- offerGenesis parties parameters >>= acceptGenesisRoots parameters
+    Some coreState <- queryContractId parties.guardianGovernance roots.coreStateCid
+    coreState.governanceChainId === governanceChainId
+    coreState.governanceContract === governanceContract
+
 ----------------------------------------------------------------------
 -- Test 2: AcceptGenesis rejects (first genesis)
 ----------------------------------------------------------------------
@@ -312,12 +328,22 @@ testAcceptGenesisRejects = do
             (withGuardianAddresses [guardianAddressA, guardianAddressA])
         , rejectedOffer "index above uint32" (preconditionOf "CoreState") \parameters ->
             parameters with genesisGuardianSet = parameters.genesisGuardianSet with guardianSetIndex = 4294967296
-        , rejectedOffer "governance chain other than Wormhole governance"
-            (RejectedWithMessage "genesis: governance chain is not the Wormhole governance chain") \parameters ->
-              parameters with governanceChainId = 2
-        , rejectedOffer "governance contract other than Wormhole governance"
-            (RejectedWithMessage "genesis: governance contract is not the Wormhole governance contract") \parameters ->
+        , rejectedOffer "governance chain 0" (RejectedWithMessage "genesis: governance chain is not a nonzero uint16") \parameters ->
+            parameters with governanceChainId = 0
+        , rejectedOffer "governance chain 65536" (RejectedWithMessage "genesis: governance chain is not a nonzero uint16") \parameters ->
+            parameters with governanceChainId = 65536
+        , rejectedOffer "governance contract of 31 bytes"
+            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
+              parameters with governanceContract = T.drop 2 defaultGovernanceContract
+        , rejectedOffer "governance contract with a 0x prefix"
+            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
               parameters with governanceContract = "0x" <> defaultGovernanceContract
+        , rejectedOffer "governance contract with a character that is not hex"
+            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
+              parameters with governanceContract = "zz" <> T.drop 2 defaultGovernanceContract
+        , rejectedOffer "governance contract in uppercase hex"
+            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
+              parameters with governanceContract = "AB" <> T.drop 2 defaultGovernanceContract
         , rejectedOffer "negative message fee" (preconditionOf "CoreState") \parameters -> parameters with initialMessageFee = -1
         , rejectedOffer "fee instrument admin is gg" (preconditionOf "CoreState") \parameters ->
             parameters with feeInstrument = parameters.feeInstrument with admin = parameters.guardianGovernance
