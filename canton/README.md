@@ -23,12 +23,14 @@ trie, disclosed-cid submission, the trust model) is in the core
 
 ## Packages
 
-| Directory (Daml package) | Contents                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ntt` (`ntt`)            | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
-| `disclosure/service`     | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md).                                                                                                                                                                                                                                  |
-| `test` (`ntt-test`)      | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`.                                                                                                                                                                                                 |
-| `dars/`                  | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md).                                                                                                                                                                                                                                   |
+| Directory (Daml package)                 | Contents                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ntt` (`ntt`)                            | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
+| `genesis` (`wormhole-genesis`)           | `Wormhole.Genesis`: the `WormholeGenesisOffer` template and its `AcceptGenesis` choice. One accept creates the core and NTT roots. Templates only; uploadable to a participant.                                                                                                                                                                                                       |
+| `genesis-test` (`wormhole-genesis-test`) | The Daml Script tests of `wormhole-genesis` (`Test.TestAcceptGenesis`).                                                                                                                                                                                                                                                                                                               |
+| `disclosure/service`                     | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md).                                                                                                                                                                                                                                  |
+| `test` (`ntt-test`)                      | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`.                                                                                                                                                                                                 |
+| `dars/`                                  | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md).                                                                                                                                                                                                                                   |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
 `TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
@@ -117,6 +119,45 @@ Vet no package with code that runs with `gg` authority and can claim a `gg`
 replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
 second trie in the namespace of a deployment. NTT reserves the replay
 namespace prefix `ntt:`.
+
+### Genesis
+
+The operator does the deployment work. The guardians sign one transaction.
+
+1. Upload the `wormhole-core`, `token-cip0056`, `ntt` and `wormhole-genesis`
+   DARs to the participant of the operator.
+2. Write the `GenesisParameters`. Each guardian keeps an agreed copy.
+3. As the operator, create one `WormholeGenesisOffer` with the parameters.
+4. As `gg`, `feeCustody` and `nttCustody`, exercise `AcceptGenesis` on the
+   offer. Give the agreed copy as `agreedParameters`.
+
+`AcceptGenesis` rejects parameters that differ from the offer. It then creates
+these contracts:
+
+| Contract             | Signatories         |
+| -------------------- | ------------------- |
+| `CoreState`          | `gg`, `feeCustody`  |
+| `EmitterRegistry`    | `gg`                |
+| `ReplayRootRegistry` | `gg`                |
+| `NttGovernance`      | `gg`, `nttCustody`  |
+| `CoinFactory`        | `gg` (also `admin`) |
+
+The same transaction archives the offer. No created contract has the operator
+as a stakeholder. After genesis, each `gg` host can unvet `wormhole-genesis`.
+
+For a re-genesis of a `gg` that ran governance before, set these parameters
+from the earlier roots:
+
+- `consumedCoreGovernanceDigests`: the `consumedGovernance` of the earlier
+  `CoreState`.
+- `consumedNttGovernanceDigests`: the `consumedGovernance` of the earlier
+  `NttGovernance`.
+- `firstEmitterId`: the `nextId` of the earlier `EmitterRegistry`.
+- `firstNttManagerId`: the `nextId` of the earlier `NttGovernance`.
+
+Each digest list holds 1024 digests or fewer. With these values, the new
+roots reject each earlier governance VAA. Each new emitter id and manager id
+is also above the earlier ones.
 
 ### Version 0.4.x is not upgrade-compatible
 
