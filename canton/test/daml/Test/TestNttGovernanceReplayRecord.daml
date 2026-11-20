@@ -106,6 +106,22 @@ testNttRegistrationEvictionRaisesTheFloor = do
   vaaAtNewFloor <- registrationVaaAt env 1 2 admin 1
   registerByVaaAttempt env successorCid admin 1 vaaAtNewFloor >>= checkRejectedWith "VAA at the new floor" floorRejection
 
+-- | A registration VAA older than every retained digest, into a full record,
+-- applies: its own digest is the one evicted, and the floor covers it.
+testNttRegistrationOlderThanTheFullRecordIsCoveredByTheFloor : Script ()
+testNttRegistrationOlderThanTheFullRecordIsCoveredByTheFloor = do
+  env <- replayRecordSetup "Oldest"
+  admin <- allocateParty "OldestAdmin"
+  let fullRecord = digestsAtTimestamps [11 .. 10 + maxRetainedGovernanceDigests]
+  rootCid <- withNttGovernanceReplayRecord env fullRecord None
+  registrationVaa <- registrationVaaAt env 5 1 admin 0
+  successorCid <- registerByVaaAttempt env rootCid admin 0 registrationVaa
+    >>= either (\submitError -> abort ("registration: " <> rejectionText submitError)) pure
+  Some successor <- queryContractId env.gg successorCid
+  successor.consumedGovernance === fullRecord
+  successor.evictedGovernanceMaxTimestampSeconds === Some 5
+  registerByVaaAttempt env successorCid admin 0 registrationVaa >>= checkRejectedWith "replay of the evicted VAA" floorRejection
+
 -- | A registration VAA at or below the floor is rejected; one above it applies.
 testNttRegistrationAtOrBelowTheFloorIsRejected : Script ()
 testNttRegistrationAtOrBelowTheFloorIsRejected = do
