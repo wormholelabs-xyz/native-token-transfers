@@ -9,14 +9,13 @@ import DA.Foldable (forA_)
 import DA.List (dedup, sort)
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
-import DA.Set qualified as Set
 
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.TransferInstructionV1 (TransferFactory)
 import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Core.Fees (emptyExtraArgs)
-import Wormhole.Core.Bytes (Bytes)
+import Wormhole.Core.Bytes (EncodedVaa, parseHexTextOrAbort)
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.State (ClaimReplayRoot (..), Emitter)
 import Wormhole.Core.VAA (parseVAA)
@@ -24,7 +23,7 @@ import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload (NttGovernanceAction (..))
-import Test.TestNtt (b32, cantonChainId, coreRegistries, resolveEmitter)
+import Test.TestNtt (b32, cantonChainId, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
 import Test.TestRedTeam
 import Test.TestReplay (coveringNode)
 
@@ -49,7 +48,7 @@ registerManagerByVaaAttempt env admin vaaSequence = do
   coinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
   vaaBytes <- governanceVaa env vaaSequence RegisterBurnMintManager with
     chain = cantonChainId
-    registrationBinding = nttRegistrationBindingFor env.gg admin 0
+    registrationBinding = nttRegistrationBindingFor testNttGovernanceRootIdentity env.gg admin 0
     tokenDecimals = 8
   fmap (\(_, managerCid, _, _, _) -> managerCid) <$> trySubmit (withReads env [admin] []) do
     exerciseCmd governanceCid RegisterManagerByVaa with
@@ -64,7 +63,6 @@ registerManagerByVaaAttempt env admin vaaSequence = do
       claimFeeAllocation = None
       feeAllocation = None
       vaaBytes
-      pubKeys = [(0, env.guardianKey.publicKey)]
       extraArgs = emptyExtraArgs
 
 registerManagerByVaaAs : RedTeamEnv -> Party -> Int -> Script (ContractId NttManager)
@@ -75,7 +73,7 @@ registerManagerByVaaAs env admin vaaSequence =
 replayRootOf : RedTeamEnv -> NttManager -> Script ReplayNode
 replayRootOf env manager = do
   nodes <- query @ReplayNode env.gg
-  case [ node | (_, node) <- nodes, node.namespace == manager.namespace, node.prefix == "" ] of
+  case [ node | (_, node) <- nodes, node.namespace == manager.namespace, node.prefix == parseHexTextOrAbort "" ] of
     [root] -> pure root
     found -> abort ("expected one replay root, got " <> show (length found))
 
@@ -125,7 +123,8 @@ testNttTemplateSignatories = do
       (sort stakeholderCase.actualObservers == sort stakeholderCase.expectedObservers)
   governance.guardianGovernance === gg
   governance.nextId === 0
-  governance.consumedGovernance === Set.empty
+  governance.consumedGovernance === Map.empty
+  governance.evictedGovernanceMaxTimestampSeconds === None
   transceiverEmitter.owner === gg
   transceiverEmitter.guardianGovernance === gg
   replayRoot.consumer === gg
@@ -211,7 +210,7 @@ testFormerOperatorHasNoNttPower = do
       cases =
         [ FormerOperatorCase "create NttGovernance naming the real gg" $ discardResult $ trySubmit asFormerOperator do
             createCmd NttGovernance with
-              guardianGovernance = env.gg, nttCustody = env.nttCustody, nextId = 0, consumedGovernance = Set.empty
+              guardianGovernance = env.gg, nttCustody = env.nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
         , FormerOperatorCase "create NttManager naming the real gg" $ discardResult $
             trySubmit (asFormerOperator <> actAs admin) do
               createCmd lockManager with managerId = 99, peers = Map.empty
@@ -237,7 +236,7 @@ testFormerOperatorHasNoNttPower = do
 
 -- | 'Mint' with an explicit replay node, submitted by @relayer@ alone.
 mintWithReplayNode
-  : RedTeamEnv -> ContractId NttManager -> Party -> Party -> ContractId ReplayNode -> Bytes
+  : RedTeamEnv -> ContractId NttManager -> Party -> Party -> ContractId ReplayNode -> EncodedVaa
   -> Script (Either SubmitError ())
 mintWithReplayNode env managerCid relayer recipient replayNodeCid vaaBytes = do
   manager <- managerOf env managerCid
@@ -248,7 +247,6 @@ mintWithReplayNode env managerCid relayer recipient replayNodeCid vaaBytes = do
       coreStateCid = env.coreStateCid
       replayNodeCid
       vaaBytes
-      pubKeys = [(0, env.guardianKey.publicKey)]
       recipient
       depositPreapprovalCid
       extraArgs = emptyExtraArgs

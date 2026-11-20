@@ -144,7 +144,7 @@ Rule for the guardian quorum:
 
 The fee registry runs with the authority of `feeCustody`, not `gg`.
 Core 0.8.3 (`wormholelabs-xyz/wormhole` PR #81) moved fee custody from `gg` to `feeCustody`.
-In core 0.9.0, the fee instrument admin is not `gg` and not `feeCustody`.
+Since core 0.9.0, the fee instrument admin is not `gg` and not `feeCustody`.
 
 ## Replay scope of a deployment
 
@@ -162,7 +162,9 @@ namespace of a deployment needs `gg` authority. NTT claims a root only in a
 new registration. Thus a second trie is possible only in these cases:
 
 - A second `NttGovernance` root for the same `gg` starts at a used `nextId`.
-  The guardians must sign one root for each `gg`.
+  The guardians must sign one root for each `gg`. A second root has another
+  `rootIdentity`, so it rejects each `RegisterManagerByVaa` VAA of the first
+  root. A lock/unlock `RegisterManager` needs no VAA, so this rule stays.
 - Code outside `ntt` that runs with `gg` authority claims a root. The
   canonical `CoinFactory` package does not depend on `wormhole-core`. Each
   `gg` host vets each new `token-cip0056` version.
@@ -263,7 +265,7 @@ Submit `Transfer` with each value below. Each transfer locks the value and publi
 
 1. `isUint8 consistencyLevel`
 2. `isUint32 nonce`
-3. `isLowerHexBytes32 recipientAddress`. This asserts `T.length recipientAddress == 64` and `isLowerHex recipientAddress`.
+3. `checkHexValueIsWellFormed recipientAddress`. `recipientAddress` is a `UniversalAddress`: exactly 64 lowercase hex characters.
 4. `not (isZeroAddress recipientAddress)`
 
 `SetPeer` and registration use the same helpers.
@@ -279,9 +281,9 @@ The check now asserts exactly 64 characters.
 
 The same follow-up applies these checks to the payload codec:
 
-- `runGet` rejects a buffer that is not whole bytes of hex.
-- `encodeLengthPrefixed` rejects a field that is not whole bytes of hex.
-- Each 32-byte field goes through `encodeBytes32`, which rejects a result that is not exactly 64 hex characters.
+- `runGet` rejects a buffer that is not whole bytes of lowercase hex.
+- Each byte field has a constrained type. Its parser rejects a value that is not whole bytes of lowercase hex.
+- Each 32-byte field has a type of exactly 32 bytes, so the codec writes it without padding.
 
 ## N4: a release from an aged Canton Coin pot
 

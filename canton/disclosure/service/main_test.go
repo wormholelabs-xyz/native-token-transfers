@@ -525,7 +525,7 @@ func jsonArray(items ...string) string {
 
 func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAddress string, transceiverEmitterID int, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":%q,"transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
 		admin, gg, nttCustody, reserveCustodian, namespace, managerAddress, transceiverEmitterID, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid,
 	)
 }
@@ -533,7 +533,7 @@ func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAd
 // nttManagerArgBeforeNtt040 is an ntt 0.3.x payload: no nttCustody and no reserveCustodian.
 func nttManagerArgBeforeNtt040(admin, gg, managerAddress, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":%q,"transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":{"tag":"NttManagerAddress","value":%q},"transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
 		admin, gg, managerAddress, gg, tokenConfig, factoryTag, factoryCid,
 	)
 }
@@ -543,11 +543,11 @@ func ledgerArg(managerAddress string, potCid *string) string {
 	if potCid != nil {
 		pot = fmt.Sprintf("%q", *potCid)
 	}
-	return fmt.Sprintf(`{"managerAddress":%q,"custodyHoldingCid":%s}`, managerAddress, pot)
+	return fmt.Sprintf(`{"managerAddress":{"tag":"NttManagerAddress","value":%q},"custodyHoldingCid":%s}`, managerAddress, pot)
 }
 
 func replayNodeArg(consumer, namespace, prefix string) string {
-	return fmt.Sprintf(`{"consumer":%q,"namespace":%q,"prefix":%q}`, consumer, namespace, prefix)
+	return fmt.Sprintf(`{"consumer":%q,"namespace":%q,"prefix":{"tag":"DigestNibblePrefix","value":%q}}`, consumer, namespace, prefix)
 }
 
 func guardianAnchorArg(gg string) string {
@@ -563,7 +563,7 @@ func preapprovalArg(owner, instrumentAdmin, instrumentID string) string {
 }
 
 func adminTransferProposalArg(admin, newAdmin, managerAddress string) string {
-	return fmt.Sprintf(`{"admin":%q,"newAdmin":%q,"managerAddress":%q}`, admin, newAdmin, managerAddress)
+	return fmt.Sprintf(`{"admin":%q,"newAdmin":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q}}`, admin, newAdmin, managerAddress)
 }
 
 func coinFactoryArg(admin string) string {
@@ -884,7 +884,7 @@ func TestParseByVAA(t *testing.T) {
 
 func TestFindManager(t *testing.T) {
 	managerAt := func(addr string) decodedEntry[daNttManager] {
-		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: addr}}
+		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: nttManagerAddressValue{hex: addr}}}
 	}
 	addrA := strings.Repeat("aa", 32)
 	addrB := strings.Repeat("bb", 32)
@@ -934,7 +934,7 @@ func TestFindGuardianAnchor(t *testing.T) {
 
 func TestCoveringReplayNode(t *testing.T) {
 	replayNode := func(consumer, namespace, prefix string) decodedEntry[daReplayNode] {
-		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: prefix}}
+		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: digestNibblePrefixValue{hex: prefix}}}
 	}
 	digest := vaaDigestHex{hex: strings.Repeat("cd", 32)}
 
@@ -958,7 +958,7 @@ func TestFindLockedLedger(t *testing.T) {
 	addr := strings.Repeat("aa", 32)
 	manager := managerAddressHex{hex: addr}
 	ledgerOfManager := func() decodedEntry[daLockedLedger] {
-		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: addr}}
+		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: nttManagerAddressValue{hex: addr}}}
 	}
 	t.Run("found", func(t *testing.T) {
 		match, err := findLockedLedger([]decodedEntry[daLockedLedger]{ledgerOfManager()}, manager)
@@ -1049,8 +1049,8 @@ func TestFindPreapproval(t *testing.T) {
 }
 
 func TestFindAdminTransferProposal(t *testing.T) {
-	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: strings.Repeat("aa", 32)}
-	proposal := func(contractID string, admin, newAdmin partyID, managerAddress string) decodedEntry[daAdminTransferProposal] {
+	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: nttManagerAddressValue{hex: strings.Repeat("aa", 32)}}
+	proposal := func(contractID string, admin, newAdmin partyID, managerAddress nttManagerAddressValue) decodedEntry[daAdminTransferProposal] {
 		return decodedEntry[daAdminTransferProposal]{
 			entry: acsEntry{ContractID: contractID},
 			value: daAdminTransferProposal{Admin: admin, NewAdmin: newAdmin, ManagerAddress: managerAddress},
@@ -1065,10 +1065,9 @@ func TestFindAdminTransferProposal(t *testing.T) {
 		wantStatus     int
 	}{
 		{"exact", []decodedEntry[daAdminTransferProposal]{exact}, true, "prop-exact", 0},
-		{"exact, upper-case managerAddress", []decodedEntry[daAdminTransferProposal]{proposal("prop-upper", manager.Admin, manager.GuardianGovernance, strings.ToUpper(manager.ManagerAddress))}, true, "prop-upper", 0},
 		{"admin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress)}, false, "", 0},
 		{"newAdmin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, "stranger::1", manager.ManagerAddress)}, false, "", 0},
-		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, strings.Repeat("bb", 32))}, false, "", 0},
+		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, nttManagerAddressValue{hex: strings.Repeat("bb", 32)})}, false, "", 0},
 		{"stranger plus real", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress), exact}, true, "prop-exact", 0},
 		{"none", nil, false, "", 0},
 		{"two exact is 500", []decodedEntry[daAdminTransferProposal]{exact, exact}, false, "", http.StatusInternalServerError},

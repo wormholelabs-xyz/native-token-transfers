@@ -1,0 +1,64 @@
+-- | NTT byte types with one valid form: 32 bytes of lowercase hex, no @0x@.
+-- They follow the rule of "Wormhole.Core.Bytes": a positional
+-- single-constructor @data@ with a private constructor, built only through
+-- 'parseHexText'. Each template @ensure@ and each choice re-checks a value
+-- from the Ledger API with 'checkHexValueIsWellFormed'.
+--
+-- NTT also uses the core types: 'UniversalAddress' (recipient, sender and
+-- token addresses), 'EmitterAddress' (peer transceiver addresses), 'HexBytes'
+-- (nested payloads), 'MessagePayload', 'EncodedVaa' and 'VaaDigest'.
+module Wormhole.Ntt.Bytes
+  ( NttManagerAddress
+  , NttMessageId
+  , NttRegistrationBinding
+  , NttGovernanceRootIdentity
+  , isZeroAddress
+  ) where
+
+import Wormhole.Core.Bytes
+
+nttAddressByteWidth : Int
+nttAddressByteWidth = 32
+
+parseNttAddressHex : Text -> Text -> Either Text Text
+parseNttAddressHex typeName hexText = case parseHexText @HexBytes hexText of
+  Left _ -> Left (typeName <> ": not whole bytes of lowercase hex")
+  Right hexBytes
+    | byteLength hexBytes == nttAddressByteWidth -> Right hexText
+    | otherwise -> Left (typeName <> ": expected " <> show nttAddressByteWidth <> " bytes, got "
+        <> show (byteLength hexBytes))
+
+-- | The 32-byte address of an NTT manager on any chain: this deployment's
+-- 'Wormhole.Ntt.Manager.nttManagerAddressFor', or a peer manager.
+data NttManagerAddress = NttManagerAddress Text deriving (Eq, Ord, Show)
+instance HexEncodedValue NttManagerAddress where
+  hexTextOf (NttManagerAddress hexText) = hexText
+  parseHexText = fmap NttManagerAddress . parseNttAddressHex "NttManagerAddress"
+instance HexEncodedBytes NttManagerAddress
+
+-- | The 32-byte id of an 'Wormhole.Ntt.Payload.NttManagerMessage'.
+data NttMessageId = NttMessageId Text deriving (Eq, Ord, Show)
+instance HexEncodedValue NttMessageId where
+  hexTextOf (NttMessageId hexText) = hexText
+  parseHexText = fmap NttMessageId . parseNttAddressHex "NttMessageId"
+instance HexEncodedBytes NttMessageId
+
+-- | The 32-byte registration binding that a RegisterBurnMintManager VAA carries.
+data NttRegistrationBinding = NttRegistrationBinding Text deriving (Eq, Ord, Show)
+instance HexEncodedValue NttRegistrationBinding where
+  hexTextOf (NttRegistrationBinding hexText) = hexText
+  parseHexText = fmap NttRegistrationBinding . parseNttAddressHex "NttRegistrationBinding"
+instance HexEncodedBytes NttRegistrationBinding
+
+-- | The 32-byte identity of one 'Wormhole.Ntt.Governance.NttGovernance' root lineage.
+data NttGovernanceRootIdentity = NttGovernanceRootIdentity Text deriving (Eq, Ord, Show)
+instance HexEncodedValue NttGovernanceRootIdentity where
+  hexTextOf (NttGovernanceRootIdentity hexText) = hexText
+  parseHexText = fmap NttGovernanceRootIdentity . parseNttAddressHex "NttGovernanceRootIdentity"
+instance HexEncodedBytes NttGovernanceRootIdentity
+
+-- | Every byte is zero: the unset address that the reference @setPeer@ rejects.
+isZeroAddress : HexEncodedBytes a => a -> Bool
+isZeroAddress address =
+  let addressBytes = hexBytesOf address
+  in addressBytes == intToBytesN 0 (byteLength addressBytes)

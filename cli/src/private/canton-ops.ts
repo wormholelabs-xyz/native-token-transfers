@@ -16,7 +16,6 @@ import {
   type FlowName,
   type FlowResponse,
 } from "./canton/disclosure-client.js";
-import { recoverGuardianPublicKeys } from "./canton/guardian-keys.js";
 import type {
   CantonLedger,
   LedgerTransaction,
@@ -352,7 +351,7 @@ export async function cantonSend(
             ? ledgerArgument.lockedLedgerCid
             : null,
         recipientChain: String(recipientChainId),
-        recipientAddress: input.recipient,
+        recipientAddress: damlByteValue("UniversalAddress", input.recipient),
         rawAmount: input.rawAmount.toString(),
         nonce: String(input.transferNonce),
         consistencyLevel: String(TRANSFER_CONSISTENCY_LEVEL),
@@ -386,6 +385,13 @@ export async function cantonSend(
     );
     return { commandId };
   }
+}
+
+/** Ledger API JSON of a Daml constrained byte type: a {tag, value} variant of lowercase hex. */
+function damlByteValue(typeName: string, lowercaseHex: string) {
+  if (!/^(?:[0-9a-f]{2})*$/.test(lowercaseHex))
+    throw new Error(`${typeName} is not whole bytes of lowercase hex`);
+  return { tag: typeName, value: lowercaseHex };
 }
 
 export interface CantonRedeemInput {
@@ -424,11 +430,7 @@ function buildRedeemRequest(
     executor: ledger.userPartyId,
     coreStateCid: requireFlowRole(flow, ROLE_CORE_STATE).contractId,
     replayNodeCid: requireFlowRole(flow, ROLE_COVERING_REPLAY_NODE).contractId,
-    vaaBytes: bytesToHex(input.parsedVaa.bytes),
-    pubKeys: recoverGuardianPublicKeys(input.parsedVaa).map((guardianKey) => ({
-      _1: String(guardianKey.guardianIndex),
-      _2: guardianKey.uncompressedPublicKeyHex,
-    })),
+    vaaBytes: damlByteValue("EncodedVaa", bytesToHex(input.parsedVaa.bytes)),
     recipient: input.recipient,
   };
   const exerciseCommand =

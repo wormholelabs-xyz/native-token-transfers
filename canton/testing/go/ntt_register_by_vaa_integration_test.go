@@ -48,6 +48,7 @@ type registerByVaaSetup struct {
 	RrReg        string `json:"rrReg"`
 	CoreStateCid string `json:"coreStateCid"`
 	FactoryCid   string `json:"factoryCid"`
+	RootIdentity string `json:"rootIdentity"`
 }
 
 // registerByVaaResult mirrors Test.TestNtt:RegisterByVaaResult's JSON shape.
@@ -120,7 +121,12 @@ func TestCantonNttRegisterByVaaIntegration(t *testing.T) {
 	// Step 2: compute the registration binding against the real party texts
 	// and sign a fresh action-2 VAA -- a static VAA can't predict these
 	// fingerprints.
-	binding := nttRegistrationBindingFromText(setup.Gg, setup.Admin, registerByVaaNonce)
+	rootIdentityBytes, err := hex.DecodeString(setup.RootIdentity)
+	require.NoError(t, err)
+	require.Len(t, rootIdentityBytes, 32)
+	var rootIdentity [32]byte
+	copy(rootIdentity[:], rootIdentityBytes)
+	binding := nttRegistrationBindingFromText(rootIdentity, setup.Gg, setup.Admin, registerByVaaNonce)
 	registerPayload := encodeRegisterBurnMintManagerPayload(registerByVaaChainId, binding, registerByVaaTokenDecimals)
 	registerBody := buildGovernanceVAABody(govEmitterChain, govEmitterAddress(), 301, registerPayload)
 	registerVAA := signGovernanceVAA(t, registerBody)

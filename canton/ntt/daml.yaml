@@ -11,20 +11,20 @@
 # directly, but pins its canonical burn/mint factory to the token-cip0056
 # CoinFactory template, so that package is a required dependency, not merely
 # an interface implementer.
-sdk-version: 3.5.1
+sdk-version: 3.7.3
 name: ntt
-version: 0.5.0
+version: 0.6.0
 source: daml
-# 0.5.x is not upgrade-compatible with 0.4.x: template fields and signatories
+# 0.6.x is not upgrade-compatible with 0.5.x: template fields and choice signatures
 # changed (README "Versions and upgrades").
 dependencies:
   - daml-prim
   - daml-stdlib
 build-options:
-  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
+  # Daml-LF 2.3 (Protocol Versions 36 and 37), matching wormhole-core.
   - --target=2.3
 data-dependencies:
-  - ../dars/wormhole-core-0.9.0.dar
+  - ../dars/wormhole-core-0.12.0.dar
   - ../dars/token-cip0056-0.2.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar

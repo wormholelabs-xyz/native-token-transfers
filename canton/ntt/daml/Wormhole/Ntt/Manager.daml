@@ -89,12 +89,13 @@
 -- be the canonical 'CoinFactory', for the deployment's whole life.
 module Wormhole.Ntt.Manager where
 
-import DA.Crypto.Text (keccak256, toHex)
 import DA.Map (Map)
 import DA.List (unique)
 import DA.Map qualified as Map
 import DA.Optional (fromSomeNote)
+import DA.Date (Month (Jan), date)
 import DA.Text qualified as T
+import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
@@ -108,8 +109,9 @@ import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.State
   ( Emitter, CoreState, WormholeMessage
   , GetGuardianGovernance (..), VerifyAndConsumeVAA (..), PublishMessage (..) )
-import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
+import Wormhole.Core.VAA (VAA)
 import Wormhole.Ntt.Amount
+import Wormhole.Ntt.Bytes
 import Wormhole.Ntt.Cip56
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger
@@ -194,34 +196,36 @@ requireCommittedCoreState guardianGovernance coreStateCid = do
 
 -- | A peer NTT deployment on another chain: its manager address (the
 -- @recipientManager@/@sourceManager@ in the transceiver message), its
--- transceiver address (the emitter of inbound VAAs, both 32 bytes), and the
+-- transceiver address (the emitter of inbound VAAs), and the
 -- number of decimals of the peer's token. The decimals let an outbound
 -- transfer trim to the precision the peer can represent, so no dust is silently
 -- dropped when the far side rescales; this mirrors the peer @decimals@ the
 -- reference @setPeer@ stores.
 data Peer = Peer with
-    managerAddress     : Bytes32
-    transceiverAddress : Bytes32
+    managerAddress     : NttManagerAddress
+    transceiverAddress : EmitterAddress
     decimals           : Int
   deriving (Eq, Show)
 
-normalizePeer : Peer -> Peer
-normalizePeer p = p with
-    managerAddress = normalizeHex p.managerAddress
-    transceiverAddress = normalizeHex p.transceiverAddress
+checkPeerAddressesAreWellFormed : Peer -> Bool
+checkPeerAddressesAreWellFormed peer =
+  checkHexValueIsWellFormed peer.managerAddress && checkHexValueIsWellFormed peer.transceiverAddress
 
--- | Whether a 32-byte address is all zeros (the unset/sentinel address the
--- reference @setPeer@ rejects).
-isZeroAddress : Bytes32 -> Bool
-isZeroAddress b =
-  normalizeHex (leftPadTo 32 b)
-    == "0000000000000000000000000000000000000000000000000000000000000000"
+-- | Choice-entry re-check of a VAA argument from the Ledger API.
+checkVaaArgumentIsWellFormed : EncodedVaa -> Update ()
+checkVaaArgumentIsWellFormed vaaBytes =
+  assertMsg "ntt: vaaBytes is not a well-formed EncodedVaa" (checkHexValueIsWellFormed vaaBytes)
 
--- | Exactly 64 lowercase hex characters. 'leftPadTo' is the identity at or
--- above 32 bytes and 'byteLength' truncates a half byte, so a 65-character
--- address would otherwise reach the wire unchanged.
-isLowerHexBytes32 : Bytes32 -> Bool
-isLowerHexBytes32 address = T.length address == 64 && isLowerHex address
+-- | The origin rule of the core's governance VAAs: the current guardian set
+-- signed it, and the core's governance emitter emitted it.
+checkVaaIsCurrentSetGovernance : CoreState -> VAA -> Update ()
+checkVaaIsCurrentSetGovernance cs vaa = do
+  assertMsg "ntt governance: not signed by current guardian set"
+    (vaa.guardianSetIndex == cs.guardianSetIndex)
+  assertMsg "ntt governance: wrong emitter chain"
+    (vaa.emitterChain == cs.governanceChainId)
+  assertMsg "ntt governance: wrong emitter address"
+    (vaa.emitterAddress == cs.governanceContract)
 
 isUint8 : Int -> Bool
 isUint8 wireField = wireField >= 0 && wireField <= 255
@@ -238,9 +242,9 @@ nttManagerAddressTag = "wormhole:ntt-manager:v1"
 -- admin. Bound to the registering admin at creation, so it survives
 -- 'TransferAdmin' — the address is computed once and stored, not recomputed
 -- against the current (transferable) admin.
-nttManagerAddressFor : Party -> Party -> Int -> Bytes32
+nttManagerAddressFor : Party -> Party -> Int -> NttManagerAddress
 nttManagerAddressFor guardianGovernance admin managerId =
-  derivedAddress (DomainTag nttManagerAddressTag) guardianGovernance admin (RegistryId managerId)
+  parseHexBytesAsOrAbort (derivedAddress (DomainTag nttManagerAddressTag) guardianGovernance admin (RegistryId managerId))
 
 -- | Domain-separation tag for NTT recipient-address bindings.
 recipientAddressTag : Text
@@ -248,16 +252,16 @@ recipientAddressTag = "wormhole:ntt-recipient:v1"
 
 -- | @keccak256(tag ‖ lp(utf8(recipientText)))@. Split from
 -- 'recipientAddressFor' so tests can pin the encoding against a fixed string.
-recipientAddressFromText : Text -> Bytes32
+recipientAddressFromText : Text -> UniversalAddress
 recipientAddressFromText recipientText =
-  normalizeHex (keccak256 (toHex recipientAddressTag
-    <> unLenPrefixed (lenPrefixed (toHex recipientText))))
+  parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes recipientAddressTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes recipientText))))
 
 -- | The 32-byte binding a sender computes off-chain for an outbound transfer's
 -- @recipientAddress@ to reach @recipient@ on Canton. The inbound path
 -- recomputes it from the caller-supplied @recipient@ and checks it against the
 -- VAA.
-recipientAddressFor : Party -> Bytes32
+recipientAddressFor : Party -> UniversalAddress
 recipientAddressFor recipient = recipientAddressFromText (partyToText recipient)
 
 -- | Domain-separation tag for burn/mint instrument-id bindings.
@@ -268,8 +272,8 @@ nttInstrumentIdTag = "wormhole:ntt-instrument:v1"
 -- against a fixed string.
 nttInstrumentIdFromText : Text -> Int -> Text
 nttInstrumentIdFromText adminText nonce =
-  "wormhole-ntt:" <> normalizeHex (keccak256 (toHex nttInstrumentIdTag
-    <> unLenPrefixed (lenPrefixed (toHex adminText))
+  "wormhole-ntt:" <> hexTextOf (keccak256Bytes (utf8Bytes nttInstrumentIdTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes adminText))
     <> intToBytesN nonce 8))
 
 -- | The instrument id a burn/mint deployment's instrument must carry:
@@ -291,29 +295,50 @@ nttInstrumentIdFromText adminText nonce =
 nttInstrumentIdFor : Party -> Int -> Text
 nttInstrumentIdFor admin nonce = nttInstrumentIdFromText (partyToText admin) nonce
 
+-- | Domain-separation tag for NTT governance root identities.
+nttGovernanceRootIdentityTag : Text
+nttGovernanceRootIdentityTag = "wormhole:ntt-governance-root:v1"
+
+microsecondsSinceUnixEpoch : Time -> Int
+microsecondsSinceUnixEpoch genesisTime =
+  convertRelTimeToMicroseconds (subTime genesisTime (time (date 1970 Jan 1) 0 0 0))
+
+-- | The identity of the 'Wormhole.Ntt.Governance.NttGovernance' root that a
+-- first genesis creates: @keccak256(tag ‖ lp(utf8(gg)) ‖ uint64(genesis ledger
+-- time in microseconds))@. A second first genesis under the same gg runs at
+-- another ledger time, so its root has another identity.
+nttGovernanceRootIdentityFor : Party -> Time -> NttGovernanceRootIdentity
+nttGovernanceRootIdentityFor guardianGovernance genesisTime =
+  parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes nttGovernanceRootIdentityTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes (partyToText guardianGovernance)))
+    <> intToBytesN (microsecondsSinceUnixEpoch genesisTime) 8))
+
 -- | Domain-separation tag for NTT registration-VAA bindings.
 nttRegistrationBindingTag : Text
-nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
+nttRegistrationBindingTag = "wormhole:ntt-registration:v2"
 
 -- | Text form of 'nttRegistrationBindingFor', split out so tests can pin
 -- the encoding against fixed strings.
-nttRegistrationBindingFromText : Text -> Text -> Int -> Bytes32
-nttRegistrationBindingFromText guardianGovernanceText adminText nonce =
-  normalizeHex (keccak256 (toHex nttRegistrationBindingTag
-    <> unLenPrefixed (lenPrefixed (toHex guardianGovernanceText))
-    <> unLenPrefixed (lenPrefixed (toHex adminText))
+nttRegistrationBindingFromText : NttGovernanceRootIdentity -> Text -> Text -> Int -> NttRegistrationBinding
+nttRegistrationBindingFromText rootIdentity guardianGovernanceText adminText nonce =
+  parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes nttRegistrationBindingTag
+    <> hexBytesOf rootIdentity
+    <> unLenPrefixed (lenPrefixed (utf8Bytes guardianGovernanceText))
+    <> unLenPrefixed (lenPrefixed (utf8Bytes adminText))
     <> intToBytesN nonce 8))
 
 -- | The 32-byte binding a guardian-signed
 -- 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA must carry in its
--- @registrationBinding@ field: hash-committed to (guardianGovernance, admin, nonce),
--- with no @nextId@ in the preimage — a signed-off-chain VAA cannot predict
--- which @NttGovernance.nextId@ will still be current when relayed, so binding
--- to it would let a stranger grief a registration by racing a junk one first.
--- @guardianGovernance@ separates deployments: one gg is one bridge instance.
-nttRegistrationBindingFor : Party -> Party -> Int -> Bytes32
-nttRegistrationBindingFor guardianGovernance admin nonce =
-  nttRegistrationBindingFromText (partyToText guardianGovernance) (partyToText admin) nonce
+-- @registrationBinding@ field: hash-committed to (root identity,
+-- guardianGovernance, admin, nonce), with no @nextId@ in the preimage — a
+-- signed-off-chain VAA cannot predict which @NttGovernance.nextId@ will still
+-- be current when relayed, so binding to it would let a stranger grief a
+-- registration by racing a junk one first. The root identity binds the VAA to
+-- one 'Wormhole.Ntt.Governance.NttGovernance' lineage: a second root of the
+-- same gg rejects it.
+nttRegistrationBindingFor : NttGovernanceRootIdentity -> Party -> Party -> Int -> NttRegistrationBinding
+nttRegistrationBindingFor rootIdentity guardianGovernance admin nonce =
+  nttRegistrationBindingFromText rootIdentity (partyToText guardianGovernance) (partyToText admin) nonce
 
 -- | Domain-separation tag for the derived replay namespace.
 nttNamespaceTag : Text
@@ -324,10 +349,10 @@ nttNamespaceTag = "wormhole:ntt-namespace:v1"
 -- ('nttInstrumentIdFromText', 'recipientAddressFromText').
 nttNamespaceFromText : Text -> Text -> Text -> Int -> Text
 nttNamespaceFromText instrumentAdminText instrumentIdText adminText managerId =
-  "ntt:" <> normalizeHex (keccak256 (toHex nttNamespaceTag
-    <> unLenPrefixed (lenPrefixed (toHex instrumentAdminText))
-    <> unLenPrefixed (lenPrefixed (toHex instrumentIdText))
-    <> unLenPrefixed (lenPrefixed (toHex adminText))
+  "ntt:" <> hexTextOf (keccak256Bytes (utf8Bytes nttNamespaceTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes instrumentAdminText))
+    <> unLenPrefixed (lenPrefixed (utf8Bytes instrumentIdText))
+    <> unLenPrefixed (lenPrefixed (utf8Bytes adminText))
     <> intToBytesN managerId 8))
 
 -- | The derived replay-trie sub-scope committed on the manager at
@@ -433,22 +458,21 @@ verifyInboundTransfer
   -> Party                    -- ^ executor (relayer; carries no authority)
   -> ContractId CoreState
   -> ContractId ReplayNode
-  -> Bytes                    -- ^ the encoded VAA
-  -> [(Int, Bytes)]           -- ^ guardian pubkey hints (untrusted)
+  -> EncodedVaa
   -> Party                    -- ^ recipient, bound against the VAA
   -> Update NativeTokenTransfer
-verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys recipient = do
+verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes recipient = do
+  checkVaaArgumentIsWellFormed vaaBytes
   pinCommittedCoreState executor mgr.guardianGovernance coreStateCid
   (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
     encodedVAA = vaaBytes
-    pubKeys
     consumer = mgr.guardianGovernance
     namespace = mgr.namespace
     replayNodeCid
   let peer = fromSomeNote ("ntt: no peer for source chain " <> show vaa.emitterChain)
                (Map.lookup vaa.emitterChain mgr.peers)
   assertMsg "ntt: VAA emitter is not the configured peer transceiver"
-    (normalizeHex vaa.emitterAddress == peer.transceiverAddress)
+    (vaa.emitterAddress == peer.transceiverAddress)
   let wm = decodeWormholeTransceiverMessage vaa.payload
   assertMsg "ntt: wrong recipient manager" (wm.recipientManager == mgr.managerAddress)
   assertMsg "ntt: source manager is not the peer manager"
@@ -458,7 +482,7 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
   assertMsg "ntt: transfer is not destined for this chain"
     (ntt.recipientChain == mgr.chainId)
   assertMsg "ntt: recipient does not match VAA recipientAddress"
-    (recipientAddressFor recipient == normalizeHex ntt.recipientAddress)
+    (recipientAddressFor recipient == ntt.recipientAddress)
   pure ntt
 
 template NttManager
@@ -470,12 +494,12 @@ template NttManager
     reserveCustodian     : Party           -- owns the lock/unlock reserve; reserveCustodianFor of (guardianGovernance, nttCustody, admin)
     chainId              : Int             -- this deployment's own Wormhole chain id (uint16)
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
-    managerAddress       : Bytes32         -- nttManagerAddressFor guardianGovernance <registering admin> managerId
+    managerAddress       : NttManagerAddress  -- nttManagerAddressFor guardianGovernance <registering admin> managerId
     transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = guardianGovernance)
     instrumentId         : InstrumentId    -- the bridged CIP-56 instrument
     tokenConfig          : NttTokenConfig
     tokenDecimals        : Int             -- the local token's decimals (0..10)
-    tokenAddress         : Bytes32         -- nttTokenAddressFor instrumentId; stored at registration so it survives TransferAdmin
+    tokenAddress         : UniversalAddress  -- nttTokenAddressFor instrumentId; stored at registration so it survives TransferAdmin
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
@@ -493,6 +517,9 @@ template NttManager
         && reserveCustodian /= guardianGovernance
         && admin /= nttCustody
         && nttCustody /= guardianGovernance
+        && checkHexValueIsWellFormed managerAddress
+        && checkHexValueIsWellFormed tokenAddress
+        && all checkPeerAddressesAreWellFormed (Map.values peers)
 
     -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
     -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
@@ -518,19 +545,17 @@ template NttManager
           (chainId /= this.chainId)
         assertMsg "ntt: peer decimals must be a positive uint8"
           (peer.decimals > 0 && peer.decimals <= 255)
-        -- Pre-normalization, so uppercase hex is rejected rather than lowercased.
-        assertMsg "ntt: peer manager address must be 32 bytes of lowercase hex"
-          (isLowerHexBytes32 peer.managerAddress)
-        assertMsg "ntt: peer transceiver address must be 32 bytes of lowercase hex"
-          (isLowerHexBytes32 peer.transceiverAddress)
+        assertMsg "ntt: peer manager address is not a well-formed NttManagerAddress"
+          (checkHexValueIsWellFormed peer.managerAddress)
+        assertMsg "ntt: peer transceiver address is not a well-formed EmitterAddress"
+          (checkHexValueIsWellFormed peer.transceiverAddress)
         assertMsg "ntt: peer manager address must be non-zero"
           (not (isZeroAddress peer.managerAddress))
         assertMsg "ntt: peer transceiver address must be non-zero"
           (not (isZeroAddress peer.transceiverAddress))
         -- Uint8 on the wire; the watcher drops out-of-range messages.
         assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
-        let peer' = normalizePeer peer
-        newMgrCid <- create this with peers = Map.insert chainId peer' peers, peerEpoch = peerEpoch + 1
+        newMgrCid <- create this with peers = Map.insert chainId peer peers, peerEpoch = peerEpoch + 1
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
           (transceiver.owner == guardianGovernance
@@ -540,7 +565,7 @@ template NttManager
         (_, msg) <- exercise transceiverEmitterCid PublishMessage with
           payload = encodeTransceiverRegistration TransceiverRegistration with
             peerChain = chainId
-            peerAddress = peer'.transceiverAddress
+            peerAddress = peer.transceiverAddress
           nonce = 0
           consistencyLevel
           coreStateCid
@@ -692,12 +717,12 @@ template NttManager
         proposalCid   : ContractId AdminTransferProposal
         coreStateCid  : ContractId CoreState
         replayNodeCid : ContractId ReplayNode
-        vaaBytes      : Bytes
-        pubKeys       : [(Int, Bytes)]
+        vaaBytes      : EncodedVaa
         ledgerCid     : Optional (ContractId LockedLedger)  -- required for lock/unlock
         extraArgs     : ExtraArgs
       controller executor
       do
+        checkVaaArgumentIsWellFormed vaaBytes
         proposal <- fetch proposalCid
         assertMsg "ntt: accept-admin-by-vaa proposal's new admin is not the guardian trust anchor"
           (proposal.newAdmin == guardianGovernance)
@@ -710,17 +735,11 @@ template NttManager
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
-          pubKeys
           consumer = guardianGovernance
           namespace
           replayNodeCid
 
-        assertMsg "ntt governance: not signed by current guardian set"
-          (vaa.guardianSetIndex == cs.guardianSetIndex)
-        assertMsg "ntt governance: wrong emitter chain"
-          (vaa.emitterChain == cs.governanceChainId)
-        assertMsg "ntt governance: wrong emitter address"
-          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+        checkVaaIsCurrentSetGovernance cs vaa
 
         -- Exhaustive constructor dispatch: a register, rotate, or set-peer VAA
         -- must abort here, even though 'RotateToCanonicalFactory' shares this
@@ -729,7 +748,7 @@ template NttManager
           AcceptAdminToGovernance chain targetManagerAddress targetFactoryEpoch -> do
             assertMsg "ntt governance: wrong target chain" (chain == chainId)
             assertMsg "ntt governance: wrong manager address"
-              (normalizeHex targetManagerAddress == managerAddress)
+              (targetManagerAddress == managerAddress)
             assertMsg "ntt governance: wrong factory epoch" (targetFactoryEpoch == factoryEpoch)
           SetPeerByGovernance {} -> abort "ntt governance: wrong action for AcceptAdminTransferByVaa"
           _ -> abort "ntt governance: not an accept-admin action"
@@ -746,28 +765,22 @@ template NttManager
         executor              : Party
         coreStateCid          : ContractId CoreState
         replayNodeCid         : ContractId ReplayNode
-        vaaBytes              : Bytes
-        pubKeys               : [(Int, Bytes)]
+        vaaBytes              : EncodedVaa
         transceiverEmitterCid : ContractId Emitter
         consistencyLevel      : Int
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)
       controller executor
       do
+        checkVaaArgumentIsWellFormed vaaBytes
         cs <- requireCommittedCoreState guardianGovernance coreStateCid
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
-          pubKeys
           consumer = guardianGovernance
           namespace
           replayNodeCid
 
-        assertMsg "ntt governance: not signed by current guardian set"
-          (vaa.guardianSetIndex == cs.guardianSetIndex)
-        assertMsg "ntt governance: wrong emitter chain"
-          (vaa.emitterChain == cs.governanceChainId)
-        assertMsg "ntt governance: wrong emitter address"
-          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+        checkVaaIsCurrentSetGovernance cs vaa
 
         case parseNttGovernance vaa.payload of
           SetPeerByGovernance
@@ -776,7 +789,7 @@ template NttManager
             } -> do
             assertMsg "ntt governance: wrong target chain" (chain == chainId)
             assertMsg "ntt governance: wrong manager address"
-              (normalizeHex actionManagerAddress == managerAddress)
+              (actionManagerAddress == managerAddress)
             assertMsg "ntt governance: wrong peer epoch" (actionPeerEpoch == peerEpoch)
             assertMsg "ntt: manager is not governance-adminned" (admin == guardianGovernance)
             exercise self SetPeer with
@@ -804,11 +817,11 @@ template NttManager
         newFactory    : NttFactory
         coreStateCid  : ContractId CoreState
         replayNodeCid : ContractId ReplayNode
-        vaaBytes      : Bytes
-        pubKeys       : [(Int, Bytes)]
+        vaaBytes      : EncodedVaa
         extraArgs     : ExtraArgs
       controller admin
       do
+        checkVaaArgumentIsWellFormed vaaBytes
         assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
           (tokenConfig == BurnMint)
 
@@ -816,23 +829,17 @@ template NttManager
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
-          pubKeys
           consumer = guardianGovernance
           namespace
           replayNodeCid
 
-        assertMsg "ntt governance: not signed by current guardian set"
-          (vaa.guardianSetIndex == cs.guardianSetIndex)
-        assertMsg "ntt governance: wrong emitter chain"
-          (vaa.emitterChain == cs.governanceChainId)
-        assertMsg "ntt governance: wrong emitter address"
-          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+        checkVaaIsCurrentSetGovernance cs vaa
 
         case parseNttGovernance vaa.payload of
           RotateToCanonicalFactory chain targetManagerAddress targetFactoryEpoch -> do
             assertMsg "ntt governance: wrong target chain" (chain == chainId)
             assertMsg "ntt governance: wrong manager address"
-              (normalizeHex targetManagerAddress == managerAddress)
+              (targetManagerAddress == managerAddress)
             assertMsg "ntt governance: wrong factory epoch" (targetFactoryEpoch == factoryEpoch)
           _ -> abort "ntt governance: not a rotate-to-canonical-factory action"
 
@@ -864,7 +871,7 @@ template NttManager
         coreStateCid          : ContractId CoreState
         ledgerCid             : Optional (ContractId LockedLedger)  -- required for lock/unlock
         recipientChain        : Int
-        recipientAddress      : Bytes32
+        recipientAddress      : UniversalAddress
         rawAmount             : Int      -- integer units at tokenDecimals
         nonce                 : Int
         consistencyLevel      : Int
@@ -877,8 +884,8 @@ template NttManager
         -- Uint8 and uint32 on the wire; the watcher drops out-of-range messages.
         assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
         assertMsg "ntt: nonce must be a uint32" (isUint32 nonce)
-        assertMsg "ntt: recipient address must be 32 bytes of lowercase hex"
-          (isLowerHexBytes32 recipientAddress)
+        assertMsg "ntt: recipient address is not a well-formed UniversalAddress"
+          (checkHexValueIsWellFormed recipientAddress)
         assertMsg "ntt: recipient address must be non-zero"
           (not (isZeroAddress recipientAddress))
         let peer = fromSomeNote ("ntt: no peer for chain " <> show recipientChain)
@@ -971,18 +978,18 @@ template NttManager
               decimals = trimmed.decimals
               amount = trimmed.amount
               sourceToken = tokenAddress
-              recipientAddress = normalizeHex recipientAddress
+              recipientAddress
               recipientChain
-              additionalPayload = ""
+              additionalPayload = mempty
             mm = NttManagerMessage with
-              id = leftPadTo 32 (intToBytesN transceiver.sequence 8)
+              id = parseHexBytesAsOrAbort (intToBytesN transceiver.sequence 32)
               sender = recipientAddressFor user
               payload = encodeNativeTokenTransfer ntt
             wm = WormholeTransceiverMessage with
               sourceManager = managerAddress
               recipientManager = peer.managerAddress
               managerPayload = encodeNttManagerMessage mm
-              transceiverPayload = ""
+              transceiverPayload = mempty
         (_, msg) <- exercise transceiverEmitterCid PublishMessage with
           payload = encodeWormholeTransceiverMessage wm
           nonce
@@ -1009,8 +1016,7 @@ template NttManager
         executor         : Party
         coreStateCid     : ContractId CoreState
         replayNodeCid    : ContractId ReplayNode
-        vaaBytes         : Bytes
-        pubKeys          : [(Int, Bytes)]
+        vaaBytes         : EncodedVaa
         recipient        : Party
         ledgerCid        : ContractId LockedLedger
         inputHoldingCids : [ContractId Holding]      -- explicit override; [] = use the pot hint
@@ -1021,8 +1027,7 @@ template NttManager
         assertMsg "ntt: release is only for lock/unlock deployments"
           (tokenConfig == LockUnlock)
         ledger <- resolveLedger this ledgerCid
-        ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid
-                 vaaBytes pubKeys recipient
+        ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid vaaBytes recipient
         let wireAmount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
             releaseAmount = untrimToDecimal wireAmount tokenDecimals
         assertMsg "ntt: received amount is zero at this token's decimals"
@@ -1115,8 +1120,7 @@ template NttManager
         executor              : Party
         coreStateCid          : ContractId CoreState
         replayNodeCid         : ContractId ReplayNode
-        vaaBytes              : Bytes
-        pubKeys               : [(Int, Bytes)]
+        vaaBytes              : EncodedVaa
         recipient             : Party
         depositPreapprovalCid : ContractId DepositPreapproval
         extraArgs             : ExtraArgs
@@ -1125,8 +1129,7 @@ template NttManager
         assertMsg "ntt: deployment is paused" (not paused)
         assertMsg "ntt: mint is only for burn/mint deployments"
           (tokenConfig == BurnMint)
-        ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid
-                 vaaBytes pubKeys recipient
+        ntt <- verifyInboundTransfer this executor coreStateCid replayNodeCid vaaBytes recipient
         pre <- fetch depositPreapprovalCid
         assertMsg "ntt: deposit pre-approval is not for this recipient"
           (pre.owner == recipient)
@@ -1154,10 +1157,11 @@ template AdminTransferProposal
   with
     admin          : Party    -- the proposing (current) admin
     newAdmin       : Party
-    managerAddress : Bytes32  -- binds the offer to one deployment
+    managerAddress : NttManagerAddress  -- binds the offer to one deployment
   where
     signatory admin
     observer newAdmin
+    ensure checkHexValueIsWellFormed managerAddress
 
     -- | Accept the offer: exercises 'TransferAdmin' on the deployment's
     -- manager, with the old admin's authority supplied by this contract's

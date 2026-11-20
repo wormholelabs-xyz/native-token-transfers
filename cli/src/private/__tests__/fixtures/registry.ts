@@ -4,9 +4,9 @@ export const RETIRED_CANTON_NAMESPACE =
   "122085bf64156420a95663eb8b8cce516858de1d531d95850debe9ec8d15e3f6263e";
 
 export const TEST_NTT_PACKAGE_ID =
-  "1a3e3b0e78f9f08adac111bc44110469dc271f61a9c0e5ed2f7b0b20a569feb8";
+  "79a1cc2c865653eafc03a39a2d81ed0f8bdafb86aa2cc7e9d3f17464faeb9536";
 export const TEST_CORE_PACKAGE_ID =
-  "9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d";
+  "aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b";
 
 export function retiredCanburnRegistryJson(): any {
   return {

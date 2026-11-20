@@ -19,11 +19,18 @@ import DA.Text qualified as T
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
 import Wormhole.Core.State
-import Test.TestCore (setup, govSetFeeVAA, devnetGuardianPubKey)
+import Test.TestCore (setup, govSetFeeVAA)
 
 -- | Right-pad a hex fragment with zeros to a full 64-nibble digest.
-pad64 : Text -> Text
-pad64 t = t <> mconcat (replicate (64 - T.length t) "0")
+pad64 : Text -> VaaDigest
+pad64 t = parseHexTextOrAbort (t <> mconcat (replicate (64 - T.length t) "0"))
+
+-- | The suffix of @digest@ under a node prefix of @prefixNibbles@ nibbles.
+suffixAfter : Int -> VaaDigest -> DigestNibbleSuffix
+suffixAfter prefixNibbles digest = parseHexTextOrAbort (T.drop prefixNibbles (hexTextOf digest))
+
+nibblePrefix : Text -> DigestNibblePrefix
+nibblePrefix = parseHexTextOrAbort
 
 nibbles : [Text]
 nibbles = T.explode "0123456789abcdef"
@@ -53,17 +60,17 @@ registerReplayRoot guardianGovernance consumer namespace threshold = do
 -- @namespace@ trie covering @digest@. Aborts unless coverage is exactly one —
 -- checking the partition invariant and detecting a forked trie (parallel
 -- roots).
-coveringNode : Party -> Text -> Text -> Script (ContractId ReplayNode, ReplayNode)
+coveringNode : Party -> Text -> VaaDigest -> Script (ContractId ReplayNode, ReplayNode)
 coveringNode consumer namespace digest = do
   nodes <- query @ReplayNode consumer
-  let d = normalizeHex digest
-  case filter (\(_, n) -> n.consumer == consumer && n.namespace == namespace && n.prefix `T.isPrefixOf` d) nodes of
+  let digestHex = hexTextOf digest
+  case filter (\(_, n) -> n.consumer == consumer && n.namespace == namespace && hexTextOf n.prefix `T.isPrefixOf` digestHex) nodes of
     [one] -> pure one
     covering -> abort ("partition invariant violated: " <> show (length covering) <> " covering nodes")
 
 -- | 'coveringNode' plus the disclosure a non-stakeholder attaches. @reader@ is
 -- any party that sees the node.
-coveringDisclosure : Party -> Party -> Text -> Text -> Script (ContractId ReplayNode, Disclosure)
+coveringDisclosure : Party -> Party -> Text -> VaaDigest -> Script (ContractId ReplayNode, Disclosure)
 coveringDisclosure reader consumer namespace digest = do
   (cid, _) <- coveringNode consumer namespace digest
   disc <- fromSome <$> queryDisclosure reader cid
@@ -71,12 +78,12 @@ coveringDisclosure reader consumer namespace digest = do
 
 -- | Consume @digest@ into @consumer@'s @namespace@ trie via the
 -- disclosure-service lookup.
-consume : Party -> Text -> Text -> Script (ContractId ReplayNode)
+consume : Party -> Text -> VaaDigest -> Script (ContractId ReplayNode)
 consume consumer namespace digest = do
   (cid, _) <- coveringNode consumer namespace digest
   submit consumer do exerciseCmd cid ConsumeDigest with digest
 
-consumeMustFail : Party -> Text -> Text -> Script ()
+consumeMustFail : Party -> Text -> VaaDigest -> Script ()
 consumeMustFail consumer namespace digest = do
   (cid, _) <- coveringNode consumer namespace digest
   submitMustFail consumer do exerciseCmd cid ConsumeDigest with digest
@@ -102,7 +109,7 @@ testTrieInsertAndReplay = do
   _ <- consume consumer ns dB
   _ <- consume consumer ns dC
   (_, root) <- coveringNode consumer ns dA
-  root.prefix === ""
+  root.prefix === nibblePrefix ""
   Set.size root.consumed === 3
   consumeMustFail consumer ns dA
 
@@ -118,15 +125,15 @@ testTrieSplit = do
   childCid <- consume consumer ns (pad64 "e5")
   nodes <- query @ReplayNode consumer
   length nodes === 16
-  sort (map (\(_, n) -> n.prefix) nodes) === nibbles
+  sort (map (\(_, n) -> n.prefix) nodes) === map nibblePrefix nibbles
   -- All children inherit the parent's namespace.
   forA_ nodes \(_, n) -> n.namespace === ns
   -- Buckets: each consumed digest's suffix sits in its first-nibble child,
   -- nibble dropped; unused children are empty.
-  forA_ nodes \(cid, n) -> case n.prefix of
-    "a" -> do Set.toList n.consumed === [T.drop 1 (pad64 "a1")]
+  forA_ nodes \(cid, n) -> case hexTextOf n.prefix of
+    "a" -> do Set.toList n.consumed === [suffixAfter 1 (pad64 "a1")]
     "e" -> do
-      Set.toList n.consumed === [T.drop 1 (pad64 "e5")]
+      Set.toList n.consumed === [suffixAfter 1 (pad64 "e5")]
       cid === childCid
     "b" -> Set.size n.consumed === 1
     "c" -> Set.size n.consumed === 1
@@ -148,34 +155,32 @@ testMultiLevelSplit = do
   -- Third consume splits the root; all three suffixes share the 'f' bucket.
   _ <- consume consumer ns (pad64 "f2")
   (_, childF) <- coveringNode consumer ns (pad64 "f0")
-  childF.prefix === "f"
+  childF.prefix === nibblePrefix "f"
   Set.size childF.consumed === 3   -- over the threshold of 2, by design
   -- Fourth consume under 'f' splits the over-full child into grandchildren.
   _ <- consume consumer ns (pad64 "f3")
   nodes <- query @ReplayNode consumer
   length nodes === 31   -- 15 depth-1 siblings + 16 depth-2 children of "f"
   (_, gf) <- coveringNode consumer ns (pad64 "f2")
-  gf.prefix === "f2"
-  Set.toList gf.consumed === [T.drop 2 (pad64 "f2")]
+  gf.prefix === nibblePrefix "f2"
+  Set.toList gf.consumed === [suffixAfter 2 (pad64 "f2")]
   -- Replay still rejected across both levels.
   consumeMustFail consumer ns (pad64 "f0")
   consumeMustFail consumer ns (pad64 "f3")
 
--- | Input hygiene: uppercase is normalized (its lowercase twin replays);
--- malformed digests are rejected.
+-- | Input hygiene: a 'VaaDigest' has one form, so uppercase and malformed
+-- digests fail to parse (the core forged-value test covers the Ledger API).
 testDigestValidation : Script ()
 testDigestValidation = do
   (_, consumer, rootCid) <- setupTrie 4
-  let upper = "AB" <> mconcat (replicate 62 "0")
-  _ <- consume consumer ns upper
-  consumeMustFail consumer ns (pad64 "ab")   -- lowercase twin: same digest
-  forA_ [ mconcat (replicate 63 "0")        -- too short
-        , mconcat (replicate 65 "0")        -- too long
-        , "0x" <> mconcat (replicate 62 "0") -- 0x prefix
-        , "g" <> mconcat (replicate 63 "0")  -- not hex
-        ] \bad -> do
-    (cid, _) <- coveringNode consumer ns (pad64 "ff")
-    submitMustFail consumer do exerciseCmd cid ConsumeDigest with digest = bad
+  _ <- consume consumer ns (pad64 "ab")
+  forA_ [ ("uppercase", "AB" <> mconcat (replicate 62 "0"), "VaaDigest: not lowercase hex")
+        , ("too short", mconcat (replicate 63 "0"), "VaaDigest: odd hex length 63")
+        , ("too long", mconcat (replicate 66 "0"), "VaaDigest: expected 32 bytes, got 66 hex characters")
+        , ("0x prefix", "0x" <> mconcat (replicate 62 "0"), "VaaDigest: not lowercase hex")
+        , ("not hex", "g" <> mconcat (replicate 63 "0"), "VaaDigest: not lowercase hex")
+        ] \(label, badHex, expectedError) ->
+    assertMsg ("digest case " <> label) (parseHexText @VaaDigest badHex == Left expectedError)
   -- rootCid is stale after the first consume: distinct failure from hygiene.
   submitMustFail consumer do exerciseCmd rootCid ConsumeDigest with digest = pad64 "cd"
 
@@ -186,7 +191,7 @@ testWrongNodeRejected = do
   (_, consumer, _) <- setupTrie 4
   forA_ (map pad64 ["a0", "b1", "c2", "d3", "e4"]) (consume consumer ns)  -- forces the split
   (wrongCid, wrong) <- coveringNode consumer ns (pad64 "a0")
-  wrong.prefix === "a"
+  wrong.prefix === nibblePrefix "a"
   submitMustFail consumer do exerciseCmd wrongCid ConsumeDigest with digest = pad64 "b9"
   _ <- consume consumer ns (pad64 "b9")
   pure ()
@@ -211,29 +216,29 @@ testStaleCidAndRetry = do
 testDepth63NeverSplits : Script ()
 testDepth63NeverSplits = do
   (gg, consumer, _) <- setupTrie 4
-  let deepPrefix = mconcat (replicate 63 "f")
+  let deepPrefixHex = mconcat (replicate 63 "f")
   -- Direct creation needs both signatories — fine for a test fixture.
   deepCid <- submit (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, guardianGovernance = gg, namespace = ns, prefix = deepPrefix, splitThreshold = 1, consumed = Set.empty
+      consumer, guardianGovernance = gg, namespace = ns, prefix = nibblePrefix deepPrefixHex, splitThreshold = 1, consumed = Set.empty
   -- Two inserts exceed threshold 1, yet the node never splits.
-  deepCid' <- submit consumer do exerciseCmd deepCid ConsumeDigest with digest = deepPrefix <> "0"
-  deepCid'' <- submit consumer do exerciseCmd deepCid' ConsumeDigest with digest = deepPrefix <> "1"
+  deepCid' <- submit consumer do exerciseCmd deepCid ConsumeDigest with digest = parseHexTextOrAbort (deepPrefixHex <> "0")
+  deepCid'' <- submit consumer do exerciseCmd deepCid' ConsumeDigest with digest = parseHexTextOrAbort (deepPrefixHex <> "1")
   Some deep <- queryContractId consumer deepCid''
-  deep.prefix === deepPrefix
+  deep.prefix === nibblePrefix deepPrefixHex
   Set.size deep.consumed === 2
-  submitMustFail consumer do exerciseCmd deepCid'' ConsumeDigest with digest = deepPrefix <> "0"
-  -- ensure: depth-64 prefixes, non-positive thresholds, and wrong-length
-  -- suffixes are unrepresentable.
+  submitMustFail consumer do exerciseCmd deepCid'' ConsumeDigest with digest = parseHexTextOrAbort (deepPrefixHex <> "0")
+  -- Depth-64 prefixes fail to parse; non-positive thresholds and wrong-length
+  -- suffixes fail the ensure.
+  parseHexText @DigestNibblePrefix (hexTextOf (pad64 ""))
+    === Left "DigestNibblePrefix: expected 0 to 63 nibbles, got 64"
   submitMustFail (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, guardianGovernance = gg, namespace = ns, prefix = pad64 "", splitThreshold = 1, consumed = Set.empty
+      consumer, guardianGovernance = gg, namespace = ns, prefix = nibblePrefix "", splitThreshold = 0, consumed = Set.empty
   submitMustFail (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, guardianGovernance = gg, namespace = ns, prefix = "", splitThreshold = 0, consumed = Set.empty
-  submitMustFail (actAs consumer <> actAs gg) do
-    createCmd ReplayNode with
-      consumer, guardianGovernance = gg, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.fromList ["00"]
+      consumer, guardianGovernance = gg, namespace = ns, prefix = nibblePrefix "", splitThreshold = 4
+      consumed = Set.fromList [parseHexTextOrAbort "00"]
 
 -- | Scopes are independent, authorization per-consumer: one party can neither
 -- advance another's trie nor be affected by it.
@@ -272,7 +277,7 @@ testRootClaims : Script ()
 testRootClaims = do
   (gg, consumer, rootCid) <- setupTrie 4
   Some root <- queryContractId consumer rootCid
-  root.prefix === ""
+  root.prefix === nibblePrefix ""
   root.splitThreshold === 4
   Set.size root.consumed === 0
   [(regCid, _)] <- query @ReplayRootRegistry gg
@@ -303,7 +308,7 @@ testRootClaims = do
   -- The consumer cannot create a co-signed node alone.
   submitMustFail consumer do
     createCmd ReplayNode with
-      consumer, guardianGovernance = gg, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.empty
+      consumer, guardianGovernance = gg, namespace = ns, prefix = nibblePrefix "", splitThreshold = 4, consumed = Set.empty
 
 -- | End-to-end verify + consume through 'VerifyAndConsumeVAA' with a real
 -- guardian-signed VAA: replay fails on membership; a second consumer has its own
@@ -317,19 +322,17 @@ testVerifyAndConsumeVAA = do
   (vaa, nodeCid) <- submit (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = rootCid
   Some node <- queryContractId ntt nodeCid
-  Set.member vaa.hash node.consumed === True
+  Set.member (suffixAfter 0 vaa.hash) node.consumed === True
   -- Replay: resolve the FRESH covering node, still rejected (membership).
   (freshCid, _) <- coveringNode ntt ns vaa.hash
   freshCid === nodeCid
   submitMustFail (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = freshCid
@@ -339,7 +342,6 @@ testVerifyAndConsumeVAA = do
   _ <- submit (actAs other <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = other
       namespace = ns
       replayNodeCid = otherRoot
@@ -349,7 +351,6 @@ testVerifyAndConsumeVAA = do
   submitMustFail (actAs ntt <> disclose csDisc <> disclose otherDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = otherFresh
@@ -358,12 +359,11 @@ testVerifyAndConsumeVAA = do
   rogueGuardianGovernance <- allocateParty "RogueGuardianGovernance"
   shadowCid <- submit (actAs ntt <> actAs rogueGuardianGovernance) do
     createCmd ReplayNode with
-      consumer = ntt, guardianGovernance = rogueGuardianGovernance, namespace = ns, prefix = ""
+      consumer = ntt, guardianGovernance = rogueGuardianGovernance, namespace = ns, prefix = nibblePrefix ""
       splitThreshold = 4, consumed = Set.empty
   submitMustFail (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = shadowCid

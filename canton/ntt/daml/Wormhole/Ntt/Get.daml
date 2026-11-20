@@ -1,31 +1,28 @@
 -- | A minimal parser-combinator monad for the wire codecs in
--- "Wormhole.Ntt.Payload". A 'Get' walks a hex 'Bytes' buffer by byte offset
+-- "Wormhole.Ntt.Payload". A 'Get' walks a 'HexBytes' buffer by byte offset
 -- (not by hand-computed absolute positions), so a decoder built from it reads
 -- as a sequence of fields in wire order.
 module Wormhole.Ntt.Get
   ( Get
   , runGet
   , getBytes
-  , getBytes32
+  , getBytes32As
   , getUint8
   , getUint16
   , getUint64
   , getLengthPrefixed
   , remainingBytes
   , assertPrefix
-  , isHexByteString
   ) where
-
-import DA.Text qualified as T
 
 import Wormhole.Core.Bytes
 
--- | A parser over a hex 'Bytes' buffer: given the buffer and the current byte
+-- | A parser over a 'HexBytes' buffer: given the buffer and the current byte
 -- offset, either fails with a message or returns a value together with the
 -- offset just past what it consumed. The buffer itself is threaded unchanged
 -- through every step; only the offset advances, so every primitive can report
 -- a failure position without re-slicing.
-newtype Get a = Get (Bytes -> Int -> Either Text (a, Int))
+newtype Get a = Get (HexBytes -> Int -> Either Text (a, Int))
 
 instance Functor Get where
   fmap f (Get g) = Get $ \b o -> case g b o of
@@ -46,18 +43,13 @@ instance Action Get where
     Right (a, o') -> case f a of
       Get g' -> g' b o'
 
--- | An even number of hex digits, either case. 'byteLength' truncates a
--- half byte, so every length computed from a buffer depends on this.
-isHexByteString : Bytes -> Bool
-isHexByteString b = T.length b % 2 == 0 && isLowerHex (normalizeHex b)
-
--- | Run a parser from offset 0 over a buffer of whole hex bytes and require
--- it to consume the buffer exactly: this is the single trailing-bytes check
--- every decoder in "Wormhole.Ntt.Payload" relies on instead of a
--- hand-written length assertion of its own.
-runGet : Get a -> Bytes -> Either Text a
+-- | Run a parser from offset 0 and require it to consume the buffer exactly:
+-- this is the single trailing-bytes check every decoder in
+-- "Wormhole.Ntt.Payload" relies on instead of a hand-written length assertion
+-- of its own. The buffer can come from the Ledger API, so its type rule runs again.
+runGet : Get a -> HexBytes -> Either Text a
 runGet (Get g) b
-  | not (isHexByteString b) = Left "malformed buffer: not whole bytes of hex"
+  | not (checkHexValueIsWellFormed b) = Left "malformed buffer: not whole bytes of lowercase hex"
   | otherwise = case g b 0 of
       Left e -> Left e
       Right (a, o) ->
@@ -84,20 +76,22 @@ instance CanAbort Get where
 remainingBytes : Get Int
 remainingBytes = Get $ \b o -> Right (byteLength b - o, o)
 
--- | Consume exactly @n@ bytes, normalized to lowercase hex. The one bounds
--- check every other primitive here goes through.
-getBytes : Int -> Get Bytes
+-- | Consume exactly @n@ bytes. The one bounds check every other primitive
+-- here goes through.
+getBytes : Int -> Get HexBytes
 getBytes n = Get $ \b o ->
   let total = byteLength b
   in if o + n > total
        then Left ("getBytes: need " <> show n <> " bytes at offset " <> show o
          <> ", only " <> show (total - o) <> " left")
-       else Right (normalizeHex (sliceBytes o n b), o + n)
+       else Right (sliceBytes o n b, o + n)
 
--- | A 32-byte field: addresses, ids and hashes, the width every fixed-size
--- field in these schemas that is not an integer uses.
-getBytes32 : Get Bytes32
-getBytes32 = getBytes 32
+-- | A 32-byte field as its constrained type: addresses, ids and bindings,
+-- the width every fixed-size field in these schemas that is not an integer uses.
+getBytes32As : HexEncodedBytes a => Get a
+getBytes32As = do
+  fieldBytes <- getBytes 32
+  either abort pure (parseHexBytesAs fieldBytes)
 
 -- | The wire integer widths, named after the schema types they read rather
 -- than a byte count, so a decoder cannot ask for a width the protocol has no
@@ -118,7 +112,7 @@ getUint n = bytesToInt <$> getBytes n
 
 -- | A length-prefixed field: a uint16 byte length, then that many bytes.
 -- Mirrors 'Wormhole.Ntt.Payload.encodeLengthPrefixed'.
-getLengthPrefixed : Get Bytes
+getLengthPrefixed : Get HexBytes
 getLengthPrefixed = do
   len <- getUint16
   getBytes len
@@ -126,9 +120,9 @@ getLengthPrefixed = do
 -- | Consume a fixed leading tag and require it to match. Sized from @expected@
 -- itself, so a schema's prefix width is stated once, where the prefix is
 -- defined.
-assertPrefix : Bytes -> Get ()
+assertPrefix : HexBytes -> Get ()
 assertPrefix expected = do
   actual <- getBytes (byteLength expected)
-  if actual == normalizeHex expected
+  if actual == expected
     then pure ()
-    else abort ("prefix: " <> actual)
+    else abort ("prefix: " <> hexTextOf actual)
