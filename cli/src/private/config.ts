@@ -55,6 +55,7 @@ export interface CantonChainConfig {
   manager: Hex32;
   emitter: Hex32;
   instrument: CantonInstrumentId;
+  reserveCustodian: CantonPartyId;
   vettedPackageIds: CantonVettedPackageIds;
 }
 
@@ -135,6 +136,7 @@ function readCantonChain(value: unknown, context: string): CantonChainConfig {
       "manager",
       "emitter",
       "instrument",
+      "reserveCustodian",
       "vettedPackageIds",
     ],
     context
@@ -167,6 +169,11 @@ function readCantonChain(value: unknown, context: string): CantonChainConfig {
       ),
       id: readNonEmptyString(instrument.id, `${context}.instrument.id`),
     },
+    reserveCustodian: readWithParser(
+      chain.reserveCustodian,
+      `${context}.reserveCustodian`,
+      parseCantonPartyId
+    ),
     vettedPackageIds: {
       ntt: readWithParser(
         packageIds.ntt,

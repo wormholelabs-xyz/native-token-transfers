@@ -222,7 +222,7 @@ async function runSend(sendArguments: SendArguments): Promise<void> {
     );
     if (result)
       console.log(
-        `sent: command ${result.commandId}, sequence ${result.sequence}`
+        `sent: command ${result.commandId}, sequence ${result.sequence ?? "(not readable; find it from the command id)"}`
       );
     sequence = result?.sequence;
   } else if (sourceChain === "Ethereum") {

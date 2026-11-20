@@ -6,6 +6,7 @@ import {
   parseCantonPartyId,
   parseHex32,
   type CantonContractId,
+  type CantonPartyId,
   type Hex32,
 } from "../types.js";
 import { errorBodyExcerpt, fetchJsonBounded } from "./http.js";
@@ -33,6 +34,7 @@ export interface ManagerSummary {
   contractId: CantonContractId;
   tokenConfig: "LockUnlock" | "BurnMint";
   instrumentId: CantonInstrumentId;
+  reserveCustodian: CantonPartyId;
   paused: boolean;
 }
 
@@ -171,6 +173,9 @@ function parseManagerSummary(entry: any): ManagerSummary {
       ),
       id: readNonEmptyText(entry.instrumentId?.id, "instrumentId.id"),
     },
+    reserveCustodian: parseCantonPartyId(
+      readNonEmptyText(entry.reserveCustodian, "reserveCustodian")
+    ),
     paused: entry.paused,
   };
 }

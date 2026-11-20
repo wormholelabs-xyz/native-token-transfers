@@ -6,9 +6,17 @@ import {
   type CantonContractId,
   type CantonPartyId,
 } from "../types.js";
-import { errorBodyExcerpt, fetchJsonBounded } from "./http.js";
+import {
+  DEFAULT_HTTP_BOUNDS,
+  errorBodyExcerpt,
+  fetchJsonBounded,
+  type HttpBounds,
+} from "./http.js";
 
 export const LEDGER_REQUEST_MAX_ATTEMPTS = 2;
+// submit-and-wait returns after the synchronizer commits; confirmation by all
+// stakeholder participants can take longer than a read.
+export const LEDGER_SUBMIT_TIMEOUT_MS = 120_000;
 export const USER_HOLDINGS_MAX = 1000;
 const TOKEN_EXPIRY_MARGIN_MS = 30_000;
 const TOKEN_LIFETIME_DEFAULT_SECONDS = 300;
@@ -100,7 +108,8 @@ export class CantonLedgerClient implements CantonLedger {
   private async requestJson(
     method: "GET" | "POST",
     ledgerPath: string,
-    body?: unknown
+    body?: unknown,
+    bounds: HttpBounds = DEFAULT_HTTP_BOUNDS
   ): Promise<unknown> {
     const url = new URL(ledgerPath, this.options.jsonApiUrl).href;
     for (
@@ -108,14 +117,20 @@ export class CantonLedgerClient implements CantonLedger {
       attemptNumber <= LEDGER_REQUEST_MAX_ATTEMPTS;
       attemptNumber++
     ) {
-      const response = await fetchJsonBounded(url, {
-        method,
-        headers: {
-          Authorization: `Bearer ${await this.accessToken()}`,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      const response = await fetchJsonBounded(
+        url,
+        {
+          method,
+          headers: {
+            Authorization: `Bearer ${await this.accessToken()}`,
+            ...(body === undefined
+              ? {}
+              : { "Content-Type": "application/json" }),
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
         },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
+        bounds
+      );
       if (
         response.status === 401 &&
         attemptNumber < LEDGER_REQUEST_MAX_ATTEMPTS
@@ -186,7 +201,8 @@ export class CantonLedgerClient implements CantonLedger {
     const response = (await this.requestJson(
       "POST",
       "/v2/commands/submit-and-wait-for-transaction",
-      request
+      request,
+      { ...DEFAULT_HTTP_BOUNDS, timeoutMs: LEDGER_SUBMIT_TIMEOUT_MS }
     )) as {
       transaction?: { events?: unknown };
     };

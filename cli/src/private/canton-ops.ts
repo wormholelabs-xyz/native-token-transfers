@@ -37,6 +37,8 @@ import type { ParsedTransferVaa } from "./vaa.js";
 
 export const REDEEM_SUBMIT_MAX_ATTEMPTS = 3;
 export const INPUT_HOLDINGS_MAX = 16;
+// Instant finality on Canton; the core watcher accepts 0.
+const TRANSFER_CONSISTENCY_LEVEL = 0;
 
 const ROLE_NTT_MANAGER = "NttManager";
 const ROLE_CORE_STATE = "CoreState";
@@ -167,6 +169,11 @@ async function checkFlowMatchesRegistry(
       "NttManager instrument differs from the registry instrument"
     );
   }
+  if (manager.reserveCustodian !== canton.reserveCustodian) {
+    throw new Error(
+      `NttManager reserveCustodian ${manager.reserveCustodian} differs from the registry ${canton.reserveCustodian}`
+    );
+  }
   if (manager.paused) throw new Error("the NttManager is paused");
 }
 
@@ -295,7 +302,7 @@ export async function cantonSend(
   disclosure: DisclosureServiceClient,
   input: CantonSendInput,
   options: { dryRun: boolean }
-): Promise<{ sequence: string; commandId: string } | undefined> {
+): Promise<{ sequence?: string; commandId: string } | undefined> {
   const canton = cantonLeg(input.deployment);
   const flow = await disclosure.fetchFlow("transfer", {
     manager: canton.manager,
@@ -348,7 +355,7 @@ export async function cantonSend(
         recipientAddress: input.recipient,
         rawAmount: input.rawAmount.toString(),
         nonce: String(input.transferNonce),
-        consistencyLevel: "0",
+        consistencyLevel: String(TRANSFER_CONSISTENCY_LEVEL),
         inputHoldingCids,
         feeAllocation: null,
         extraArgs: EMPTY_EXTRA_ARGS,
@@ -362,8 +369,23 @@ export async function cantonSend(
     );
     return undefined;
   }
-  const transaction = await ledger.submitAndWaitForTransaction(request);
-  return { sequence: extractTransferSequence(transaction), commandId };
+  let transaction: LedgerTransaction;
+  try {
+    transaction = await ledger.submitAndWaitForTransaction(request);
+  } catch (err) {
+    throw new Error(
+      `Canton submit of command ${commandId}: result unknown (${(err as Error).message}). ` +
+        `Run the same send with --transfer-nonce ${input.transferNonce}: the command id is then the same, and the participant rejects a duplicate.`
+    );
+  }
+  try {
+    return { sequence: extractTransferSequence(transaction), commandId };
+  } catch (err) {
+    console.log(
+      `  command ${commandId} committed; the sequence is not readable (${(err as Error).message})`
+    );
+    return { commandId };
+  }
 }
 
 export interface CantonRedeemInput {
