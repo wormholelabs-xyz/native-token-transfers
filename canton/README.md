@@ -74,7 +74,7 @@ the upgrades of a package in order.
 Version 0.5.0 removes the `operator` field and signatory from `NttGovernance`,
 `NttManager` and `LockedLedger`. `gg` is the only NTT anchor. Version 0.5.0
 builds against core 0.9.0 (`bba94798...`) and has the package id
-`9e08a8e6ea6b52697e8f7f3dbedf3e090ced8845af9bd335f0d3cf377fdb381a`.
+`449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e`.
 An upgrade cannot remove a template field or a signatory. Thus
 `ntt/daml.yaml` has no `upgrades:` field. Use participants that have no
 earlier `ntt` package.
@@ -108,7 +108,15 @@ The guardians must sign one `NttGovernance` root for each `gg`.
 
 NTT must be final at genesis. An upgrade-compatible NTT version needs only
 the vetting of the new DAR on each `gg` host. A breaking NTT version needs a
-new `NttGovernance` root, and thus one more `gg` transaction.
+new `NttGovernance` root, and thus one more `gg` transaction. That
+transaction must archive the earlier root and create the new root. If the
+earlier root stays active, both roots accept one registration VAA. Then one
+manager address gets two managers, and each inbound transfer mints two times.
+
+Vet no package with code that runs with `gg` authority and can claim a `gg`
+replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
+second trie in the namespace of a deployment. NTT reserves the replay
+namespace prefix `ntt:`.
 
 ### Version 0.4.x is not upgrade-compatible
 
@@ -143,10 +151,11 @@ package name when it receives a DAR. Thus a participant that has an earlier
 
 To move a deployment from an earlier version, do these steps:
 
-1. Hold a new root ceremony. `gg` and `nttCustody` sign the new
-   `NttGovernance`.
-2. Set `nextId` of the new root to the `nextId` of the old root. Thus no
-   manager address and no replay namespace occurs two times.
+1. Hold a new root ceremony. In one transaction, `gg` and `nttCustody`
+   archive the old `NttGovernance` and create the new one.
+2. In the same transaction, set `nextId` of the new root to the `nextId` of
+   the archived root. Thus no manager address and no replay namespace occurs
+   two times.
 3. Register each deployment again on the new root.
 4. On each peer chain, register the new manager and transceiver addresses.
 5. Move each reserve from its old custodian to the new `reserveCustodian`.
