@@ -5,7 +5,7 @@ module Test.TestAcceptGenesis where
 
 import Daml.Script
 import DA.Assert ((===))
-import DA.Crypto.Text (keccak256)
+import DA.Crypto.Text (keccak256, toHex)
 import DA.Foldable (forA_, maximum)
 import DA.List (dedup, sort)
 import DA.Optional (isNone, isSome)
@@ -14,7 +14,6 @@ import DA.Text qualified as T
 
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
-import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Governance (coreModule)
@@ -304,7 +303,7 @@ testAcceptGenesisRejects = do
         , GenesisRejectionCase "negative first NTT manager id" "genesis: first NTT manager id is negative" True $
             acceptChangedOffer \parameters -> parameters with firstNttManagerId = -1
         , GenesisRejectionCase "malformed consumed core governance digest" "genesis: consumed governance digest is not 32 bytes of lowercase hex" True $
-            acceptChangedOffer \parameters -> parameters with consumedCoreGovernanceDigests = [T.toUpper (digestOf "core")]
+            acceptChangedOffer \parameters -> parameters with consumedCoreGovernanceDigests = ["A" <> T.drop 1 (digestOf "core")]
         , GenesisRejectionCase "malformed consumed NTT governance digest" "genesis: consumed governance digest is not 32 bytes of lowercase hex" True $
             acceptChangedOffer \parameters -> parameters with consumedNttGovernanceDigests = ["00"]
         , GenesisRejectionCase "duplicate consumed core governance digest" "genesis: duplicate consumed core governance digest" True $
@@ -409,12 +408,12 @@ testReGenesisRejectsGovernanceReplay = do
     chain = cantonChainIdForTests
     registrationBinding = nttRegistrationBindingFor gg admin 0
     tokenDecimals = 8
+  managerA <- registerManagerByVaaAttempt gg rootsA admin registerVaa key
+    >>= either (\submitError -> abort ("RegisterManagerByVaa on A: " <> rejectionText submitError)) pure
   coreStateAfterFee <- relayCoreGovernance gg rootsA relayer setFeeVaa key
     >>= either (\submitError -> abort ("SetMessageFee on A: " <> rejectionText submitError)) pure
   _ <- relayCoreGovernance gg (rootsA with coreStateCid = coreStateAfterFee) relayer transferFeesVaa key
     >>= either (\submitError -> abort ("TransferFees on A: " <> rejectionText submitError)) pure
-  managerA <- registerManagerByVaaAttempt gg rootsA admin registerVaa key
-    >>= either (\submitError -> abort ("RegisterManagerByVaa on A: " <> rejectionText submitError)) pure
   Some managerOnA <- queryContractId gg managerA
   [(_, nttGovernanceA)] <- query @NttGovernance gg
   emitterRegistriesA <- query @EmitterRegistry gg

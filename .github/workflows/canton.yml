@@ -48,6 +48,10 @@ jobs:
         working-directory: ./canton/test
         run: dpm test
 
+      - name: Run wormhole-genesis Daml tests
+        working-directory: ./canton/genesis-test
+        run: dpm test
+
   disclosure-service:
     name: disclosure service (go)
     runs-on: ubuntu-latest
