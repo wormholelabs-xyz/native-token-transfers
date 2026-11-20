@@ -1,7 +1,7 @@
 -- | NTT wire codec: the three nested structures a Native Token Transfer travels
 -- in, mirroring the spec and the EVM/Solana reference implementations.
 --
--- Layouts (widths in BYTES; big-endian; hex 'Bytes' throughout):
+-- Layouts (widths in BYTES; big-endian; 'HexBytes' throughout):
 --
 -- > NativeTokenTransfer:
 -- >   prefix(4) = 0x994E5454 ‖ decimals(1) ‖ amount(8) ‖ sourceToken(32)
@@ -30,47 +30,34 @@
 -- bytes past the decoded message).
 module Wormhole.Ntt.Payload where
 
-import DA.Crypto.Text (keccak256, toHex)
-import DA.Text qualified as T
-
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 
 import Wormhole.Core.Bytes
+import Wormhole.Ntt.Bytes
 import Wormhole.Ntt.Get
 
 ----------------------------------------------------------------------
--- Big-endian encoding helpers. 'intToBytesN' / 'leftPadTo' live in
--- Wormhole.Core.Bytes; this module adds the NTT uint16 length prefix and the
--- checked 32-byte field.
+-- Big-endian encoding helpers. 'intToBytesN' lives in Wormhole.Core.Bytes;
+-- this module adds the NTT uint16 length prefix. A 32-byte field encodes
+-- with 'hexBytesOf' of its constrained type.
 ----------------------------------------------------------------------
 
--- | Encode a length-prefixed field: uint16 length ‖ bytes.
-encodeLengthPrefixed : Bytes -> Bytes
-encodeLengthPrefixed b
-  | not (isHexByteString b) = error "ntt: length-prefixed field is not whole bytes of hex"
-  | otherwise = intToBytesN (byteLength b) 2 <> normalizeHex b
-
--- | Encode a 32-byte field, left-padding a shorter value. 'leftPadTo' is the
--- identity at or above 32 bytes, so a longer or half-byte value must abort
--- here instead of shifting every later field.
-encodeBytes32 : Bytes32 -> Bytes
-encodeBytes32 b =
-  let padded = leftPadTo 32 b
-  in if T.length padded == 64 && isLowerHex padded
-       then padded
-       else error ("ntt: 32-byte field is not 32 bytes of hex: " <> b)
+-- | Encode a length-prefixed field: uint16 length ‖ bytes. 'intToBytesN'
+-- aborts on a field longer than 65535 bytes.
+encodeLengthPrefixed : HexBytes -> HexBytes
+encodeLengthPrefixed fieldBytes = intToBytesN (byteLength fieldBytes) 2 <> fieldBytes
 
 ----------------------------------------------------------------------
 -- Prefixes
 ----------------------------------------------------------------------
 
 -- | @0x994E5454@ = 0x99 'N' 'T' 'T'.
-nativeTokenTransferPrefix : Bytes
-nativeTokenTransferPrefix = "994e5454"
+nativeTokenTransferPrefix : HexBytes
+nativeTokenTransferPrefix = parseHexTextOrAbort "994e5454"
 
 -- | @0x9945FF10@, the Wormhole transceiver message prefix.
-wormholeTransceiverPrefix : Bytes
-wormholeTransceiverPrefix = "9945ff10"
+wormholeTransceiverPrefix : HexBytes
+wormholeTransceiverPrefix = parseHexTextOrAbort "9945ff10"
 
 ----------------------------------------------------------------------
 -- NativeTokenTransfer
@@ -79,21 +66,21 @@ wormholeTransceiverPrefix = "9945ff10"
 data NativeTokenTransfer = NativeTokenTransfer with
     decimals          : Int      -- uint8: trimmed-amount decimals
     amount            : Int      -- uint64: trimmed amount
-    sourceToken       : Bytes32
-    recipientAddress  : Bytes32
+    sourceToken       : UniversalAddress
+    recipientAddress  : UniversalAddress
     recipientChain    : Int      -- uint16: Wormhole chain id
-    additionalPayload : Bytes    -- "" when absent
+    additionalPayload : HexBytes -- empty when absent
   deriving (Eq, Show)
 
-encodeNativeTokenTransfer : NativeTokenTransfer -> Bytes
+encodeNativeTokenTransfer : NativeTokenTransfer -> HexBytes
 encodeNativeTokenTransfer n =
   nativeTokenTransferPrefix
     <> intToHexByte n.decimals
     <> intToBytesN n.amount 8
-    <> encodeBytes32 n.sourceToken
-    <> encodeBytes32 n.recipientAddress
+    <> hexBytesOf n.sourceToken
+    <> hexBytesOf n.recipientAddress
     <> intToBytesN n.recipientChain 2
-    <> (if n.additionalPayload == "" then "" else encodeLengthPrefixed n.additionalPayload)
+    <> (if n.additionalPayload == mempty then mempty else encodeLengthPrefixed n.additionalPayload)
 
 -- | The 'Get' counterpart of 'decodeNativeTokenTransfer', for callers that
 -- want an 'Either' instead of an aborting 'error'.
@@ -102,17 +89,17 @@ getNativeTokenTransfer = do
   assertPrefix nativeTokenTransferPrefix
   decimals <- getUint8
   amount <- getUint64
-  sourceToken <- getBytes32
-  recipientAddress <- getBytes32
+  sourceToken <- getBytes32As
+  recipientAddress <- getBytes32As
   recipientChain <- getUint16
   -- Two valid wire forms of an absent additionalPayload: omitted
   -- entirely, or an explicit zero-length field (non-canonical, but
   -- accepted for cross-runtime compatibility).
   left <- remainingBytes
-  additionalPayload <- if left == 0 then pure "" else getLengthPrefixed
+  additionalPayload <- if left == 0 then pure mempty else getLengthPrefixed
   pure NativeTokenTransfer with ..
 
-decodeNativeTokenTransfer : Bytes -> NativeTokenTransfer
+decodeNativeTokenTransfer : HexBytes -> NativeTokenTransfer
 decodeNativeTokenTransfer b = case runGet getNativeTokenTransfer b of
   Right a -> a
   Left e -> error ("ntt: bad NativeTokenTransfer " <> e)
@@ -122,24 +109,24 @@ decodeNativeTokenTransfer b = case runGet getNativeTokenTransfer b of
 ----------------------------------------------------------------------
 
 data NttManagerMessage = NttManagerMessage with
-    id      : Bytes32   -- unique per (source manager) message id
-    sender  : Bytes32   -- the sending manager address
-    payload : Bytes     -- an encoded NativeTokenTransfer
+    id      : NttMessageId      -- unique per (source manager) message id
+    sender  : UniversalAddress  -- the sending user's address
+    payload : HexBytes          -- an encoded NativeTokenTransfer
   deriving (Eq, Show)
 
-encodeNttManagerMessage : NttManagerMessage -> Bytes
+encodeNttManagerMessage : NttManagerMessage -> HexBytes
 encodeNttManagerMessage m =
-  encodeBytes32 m.id <> encodeBytes32 m.sender <> encodeLengthPrefixed m.payload
+  hexBytesOf m.id <> hexBytesOf m.sender <> encodeLengthPrefixed m.payload
 
 -- | The 'Get' counterpart of 'decodeNttManagerMessage'.
 getNttManagerMessage : Get NttManagerMessage
 getNttManagerMessage = do
-  id <- getBytes32
-  sender <- getBytes32
+  id <- getBytes32As
+  sender <- getBytes32As
   payload <- getLengthPrefixed
   pure NttManagerMessage with ..
 
-decodeNttManagerMessage : Bytes -> NttManagerMessage
+decodeNttManagerMessage : HexBytes -> NttManagerMessage
 decodeNttManagerMessage b = case runGet getNttManagerMessage b of
   Right a -> a
   Left e -> error ("ntt: bad NttManagerMessage " <> e)
@@ -149,32 +136,32 @@ decodeNttManagerMessage b = case runGet getNttManagerMessage b of
 ----------------------------------------------------------------------
 
 data WormholeTransceiverMessage = WormholeTransceiverMessage with
-    sourceManager      : Bytes32
-    recipientManager   : Bytes32
-    managerPayload     : Bytes   -- an encoded NttManagerMessage
-    transceiverPayload : Bytes   -- "" for the Wormhole transceiver
+    sourceManager      : NttManagerAddress
+    recipientManager   : NttManagerAddress
+    managerPayload     : HexBytes  -- an encoded NttManagerMessage
+    transceiverPayload : HexBytes  -- empty for the Wormhole transceiver
   deriving (Eq, Show)
 
-encodeWormholeTransceiverMessage : WormholeTransceiverMessage -> Bytes
-encodeWormholeTransceiverMessage w =
-  wormholeTransceiverPrefix
-    <> encodeBytes32 w.sourceManager
-    <> encodeBytes32 w.recipientManager
+encodeWormholeTransceiverMessage : WormholeTransceiverMessage -> MessagePayload
+encodeWormholeTransceiverMessage w = parseHexBytesAsOrAbort
+  (wormholeTransceiverPrefix
+    <> hexBytesOf w.sourceManager
+    <> hexBytesOf w.recipientManager
     <> encodeLengthPrefixed w.managerPayload
-    <> encodeLengthPrefixed w.transceiverPayload
+    <> encodeLengthPrefixed w.transceiverPayload)
 
 -- | The 'Get' counterpart of 'decodeWormholeTransceiverMessage'.
 getWormholeTransceiverMessage : Get WormholeTransceiverMessage
 getWormholeTransceiverMessage = do
   assertPrefix wormholeTransceiverPrefix
-  sourceManager <- getBytes32
-  recipientManager <- getBytes32
+  sourceManager <- getBytes32As
+  recipientManager <- getBytes32As
   managerPayload <- getLengthPrefixed
   transceiverPayload <- getLengthPrefixed
   pure WormholeTransceiverMessage with ..
 
-decodeWormholeTransceiverMessage : Bytes -> WormholeTransceiverMessage
-decodeWormholeTransceiverMessage b = case runGet getWormholeTransceiverMessage b of
+decodeWormholeTransceiverMessage : MessagePayload -> WormholeTransceiverMessage
+decodeWormholeTransceiverMessage b = case runGet getWormholeTransceiverMessage (hexBytesOf b) of
   Right a -> a
   Left e -> error ("ntt: bad WormholeTransceiver " <> e)
 
@@ -193,8 +180,8 @@ decodeWormholeTransceiverMessage b = case runGet getWormholeTransceiverMessage b
 -- | The NTT governance module identifier: ASCII "Ntt" (0x4e7474) left-padded to
 -- 32 bytes. Every NTT governance packet carries this value; a core ("Core")
 -- packet routed here (or vice versa) is rejected at the module check.
-nttGovernanceModule : Bytes32
-nttGovernanceModule = "00000000000000000000000000000000000000000000000000000000004e7474"
+nttGovernanceModule : HexBytes
+nttGovernanceModule = parseHexTextOrAbort "00000000000000000000000000000000000000000000000000000000004e7474"
 
 -- | The guardian quorum accepts the admin role of the manager identified by
 -- @(managerAddress, factoryEpoch)@ into @guardianGovernance@. See
@@ -225,23 +212,23 @@ nttGovernanceSetPeerAction = 4
 data NttGovernanceAction
   = AcceptAdminToGovernance with
       chain          : Int      -- uint16: Wormhole chain id
-      managerAddress : Bytes32
+      managerAddress : NttManagerAddress
       factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
   | RegisterBurnMintManager with
-      chain               : Int      -- uint16: Wormhole chain id
-      registrationBinding : Bytes32  -- nttRegistrationBindingFor guardianGovernance admin instrumentNonce
-      tokenDecimals       : Int      -- uint8: 0..10
+      chain               : Int                     -- uint16: Wormhole chain id
+      registrationBinding : NttRegistrationBinding  -- nttRegistrationBindingFor of the root, gg, admin and nonce
+      tokenDecimals       : Int                     -- uint8: 0..10
   | RotateToCanonicalFactory with
       chain          : Int      -- uint16: Wormhole chain id
-      managerAddress : Bytes32
+      managerAddress : NttManagerAddress
       factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
   | SetPeerByGovernance with
       chain                  : Int      -- uint16: Wormhole chain id
-      managerAddress         : Bytes32
+      managerAddress         : NttManagerAddress
       peerEpoch              : Int      -- uint64: the manager's current peerEpoch when the quorum signed
       peerChain              : Int      -- uint16
-      peerManagerAddress     : Bytes32
-      peerTransceiverAddress : Bytes32
+      peerManagerAddress     : NttManagerAddress
+      peerTransceiverAddress : EmitterAddress
       peerDecimals           : Int      -- uint8
   deriving (Eq, Show)
 
@@ -252,35 +239,38 @@ data NttGovernanceAction
 -- registrationBinding(32) ‖ tokenDecimals(1)); @SetPeerByGovernance@ is 142
 -- (module(32) ‖ action(1) ‖ chain(2) ‖ managerAddress(32) ‖ peerEpoch(8) ‖
 -- peerChain(2) ‖ peerManagerAddress(32) ‖ peerTransceiverAddress(32) ‖ peerDecimals(1)).
-encodeNttGovernance : NttGovernanceAction -> Bytes
-encodeNttGovernance = \case
+encodeNttGovernance : NttGovernanceAction -> MessagePayload
+encodeNttGovernance action = parseHexBytesAsOrAbort (nttGovernancePacketBytes action)
+
+nttGovernancePacketBytes : NttGovernanceAction -> HexBytes
+nttGovernancePacketBytes = \case
   AcceptAdminToGovernance chain managerAddress factoryEpoch ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceAcceptAdminAction
       <> intToBytesN chain 2
-      <> encodeBytes32 managerAddress
+      <> hexBytesOf managerAddress
       <> intToBytesN factoryEpoch 8
   RegisterBurnMintManager chain registrationBinding tokenDecimals ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceRegisterBurnMintManagerAction
       <> intToBytesN chain 2
-      <> encodeBytes32 registrationBinding
+      <> hexBytesOf registrationBinding
       <> intToHexByte tokenDecimals
   RotateToCanonicalFactory chain managerAddress factoryEpoch ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceRotateToCanonicalFactoryAction
       <> intToBytesN chain 2
-      <> encodeBytes32 managerAddress
+      <> hexBytesOf managerAddress
       <> intToBytesN factoryEpoch 8
   SetPeerByGovernance chain managerAddress peerEpoch peerChain peerManagerAddress peerTransceiverAddress peerDecimals ->
     nttGovernanceModule
       <> intToHexByte nttGovernanceSetPeerAction
       <> intToBytesN chain 2
-      <> encodeBytes32 managerAddress
+      <> hexBytesOf managerAddress
       <> intToBytesN peerEpoch 8
       <> intToBytesN peerChain 2
-      <> encodeBytes32 peerManagerAddress
-      <> encodeBytes32 peerTransceiverAddress
+      <> hexBytesOf peerManagerAddress
+      <> hexBytesOf peerTransceiverAddress
       <> intToHexByte peerDecimals
 
 -- | The 'Get' counterpart of 'parseNttGovernance'. Each action reads its own
@@ -288,7 +278,7 @@ encodeNttGovernance = \case
 -- by 'runGet''s end-of-input check.
 getNttGovernance : Get NttGovernanceAction
 getNttGovernance = do
-  moduleId <- getBytes32
+  moduleId <- getBytes 32
   if moduleId /= nttGovernanceModule
     then abort "not the Ntt module"
     else do
@@ -296,23 +286,23 @@ getNttGovernance = do
       chain <- getUint16
       case action of
         1 -> do
-          managerAddress <- getBytes32
+          managerAddress <- getBytes32As
           factoryEpoch <- getUint64
           pure AcceptAdminToGovernance with chain, managerAddress, factoryEpoch
         2 -> do
-          registrationBinding <- getBytes32
+          registrationBinding <- getBytes32As
           tokenDecimals <- getUint8
           pure RegisterBurnMintManager with chain, registrationBinding, tokenDecimals
         3 -> do
-          managerAddress <- getBytes32
+          managerAddress <- getBytes32As
           factoryEpoch <- getUint64
           pure RotateToCanonicalFactory with chain, managerAddress, factoryEpoch
         4 -> do
-          managerAddress <- getBytes32
+          managerAddress <- getBytes32As
           peerEpoch <- getUint64
           peerChain <- getUint16
-          peerManagerAddress <- getBytes32
-          peerTransceiverAddress <- getBytes32
+          peerManagerAddress <- getBytes32As
+          peerTransceiverAddress <- getBytes32As
           peerDecimals <- getUint8
           pure SetPeerByGovernance with
             chain, managerAddress, peerEpoch, peerChain
@@ -324,8 +314,8 @@ getNttGovernance = do
 -- Callers only reach this after VAA signature verification, so a parse
 -- failure here means a genuinely guardian-signed VAA for the wrong purpose,
 -- not a forgery.
-parseNttGovernance : Bytes -> NttGovernanceAction
-parseNttGovernance payload = case runGet getNttGovernance payload of
+parseNttGovernance : MessagePayload -> NttGovernanceAction
+parseNttGovernance payload = case runGet getNttGovernance (hexBytesOf payload) of
   Right a -> a
   Left e -> error ("ntt governance: " <> e)
 
@@ -334,24 +324,24 @@ parseNttGovernance payload = case runGet getNttGovernance payload of
 ----------------------------------------------------------------------
 
 -- | bytes4(keccak256("WormholePeerRegistration")).
-wormholePeerRegistrationPrefix : Bytes
-wormholePeerRegistrationPrefix = "18fc67c2"
+wormholePeerRegistrationPrefix : HexBytes
+wormholePeerRegistrationPrefix = parseHexTextOrAbort "18fc67c2"
 
 -- | bytes4(keccak256("WormholeTransceiverInit")).
-wormholeTransceiverInitPrefix : Bytes
-wormholeTransceiverInitPrefix = "9c23bd3b"
+wormholeTransceiverInitPrefix : HexBytes
+wormholeTransceiverInitPrefix = parseHexTextOrAbort "9c23bd3b"
 
 -- | The accountant's record of a foreign transceiver registration. 38 bytes.
 data TransceiverRegistration = TransceiverRegistration with
     peerChain   : Int      -- uint16
-    peerAddress : Bytes32
+    peerAddress : EmitterAddress
   deriving (Eq, Show)
 
-encodeTransceiverRegistration : TransceiverRegistration -> Bytes
-encodeTransceiverRegistration r =
-  wormholePeerRegistrationPrefix
+encodeTransceiverRegistration : TransceiverRegistration -> MessagePayload
+encodeTransceiverRegistration r = parseHexBytesAsOrAbort
+  (wormholePeerRegistrationPrefix
     <> intToBytesN r.peerChain 2
-    <> encodeBytes32 r.peerAddress
+    <> hexBytesOf r.peerAddress)
 
 -- | The 'Get' counterpart of 'decodeTransceiverRegistration'. Its 38-byte
 -- fixed size follows from consuming exactly these fields plus 'runGet''s end
@@ -360,30 +350,30 @@ getTransceiverRegistration : Get TransceiverRegistration
 getTransceiverRegistration = do
   assertPrefix wormholePeerRegistrationPrefix
   peerChain <- getUint16
-  peerAddress <- getBytes32
+  peerAddress <- getBytes32As
   pure TransceiverRegistration with ..
 
-decodeTransceiverRegistration : Bytes -> TransceiverRegistration
-decodeTransceiverRegistration b = case runGet getTransceiverRegistration b of
+decodeTransceiverRegistration : MessagePayload -> TransceiverRegistration
+decodeTransceiverRegistration b = case runGet getTransceiverRegistration (hexBytesOf b) of
   Right a -> a
   Left e -> error ("ntt: bad TransceiverRegistration " <> e)
 
 -- | The accountant's record of a deployment's manager/token behind a
 -- transceiver. 70 bytes. @nttManagerMode@: 0 = LockUnlock, 1 = BurnMint.
 data TransceiverInit = TransceiverInit with
-    nttManagerAddress : Bytes32
+    nttManagerAddress : NttManagerAddress
     nttManagerMode    : Int      -- uint8
-    tokenAddress      : Bytes32
+    tokenAddress      : UniversalAddress
     tokenDecimals     : Int      -- uint8
   deriving (Eq, Show)
 
-encodeTransceiverInit : TransceiverInit -> Bytes
-encodeTransceiverInit i =
-  wormholeTransceiverInitPrefix
-    <> encodeBytes32 i.nttManagerAddress
+encodeTransceiverInit : TransceiverInit -> MessagePayload
+encodeTransceiverInit i = parseHexBytesAsOrAbort
+  (wormholeTransceiverInitPrefix
+    <> hexBytesOf i.nttManagerAddress
     <> intToHexByte i.nttManagerMode
-    <> encodeBytes32 i.tokenAddress
-    <> intToHexByte i.tokenDecimals
+    <> hexBytesOf i.tokenAddress
+    <> intToHexByte i.tokenDecimals)
 
 -- | The 'Get' counterpart of 'decodeTransceiverInit'. Its 70-byte fixed size
 -- follows from consuming exactly these fields plus 'runGet''s end check; no
@@ -391,14 +381,14 @@ encodeTransceiverInit i =
 getTransceiverInit : Get TransceiverInit
 getTransceiverInit = do
   assertPrefix wormholeTransceiverInitPrefix
-  nttManagerAddress <- getBytes32
+  nttManagerAddress <- getBytes32As
   nttManagerMode <- getUint8
-  tokenAddress <- getBytes32
+  tokenAddress <- getBytes32As
   tokenDecimals <- getUint8
   pure TransceiverInit with ..
 
-decodeTransceiverInit : Bytes -> TransceiverInit
-decodeTransceiverInit b = case runGet getTransceiverInit b of
+decodeTransceiverInit : MessagePayload -> TransceiverInit
+decodeTransceiverInit b = case runGet getTransceiverInit (hexBytesOf b) of
   Right a -> a
   Left e -> error ("ntt: bad TransceiverInit " <> e)
 
@@ -409,11 +399,11 @@ nttTokenAddressTag = "wormhole:ntt-token:v1"
 -- | Canton's opaque 32-byte stand-in for a CIP-56 'InstrumentId' on the wire
 -- (no chain has a native 32-byte token address). Split from
 -- 'nttTokenAddressFor' so tests can pin the encoding against fixed text.
-nttTokenAddressFromText : Text -> Text -> Bytes32
+nttTokenAddressFromText : Text -> Text -> UniversalAddress
 nttTokenAddressFromText adminText idText =
-  normalizeHex (keccak256 (toHex nttTokenAddressTag
-    <> unLenPrefixed (lenPrefixed (toHex adminText))
-    <> unLenPrefixed (lenPrefixed (toHex idText))))
+  parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes nttTokenAddressTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes adminText))
+    <> unLenPrefixed (lenPrefixed (utf8Bytes idText))))
 
-nttTokenAddressFor : InstrumentId -> Bytes32
+nttTokenAddressFor : InstrumentId -> UniversalAddress
 nttTokenAddressFor inst = nttTokenAddressFromText (partyToText inst.admin) inst.id

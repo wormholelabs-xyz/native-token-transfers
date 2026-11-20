@@ -25,21 +25,31 @@ jobs:
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
-      # dpm is Digital Asset's Daml package manager. There is no official
-      # published GitHub Action for it yet; the install step below uses the
-      # same installer as the wormhole repo's canton/Dockerfile and pins the
-      # SDK version declared in every daml.yaml (sdk-version: 3.5.1). The Daml
-      # source builds against the vendored wormhole-core DAR — this job never
+      # dpm is Digital Asset's Daml package manager. The step installs the
+      # dpm SDK tarball of the SDK version in every daml.yaml (3.7.3), checked
+      # by SHA-256, as the wormhole repo's canton/Dockerfile does. The Daml
+      # source builds against the vendored wormhole-core DAR; this job never
       # rebuilds core.
-      - name: Install dpm
+      - name: Install dpm and the Daml SDK
+        env:
+          DAML_SDK_VERSION: "3.7.3"
+          DPM_SDK_TARBALL_SHA256: 73bd3d5e1ad656a2cd89b7c4e122495fd68acd5b84db4a91c5aefb9a2ddeb2e2
         run: |
-          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
+          set -eu
+          tarball="dpm-${DAML_SDK_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL --max-time 1800 -o "$RUNNER_TEMP/$tarball" \
+            "https://artifactregistry.googleapis.com/download/v1/projects/da-images/locations/europe/repositories/public-generic/files/dpm-sdk:${DAML_SDK_VERSION}:${tarball}:download?alt=media"
+          echo "$DPM_SDK_TARBALL_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/dpm-sdk"
+          tar xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/dpm-sdk" --strip-components 1
+          "$RUNNER_TEMP/dpm-sdk/bin/dpm" bootstrap "$RUNNER_TEMP/dpm-sdk"
           echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
-
-      - name: Install SDK
-        run: dpm install 3.5.1
+          test "$("$HOME/.dpm/bin/dpm" version --active)" = "$DAML_SDK_VERSION"
+          for daml_yaml in ntt/daml.yaml test/daml.yaml genesis/daml.yaml genesis-test/daml.yaml; do
+            test "$(sed -n 's/^sdk-version: //p' "$daml_yaml")" = "$DAML_SDK_VERSION"
+          done
 
       - name: Build all Canton packages
         run: dpm build --all

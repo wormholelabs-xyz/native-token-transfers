@@ -5,11 +5,10 @@ module Test.TestAcceptGenesis where
 
 import Daml.Script
 import DA.Assert ((===))
-import DA.Crypto.Text (keccak256, toHex)
 import DA.Foldable (forA_)
 import DA.List (dedup, sort)
-import DA.Optional (isNone, isSome)
-import DA.Set qualified as Set
+import DA.Map qualified as Map
+import DA.Optional (fromSome, isNone, isSome)
 import DA.Text qualified as T
 
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
@@ -18,10 +17,13 @@ import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Governance (coreModule)
-import Wormhole.Core.Setup (GenesisGuardianSet (..), defaultGovernanceContract, mkInitialCoreState, solanaGovernanceChainId)
+import Wormhole.Core.GuardianSet (guardianAddressFromPublicKey)
+import Wormhole.Core.Setup
+  ( GenesisGuardian (..), GenesisGuardianSet (..), defaultGovernanceContract, mkInitialCoreState, solanaGovernanceChainId )
 import Wormhole.Core.State
-import Wormhole.Core.VAA (addressFromPubKey, parseVAA, spkiPrefixSecp256k1)
+import Wormhole.Core.VAA (parseVAA, spkiPrefixSecp256k1)
 import Wormhole.Genesis
+import Wormhole.Ntt.Bytes (NttGovernanceRootIdentity)
 import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload (NttGovernanceAction (..), encodeNttGovernance)
@@ -32,20 +34,24 @@ import Wormhole.Ntt.Payload (NttGovernanceAction (..), encodeNttGovernance)
 
 data GuardianKey = GuardianKey with
     privateKey : Text
-    publicKey  : Bytes
+    publicKey  : GuardianPublicKey
   deriving (Eq, Show)
 
 generateGuardianKey : Script GuardianKey
 generateGuardianKey = do
   keyPair <- secp256k1generatekeypair
-  let spki = normalizeHex keyPair.publicKey
-  assertMsg ("unexpected public key encoding: " <> spki) (spkiPrefixSecp256k1 `T.isPrefixOf` spki)
-  let publicKey = T.drop (T.length spkiPrefixSecp256k1) spki
-  byteLength publicKey === 65
-  pure GuardianKey with privateKey = keyPair.privateKey, publicKey
+  let spkiHex = T.asciiToLower keyPair.publicKey
+      prefixHex = hexTextOf spkiPrefixSecp256k1
+  assertMsg ("unexpected public key encoding: " <> spkiHex) (prefixHex `T.isPrefixOf` spkiHex)
+  pure GuardianKey with
+    privateKey = keyPair.privateKey
+    publicKey = parseHexTextOrAbort (T.drop (T.length prefixHex) spkiHex)
+
+guardianOf : GuardianKey -> GenesisGuardian
+guardianOf key = GenesisGuardian with address = guardianAddressFromPublicKey key.publicKey, publicKey = key.publicKey
 
 -- | DER @SEQUENCE { INTEGER r, INTEGER s }@ to 32-byte @r@ and @s@.
-derSignatureToRs : Bytes -> (Bytes, Bytes)
+derSignatureToRs : HexBytes -> (HexBytes, HexBytes)
 derSignatureToRs der =
   let rLength = bytesToInt (sliceBytes 3 1 der)
       r = sliceBytes 4 rLength der
@@ -54,23 +60,51 @@ derSignatureToRs der =
       s = sliceBytes (sOffset + 2) sLength der
   in (leftPadTo 32 (stripLeadingZeroBytes r), leftPadTo 32 (stripLeadingZeroBytes s))
 
--- | A governance VAA from the standard governance emitter, signed by guardian 0 of set 0.
-signGovernanceVaa : GuardianKey -> Int -> Bytes -> Script Bytes
-signGovernanceVaa key sequence payload = do
-  let body = intToBytesN 0 4 <> intToBytesN 0 4
-        <> intToBytesN solanaGovernanceChainId 2 <> leftPadTo 32 defaultGovernanceContract
-        <> intToBytesN sequence 8 <> "00" <> normalizeHex payload
-      digest = keccak256 (keccak256 body)
-  der <- secp256k1signWithEcdsaOnly key.privateKey digest
-  let (r, s) = derSignatureToRs (normalizeHex der)
-  pure ("01" <> intToBytesN 0 4 <> "01" <> "00" <> r <> s <> "00" <> body)
+-- | The signer, the emitter and the body timestamp of a governance VAA.
+data GovernanceVaaSigning = GovernanceVaaSigning with
+    signerKey        : GuardianKey
+    guardianSetIndex : Int
+    emitterChain     : Int
+    emitterAddress   : EmitterAddress
+    timestampSeconds : Int
 
-setMessageFeePayload : Int -> Bytes
-setMessageFeePayload fee = coreModule <> "03" <> intToBytesN cantonChainIdForTests 2 <> leftPadTo 32 (intToBytesN fee 8)
+-- | Guardian 0 of set 0 signs, from the standard governance emitter.
+standardGovernanceSigning : GuardianKey -> Int -> GovernanceVaaSigning
+standardGovernanceSigning signerKey timestampSeconds = GovernanceVaaSigning with
+  signerKey
+  guardianSetIndex = 0
+  emitterChain = solanaGovernanceChainId
+  emitterAddress = defaultGovernanceContract
+  timestampSeconds
 
-transferFeesPayload : Int -> Bytes32 -> Bytes
-transferFeesPayload amount recipient =
-  coreModule <> "04" <> intToBytesN cantonChainIdForTests 2 <> leftPadTo 32 (intToBytesN amount 8) <> recipient
+signGovernanceVaaWith : GovernanceVaaSigning -> Int -> MessagePayload -> Script EncodedVaa
+signGovernanceVaaWith signing sequence payload = do
+  let body = intToBytesN signing.timestampSeconds 4 <> intToBytesN 0 4
+        <> intToBytesN signing.emitterChain 2 <> hexBytesOf signing.emitterAddress
+        <> intToBytesN sequence 8 <> intToHexByte 0 <> hexBytesOf payload
+      digest = keccak256Bytes (keccak256Bytes body)
+  derHex <- secp256k1signWithEcdsaOnly signing.signerKey.privateKey (hexTextOf digest)
+  let (r, s) = derSignatureToRs (parseHexTextOrAbort (T.asciiToLower derHex))
+  pure (parseHexBytesAsOrAbort (intToHexByte 1 <> intToBytesN signing.guardianSetIndex 4 <> intToHexByte 1
+    <> intToHexByte 0 <> r <> s <> intToHexByte 0 <> body))
+
+-- | A governance VAA of guardian set 0 from the standard emitter. The body
+-- timestamp equals the sequence, so later VAAs have later timestamps.
+signGovernanceVaa : GuardianKey -> Int -> MessagePayload -> Script EncodedVaa
+signGovernanceVaa key sequence = signGovernanceVaaWith (standardGovernanceSigning key sequence) sequence
+
+setMessageFeePayload : Int -> MessagePayload
+setMessageFeePayload fee = parseHexBytesAsOrAbort
+  (coreModule <> intToHexByte 3 <> intToBytesN cantonChainIdForTests 2 <> intToBytesN fee 32)
+
+transferFeesPayload : Int -> UniversalAddress -> MessagePayload
+transferFeesPayload amount recipient = parseHexBytesAsOrAbort
+  (coreModule <> intToHexByte 4 <> intToBytesN cantonChainIdForTests 2 <> intToBytesN amount 32 <> hexBytesOf recipient)
+
+guardianSetUpgradePayload : Int -> [GuardianAddress] -> MessagePayload
+guardianSetUpgradePayload newIndex addresses = parseHexBytesAsOrAbort
+  (coreModule <> intToHexByte 2 <> intToBytesN cantonChainIdForTests 2 <> intToBytesN newIndex 4
+    <> intToHexByte (length addresses) <> mconcat (map hexBytesOf addresses))
 
 cantonChainIdForTests : Int
 cantonChainIdForTests = 75
@@ -99,22 +133,23 @@ allocateGenesisParties label = do
   stranger <- allocateParty (label <> "Stranger")
   pure GenesisParties with ..
 
-guardianAddressA : Bytes20
-guardianAddressA = "befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
+-- | A 32-byte value derived from @label@.
+bytes32Of : HexEncodedBytes a => Text -> a
+bytes32Of label = parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes label))
 
-guardianAddressB : Bytes20
-guardianAddressB = "88d7d8b32a9105d228100e72dffe2fae0705d31c"
+emptyReplayRecord : GovernanceReplayRecord
+emptyReplayRecord = GovernanceReplayRecord with consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
 
-digestOf : Text -> Bytes32
-digestOf label = keccak256 (toHex label)
+replayRecordOf : Map.Map VaaDigest Int -> Optional Int -> GovernanceReplayRecord
+replayRecordOf consumedGovernance evictedGovernanceMaxTimestampSeconds = GovernanceReplayRecord with ..
 
-parametersFor : GenesisParties -> [Bytes20] -> GenesisParameters
-parametersFor parties guardianAddresses = GenesisParameters with
+parametersFor : GenesisParties -> [GenesisGuardian] -> GenesisParameters
+parametersFor parties guardians = GenesisParameters with
   guardianGovernance = parties.guardianGovernance
   feeCustody = parties.feeCustody
   nttCustody = parties.nttCustody
   onboardingFeeAdmin = parties.onboardingFeeAdmin
-  genesisGuardianSet = GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses
+  genesisGuardianSet = GenesisGuardianSet with guardianSetIndex = 0, guardians
   governanceChainId = solanaGovernanceChainId
   governanceContract = defaultGovernanceContract
   initialMessageFee = 0
@@ -123,8 +158,8 @@ parametersFor parties guardianAddresses = GenesisParameters with
   replayRootClaimFee = 0
   firstEmitterId = 0
   firstNttManagerId = 0
-  consumedCoreGovernanceDigests = []
-  consumedNttGovernanceDigests = []
+  coreGovernanceReplayRecord = emptyReplayRecord
+  nttGovernanceReplayRecord = emptyReplayRecord
   genesisKind = FirstGenesis
 
 offerGenesis : GenesisParties -> GenesisParameters -> Script (ContractId WormholeGenesisOffer)
@@ -175,8 +210,13 @@ checkRejection caseName expectedRejection result = case (expectedRejection, resu
   (_, Left submitError) ->
     abort (caseName <> ": expected " <> show expectedRejection <> ", got: " <> rejectionText submitError)
 
+rootIdentityOf : Party -> GenesisRoots -> Script NttGovernanceRootIdentity
+rootIdentityOf gg roots = do
+  Some nttGovernance <- queryContractId gg roots.nttGovernanceCid
+  pure nttGovernance.rootIdentity
+
 ----------------------------------------------------------------------
--- Test 1: a first genesis creates every root
+-- A first genesis creates every root
 ----------------------------------------------------------------------
 
 data StakeholderCase = StakeholderCase with
@@ -187,13 +227,16 @@ data StakeholderCase = StakeholderCase with
 
 testAcceptGenesisCreatesEveryRoot : Script ()
 testAcceptGenesisCreatesEveryRoot = do
+  keyA <- generateGuardianKey
+  keyB <- generateGuardianKey
   parties <- allocateGenesisParties "Roots"
   let gg = parties.guardianGovernance
-      parameters = (parametersFor parties [guardianAddressA, guardianAddressB]) with
+      parameters = (parametersFor parties [guardianOf keyA, guardianOf keyB]) with
         initialMessageFee = 5
         registrationFee = 7
         replayRootClaimFee = 9
   offerCid <- offerGenesis parties parameters
+  genesisTime <- getTime
   roots <- acceptGenesisRoots parameters offerCid
 
   Some coreState <- queryContractId gg roots.coreStateCid
@@ -221,6 +264,7 @@ testAcceptGenesisCreatesEveryRoot = do
           parameters.genesisGuardianSet parameters.feeInstrument parameters.feeCustody) with
           messageFee = 5
   coreState === expectedCoreState
+  map (.publicKey) (fromSome (Map.lookup 0 coreState.guardianSets)).members === [Some keyA.publicKey, Some keyB.publicKey]
   emitterRegistry.guardianGovernance === gg
   emitterRegistry.onboardingFeeAdmin === parties.onboardingFeeAdmin
   emitterRegistry.registrationFee === 7
@@ -231,7 +275,9 @@ testAcceptGenesisCreatesEveryRoot = do
   nttGovernance.guardianGovernance === gg
   nttGovernance.nttCustody === parties.nttCustody
   nttGovernance.nextId === 0
-  nttGovernance.consumedGovernance === Set.empty
+  nttGovernance.rootIdentity === nttGovernanceRootIdentityFor gg genesisTime
+  nttGovernance.consumedGovernance === Map.empty
+  nttGovernance.evictedGovernanceMaxTimestampSeconds === None
   coinFactory.admin === gg
 
   offerAfterAccept <- queryContractId parties.operator offerCid
@@ -245,20 +291,41 @@ testAcceptGenesisCreatesEveryRoot = do
 -- accepted, at both ends of the chain id range.
 testAcceptGenesisAcceptsWellFormedGovernanceEmitter : Script ()
 testAcceptGenesisAcceptsWellFormedGovernanceEmitter = do
+  key <- generateGuardianKey
   let governanceEmitters =
-        [ (1, digestOf "governance emitter at chain 1")
-        , (65535, digestOf "governance emitter at chain 65535")
+        [ (1, bytes32Of "governance emitter at chain 1")
+        , (65535, bytes32Of "governance emitter at chain 65535")
         ]
   forA_ (zip [0 .. length governanceEmitters - 1] governanceEmitters) \(position, (governanceChainId, governanceContract)) -> do
     parties <- allocateGenesisParties ("Emitter" <> show position)
-    let parameters = (parametersFor parties [guardianAddressA]) with governanceChainId, governanceContract
+    let parameters = (parametersFor parties [guardianOf key]) with governanceChainId, governanceContract
     roots <- offerGenesis parties parameters >>= acceptGenesisRoots parameters
     Some coreState <- queryContractId parties.guardianGovernance roots.coreStateCid
     coreState.governanceChainId === governanceChainId
     coreState.governanceContract === governanceContract
 
+-- | A byte parameter has one form: parsing rejects each malformed governance
+-- contract, guardian address and guardian public key.
+testGenesisByteParametersRejectMalformedHex : Script ()
+testGenesisByteParametersRejectMalformedHex = do
+  let defaultContractHex = hexTextOf defaultGovernanceContract
+  forA_ [ ("31 bytes", T.drop 2 defaultContractHex, "EmitterAddress: expected 32 bytes, got 62 hex characters")
+        , ("0x prefix", "0x" <> defaultContractHex, "EmitterAddress: not lowercase hex")
+        , ("not hex", "zz" <> T.drop 2 defaultContractHex, "EmitterAddress: not lowercase hex")
+        , ("uppercase", "AB" <> T.drop 2 defaultContractHex, "EmitterAddress: not lowercase hex")
+        ] \(label, badHex, expectedError) ->
+    assertMsg ("governance contract " <> label) (parseHexText @EmitterAddress badHex == Left expectedError)
+  forA_ [ ("uppercase", "BEFA429D57CD18B7F8A4D91A2DA9AB4AF05D0FBE", "GuardianAddress: not lowercase hex")
+        , ("19 bytes", "befa429d57cd18b7f8a4d91a2da9ab4af05d0f", "GuardianAddress: expected 20 bytes, got 38 hex characters")
+        ] \(label, badHex, expectedError) ->
+    assertMsg ("guardian address " <> label) (parseHexText @GuardianAddress badHex == Left expectedError)
+  forA_ [ ("compressed prefix", "02" <> mconcat (replicate 128 "1"), "GuardianPublicKey: first byte must be 04 (uncompressed point)")
+        , ("64 bytes", mconcat (replicate 128 "1"), "GuardianPublicKey: expected 65 bytes, got 128 hex characters")
+        ] \(label, badHex, expectedError) ->
+    assertMsg ("guardian public key " <> label) (parseHexText @GuardianPublicKey badHex == Left expectedError)
+
 ----------------------------------------------------------------------
--- Test 2: AcceptGenesis rejects (first genesis)
+-- AcceptGenesis rejects (first genesis)
 ----------------------------------------------------------------------
 
 data GenesisRejectionCase = GenesisRejectionCase with
@@ -278,9 +345,9 @@ acceptChangedOffer changeOffer parties offered _ = do
   changedOfferCid <- offerGenesis parties changed
   discardResult (acceptAsGuardians changed changedOfferCid changed)
 
-withGuardianAddresses : [Bytes20] -> GenesisParameters -> GenesisParameters
-withGuardianAddresses guardianAddresses parameters =
-  parameters with genesisGuardianSet = parameters.genesisGuardianSet with guardianAddresses
+withGenesisGuardians : [GenesisGuardian] -> GenesisParameters -> GenesisParameters
+withGenesisGuardians guardians parameters =
+  parameters with genesisGuardianSet = parameters.genesisGuardianSet with guardians
 
 -- | Earlier roots that name one unrelated contract, for a parameter mismatch.
 placeholderEarlierRootsFrom : ContractId WormholeGenesisOffer -> EarlierGenesisRoots
@@ -291,61 +358,50 @@ placeholderEarlierRootsFrom unrelatedCid = EarlierGenesisRoots with
   nttGovernanceCid = coerceContractId unrelatedCid
   coinFactoryCid = coerceContractId unrelatedCid
 
-mismatchedParameterCases : [(Text, GenesisParameters -> GenesisParameters)]
-mismatchedParameterCases =
-  [ ("genesis guardian addresses", withGuardianAddresses [guardianAddressB])
-  , ("genesis guardian set index", \parameters -> parameters with genesisGuardianSet = parameters.genesisGuardianSet with guardianSetIndex = 1)
-  , ("governance chain", \parameters -> parameters with governanceChainId = 2)
-  , ("governance contract", \parameters -> parameters with governanceContract = digestOf "another governance contract")
-  , ("message fee", \parameters -> parameters with initialMessageFee = 1)
-  , ("fee instrument", \parameters -> parameters with feeInstrument = parameters.feeInstrument with id = "Another")
-  , ("fee recipient", \parameters -> parameters with feeCustody = parameters.onboardingFeeAdmin)
-  , ("registration fee", \parameters -> parameters with registrationFee = 1)
-  , ("claim fee", \parameters -> parameters with replayRootClaimFee = 1)
-  , ("onboarding fee admin", \parameters -> parameters with onboardingFeeAdmin = parameters.feeCustody)
-  , ("NTT custody party", \parameters -> parameters with nttCustody = parameters.onboardingFeeAdmin)
-  , ("guardianGovernance", \parameters -> parameters with guardianGovernance = parameters.onboardingFeeAdmin)
-  , ("first emitter id", \parameters -> parameters with firstEmitterId = 1)
-  , ("first NTT manager id", \parameters -> parameters with firstNttManagerId = 1)
-  , ("consumed core governance digests", \parameters -> parameters with consumedCoreGovernanceDigests = [digestOf "core"])
-  , ("consumed NTT governance digests", \parameters -> parameters with consumedNttGovernanceDigests = [digestOf "ntt"])
-  ]
-
 testAcceptGenesisRejects : Script ()
 testAcceptGenesisRejects = do
-  let mismatchCases =
+  keyA <- generateGuardianKey
+  keyB <- generateGuardianKey
+  let guardianA = guardianOf keyA
+      guardianB = guardianOf keyB
+      mismatchedParameterCases =
+        [ ("genesis guardians", withGenesisGuardians [guardianB])
+        , ("genesis guardian set index", \parameters -> parameters with genesisGuardianSet = parameters.genesisGuardianSet with guardianSetIndex = 1)
+        , ("governance chain", \parameters -> parameters with governanceChainId = 2)
+        , ("governance contract", \parameters -> parameters with governanceContract = bytes32Of "another governance contract")
+        , ("message fee", \parameters -> parameters with initialMessageFee = 1)
+        , ("fee instrument", \parameters -> parameters with feeInstrument = parameters.feeInstrument with id = "Another")
+        , ("fee recipient", \parameters -> parameters with feeCustody = parameters.onboardingFeeAdmin)
+        , ("registration fee", \parameters -> parameters with registrationFee = 1)
+        , ("claim fee", \parameters -> parameters with replayRootClaimFee = 1)
+        , ("onboarding fee admin", \parameters -> parameters with onboardingFeeAdmin = parameters.feeCustody)
+        , ("NTT custody party", \parameters -> parameters with nttCustody = parameters.onboardingFeeAdmin)
+        , ("guardianGovernance", \parameters -> parameters with guardianGovernance = parameters.onboardingFeeAdmin)
+        , ("first emitter id", \parameters -> parameters with firstEmitterId = 1)
+        , ("first NTT manager id", \parameters -> parameters with firstNttManagerId = 1)
+        , ("core governance replay record", \parameters -> parameters with
+            coreGovernanceReplayRecord = replayRecordOf (Map.fromList [(bytes32Of "core", 1)]) None)
+        , ("NTT governance replay record", \parameters -> parameters with
+            nttGovernanceReplayRecord = replayRecordOf Map.empty (Some 1))
+        ]
+      mismatchCases =
         [ GenesisRejectionCase ("mismatched " <> fieldName) (RejectedWithMessage "genesis: agreed parameters differ from the offer") True
             (acceptWithChangedParameters changeParameters)
         | (fieldName, changeParameters) <- mismatchedParameterCases ]
       rejectedOffer caseName expectedRejection changeOffer =
         GenesisRejectionCase caseName expectedRejection True (acceptChangedOffer changeOffer)
       cases = mismatchCases <>
-        [ rejectedOffer "empty guardian set" (RejectedWithMessage "guardian set: empty set") (withGuardianAddresses [])
-        , rejectedOffer "malformed guardian address"
-            (RejectedWithMessage "guardian set: address at position 0 is not 20 bytes of lowercase hex")
-            (withGuardianAddresses ["BEFA429D57CD18B7F8A4D91A2DA9AB4AF05D0FBE"])
+        [ rejectedOffer "empty guardian set" (RejectedWithMessage "guardian set: empty set") (withGenesisGuardians [])
         , rejectedOffer "zero address" (RejectedWithMessage "guardian set: zero address at position 0")
-            (withGuardianAddresses ["0000000000000000000000000000000000000000"])
+            (withGenesisGuardians [guardianA with address = parseHexTextOrAbort "0000000000000000000000000000000000000000"])
         , rejectedOffer "duplicate address" (RejectedWithMessage "guardian set: duplicate address")
-            (withGuardianAddresses [guardianAddressA, guardianAddressA])
+            (withGenesisGuardians [guardianA, guardianA])
         , rejectedOffer "index above uint32" (preconditionOf "CoreState") \parameters ->
             parameters with genesisGuardianSet = parameters.genesisGuardianSet with guardianSetIndex = 4294967296
-        , rejectedOffer "governance chain 0" (RejectedWithMessage "genesis: governance chain is not a nonzero uint16") \parameters ->
+        , rejectedOffer "governance chain 0" (RejectedWithMessage "genesis: governance chain is 0 (unset)") \parameters ->
             parameters with governanceChainId = 0
-        , rejectedOffer "governance chain 65536" (RejectedWithMessage "genesis: governance chain is not a nonzero uint16") \parameters ->
+        , rejectedOffer "governance chain 65536" (RejectedWithMessage "genesis: governance chain exceeds uint16") \parameters ->
             parameters with governanceChainId = 65536
-        , rejectedOffer "governance contract of 31 bytes"
-            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
-              parameters with governanceContract = T.drop 2 defaultGovernanceContract
-        , rejectedOffer "governance contract with a 0x prefix"
-            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
-              parameters with governanceContract = "0x" <> defaultGovernanceContract
-        , rejectedOffer "governance contract with a character that is not hex"
-            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
-              parameters with governanceContract = "zz" <> T.drop 2 defaultGovernanceContract
-        , rejectedOffer "governance contract in uppercase hex"
-            (RejectedWithMessage "genesis: governance contract is not 32 bytes of lowercase hex") \parameters ->
-              parameters with governanceContract = "AB" <> T.drop 2 defaultGovernanceContract
         , rejectedOffer "negative message fee" (preconditionOf "CoreState") \parameters -> parameters with initialMessageFee = -1
         , rejectedOffer "fee instrument admin is gg" (preconditionOf "CoreState") \parameters ->
             parameters with feeInstrument = parameters.feeInstrument with admin = parameters.guardianGovernance
@@ -374,31 +430,18 @@ testAcceptGenesisRejects = do
             parameters with firstEmitterId = 3
         , rejectedOffer "first genesis with a first NTT manager id" (RejectedWithMessage "genesis: a first genesis starts at NTT manager id 0") \parameters ->
             parameters with firstNttManagerId = 2
-        , rejectedOffer "first genesis with consumed core governance digests"
+        , rejectedOffer "first genesis with a consumed core governance digest"
             (RejectedWithMessage "genesis: a first genesis has no consumed core governance digest") \parameters ->
-              parameters with consumedCoreGovernanceDigests = [digestOf "core"]
-        , rejectedOffer "first genesis with consumed NTT governance digests"
+              parameters with coreGovernanceReplayRecord = replayRecordOf (Map.fromList [(bytes32Of "core", 1)]) None
+        , rejectedOffer "first genesis with a consumed NTT governance digest"
             (RejectedWithMessage "genesis: a first genesis has no consumed NTT governance digest") \parameters ->
-              parameters with consumedNttGovernanceDigests = [digestOf "ntt"]
-        , rejectedOffer "malformed consumed core governance digest"
-            (RejectedWithMessage "genesis: consumed governance digest is not 32 bytes of lowercase hex") \parameters ->
-              parameters with consumedCoreGovernanceDigests = ["A" <> T.drop 1 (digestOf "core")]
-        , rejectedOffer "malformed consumed NTT governance digest"
-            (RejectedWithMessage "genesis: consumed governance digest is not 32 bytes of lowercase hex") \parameters ->
-              parameters with consumedNttGovernanceDigests = ["00"]
-        , rejectedOffer "duplicate consumed core governance digest" (RejectedWithMessage "genesis: duplicate consumed core governance digest") \parameters ->
-            parameters with consumedCoreGovernanceDigests = [digestOf "core", digestOf "core"]
-        , rejectedOffer "duplicate consumed NTT governance digest" (RejectedWithMessage "genesis: duplicate consumed NTT governance digest") \parameters ->
-            parameters with consumedNttGovernanceDigests = [digestOf "ntt", digestOf "ntt"]
-        , GenesisRejectionCase "consumed governance digests above the bound" (preconditionOf "WormholeGenesisOffer") True \parties offered _ ->
-            discardResult $ tryOfferGenesis parties offered with
-              consumedCoreGovernanceDigests = [ digestOf (show position) | position <- [0 .. maxGenesisConsumedGovernanceDigests] ]
+              parameters with nttGovernanceReplayRecord = replayRecordOf (Map.fromList [(bytes32Of "ntt", 1)]) None
         , GenesisRejectionCase "mismatched genesis kind" (RejectedWithMessage "genesis: agreed parameters differ from the offer") True \_ offered offerCid ->
             discardResult (acceptAsGuardians offered offerCid (offered with genesisKind = ReGenesisReplacing (placeholderEarlierRootsFrom offerCid)))
-        , GenesisRejectionCase "accept by a stranger" RejectedForMissingAuthorization True \parties _ offerCid -> do
+        , GenesisRejectionCase "accept by a stranger" RejectedForMissingAuthorization True \parties offered offerCid -> do
             offerDisclosure <- fromSomeDisclosure parties.operator offerCid
             discardResult $ trySubmit (actAs parties.stranger <> disclose offerDisclosure) do
-              exerciseCmd offerCid AcceptGenesis with agreedParameters = parametersFor parties [guardianAddressA]
+              exerciseCmd offerCid AcceptGenesis with agreedParameters = offered
         , GenesisRejectionCase "accept by the operator" RejectedForMissingAuthorization True \parties offered offerCid ->
             discardResult $ trySubmit parties.operator do
               exerciseCmd offerCid AcceptGenesis with agreedParameters = offered
@@ -422,7 +465,7 @@ testAcceptGenesisRejects = do
         ]
   forA_ (zip [0 .. length cases - 1] cases) \(position, rejectionCase) -> do
     parties <- allocateGenesisParties ("Reject" <> show position)
-    let offered = parametersFor parties [guardianAddressA]
+    let offered = parametersFor parties [guardianA]
     offerCid <- offerGenesis parties offered
     rejectionCase.attempt parties offered offerCid >>= checkRejection rejectionCase.caseName rejectionCase.expectedRejection
     offerAfterAttempt <- queryContractId parties.operator offerCid
@@ -438,23 +481,22 @@ fromSomeDisclosure reader offerCid = queryDisclosure reader offerCid >>= \case
   None -> abort "the offer is not visible to its signatory"
 
 ----------------------------------------------------------------------
--- Test 3 and 4: a re-genesis replaces the earlier roots
+-- Governance VAAs on the genesis roots
 ----------------------------------------------------------------------
 
-relayCoreGovernance : Party -> ContractId CoreState -> Party -> Bytes -> GuardianKey -> Script (Either SubmitError (ContractId CoreState))
-relayCoreGovernance reader coreStateCid relayer encodedVAA key =
+relayCoreGovernance : Party -> ContractId CoreState -> Party -> EncodedVaa -> Script (Either SubmitError (ContractId CoreState))
+relayCoreGovernance reader coreStateCid relayer encodedVAA =
   trySubmit (actAs relayer <> readAs reader) do
-    exerciseCmd coreStateCid SubmitGovernanceVAA with
-      submitter = relayer, encodedVAA, pubKeys = [(0, key.publicKey)]
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA
 
-registerManagerByVaaAttempt : Party -> GenesisRoots -> Party -> Bytes -> GuardianKey -> Script (Either SubmitError (ContractId NttManager))
-registerManagerByVaaAttempt gg roots admin vaaBytes key =
+registerManagerByVaaAttempt : Party -> GenesisRoots -> Party -> Int -> EncodedVaa -> Script (Either SubmitError (ContractId NttManager))
+registerManagerByVaaAttempt gg roots admin instrumentNonce vaaBytes =
   fmap (\(_, managerCid, _, _, _) -> managerCid) <$> trySubmit (actAs admin <> readAs gg) do
     exerciseCmd roots.nttGovernanceCid RegisterManagerByVaa with
       admin
       emitterRegistryCid = roots.emitterRegistryCid
       replayRootRegistryCid = roots.replayRootRegistryCid
-      instrumentNonce = 0
+      instrumentNonce
       factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory roots.coinFactoryCid)
       coreStateCid = roots.coreStateCid
       consistencyLevel = 0
@@ -462,17 +504,32 @@ registerManagerByVaaAttempt gg roots admin vaaBytes key =
       claimFeeAllocation = None
       feeAllocation = None
       vaaBytes
-      pubKeys = [(0, key.publicKey)]
       extraArgs = emptyExtraArgs
 
-registerVaaFor : GuardianKey -> Party -> Party -> Int -> Script Bytes
-registerVaaFor key gg admin sequence = signGovernanceVaa key sequence $ encodeNttGovernance RegisterBurnMintManager with
+registerPayloadFor : NttGovernanceRootIdentity -> Party -> Party -> Int -> MessagePayload
+registerPayloadFor rootIdentity gg admin instrumentNonce = encodeNttGovernance RegisterBurnMintManager with
   chain = cantonChainIdForTests
-  registrationBinding = nttRegistrationBindingFor gg admin 0
+  registrationBinding = nttRegistrationBindingFor rootIdentity gg admin instrumentNonce
   tokenDecimals = 8
+
+registerVaaFor : GuardianKey -> Party -> Party -> NttGovernanceRootIdentity -> Int -> Script EncodedVaa
+registerVaaFor key gg admin rootIdentity sequence = signGovernanceVaa key sequence (registerPayloadFor rootIdentity gg admin 0)
 
 expectSuccess : Text -> Either SubmitError a -> Script a
 expectSuccess label = either (\submitError -> abort (label <> ": " <> rejectionText submitError)) pure
+
+data GovernanceRejectionCase = GovernanceRejectionCase with
+    caseName          : Text
+    expectedRejection : ExpectedRejection
+    attempt           : Script (Either SubmitError ())
+
+checkGovernanceCasesRejected : [GovernanceRejectionCase] -> Script ()
+checkGovernanceCasesRejected cases = forA_ cases \rejectionCase ->
+  rejectionCase.attempt >>= checkRejection rejectionCase.caseName rejectionCase.expectedRejection
+
+----------------------------------------------------------------------
+-- A re-genesis replaces the earlier roots
+----------------------------------------------------------------------
 
 -- | A genesis that ran one NTT registration, one SetMessageFee and one
 -- TransferFees, and the VAAs it consumed.
@@ -481,11 +538,12 @@ data GenesisWithHistory = GenesisWithHistory with
     key             : GuardianKey
     relayer         : Party
     admin           : Party
+    rootIdentity    : NttGovernanceRootIdentity
     earlierRoots    : GenesisRoots           -- the roots after the governance
     earlierManager  : NttManager
-    setFeeVaa       : Bytes
-    transferFeesVaa : Bytes
-    registerVaa     : Bytes
+    setFeeVaa       : EncodedVaa
+    transferFeesVaa : EncodedVaa
+    registerVaa     : EncodedVaa
 
 genesisWithHistory : Text -> Script GenesisWithHistory
 genesisWithHistory label = do
@@ -494,15 +552,16 @@ genesisWithHistory label = do
   relayer <- allocateParty (label <> "Relayer")
   admin <- allocateParty (label <> "Admin")
   let gg = parties.guardianGovernance
-      parameters = parametersFor parties [addressFromPubKey key.publicKey]
+      parameters = parametersFor parties [guardianOf key]
   roots <- offerGenesis parties parameters >>= acceptGenesisRoots parameters
-  registerVaa <- registerVaaFor key gg admin 1
-  earlierManagerCid <- registerManagerByVaaAttempt gg roots admin registerVaa key >>= expectSuccess "RegisterManagerByVaa"
+  rootIdentity <- rootIdentityOf gg roots
+  registerVaa <- registerVaaFor key gg admin rootIdentity 1
+  earlierManagerCid <- registerManagerByVaaAttempt gg roots admin 0 registerVaa >>= expectSuccess "RegisterManagerByVaa"
   Some earlierManager <- queryContractId gg earlierManagerCid
   setFeeVaa <- signGovernanceVaa key 2 (setMessageFeePayload 1000)
-  transferFeesVaa <- signGovernanceVaa key 3 (transferFeesPayload 9 (digestOf "fee recipient"))
-  coreStateAfterFee <- relayCoreGovernance gg roots.coreStateCid relayer setFeeVaa key >>= expectSuccess "SetMessageFee"
-  coreStateAfterTransfer <- relayCoreGovernance gg coreStateAfterFee relayer transferFeesVaa key >>= expectSuccess "TransferFees"
+  transferFeesVaa <- signGovernanceVaa key 3 (transferFeesPayload 9 (bytes32Of "fee recipient"))
+  coreStateAfterFee <- relayCoreGovernance gg roots.coreStateCid relayer setFeeVaa >>= expectSuccess "SetMessageFee"
+  coreStateAfterTransfer <- relayCoreGovernance gg coreStateAfterFee relayer transferFeesVaa >>= expectSuccess "TransferFees"
   [(emitterRegistryCid, _)] <- query @EmitterRegistry gg
   [(nttGovernanceCid, _)] <- query @NttGovernance gg
   let earlierRoots = roots with coreStateCid = coreStateAfterTransfer, emitterRegistryCid, nttGovernanceCid
@@ -516,19 +575,41 @@ earlierGenesisRootsOf roots = EarlierGenesisRoots with
   nttGovernanceCid = roots.nttGovernanceCid
   coinFactoryCid = roots.coinFactoryCid
 
--- | Re-genesis parameters read from the earlier roots.
-reGenesisParametersFor : GenesisWithHistory -> Script GenesisParameters
-reGenesisParametersFor history = do
-  let gg = history.parties.guardianGovernance
-  Some earlierCoreState <- queryContractId gg history.earlierRoots.coreStateCid
-  Some earlierEmitterRegistry <- queryContractId gg history.earlierRoots.emitterRegistryCid
-  Some earlierNttGovernance <- queryContractId gg history.earlierRoots.nttGovernanceCid
-  pure (parametersFor history.parties [addressFromPubKey history.key.publicKey]) with
+-- | The genesis guardian set of the current set of @coreState@. A member
+-- without a key aborts: such a set cannot be a genesis parameter.
+currentGenesisGuardianSetOf : CoreState -> GenesisGuardianSet
+currentGenesisGuardianSetOf coreState =
+  let currentSet = fromSome (Map.lookup coreState.guardianSetIndex coreState.guardianSets)
+      genesisGuardianOf member = GenesisGuardian with address = member.address, publicKey = fromSome member.publicKey
+  in GenesisGuardianSet with
+       guardianSetIndex = coreState.guardianSetIndex
+       guardians = map genesisGuardianOf currentSet.members
+
+-- | Re-genesis parameters read from the earlier roots, with @genesisGuardians@
+-- as the current set.
+reGenesisParametersWithGuardians : GenesisParties -> GenesisRoots -> GenesisGuardianSet -> Script GenesisParameters
+reGenesisParametersWithGuardians parties earlierRoots genesisGuardianSet = do
+  let gg = parties.guardianGovernance
+  Some earlierCoreState <- queryContractId gg earlierRoots.coreStateCid
+  Some earlierEmitterRegistry <- queryContractId gg earlierRoots.emitterRegistryCid
+  Some earlierNttGovernance <- queryContractId gg earlierRoots.nttGovernanceCid
+  pure (parametersFor parties []) with
+    genesisGuardianSet
     firstEmitterId = earlierEmitterRegistry.nextId
     firstNttManagerId = earlierNttGovernance.nextId
-    consumedCoreGovernanceDigests = Set.toList earlierCoreState.consumedGovernance
-    consumedNttGovernanceDigests = Set.toList earlierNttGovernance.consumedGovernance
-    genesisKind = ReGenesisReplacing (earlierGenesisRootsOf history.earlierRoots)
+    coreGovernanceReplayRecord = replayRecordOf
+      earlierCoreState.consumedGovernance earlierCoreState.evictedGovernanceMaxTimestampSeconds
+    nttGovernanceReplayRecord = replayRecordOf
+      earlierNttGovernance.consumedGovernance earlierNttGovernance.evictedGovernanceMaxTimestampSeconds
+    genesisKind = ReGenesisReplacing (earlierGenesisRootsOf earlierRoots)
+
+reGenesisParametersOf : GenesisParties -> GenesisRoots -> Script GenesisParameters
+reGenesisParametersOf parties earlierRoots = do
+  Some earlierCoreState <- queryContractId parties.guardianGovernance earlierRoots.coreStateCid
+  reGenesisParametersWithGuardians parties earlierRoots (currentGenesisGuardianSetOf earlierCoreState)
+
+reGenesisParametersFor : GenesisWithHistory -> Script GenesisParameters
+reGenesisParametersFor history = reGenesisParametersOf history.parties history.earlierRoots
 
 checkEarlierRootsActivity : Text -> Bool -> GenesisWithHistory -> Script ()
 checkEarlierRootsActivity caseName expectedActive history = do
@@ -544,18 +625,9 @@ checkEarlierRootsActivity caseName expectedActive history = do
   assertMsg (caseName <> ": earlier NttGovernance activity") (isSome nttGovernance == expectedActive)
   assertMsg (caseName <> ": earlier CoinFactory is archived") (isSome coinFactory)
 
-data ReplayCase = ReplayCase with
-    caseName          : Text
-    expectedRejection : ExpectedRejection
-    attempt           : Script (Either SubmitError ())
-
-checkReplayCasesRejected : [ReplayCase] -> Script ()
-checkReplayCasesRejected cases = forA_ cases \replayCase ->
-  replayCase.attempt >>= checkRejection replayCase.caseName replayCase.expectedRejection
-
 -- | A re-genesis archives the earlier roots in the accept transaction and
--- seeds their consumed digests and id floors. Each earlier VAA is then
--- rejected on the new roots and on the archived ones. A fresh VAA applies
+-- seeds their replay records, id floors and root identity. Each earlier VAA is
+-- then rejected on the new roots and on the archived ones. A fresh VAA applies
 -- once: on the new roots only.
 testReGenesisReplacesEarlierRoots : Script ()
 testReGenesisReplacesEarlierRoots = do
@@ -567,35 +639,38 @@ testReGenesisReplacesEarlierRoots = do
   reGenesisParameters <- reGenesisParametersFor history
   reGenesisParameters.firstEmitterId === 1
   reGenesisParameters.firstNttManagerId === 1
-  length reGenesisParameters.consumedCoreGovernanceDigests === 2
-  reGenesisParameters.consumedNttGovernanceDigests === [(parseVAA history.registerVaa).hash]
+  sort (Map.toList reGenesisParameters.coreGovernanceReplayRecord.consumedGovernance)
+    === sort [((parseVAA history.setFeeVaa).hash, 2), ((parseVAA history.transferFeesVaa).hash, 3)]
+  reGenesisParameters.nttGovernanceReplayRecord === replayRecordOf (Map.fromList [((parseVAA history.registerVaa).hash, 1)]) None
   newRoots <- offerGenesis history.parties reGenesisParameters >>= acceptGenesisRoots reGenesisParameters
   checkEarlierRootsActivity "after the re-genesis" False history
   newRoots.coinFactoryCid === history.earlierRoots.coinFactoryCid
   coinFactories <- query @CoinFactory gg
   [ coinFactoryCid | (coinFactoryCid, coinFactory) <- coinFactories, coinFactory.admin == gg ] === [history.earlierRoots.coinFactoryCid]
+  newRootIdentity <- rootIdentityOf gg newRoots
+  newRootIdentity === history.rootIdentity
 
-  freshRegisterVaa <- registerVaaFor key gg admin 4
-  freshTransferFeesVaa <- signGovernanceVaa key 5 (transferFeesPayload 7 (digestOf "fresh fee recipient"))
-  checkReplayCasesRejected
-    [ ReplayCase "earlier SetMessageFee on the new CoreState" (RejectedWithMessage "governance: action already consumed") $
-        discardResult (relayCoreGovernance gg newRoots.coreStateCid relayer history.setFeeVaa key)
-    , ReplayCase "earlier TransferFees on the new CoreState" (RejectedWithMessage "governance: action already consumed") $
-        discardResult (relayCoreGovernance gg newRoots.coreStateCid relayer history.transferFeesVaa key)
-    , ReplayCase "earlier RegisterBurnMintManager on the new root" (RejectedWithMessage "registration VAA already consumed") $
-        discardResult (registerManagerByVaaAttempt gg newRoots admin history.registerVaa key)
-    , ReplayCase "fresh RegisterBurnMintManager on the archived root" RejectedForUnknownContract $
-        discardResult (registerManagerByVaaAttempt gg history.earlierRoots admin freshRegisterVaa key)
-    , ReplayCase "fresh TransferFees on the archived CoreState" RejectedForUnknownContract $
-        discardResult (relayCoreGovernance gg history.earlierRoots.coreStateCid relayer freshTransferFeesVaa key)
+  freshRegisterVaa <- registerVaaFor key gg admin history.rootIdentity 4
+  freshTransferFeesVaa <- signGovernanceVaa key 5 (transferFeesPayload 7 (bytes32Of "fresh fee recipient"))
+  checkGovernanceCasesRejected
+    [ GovernanceRejectionCase "earlier SetMessageFee on the new CoreState" (RejectedWithMessage "governance: action already consumed") $
+        discardResult (relayCoreGovernance gg newRoots.coreStateCid relayer history.setFeeVaa)
+    , GovernanceRejectionCase "earlier TransferFees on the new CoreState" (RejectedWithMessage "governance: action already consumed") $
+        discardResult (relayCoreGovernance gg newRoots.coreStateCid relayer history.transferFeesVaa)
+    , GovernanceRejectionCase "earlier RegisterBurnMintManager on the new root" (RejectedWithMessage "ntt governance: registration VAA already consumed") $
+        discardResult (registerManagerByVaaAttempt gg newRoots admin 0 history.registerVaa)
+    , GovernanceRejectionCase "fresh RegisterBurnMintManager on the archived root" RejectedForUnknownContract $
+        discardResult (registerManagerByVaaAttempt gg history.earlierRoots admin 0 freshRegisterVaa)
+    , GovernanceRejectionCase "fresh TransferFees on the archived CoreState" RejectedForUnknownContract $
+        discardResult (relayCoreGovernance gg history.earlierRoots.coreStateCid relayer freshTransferFeesVaa)
     ]
 
   -- Control: fresh VAAs apply on the new roots, and the new ids start at the floors.
-  newCoreStateCid <- relayCoreGovernance gg newRoots.coreStateCid relayer freshTransferFeesVaa key >>= expectSuccess "fresh TransferFees"
+  newCoreStateCid <- relayCoreGovernance gg newRoots.coreStateCid relayer freshTransferFeesVaa >>= expectSuccess "fresh TransferFees"
   feeWithdrawals <- query @FeeWithdrawalAuthorization gg
   sort [ withdrawal.vaaHash | (_, withdrawal) <- feeWithdrawals ]
     === sort [(parseVAA history.transferFeesVaa).hash, (parseVAA freshTransferFeesVaa).hash]
-  newManagerCid <- registerManagerByVaaAttempt gg (newRoots with coreStateCid = newCoreStateCid) admin freshRegisterVaa key
+  newManagerCid <- registerManagerByVaaAttempt gg (newRoots with coreStateCid = newCoreStateCid) admin 0 freshRegisterVaa
     >>= expectSuccess "fresh RegisterBurnMintManager"
   Some newManager <- queryContractId gg newManagerCid
   newManager.managerId === history.earlierManager.managerId + 1
@@ -621,8 +696,12 @@ withEarlierRoots changeEarlierRoots parameters = case parameters.genesisKind of
   ReGenesisReplacing earlierRoots -> parameters with genesisKind = ReGenesisReplacing (changeEarlierRoots earlierRoots)
   FirstGenesis -> parameters
 
--- | A re-genesis whose parameters differ from the earlier roots is rejected,
--- and the earlier roots stay active.
+withCoreReplayRecord : (GovernanceReplayRecord -> GovernanceReplayRecord) -> GenesisParameters -> GenesisParameters
+withCoreReplayRecord changeRecord parameters =
+  parameters with coreGovernanceReplayRecord = changeRecord parameters.coreGovernanceReplayRecord
+
+-- | A re-genesis whose parameters differ from what the earlier roots imply is
+-- rejected, and the earlier roots stay active.
 testReGenesisRejectsParametersThatDifferFromTheEarlierRoots : Script ()
 testReGenesisRejectsParametersThatDifferFromTheEarlierRoots = do
   otherHistory <- genesisWithHistory "OtherBridge"
@@ -636,16 +715,25 @@ testReGenesisRejectsParametersThatDifferFromTheEarlierRoots = do
         , ReGenesisRejectionCase "first NTT manager id below the earlier nextId"
             (RejectedWithMessage "genesis: first NTT manager id differs from the earlier NttGovernance nextId") $
               acceptReGenesisWith \parameters -> parameters with firstNttManagerId = 0
-        , ReGenesisRejectionCase "consumed core governance digests without one earlier digest"
-            (RejectedWithMessage "genesis: consumed core governance digests differ from the earlier CoreState") $
-              acceptReGenesisWith \parameters -> parameters with consumedCoreGovernanceDigests = drop 1 parameters.consumedCoreGovernanceDigests
-        , ReGenesisRejectionCase "consumed core governance digests with an extra digest"
-            (RejectedWithMessage "genesis: consumed core governance digests differ from the earlier CoreState") $
-              acceptReGenesisWith \parameters -> parameters with
-                consumedCoreGovernanceDigests = digestOf "extra" :: parameters.consumedCoreGovernanceDigests
-        , ReGenesisRejectionCase "consumed NTT governance digests empty"
-            (RejectedWithMessage "genesis: consumed NTT governance digests differ from the earlier NttGovernance") $
-              acceptReGenesisWith \parameters -> parameters with consumedNttGovernanceDigests = []
+        , ReGenesisRejectionCase "core replay record without one earlier digest"
+            (RejectedWithMessage "genesis: core governance replay record differs from the earlier CoreState") $
+              acceptReGenesisWith $ withCoreReplayRecord \replayRecord -> replayRecord with
+                consumedGovernance = Map.fromList (drop 1 (Map.toList replayRecord.consumedGovernance))
+        , ReGenesisRejectionCase "core replay record with an extra digest"
+            (RejectedWithMessage "genesis: core governance replay record differs from the earlier CoreState") $
+              acceptReGenesisWith $ withCoreReplayRecord \replayRecord -> replayRecord with
+                consumedGovernance = Map.insert (bytes32Of "extra") 4 replayRecord.consumedGovernance
+        , ReGenesisRejectionCase "core replay record with another timestamp"
+            (RejectedWithMessage "genesis: core governance replay record differs from the earlier CoreState") $
+              acceptReGenesisWith $ withCoreReplayRecord \replayRecord -> replayRecord with
+                consumedGovernance = fmap (+ 1) replayRecord.consumedGovernance
+        , ReGenesisRejectionCase "core replay record with a floor the earlier CoreState has not"
+            (RejectedWithMessage "genesis: core governance replay record differs from the earlier CoreState") $
+              acceptReGenesisWith $ withCoreReplayRecord \replayRecord -> replayRecord with
+                evictedGovernanceMaxTimestampSeconds = Some 1
+        , ReGenesisRejectionCase "NTT replay record empty"
+            (RejectedWithMessage "genesis: NTT governance replay record differs from the earlier NttGovernance") $
+              acceptReGenesisWith \parameters -> parameters with nttGovernanceReplayRecord = emptyReplayRecord
         , ReGenesisRejectionCase "another fee custody party"
             (RejectedWithMessage "genesis: earlier CoreState has another fee custody party") $
               acceptReGenesisWith \parameters -> parameters with feeCustody = parameters.onboardingFeeAdmin
@@ -658,10 +746,10 @@ testReGenesisRejectsParametersThatDifferFromTheEarlierRoots = do
             acceptReGenesisWith (withEarlierRoots (\earlierRoots -> earlierRoots with coinFactoryCid = otherHistory.earlierRoots.coinFactoryCid))
         , ReGenesisRejectionCase "earlier CoreState superseded by governance" RejectedForUnknownContract \history parameters -> do
             freshFeeVaa <- signGovernanceVaa history.key 9 (setMessageFeePayload 2000)
-            _ <- relayCoreGovernance history.parties.guardianGovernance history.earlierRoots.coreStateCid history.relayer freshFeeVaa history.key
+            _ <- relayCoreGovernance history.parties.guardianGovernance history.earlierRoots.coreStateCid history.relayer freshFeeVaa
               >>= expectSuccess "SetMessageFee"
-            acceptReGenesisWith (\changed -> changed with
-              consumedCoreGovernanceDigests = (parseVAA freshFeeVaa).hash :: changed.consumedCoreGovernanceDigests) history parameters
+            acceptReGenesisWith (withCoreReplayRecord \replayRecord -> replayRecord with
+              consumedGovernance = Map.insert (parseVAA freshFeeVaa).hash 9 replayRecord.consumedGovernance) history parameters
         , ReGenesisRejectionCase "first genesis while the earlier roots are given as absent"
             (RejectedWithMessage "genesis: a first genesis starts at emitter id 0") $
               acceptReGenesisWith \parameters -> parameters with genesisKind = FirstGenesis

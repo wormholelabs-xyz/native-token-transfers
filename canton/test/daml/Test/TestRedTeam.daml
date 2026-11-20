@@ -10,11 +10,10 @@ module Test.TestRedTeam where
 
 import Daml.Script hiding (AnyContractId)
 import DA.Assert ((===))
-import DA.Crypto.Text (keccak256)
 import DA.Action (when)
 import DA.Foldable (forA_)
 import DA.Optional (catOptionals, fromSome)
-import DA.Set qualified as Set
+import DA.Map qualified as Map
 import DA.Text qualified as T
 import DA.TextMap qualified as TextMap
 
@@ -29,17 +28,19 @@ import Token.CIP0056.CoinTransfer (TransferPreapproval (..), transferPreapproval
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Replay (ReplayNode)
+import Wormhole.Core.GuardianSet (guardianAddressFromPublicKey)
 import Wormhole.Core.Setup
-  ( GenesisGuardianSet (..), RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
+  ( GenesisGuardianSet (..), GenesisGuardian (..), RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
   , solanaGovernanceChainId, defaultGovernanceContract )
 import Wormhole.Core.State (CoreState, Emitter (..), PublishMessage (..))
-import Wormhole.Core.VAA (parseVAA, addressFromPubKey, spkiPrefixSecp256k1)
+import Wormhole.Core.VAA (parseVAA, spkiPrefixSecp256k1)
+import Wormhole.Ntt.Bytes
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload
-import Test.TestNtt (ForgedHolding (..), MockTransferFactory (..), b32, cantonChainId, coreRegistries, resolveEmitter)
+import Test.TestNtt (ForgedHolding (..), MockTransferFactory (..), b32, cantonChainId, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
 import Test.TestReplay (coveringNode)
 
 ----------------------------------------------------------------------
@@ -48,46 +49,53 @@ import Test.TestReplay (coveringNode)
 
 data GuardianKey = GuardianKey with
     privateKey : Text
-    publicKey  : Bytes   -- 65-byte uncompressed secp256k1 point
+    publicKey  : GuardianPublicKey
   deriving (Eq, Show)
 
 generateGuardianKey : Script GuardianKey
 generateGuardianKey = do
   pair <- secp256k1generatekeypair
-  let spki = normalizeHex pair.publicKey
-  assertMsg ("unexpected public key encoding: " <> spki) (spkiPrefixSecp256k1 `T.isPrefixOf` spki)
-  let publicKey = T.drop (T.length spkiPrefixSecp256k1) spki
-  byteLength publicKey === 65
+  let spkiHex = T.asciiToLower pair.publicKey
+      prefixHex = hexTextOf spkiPrefixSecp256k1
+  assertMsg ("unexpected public key encoding: " <> spkiHex) (prefixHex `T.isPrefixOf` spkiHex)
+  let publicKey = parseHexTextOrAbort (T.drop (T.length prefixHex) spkiHex)
   pure GuardianKey with privateKey = pair.privateKey, publicKey
 
+-- | The genesis guardian of @key@: its derived address and its public key.
+genesisGuardianOf : GuardianKey -> GenesisGuardian
+genesisGuardianOf key =
+  GenesisGuardian with address = guardianAddressFromPublicKey key.publicKey, publicKey = key.publicKey
+
 -- | DER @SEQUENCE { INTEGER r, INTEGER s }@ to 32-byte @r@ and @s@.
-derSignatureToRs : Bytes -> (Bytes, Bytes)
+derSignatureToRs : HexBytes -> (EcdsaSignatureR, EcdsaSignatureS)
 derSignatureToRs der =
   let rLength = bytesToInt (sliceBytes 3 1 der)
       r = sliceBytes 4 rLength der
       sOffset = 4 + rLength
       sLength = bytesToInt (sliceBytes (sOffset + 1) 1 der)
       s = sliceBytes (sOffset + 2) sLength der
-  in (leftPadTo 32 (stripLeadingZeroBytes r), leftPadTo 32 (stripLeadingZeroBytes s))
+  in ( parseHexBytesAsOrAbort (leftPadTo 32 (stripLeadingZeroBytes r))
+     , parseHexBytesAsOrAbort (leftPadTo 32 (stripLeadingZeroBytes s)) )
 
 data VaaSpec = VaaSpec with
     guardianSetIndex : Int
     emitterChain     : Int
-    emitterAddress   : Bytes32
+    emitterAddress   : EmitterAddress
     sequence         : Int
-    payload          : Bytes
+    payload          : MessagePayload
   deriving (Eq, Show)
 
 -- | A single-signature VAA (guardian index 0).
-signVaa : GuardianKey -> VaaSpec -> Script Bytes
+signVaa : GuardianKey -> VaaSpec -> Script EncodedVaa
 signVaa key spec = do
   let body = intToBytesN 0 4 <> intToBytesN 0 4
-        <> intToBytesN spec.emitterChain 2 <> leftPadTo 32 spec.emitterAddress
-        <> intToBytesN spec.sequence 8 <> "00" <> normalizeHex spec.payload
-      digest = keccak256 (keccak256 body)
-  der <- secp256k1signWithEcdsaOnly key.privateKey digest
-  let (r, s) = derSignatureToRs (normalizeHex der)
-  pure ("01" <> intToBytesN spec.guardianSetIndex 4 <> "01" <> "00" <> r <> s <> "00" <> body)
+        <> intToBytesN spec.emitterChain 2 <> hexBytesOf spec.emitterAddress
+        <> intToBytesN spec.sequence 8 <> intToHexByte 0 <> hexBytesOf spec.payload
+      digest = keccak256Bytes (keccak256Bytes body)
+  derHex <- secp256k1signWithEcdsaOnly key.privateKey (hexTextOf digest)
+  let (r, s) = derSignatureToRs (parseHexTextOrAbort (T.asciiToLower derHex))
+  pure (parseHexBytesAsOrAbort (intToHexByte 1 <> intToBytesN spec.guardianSetIndex 4 <> intToHexByte 1
+    <> intToHexByte 0 <> hexBytesOf r <> hexBytesOf s <> intToHexByte 0 <> body))
 
 ----------------------------------------------------------------------
 -- Environment and deployments
@@ -119,12 +127,12 @@ redTeamSetupWithPartyHintPrefix partyHintPrefix = do
   let registryParties = RegistryParties with guardianGovernance = gg, onboardingFeeAdmin
   coreStateCid <- submit (actAs gg <> actAs feeCustody) do
     createCmd (mkInitialCoreState gg solanaGovernanceChainId defaultGovernanceContract
-                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [addressFromPubKey guardianKey.publicKey])
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardians = [genesisGuardianOf guardianKey])
                  (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
   _ <- submit gg do createCmd (mkInitialEmitterRegistry registryParties 0)
   _ <- submit gg do createCmd (mkInitialReplayRootRegistry registryParties 0)
   _ <- submit (actAs gg <> actAs nttCustody) do
-    createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, consumedGovernance = Set.empty
+    createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
   issuerFactoryCid <- submit issuer do createCmd CoinFactory with admin = issuer
   pure RedTeamEnv with ..
 
@@ -138,10 +146,10 @@ withReads env actors readers = actAs actors <> readAs (env.gg :: env.nttCustody 
 peerChainId : Int
 peerChainId = 2
 
-testPeerManagerAddress : Bytes32
+testPeerManagerAddress : NttManagerAddress
 testPeerManagerAddress = b32 "bb"
 
-testPeerTransceiverAddress : Bytes32
+testPeerTransceiverAddress : EmitterAddress
 testPeerTransceiverAddress = b32 "cc"
 
 registerManagerAs
@@ -210,7 +218,7 @@ deployBurnMint env admin = do
 managerOf : RedTeamEnv -> ContractId NttManager -> Script NttManager
 managerOf env mgrCid = fromSome <$> queryContractId env.gg mgrCid
 
-ledgerOf : RedTeamEnv -> Bytes32 -> Script (ContractId LockedLedger, LockedLedger)
+ledgerOf : RedTeamEnv -> NttManagerAddress -> Script (ContractId LockedLedger, LockedLedger)
 ledgerOf env managerAddress = do
   ledgers <- query @LockedLedger env.gg
   case [ entry | entry@(_, ledger) <- ledgers, ledger.managerAddress == managerAddress ] of
@@ -275,7 +283,7 @@ wireUnitsPerToken = 100000000.0
 
 data OutboundTransfer = OutboundTransfer with
     rawAmount        : Int
-    recipientAddress : Bytes32
+    recipientAddress : UniversalAddress
     nonce            : Int
     consistencyLevel : Int
     inputHoldingCids : [ContractId Holding]
@@ -326,16 +334,16 @@ lockFrom env user mgrCid rawAmount = do
 data InboundTransfer = InboundTransfer with
     guardianSetIndex : Int
     emitterChain     : Int
-    emitterAddress   : Bytes32
+    emitterAddress   : EmitterAddress
     sequence         : Int
-    sourceManager    : Bytes32
-    recipientManager : Bytes32
+    sourceManager    : NttManagerAddress
+    recipientManager : NttManagerAddress
     recipient        : Party
     wireDecimals     : Int
     wireAmount       : Int
     recipientChain   : Int
 
-inboundTransferTo : Bytes32 -> Party -> Int -> Int -> InboundTransfer
+inboundTransferTo : NttManagerAddress -> Party -> Int -> Int -> InboundTransfer
 inboundTransferTo recipientManager recipient sequence wireAmount = InboundTransfer with
   guardianSetIndex = 0
   emitterChain = peerChainId
@@ -348,7 +356,7 @@ inboundTransferTo recipientManager recipient sequence wireAmount = InboundTransf
   wireAmount
   recipientChain = cantonChainId
 
-signInboundTransfer : GuardianKey -> InboundTransfer -> Script Bytes
+signInboundTransfer : GuardianKey -> InboundTransfer -> Script EncodedVaa
 signInboundTransfer key inbound = signVaa key VaaSpec with
   guardianSetIndex = inbound.guardianSetIndex
   emitterChain = inbound.emitterChain
@@ -358,7 +366,7 @@ signInboundTransfer key inbound = signVaa key VaaSpec with
     sourceManager = inbound.sourceManager
     recipientManager = inbound.recipientManager
     managerPayload = encodeNttManagerMessage NttManagerMessage with
-      id = leftPadTo 32 (intToBytesN inbound.sequence 8)
+      id = parseHexBytesAsOrAbort (intToBytesN inbound.sequence 32)
       sender = b32 "01"
       payload = encodeNativeTokenTransfer NativeTokenTransfer with
         decimals = inbound.wireDecimals
@@ -366,29 +374,27 @@ signInboundTransfer key inbound = signVaa key VaaSpec with
         sourceToken = b32 "dd"
         recipientAddress = recipientAddressFor inbound.recipient
         recipientChain = inbound.recipientChain
-        additionalPayload = ""
-    transceiverPayload = ""
+        additionalPayload = mempty
+    transceiverPayload = mempty
 
 data InboundCall = InboundCall with
     executor             : Party
     recipient            : Party
     explicitInputs       : [ContractId Holding]
-    pubKeys              : [(Int, Bytes)]
     replayNamespace      : Optional Text  -- None: the manager's own
 
 inboundCallBy : RedTeamEnv -> Party -> Party -> InboundCall
 inboundCallBy env executor recipient = InboundCall with
   executor, recipient
   explicitInputs = []
-  pubKeys = [(0, env.guardianKey.publicKey)]
   replayNamespace = None
 
-replayNodeFor : RedTeamEnv -> NttManager -> InboundCall -> Bytes -> Script (ContractId ReplayNode)
+replayNodeFor : RedTeamEnv -> NttManager -> InboundCall -> EncodedVaa -> Script (ContractId ReplayNode)
 replayNodeFor env mgr call vaaBytes = do
   let namespace = optional mgr.namespace identity call.replayNamespace
   fst <$> coveringNode env.gg namespace (parseVAA vaaBytes).hash
 
-releaseAttempt : RedTeamEnv -> ContractId NttManager -> InboundCall -> Bytes -> Script (Either SubmitError ())
+releaseAttempt : RedTeamEnv -> ContractId NttManager -> InboundCall -> EncodedVaa -> Script (Either SubmitError ())
 releaseAttempt env mgrCid call vaaBytes = do
   mgr <- managerOf env mgrCid
   ledgerCid <- case mgr.tokenConfig of
@@ -402,13 +408,12 @@ releaseAttempt env mgrCid call vaaBytes = do
       coreStateCid = env.coreStateCid
       replayNodeCid
       vaaBytes
-      pubKeys = call.pubKeys
       recipient = call.recipient
       ledgerCid
       inputHoldingCids = call.explicitInputs
       extraArgs = receiverPreapprovalArgs recipientPreapprovalCid
 
-mintAttempt : RedTeamEnv -> ContractId NttManager -> InboundCall -> Bytes -> Script (Either SubmitError ())
+mintAttempt : RedTeamEnv -> ContractId NttManager -> InboundCall -> EncodedVaa -> Script (Either SubmitError ())
 mintAttempt env mgrCid call vaaBytes = do
   mgr <- managerOf env mgrCid
   replayNodeCid <- replayNodeFor env mgr call vaaBytes
@@ -419,7 +424,6 @@ mintAttempt env mgrCid call vaaBytes = do
       coreStateCid = env.coreStateCid
       replayNodeCid
       vaaBytes
-      pubKeys = call.pubKeys
       recipient = call.recipient
       depositPreapprovalCid
       extraArgs = emptyExtraArgs
@@ -433,7 +437,7 @@ expectAccepted label = \case
 -- Governance
 ----------------------------------------------------------------------
 
-governanceVaa : RedTeamEnv -> Int -> NttGovernanceAction -> Script Bytes
+governanceVaa : RedTeamEnv -> Int -> NttGovernanceAction -> Script EncodedVaa
 governanceVaa env sequence action = signVaa env.guardianKey VaaSpec with
   guardianSetIndex = 0
   emitterChain = solanaGovernanceChainId
@@ -651,9 +655,9 @@ testRedTeamInboundEdgeCasesRejected = do
         release (base 8 1000) with sourceManager = b32 "b1"
     , AttackCase "unknown guardian set" "unknown guardian set index" $
         release (base 9 1000) with guardianSetIndex = 1
-    , AttackCase "signed by a non-guardian key" "public key does not match guardian address" $ do
+    , AttackCase "signed by a non-guardian key" "invalid signature for guardian index 0" $ do
         vaaBytes <- signInboundTransfer strangerKey (base 10 1000)
-        releaseAttempt env lockA ((inboundCallBy env relayer bob) with pubKeys = [(0, strangerKey.publicKey)]) vaaBytes
+        releaseAttempt env lockA (inboundCallBy env relayer bob) vaaBytes
     , AttackCase "payout steered to another recipient" "recipient does not match VAA recipientAddress" $ do
         vaaBytes <- signInboundTransfer env.guardianKey (base 11 1000)
         releaseAttempt env lockA (inboundCallBy env relayer mallory) vaaBytes
@@ -693,7 +697,6 @@ testRedTeamGovernanceForgeriesRejected = do
             coreStateCid = env.coreStateCid
             replayNodeCid
             vaaBytes
-            pubKeys = [(0, env.guardianKey.publicKey)]
             extraArgs = emptyExtraArgs
       signedFrom emitterChain emitterAddress guardianSetIndex sequence action =
         signVaa env.guardianKey VaaSpec with
@@ -745,7 +748,6 @@ testRedTeamGovernanceForgeriesRejected = do
             coreStateCid = env.coreStateCid
             replayNodeCid
             vaaBytes
-            pubKeys = [(0, env.guardianKey.publicKey)]
             ledgerCid = None
             extraArgs = emptyExtraArgs
   checkAttacksRejected
@@ -765,7 +767,6 @@ testRedTeamGovernanceForgeriesRejected = do
             coreStateCid = env.coreStateCid
             replayNodeCid
             vaaBytes
-            pubKeys = [(0, env.guardianKey.publicKey)]
             transceiverEmitterCid
             consistencyLevel = 0
             feeAllocation = None
@@ -778,7 +779,7 @@ testRedTeamGovernanceForgeriesRejected = do
   let registerByVaa sequence emitterChain factory = do
         vaaBytes <- signedFrom emitterChain governanceEmitter 0 sequence RegisterBurnMintManager with
           chain = cantonChainId
-          registrationBinding = nttRegistrationBindingFor env.gg adminE 0
+          registrationBinding = nttRegistrationBindingFor testNttGovernanceRootIdentity env.gg adminE 0
           tokenDecimals = 8
         fmap (const ()) <$> trySubmit (withReads env [adminE] []) do
           exerciseCmd govCid RegisterManagerByVaa with
@@ -793,7 +794,6 @@ testRedTeamGovernanceForgeriesRejected = do
             claimFeeAllocation = None
             feeAllocation = None
             vaaBytes
-            pubKeys = [(0, env.guardianKey.publicKey)]
             extraArgs = emptyExtraArgs
   checkAttacksRejected
     [ AttackCase "register-by-VAA with the admin's own CoinFactory" "factory's admin does not match this deployment's guardianGovernance" $ do
@@ -923,7 +923,6 @@ testRedTeamUnauthorizedMovesRejected = do
             coreStateCid = env.coreStateCid
             replayNodeCid
             vaaBytes
-            pubKeys = [(0, env.guardianKey.publicKey)]
             ledgerCid = Some ledgerA
             extraArgs = emptyExtraArgs
     ]
@@ -1053,7 +1052,6 @@ acceptQuorumCustody env relayer mgrCid sequence = do
       coreStateCid = env.coreStateCid
       replayNodeCid
       vaaBytes = acceptVaa
-      pubKeys = [(0, env.guardianKey.publicKey)]
       ledgerCid = Some ledgerCid
       extraArgs = receiverPreapprovalArgs custodyPreapprovalCid
   pure mgrCid'
@@ -1104,7 +1102,7 @@ template SenderAuthorityGovernanceRegistryFactory
             Some (AV_Text payload) -> pure payload
             _ -> abort "redteam: forged payload missing"
           _ <- exercise (coerceContractId emitterCid : ContractId Emitter) PublishMessage with
-            payload = forgedPayload
+            payload = parseHexTextOrAbort forgedPayload
             nonce = 0
             consistencyLevel = 0
             coreStateCid = fromSome coreStateCidOf
@@ -1171,8 +1169,8 @@ testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority = do
             sourceToken = victim.tokenAddress
             recipientAddress = b32 "ee"
             recipientChain = peerChainId
-            additionalPayload = ""
-        transceiverPayload = ""
+            additionalPayload = mempty
+        transceiverPayload = mempty
       consolidateWithContext contextValues = do
         custodyHoldings <- forA [1.0, 2.0] \amount -> toInterfaceContractId @Holding <$> submit registryAdmin do
           createCmd RegistryHolding with
@@ -1195,7 +1193,7 @@ testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority = do
     [ AttackCase "registry publishes a forged transfer from another deployment's transceiver" "Wormhole.Core.State:Emitter) requires authorizers" $
         consolidateWithContext \victimEmitterCid ->
           [ (forgedEmitterContextKey, AV_ContractId (coerceContractId victimEmitterCid))
-          , (forgedPayloadContextKey, AV_Text forgedTransfer) ]
+          , (forgedPayloadContextKey, AV_Text (hexTextOf forgedTransfer)) ]
     , AttackCase "registry sets a peer on another quorum-adminned manager" "Wormhole.Ntt.Manager:NttManager) requires authorizers" $
         consolidateWithContext \victimEmitterCid ->
           [ (hijackedManagerContextKey, AV_ContractId (coerceContractId victimLock))
@@ -1432,7 +1430,7 @@ testRedTeamReserveCustodianIsNeverGuardianGovernance = do
         fmap (const ()) <$> trySubmit (withReads env [env.gg] []) do
           createCmd NttGovernance with
             guardianGovernance = env.gg, nttCustody = env.gg
-            nextId = 0, consumedGovernance = Set.empty
+            nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
     , AttackCase "manager with gg as admin and reserve custodian" "precondition violated" $
         createManagerAttempt managerA with admin = env.gg, reserveCustodian = env.gg
     , AttackCase "manager with an ordinary admin and gg as reserve custodian" "precondition violated" $
@@ -1776,24 +1774,21 @@ testRedTeamTransferWireFieldBounds = do
     , rejectedWith "consistency level -1" "consistency level must be a uint8" \outbound -> outbound with consistencyLevel = -1
     , rejectedWith "nonce 2^32" "nonce must be a uint32" \outbound -> outbound with nonce = 4294967296
     , rejectedWith "nonce -1" "nonce must be a uint32" \outbound -> outbound with nonce = -1
-    , rejectedWith "33-byte recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
-        outbound with recipientAddress = "01" <> b32 "ee"
-    , rejectedWith "31-byte recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
-        outbound with recipientAddress = T.drop 2 (b32 "ee")
-    , rejectedWith "65-character recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
-        outbound with recipientAddress = "0" <> b32 "ee"
-    , rejectedWith "63-character recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
-        outbound with recipientAddress = T.drop 1 (b32 "ee")
-    , rejectedWith "65-character zero recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
-        outbound with recipientAddress = "0" <> b32 "00"
-    , rejectedWith "uppercase recipient address" "recipient address must be 32 bytes of lowercase hex" \outbound ->
-        outbound with recipientAddress = T.drop 2 (b32 "01") <> "EE"
     , rejectedWith "zero recipient address" "recipient address must be non-zero" \outbound ->
         outbound with recipientAddress = b32 "00"
     ]
   attemptWith (\outbound -> outbound with consistencyLevel = 255) >>= expectAccepted "consistency level 255"
   attemptWith (\outbound -> outbound with nonce = 4294967295) >>= expectAccepted "nonce 2^32 - 1"
   attemptWith (\outbound -> outbound with recipientAddress = b32 "01") >>= expectAccepted "recipient address 0x00..01"
+  let recipientHex = hexTextOf (b32 "ee" : UniversalAddress)
+  forA_
+    [ ("33-byte recipient address", "01" <> recipientHex, "UniversalAddress: expected 32 bytes, got 66 hex characters")
+    , ("31-byte recipient address", T.drop 2 recipientHex, "UniversalAddress: expected 32 bytes, got 62 hex characters")
+    , ("65-character recipient address", "0" <> recipientHex, "UniversalAddress: odd hex length 65")
+    , ("63-character recipient address", T.drop 1 recipientHex, "UniversalAddress: odd hex length 63")
+    , ("uppercase recipient address", T.drop 2 recipientHex <> "EE", "UniversalAddress: not lowercase hex")
+    ] \(label, malformedHex, expectedError) ->
+      assertMsg label (parseHexText @UniversalAddress malformedHex == Left expectedError)
 
 ----------------------------------------------------------------------
 -- Lock/unlock admin and gg authority
@@ -1829,7 +1824,7 @@ testRedTeamLockUnlockAdminCannotUseGgAuthority = do
         fmap (const ()) <$> trySubmit (withReads env [admin] []) do
           exerciseCmd transceiverEmitterCid PublishMessage with
             nonce = 0
-            payload = "deadbeef"
+            payload = parseHexTextOrAbort "deadbeef"
             consistencyLevel = 0
             coreStateCid = env.coreStateCid
             payer = admin

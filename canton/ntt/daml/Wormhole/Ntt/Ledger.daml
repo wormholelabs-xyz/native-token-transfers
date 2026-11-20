@@ -37,14 +37,15 @@
 module Wormhole.Ntt.Ledger where
 
 import Splice.Api.Token.HoldingV1 (Holding)
-import Wormhole.Core.Bytes (Bytes32)
+import Wormhole.Core.Bytes (checkHexValueIsWellFormed)
+import Wormhole.Ntt.Bytes (NttManagerAddress)
 
 template LockedLedger
   with
     guardianGovernance : Party
     admin              : Party     -- CURRENT admin; observer only, kept in sync
                                    -- by TransferAdmin
-    managerAddress     : Bytes32   -- the owning NttManager
+    managerAddress     : NttManagerAddress  -- the owning NttManager
     balance            : Decimal
     custodyHoldingCid  : Optional (ContractId Holding)  -- hint: the consolidated pot
   where
@@ -60,7 +61,7 @@ template LockedLedger
     -- template. Each gg host vets each new token-cip0056 version.
     signatory guardianGovernance
     observer admin
-    ensure balance >= 0.0
+    ensure balance >= 0.0 && checkHexValueIsWellFormed managerAddress
 
     -- The controller is the signatory, so only a choice body with gg
     -- authority (in practice: the owning manager's choices) can update the ledger.

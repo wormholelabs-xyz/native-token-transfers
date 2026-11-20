@@ -11,32 +11,34 @@
 --
 -- A re-genesis ('ReGenesisReplacing') names the earlier 'CoreState',
 -- 'EmitterRegistry', 'ReplayRootRegistry' and 'NttGovernance'. 'AcceptGenesis'
--- checks that the parameters carry their consumed governance digests and
--- their next ids, archives them, and creates the new roots in the same
--- transaction. Thus one gg has one set of active roots, each earlier
--- governance VAA stays consumed, and each new emitter and manager id is above
--- the earlier ones. The earlier 'CoinFactory' stays active and is the
--- 'CoinFactory' of the new roots: burn/mint managers hold its cid, and one gg
--- has one canonical factory.
+-- checks that the parameters equal what the earlier roots imply: the
+-- governance replay records, the guardian sets and the next ids. It archives
+-- the earlier roots and creates the new roots in the same transaction. Thus
+-- one gg has one set of active roots, each earlier governance VAA stays
+-- consumed or below the eviction floor, the guardian set index stays, and
+-- each new emitter and manager id is above the earlier ones. The new
+-- 'NttGovernance' keeps the earlier root identity. The earlier 'CoinFactory'
+-- stays active and is the 'CoinFactory' of the new roots: burn/mint managers
+-- hold its cid, and one gg has one canonical factory.
 module Wormhole.Genesis where
 
-import DA.Foldable (forA_)
 import DA.List (dedup, sort)
-import DA.Set qualified as Set
-import DA.Text qualified as T
+import DA.Map qualified as Map
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Token.CIP0056.CoinFactory (CoinFactory (..))
-import Wormhole.Core.Bytes (Bytes32, isLowerHex, normalizeHex)
+import Wormhole.Core.Bytes (EmitterAddress, checkHexValueIsWellFormed)
+import DA.Date (Month (Jan), date)
+import DA.Time (time)
 import Wormhole.Core.GuardianSet (checkGuardianAddressesAreWellFormed)
 import Wormhole.Core.Setup
   ( GenesisGuardianSet (..), RegistryParties (..), cantonChainId
   , mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry )
-import Wormhole.Core.State (CoreState (..), EmitterRegistry (..), ReplayRootRegistry (..), maxEmitterId)
+import Wormhole.Core.State
+  ( CoreState (..), EmitterRegistry (..), GovernanceReplayRecord (..), RegenesisGuardianSets (..)
+  , ReplayRootRegistry (..), maxEmitterId )
+import Wormhole.Ntt.Bytes (NttGovernanceRootIdentity)
 import Wormhole.Ntt.Governance (NttGovernance (..))
-
--- | Bound of each consumed governance digest list in 'GenesisParameters'.
-maxGenesisConsumedGovernanceDigests : Int
-maxGenesisConsumedGovernanceDigests = 1024
+import Wormhole.Ntt.Manager (nttGovernanceRootIdentityFor)
 
 -- | 2^53 - 1, as core 'maxEmitterId': manager ids stay exact in JSON doubles.
 maxNttManagerId : Int
@@ -58,22 +60,22 @@ data GenesisKind
 
 -- | Every genesis parameter. Each gg owner compares it with its agreed copy.
 data GenesisParameters = GenesisParameters with
-    guardianGovernance            : Party
-    feeCustody                    : Party               -- CoreState feeRecipient
-    nttCustody                    : Party
-    onboardingFeeAdmin            : Party               -- controller of SetRegistrationFee and SetClaimFee
-    genesisGuardianSet            : GenesisGuardianSet  -- the live global index and its addresses
-    governanceChainId             : Int
-    governanceContract            : Bytes32
-    initialMessageFee             : Int                 -- 10^-10 feeInstrument units
-    feeInstrument                 : InstrumentId
-    registrationFee               : Int                 -- 10^-10 feeInstrument units
-    replayRootClaimFee            : Int                 -- 10^-10 feeInstrument units
-    firstEmitterId                : Int                 -- EmitterRegistry nextId; the earlier registry's nextId on a re-genesis
-    firstNttManagerId             : Int                 -- NttGovernance nextId; the earlier root's nextId on a re-genesis
-    consumedCoreGovernanceDigests : [Bytes32]           -- CoreState consumedGovernance of the earlier roots
-    consumedNttGovernanceDigests  : [Bytes32]           -- NttGovernance consumedGovernance of the earlier roots
-    genesisKind                   : GenesisKind
+    guardianGovernance         : Party
+    feeCustody                 : Party                   -- CoreState feeRecipient
+    nttCustody                 : Party
+    onboardingFeeAdmin         : Party                   -- controller of SetRegistrationFee and SetClaimFee
+    genesisGuardianSet         : GenesisGuardianSet      -- the current set: global index, each address and public key
+    governanceChainId          : Int
+    governanceContract         : EmitterAddress
+    initialMessageFee          : Int                     -- 10^-10 feeInstrument units
+    feeInstrument              : InstrumentId
+    registrationFee            : Int                     -- 10^-10 feeInstrument units
+    replayRootClaimFee         : Int                     -- 10^-10 feeInstrument units
+    firstEmitterId             : Int                     -- EmitterRegistry nextId; the earlier registry's nextId on a re-genesis
+    firstNttManagerId          : Int                     -- NttGovernance nextId; the earlier root's nextId on a re-genesis
+    coreGovernanceReplayRecord : GovernanceReplayRecord  -- empty at a first genesis; tryGovernanceReplayRecordForRegenesis of the earlier CoreState
+    nttGovernanceReplayRecord  : GovernanceReplayRecord  -- empty at a first genesis; tryNttGovernanceReplayRecordForRegenesis of the earlier NttGovernance
+    genesisKind                : GenesisKind
   deriving (Eq, Show)
 
 -- | The contracts that 'AcceptGenesis' creates.
@@ -85,10 +87,22 @@ data GenesisRoots = GenesisRoots with
     coinFactoryCid        : ContractId CoinFactory
   deriving (Eq, Show)
 
-checkConsumedGovernanceDigestListsAreBounded : GenesisParameters -> Bool
-checkConsumedGovernanceDigestListsAreBounded parameters =
-  length parameters.consumedCoreGovernanceDigests <= maxGenesisConsumedGovernanceDigests
-    && length parameters.consumedNttGovernanceDigests <= maxGenesisConsumedGovernanceDigests
+-- | The guardian set state and the root identity of the new roots: from the
+-- parameters at a first genesis, from the earlier roots on a re-genesis.
+data GenesisLineage = GenesisLineage with
+    guardianSets : RegenesisGuardianSets
+    rootIdentity : NttGovernanceRootIdentity
+  deriving (Eq, Show)
+
+checkGovernanceReplayRecordIsWellFormed : Text -> GovernanceReplayRecord -> Either Text ()
+checkGovernanceReplayRecordIsWellFormed recordName replayRecord = do
+  assertMsg ("genesis: a consumed " <> recordName <> " governance digest is not a well-formed VaaDigest")
+    (all checkHexValueIsWellFormed (Map.keys replayRecord.consumedGovernance))
+
+checkGenesisReplayRecordsAreWellFormed : GenesisParameters -> Bool
+checkGenesisReplayRecordsAreWellFormed parameters =
+  checkGovernanceReplayRecordIsWellFormed "core" parameters.coreGovernanceReplayRecord == Right ()
+    && checkGovernanceReplayRecordIsWellFormed "NTT" parameters.nttGovernanceReplayRecord == Right ()
 
 template WormholeGenesisOffer
   with
@@ -97,7 +111,7 @@ template WormholeGenesisOffer
   where
     signatory operator
     observer parameters.guardianGovernance, parameters.feeCustody, parameters.nttCustody
-    ensure checkConsumedGovernanceDigestListsAreBounded parameters
+    ensure checkGenesisReplayRecordsAreWellFormed parameters
 
     -- | Creates the roots. Authority: the actors gg, feeCustody and
     -- nttCustody sign each root and each earlier root that a re-genesis
@@ -109,32 +123,36 @@ template WormholeGenesisOffer
       do
         assertMsg "genesis: agreed parameters differ from the offer" (agreedParameters == parameters)
         either assertFail pure (checkGenesisParametersAreWellFormed parameters)
-        coinFactoryCid <- case parameters.genesisKind of
+        (lineage, coinFactoryCid) <- case parameters.genesisKind of
           FirstGenesis -> do
             either assertFail pure (checkFirstGenesisStartsEmpty parameters)
-            create CoinFactory with admin = parameters.guardianGovernance
+            genesisTime <- getTime
+            coinFactoryCid <- create CoinFactory with admin = parameters.guardianGovernance
+            pure (firstGenesisLineageOf parameters genesisTime, coinFactoryCid)
           ReGenesisReplacing earlierRoots -> do
-            archiveEarlierRootsMatchingParameters parameters earlierRoots
-            requireEarlierCoinFactoryOf parameters.guardianGovernance earlierRoots.coinFactoryCid
-        roots <- createGenesisRoots parameters coinFactoryCid
-        checkGenesisRootsMatchParameters parameters roots
+            lineage <- archiveEarlierRootsMatchingParameters parameters earlierRoots
+            coinFactoryCid <- requireEarlierCoinFactoryOf parameters.guardianGovernance earlierRoots.coinFactoryCid
+            pure (lineage, coinFactoryCid)
+        roots <- createGenesisRoots parameters lineage coinFactoryCid
+        checkGenesisRootsMatchParameters parameters lineage roots
         pure roots
 
     choice WithdrawGenesisOffer : ()
       controller operator
       do pure ()
 
--- | Parameter checks that run before the creates. The 'CoreState', registry
--- and 'NttGovernance' preconditions run on each create.
+-- | Parameter checks that run before the creates, for both genesis kinds. The
+-- 'CoreState', registry and 'NttGovernance' preconditions run on each create.
+-- The core key precondition binds only without governance history, so the
+-- guardian keys are checked here for a re-genesis too.
 checkGenesisParametersAreWellFormed : GenesisParameters -> Either Text ()
 checkGenesisParametersAreWellFormed parameters = do
-  checkGuardianAddressesAreWellFormed parameters.genesisGuardianSet.guardianAddresses
+  checkGuardianAddressesAreWellFormed (map (.address) parameters.genesisGuardianSet.guardians)
   -- sdk/vaa ChainID is a uint16, and 0 is ChainIDUnset.
-  assertMsg "genesis: governance chain is not a nonzero uint16"
-    (parameters.governanceChainId >= 1 && parameters.governanceChainId <= 65535)
-  -- The lowercase form that mkInitialCoreState stores.
-  assertMsg "genesis: governance contract is not 32 bytes of lowercase hex"
-    (T.length parameters.governanceContract == 64 && isLowerHex parameters.governanceContract)
+  assertMsg "genesis: governance chain is 0 (unset)" (parameters.governanceChainId >= 1)
+  assertMsg "genesis: governance chain exceeds uint16" (parameters.governanceChainId <= 65535)
+  assertMsg "genesis: governance contract is not a well-formed EmitterAddress"
+    (checkHexValueIsWellFormed parameters.governanceContract)
   assertMsg "genesis: fee custody party is guardianGovernance" (parameters.feeCustody /= parameters.guardianGovernance)
   assertMsg "genesis: NTT custody party is guardianGovernance" (parameters.nttCustody /= parameters.guardianGovernance)
   assertMsg "genesis: fee custody party is the NTT custody party" (parameters.feeCustody /= parameters.nttCustody)
@@ -142,28 +160,30 @@ checkGenesisParametersAreWellFormed parameters = do
   assertMsg "genesis: first emitter id exceeds the bound" (parameters.firstEmitterId <= maxEmitterId + 1)
   assertMsg "genesis: first NTT manager id is negative" (parameters.firstNttManagerId >= 0)
   assertMsg "genesis: first NTT manager id exceeds the bound" (parameters.firstNttManagerId <= maxNttManagerId)
-  assertMsg "genesis: consumed core governance digests exceed the bound"
-    (length parameters.consumedCoreGovernanceDigests <= maxGenesisConsumedGovernanceDigests)
-  assertMsg "genesis: consumed NTT governance digests exceed the bound"
-    (length parameters.consumedNttGovernanceDigests <= maxGenesisConsumedGovernanceDigests)
-  forA_ (parameters.consumedCoreGovernanceDigests <> parameters.consumedNttGovernanceDigests) \digest ->
-    assertMsg "genesis: consumed governance digest is not 32 bytes of lowercase hex"
-      (T.length digest == 64 && isLowerHex digest)
-  assertMsg "genesis: duplicate consumed core governance digest"
-    (length (dedup parameters.consumedCoreGovernanceDigests) == length parameters.consumedCoreGovernanceDigests)
-  assertMsg "genesis: duplicate consumed NTT governance digest"
-    (length (dedup parameters.consumedNttGovernanceDigests) == length parameters.consumedNttGovernanceDigests)
+  checkGovernanceReplayRecordIsWellFormed "core" parameters.coreGovernanceReplayRecord
+  checkGovernanceReplayRecordIsWellFormed "NTT" parameters.nttGovernanceReplayRecord
 
+-- | A first genesis has no governance history, so the core key precondition
+-- requires each guardian public key.
 checkFirstGenesisStartsEmpty : GenesisParameters -> Either Text ()
 checkFirstGenesisStartsEmpty parameters = do
   assertMsg "genesis: a first genesis starts at emitter id 0" (parameters.firstEmitterId == 0)
   assertMsg "genesis: a first genesis starts at NTT manager id 0" (parameters.firstNttManagerId == 0)
-  assertMsg "genesis: a first genesis has no consumed core governance digest" (null parameters.consumedCoreGovernanceDigests)
-  assertMsg "genesis: a first genesis has no consumed NTT governance digest" (null parameters.consumedNttGovernanceDigests)
+  assertMsg "genesis: a first genesis has no consumed core governance digest"
+    (Map.null parameters.coreGovernanceReplayRecord.consumedGovernance)
+  assertMsg "genesis: a first genesis has no consumed NTT governance digest"
+    (Map.null parameters.nttGovernanceReplayRecord.consumedGovernance)
 
--- | Fetches the earlier roots, checks that the parameters carry their parties,
--- next ids and consumed digests, then archives them.
-archiveEarlierRootsMatchingParameters : GenesisParameters -> EarlierGenesisRoots -> Update ()
+firstGenesisLineageOf : GenesisParameters -> Time -> GenesisLineage
+firstGenesisLineageOf parameters genesisTime = GenesisLineage with
+  guardianSets = RegenesisGuardianSets with
+    guardianSetIndex = parameters.genesisGuardianSet.guardianSetIndex
+    guardianSets = (expectedFirstCoreStateOf parameters).guardianSets
+  rootIdentity = nttGovernanceRootIdentityFor parameters.guardianGovernance genesisTime
+
+-- | Fetches the earlier roots, checks that the parameters equal what they
+-- imply, then archives them. Returns the lineage of the new roots.
+archiveEarlierRootsMatchingParameters : GenesisParameters -> EarlierGenesisRoots -> Update GenesisLineage
 archiveEarlierRootsMatchingParameters parameters earlierRoots = do
   let gg = parameters.guardianGovernance
   earlierCoreState <- fetch earlierRoots.coreStateCid
@@ -180,26 +200,48 @@ archiveEarlierRootsMatchingParameters parameters earlierRoots = do
     (parameters.firstEmitterId == earlierEmitterRegistry.nextId)
   assertMsg "genesis: first NTT manager id differs from the earlier NttGovernance nextId"
     (parameters.firstNttManagerId == earlierNttGovernance.nextId)
-  assertMsg "genesis: consumed core governance digests differ from the earlier CoreState"
-    (Set.fromList parameters.consumedCoreGovernanceDigests == earlierCoreState.consumedGovernance)
-  assertMsg "genesis: consumed NTT governance digests differ from the earlier NttGovernance"
-    (Set.fromList parameters.consumedNttGovernanceDigests == earlierNttGovernance.consumedGovernance)
+  assertMsg "genesis: core governance replay record differs from the earlier CoreState"
+    (parameters.coreGovernanceReplayRecord == GovernanceReplayRecord with
+      consumedGovernance = earlierCoreState.consumedGovernance
+      evictedGovernanceMaxTimestampSeconds = earlierCoreState.evictedGovernanceMaxTimestampSeconds)
+  assertMsg "genesis: NTT governance replay record differs from the earlier NttGovernance"
+    (parameters.nttGovernanceReplayRecord == GovernanceReplayRecord with
+      consumedGovernance = earlierNttGovernance.consumedGovernance
+      evictedGovernanceMaxTimestampSeconds = earlierNttGovernance.evictedGovernanceMaxTimestampSeconds)
   archive earlierRoots.coreStateCid
   archive earlierRoots.emitterRegistryCid
   archive earlierRoots.replayRootRegistryCid
   archive earlierRoots.nttGovernanceCid
+  pure GenesisLineage with
+    guardianSets = (firstGenesisLineageOf parameters (time (date 1970 Jan 1) 0 0 0)).guardianSets
+    rootIdentity = earlierNttGovernance.rootIdentity
 
 registryPartiesOf : GenesisParameters -> RegistryParties
 registryPartiesOf parameters = RegistryParties with
   guardianGovernance = parameters.guardianGovernance
   onboardingFeeAdmin = parameters.onboardingFeeAdmin
 
-expectedCoreStateOf : GenesisParameters -> CoreState
-expectedCoreStateOf parameters =
-  (mkInitialCoreState parameters.guardianGovernance parameters.governanceChainId parameters.governanceContract
-    parameters.genesisGuardianSet parameters.feeInstrument parameters.feeCustody) with
-      messageFee = parameters.initialMessageFee
-      consumedGovernance = Set.fromList parameters.consumedCoreGovernanceDigests
+expectedFirstCoreStateOf : GenesisParameters -> CoreState
+expectedFirstCoreStateOf parameters =
+  mkInitialCoreState parameters.guardianGovernance parameters.governanceChainId parameters.governanceContract
+    parameters.genesisGuardianSet parameters.feeInstrument parameters.feeCustody
+
+expectedCoreStateOf : GenesisParameters -> GenesisLineage -> CoreState
+expectedCoreStateOf parameters lineage = (expectedFirstCoreStateOf parameters) with
+  guardianSetIndex = lineage.guardianSets.guardianSetIndex
+  guardianSets = lineage.guardianSets.guardianSets
+  messageFee = parameters.initialMessageFee
+  consumedGovernance = parameters.coreGovernanceReplayRecord.consumedGovernance
+  evictedGovernanceMaxTimestampSeconds = parameters.coreGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds
+
+expectedNttGovernanceOf : GenesisParameters -> GenesisLineage -> NttGovernance
+expectedNttGovernanceOf parameters lineage = NttGovernance with
+  guardianGovernance = parameters.guardianGovernance
+  nttCustody = parameters.nttCustody
+  nextId = parameters.firstNttManagerId
+  rootIdentity = lineage.rootIdentity
+  consumedGovernance = parameters.nttGovernanceReplayRecord.consumedGovernance
+  evictedGovernanceMaxTimestampSeconds = parameters.nttGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds
 
 -- | The earlier 'CoinFactory', checked to be administered by gg.
 requireEarlierCoinFactoryOf : Party -> ContractId CoinFactory -> Update (ContractId CoinFactory)
@@ -209,17 +251,13 @@ requireEarlierCoinFactoryOf guardianGovernance earlierCoinFactoryCid = do
   pure earlierCoinFactoryCid
 
 -- | Creates the core and NTT roots; @coinFactoryCid@ is the gg factory of the roots.
-createGenesisRoots : GenesisParameters -> ContractId CoinFactory -> Update GenesisRoots
-createGenesisRoots parameters coinFactoryCid = do
-  coreStateCid <- create (expectedCoreStateOf parameters)
+createGenesisRoots : GenesisParameters -> GenesisLineage -> ContractId CoinFactory -> Update GenesisRoots
+createGenesisRoots parameters lineage coinFactoryCid = do
+  coreStateCid <- create (expectedCoreStateOf parameters lineage)
   emitterRegistryCid <- create (mkInitialEmitterRegistry (registryPartiesOf parameters) parameters.registrationFee) with
     nextId = parameters.firstEmitterId
   replayRootRegistryCid <- create (mkInitialReplayRootRegistry (registryPartiesOf parameters) parameters.replayRootClaimFee)
-  nttGovernanceCid <- create NttGovernance with
-    guardianGovernance = parameters.guardianGovernance
-    nttCustody = parameters.nttCustody
-    nextId = parameters.firstNttManagerId
-    consumedGovernance = Set.fromList parameters.consumedNttGovernanceDigests
+  nttGovernanceCid <- create (expectedNttGovernanceOf parameters lineage)
   pure GenesisRoots with ..
 
 checkSignatoriesAre : Text -> [Party] -> [Party] -> Update ()
@@ -228,25 +266,28 @@ checkSignatoriesAre templateName expectedSignatories actualSignatories =
     (sort (dedup actualSignatories) == sort expectedSignatories)
 
 -- | Fetches each created root and checks each field and each signatory list.
-checkGenesisRootsMatchParameters : GenesisParameters -> GenesisRoots -> Update ()
-checkGenesisRootsMatchParameters parameters roots = do
+checkGenesisRootsMatchParameters : GenesisParameters -> GenesisLineage -> GenesisRoots -> Update ()
+checkGenesisRootsMatchParameters parameters lineage roots = do
   let gg = parameters.guardianGovernance
+      expectedCoreState = expectedCoreStateOf parameters lineage
+      expectedNttGovernance = expectedNttGovernanceOf parameters lineage
   coreState <- fetch roots.coreStateCid
   checkSignatoriesAre "CoreState" [gg, parameters.feeCustody] (signatory coreState)
   assertMsg "genesis: CoreState has observers" (null (observer coreState))
   assertMsg "genesis: CoreState guardianGovernance" (coreState.guardianGovernance == gg)
   assertMsg "genesis: CoreState chainId" (coreState.chainId == cantonChainId)
   assertMsg "genesis: CoreState governanceChainId" (coreState.governanceChainId == parameters.governanceChainId)
-  assertMsg "genesis: CoreState governanceContract"
-    (coreState.governanceContract == normalizeHex parameters.governanceContract)
-  assertMsg "genesis: CoreState guardianSetIndex"
-    (coreState.guardianSetIndex == parameters.genesisGuardianSet.guardianSetIndex)
-  assertMsg "genesis: CoreState guardianSets" (coreState.guardianSets == (expectedCoreStateOf parameters).guardianSets)
+  assertMsg "genesis: CoreState governanceContract" (coreState.governanceContract == parameters.governanceContract)
+  assertMsg "genesis: CoreState guardianSetIndex" (coreState.guardianSetIndex == expectedCoreState.guardianSetIndex)
+  assertMsg "genesis: CoreState guardianSets" (coreState.guardianSets == expectedCoreState.guardianSets)
   assertMsg "genesis: CoreState messageFee" (coreState.messageFee == parameters.initialMessageFee)
   assertMsg "genesis: CoreState feeInstrument" (coreState.feeInstrument == parameters.feeInstrument)
   assertMsg "genesis: CoreState feeRecipient" (coreState.feeRecipient == parameters.feeCustody)
   assertMsg "genesis: CoreState consumedGovernance"
-    (coreState.consumedGovernance == Set.fromList parameters.consumedCoreGovernanceDigests)
+    (coreState.consumedGovernance == parameters.coreGovernanceReplayRecord.consumedGovernance)
+  assertMsg "genesis: CoreState evictedGovernanceMaxTimestampSeconds"
+    (coreState.evictedGovernanceMaxTimestampSeconds == parameters.coreGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds)
+  assertMsg "genesis: CoreState differs from the expected root" (coreState == expectedCoreState)
 
   emitterRegistry <- fetch roots.emitterRegistryCid
   checkSignatoriesAre "EmitterRegistry" [gg] (signatory emitterRegistry)
@@ -269,8 +310,12 @@ checkGenesisRootsMatchParameters parameters roots = do
   assertMsg "genesis: NttGovernance guardianGovernance" (nttGovernance.guardianGovernance == gg)
   assertMsg "genesis: NttGovernance nttCustody" (nttGovernance.nttCustody == parameters.nttCustody)
   assertMsg "genesis: NttGovernance nextId" (nttGovernance.nextId == parameters.firstNttManagerId)
+  assertMsg "genesis: NttGovernance rootIdentity" (nttGovernance.rootIdentity == lineage.rootIdentity)
   assertMsg "genesis: NttGovernance consumedGovernance"
-    (nttGovernance.consumedGovernance == Set.fromList parameters.consumedNttGovernanceDigests)
+    (nttGovernance.consumedGovernance == parameters.nttGovernanceReplayRecord.consumedGovernance)
+  assertMsg "genesis: NttGovernance evictedGovernanceMaxTimestampSeconds"
+    (nttGovernance.evictedGovernanceMaxTimestampSeconds == parameters.nttGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds)
+  assertMsg "genesis: NttGovernance differs from the expected root" (nttGovernance == expectedNttGovernance)
 
   coinFactory <- fetch roots.coinFactoryCid
   checkSignatoriesAre "CoinFactory" [gg] (signatory coinFactory)

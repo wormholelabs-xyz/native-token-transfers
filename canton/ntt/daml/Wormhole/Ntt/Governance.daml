@@ -19,18 +19,19 @@
 -- this root.
 module Wormhole.Ntt.Governance where
 
+import DA.Map (Map)
 import DA.Map qualified as Map
-import DA.Set (Set)
-import DA.Set qualified as Set
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
-import Wormhole.Core.Bytes (Bytes, Bytes32, normalizeHex)
-import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
+import Wormhole.Core.Bytes (EncodedVaa, VaaDigest, checkHexValueIsWellFormed)
+import Wormhole.Core.Replay (defaultSplitThreshold)
 import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry, WormholeMessage
-  , RegisterEmitter (..), ClaimReplayRoot (..), ParseAndVerifyVAA (..), PublishMessage (..) )
+  , RegisterEmitter (..), ClaimReplayRoot (..), ParseAndVerifyVAA (..), PublishMessage (..)
+  , GovernanceReplayRecord (..) )
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
+import Wormhole.Ntt.Bytes (NttGovernanceRootIdentity)
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload
@@ -42,12 +43,16 @@ template NttGovernance
     guardianGovernance : Party
     nttCustody         : Party  -- owns quorum-held lock/unlock reserves; see 'Wormhole.Ntt.Manager.reserveCustodianFor'
     nextId             : Int
-    consumedGovernance : Set Bytes32  -- Replay protection for RegisterManagerByVaa
-                                      -- (by VAA digest); mirrors CoreState.consumedGovernance,
-                                      -- untouched by plain RegisterManager.
+    rootIdentity       : NttGovernanceRootIdentity  -- fixed at the first genesis; carried by each re-genesis
+    consumedGovernance : Map VaaDigest Int  -- RegisterManagerByVaa replay protection: digest ->
+                                            -- VAA body timestamp, seconds
+    evictedGovernanceMaxTimestampSeconds : Optional Int
+                                            -- highest timestamp of an evicted digest
   where
     signatory guardianGovernance, nttCustody
     ensure nttCustody /= guardianGovernance
+      && checkHexValueIsWellFormed rootIdentity
+      && all checkHexValueIsWellFormed (Map.keys consumedGovernance)
 
     -- | Stand up a deployment, atomically: allocate the next manager id, mint
     -- the deployment's gg-owned transceiver 'Emitter' and claim its gg-scoped
@@ -151,11 +156,11 @@ template NttGovernance
         emitterFeeAllocation  : Optional (ContractId Allocation, ExtraArgs)
         claimFeeAllocation    : Optional (ContractId Allocation, ExtraArgs)
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- the TransceiverInit message fee
-        vaaBytes              : Bytes
-        pubKeys               : [(Int, Bytes)]
+        vaaBytes              : EncodedVaa
         extraArgs             : ExtraArgs
       controller admin
       do
+        checkVaaArgumentIsWellFormed vaaBytes
         -- 1. Pin CoreState before trusting any of its fields.
         cs <- requireCommittedCoreState guardianGovernance coreStateCid
 
@@ -163,15 +168,9 @@ template NttGovernance
         vaa <- exercise coreStateCid ParseAndVerifyVAA with
           verifier = admin
           encodedVAA = vaaBytes
-          pubKeys
 
         -- 3. VAA origin checks.
-        assertMsg "ntt governance: not signed by current guardian set"
-          (vaa.guardianSetIndex == cs.guardianSetIndex)
-        assertMsg "ntt governance: wrong emitter chain"
-          (vaa.emitterChain == cs.governanceChainId)
-        assertMsg "ntt governance: wrong emitter address"
-          (normalizeHex vaa.emitterAddress == normalizeHex cs.governanceContract)
+        checkVaaIsCurrentSetGovernance cs vaa
 
         -- 4. Exhaustive constructor dispatch: reject any non-registration action.
         (chainId, registrationBinding, tokenDecimals) <- case parseNttGovernance vaa.payload of
@@ -180,7 +179,7 @@ template NttGovernance
 
         -- 5. Replay, checked before the binding check below.
         assertMsg "ntt governance: registration VAA already consumed"
-          (not (Set.member vaa.hash consumedGovernance))
+          (not (Map.member vaa.hash consumedGovernance))
 
         -- 6. Derived-value range asserts, reachable ahead of the binding
         -- check (also re-asserted inside 'registerManagerBody').
@@ -192,7 +191,7 @@ template NttGovernance
         -- 7. Binding: no static VAA can pass this, since party fingerprints
         -- are nondeterministic and only known once parties are allocated.
         assertMsg "ntt governance: registration binding does not match"
-          (normalizeHex registrationBinding == nttRegistrationBindingFor guardianGovernance admin instrumentNonce)
+          (registrationBinding == nttRegistrationBindingFor rootIdentity guardianGovernance admin instrumentNonce)
 
         -- 8. Factory template-pin, ahead of the shared body's identical check.
         requireCanonicalFactory guardianGovernance factory
@@ -207,9 +206,15 @@ template NttGovernance
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce BurnMint tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
+        let replayRecord = GovernanceReplayRecord with
+              consumedGovernance = Map.insert vaa.hash vaa.timestamp consumedGovernance
+              evictedGovernanceMaxTimestampSeconds
+        assertMsg "ntt governance: VAA digest not recorded"
+          (Map.lookup vaa.hash replayRecord.consumedGovernance == Some vaa.timestamp)
         reg' <- create this with
           nextId = nextId + 1
-          consumedGovernance = Set.insert vaa.hash consumedGovernance
+          consumedGovernance = replayRecord.consumedGovernance
+          evictedGovernanceMaxTimestampSeconds = replayRecord.evictedGovernanceMaxTimestampSeconds
         pure (reg', mgr, emitterCid, ledger, msg)
 
 -- | Registration body shared by 'RegisterManager' and

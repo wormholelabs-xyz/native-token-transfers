@@ -53,7 +53,7 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.GuardianSet (GuardianSet(..))
 import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
-import Wormhole.Core.Setup (GenesisGuardianSet (..), RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.Setup (RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 import Wormhole.Core.State
   ( Emitter(..), CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
@@ -61,16 +61,17 @@ import Wormhole.Core.VAA (parseVAA)
 import Token.CIP0056.Coin (Coin(..))
 import Token.CIP0056.CoinFactory
 import Wormhole.Ntt.Amount
+import Wormhole.Ntt.Bytes
 import Wormhole.Ntt.Payload
 import Wormhole.Ntt.Deposit
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Governance
 import Test.MockToken (mintAndAllocate, mockBalance)
-import Test.TestReplay (registerReplayRoot, coveringDisclosure)
+import Test.TestReplay (registerReplayRoot, coveringDisclosure, suffixAfter)
 import Test.TestCore
   ( setup, setupWithInstrument
-  , govSetFeeVAA, devnetGuardianPubKey, devnetGuardian )
+  , govSetFeeVAA, devnetGenesisGuardianSet, devnetGuardianMember )
 
 ----------------------------------------------------------------------
 -- CIP-56 mocks: local implementations of the vendored Holding /
@@ -273,9 +274,17 @@ discloseTransferFactory gg = do
   [(cid, _)] <- query @MockTransferFactory gg
   fromSome <$> queryDisclosure gg cid
 
--- | 32-byte hex from a short tail (@b32 "aa"@ = 0x00..aa), matching the fixture.
-b32 : Text -> Bytes32
-b32 = leftPadTo 32
+-- | 32 bytes from a short tail (@b32 "aa"@ = 0x00..aa), matching the fixture.
+b32 : HexEncodedBytes a => Text -> a
+b32 tailHex = parseHexBytesAsOrAbort (leftPadTo 32 (parseHexTextOrAbort tailHex))
+
+-- | A constrained byte value from its hex text.
+hexValue : HexEncodedValue a => Text -> a
+hexValue = parseHexTextOrAbort
+
+-- | The root identity of each hand-built 'NttGovernance' in these tests.
+testNttGovernanceRootIdentity : NttGovernanceRootIdentity
+testNttGovernanceRootIdentity = b32 "11"
 
 -- | The placeholder Wormhole chain id the fixtures use for this Canton
 -- deployment (the fixture NTT payload's @recipientChain@ is 72). A real
@@ -304,7 +313,7 @@ testNttCodec = do
         sourceToken = b32 "dd"
         recipientAddress = b32 "ee"
         recipientChain = 72
-        additionalPayload = ""
+        additionalPayload = mempty
   decodeNativeTokenTransfer (encodeNativeTokenTransfer ntt) === ntt
 
   let mm = NttManagerMessage with
@@ -317,7 +326,7 @@ testNttCodec = do
         sourceManager = b32 "bb"
         recipientManager = b32 "aa"
         managerPayload = encodeNttManagerMessage mm
-        transceiverPayload = ""
+        transceiverPayload = mempty
   decodeWormholeTransceiverMessage (encodeWormholeTransceiverMessage wm) === wm
 
   let t = trimAmount 1234567890123456789 18
@@ -335,7 +344,7 @@ testNttCodec = do
 testRecipientAddressForVector : Script ()
 testRecipientAddressForVector = do
   recipientAddressFromText "vector-recipient::1220deadbeef"
-    === "dbd2d1b09ea5715be3e45d0e38e5c5c0f6fcd0f181d45a9620dfb20f8ae3a4d9"
+    === hexValue "dbd2d1b09ea5715be3e45d0e38e5c5c0f6fcd0f181d45a9620dfb20f8ae3a4d9"
   assert (recipientAddressFromText "vector-recipient::1220deadbeef"
             /= recipientAddressFromText "vector-recipient::1220cafebabe")
 
@@ -389,7 +398,7 @@ createNttGovernanceRoot : Party -> Script ()
 createNttGovernanceRoot gg = do
   nttCustody <- allocateParty "NttCustody"
   _ <- submit (actAs gg <> actAs nttCustody) do
-    createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, consumedGovernance = Set.empty
+    createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
   pure ()
 
 -- | The custody party of @gg@'s 'NttGovernance' root.
@@ -524,7 +533,7 @@ testNttDeployment = do
   -- Pin the manager-address encoding against a fixed vector, and
   -- confirm the emitter/manager domain tags separate identical ordinals.
   derivedAddressFromText (DomainTag nttManagerAddressTag) (RegistrarText "vector-registrar::1220deadbeef") (OwnerText "vector-owner::1220cafebabe") (RegistryId 7)
-    === "52734ae3caf51e70510fa464245ddfd9be378b04d7b0422a740bb3d9581bc769"
+    === hexValue "52734ae3caf51e70510fa464245ddfd9be378b04d7b0422a740bb3d9581bc769"
   assert (derivedAddressFromText (DomainTag emitterAddressTag) (RegistrarText "p::1") (OwnerText "q::2") (RegistryId 0)
             /= derivedAddressFromText (DomainTag nttManagerAddressTag) (RegistrarText "p::1") (OwnerText "q::2") (RegistryId 0))
 
@@ -751,15 +760,6 @@ testSetPeerGuards = do
     setPeerCmd 2 (Peer with managerAddress = b32 "", transceiverAddress = b32 "cc", decimals = 8)
   expectAbort "manager address must be non-zero" res
 
-  forA_
-    [ ((goodPeer with managerAddress = "0" <> b32 "bb"), "peer manager address must be 32 bytes of lowercase hex")
-    , ((goodPeer with managerAddress = T.drop 1 (b32 "bb")), "peer manager address must be 32 bytes of lowercase hex")
-    , ((goodPeer with managerAddress = "0" <> b32 ""), "peer manager address must be 32 bytes of lowercase hex")
-    , ((goodPeer with transceiverAddress = "0" <> b32 "cc"), "peer transceiver address must be 32 bytes of lowercase hex")
-    , ((goodPeer with transceiverAddress = T.drop 1 (b32 "cc")), "peer transceiver address must be 32 bytes of lowercase hex")
-    ] \(malformedPeer, expectedRejection) -> do
-      res <- trySubmitWithDiscs admin discs do setPeerCmd 2 malformedPeer
-      expectAbort expectedRejection res
 
   res <- trySubmitWithDiscs admin discs do
     setPeerCmd 2 (Peer with managerAddress = b32 "bb", transceiverAddress = b32 "cc", decimals = 0)
@@ -869,14 +869,10 @@ testSetPeerRejectsForeignTransceiver = do
       feeAllocation = None
   expectAbort "transceiver emitter is not this deployment's" res
 
--- | Peer addresses must be exactly 32 bytes of lowercase hex:
--- 'leftPadTo' is the identity above 32 bytes, so an unchecked oversized
--- address would emit an over-length registration the accountant truncates
--- and permanently mis-records into its write-once slot. Uppercase hex is
--- REJECTED rather than normalized — the check runs on the raw field, before
--- 'normalizePeer' lowercases, so this pins the actual behaviour rather than
--- the alternative (normalize-then-accept). A valid 32-byte lowercase address
--- is still accepted.
+-- | Peer addresses have one form, 32 bytes of lowercase hex: an oversized
+-- address would emit an over-length registration that the accountant
+-- mis-records into its write-once slot. Parsing rejects malformed addresses
+-- (the Ledger API path is the choice re-check); a valid address is accepted.
 testSetPeerRejectsMalformedAddress : Script ()
 testSetPeerRejectsMalformedAddress = do
   (gg, csId) <- nttSetup
@@ -893,28 +889,19 @@ testSetPeerRejectsMalformedAddress = do
         consistencyLevel = 0
         payer = admin
         feeAllocation = None
-      tryPeer peer = trySubmitWithDiscs admin [csDisc, emitterDisc] do doSetPeer peer
 
-  -- Oversized (33 bytes): rejected, not silently truncated.
-  res <- tryPeer (valid with transceiverAddress = "00" <> b32 "cc")
-  expectAbort "32 bytes of lowercase hex" res
-
-  -- Short (31 bytes): rejected, not silently zero-padded.
-  res <- tryPeer (valid with transceiverAddress = T.drop 2 (b32 "cc"))
-  expectAbort "32 bytes of lowercase hex" res
-
-  -- Non-hex characters: rejected even at the correct width.
-  res <- tryPeer (valid with transceiverAddress = "zz" <> T.drop 2 (b32 "cc"))
-  expectAbort "32 bytes of lowercase hex" res
-
-  -- Odd hex-digit count: 'byteLength' truncates via integer division, so
-  -- this is caught by the width check.
-  res <- tryPeer (valid with transceiverAddress = T.take (T.length (b32 "cc") - 1) (b32 "cc"))
-  expectAbort "32 bytes of lowercase hex" res
-
-  -- Uppercase hex: rejected, not normalized.
-  res <- tryPeer (valid with transceiverAddress = T.asciiToUpper (b32 "cc"))
-  expectAbort "32 bytes of lowercase hex" res
+  let validHex = hexTextOf (valid.transceiverAddress)
+  forA_
+    [ ("oversized", "00" <> validHex, "EmitterAddress: expected 32 bytes, got 66 hex characters", "NttManagerAddress: expected 32 bytes, got 33")
+    , ("short", T.drop 2 validHex, "EmitterAddress: expected 32 bytes, got 62 hex characters", "NttManagerAddress: expected 32 bytes, got 31")
+    , ("non-hex", "zz" <> T.drop 2 validHex, "EmitterAddress: not lowercase hex", "NttManagerAddress: not whole bytes of lowercase hex")
+    , ("odd length", T.drop 1 validHex, "EmitterAddress: odd hex length 63", "NttManagerAddress: not whole bytes of lowercase hex")
+    , ("uppercase", T.asciiToUpper validHex, "EmitterAddress: not lowercase hex", "NttManagerAddress: not whole bytes of lowercase hex")
+    ] \(label, malformedHex, expectedTransceiverError, expectedManagerError) -> do
+      assertMsg ("transceiver address case " <> label)
+        (parseHexText @EmitterAddress malformedHex == Left expectedTransceiverError)
+      assertMsg ("manager address case " <> label)
+        (parseHexText @NttManagerAddress malformedHex == Left expectedManagerError)
 
   -- A valid 32-byte lowercase address is still accepted.
   (_, msg) <- submitWithDiscs admin [csDisc, emitterDisc] do doSetPeer valid
@@ -986,7 +973,6 @@ testSetPeerFeeRequired = do
     exerciseCmd csId SubmitGovernanceVAA with
       submitter = gg
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
   csDisc <- fromSome <$> queryDisclosure gg csId
   emitterDisc <- fromSome <$> queryDisclosure gg d.emitterCid
   let doSetPeer feeAlloc = exerciseCmd d.mgrCid SetPeer with
@@ -1398,7 +1384,6 @@ testPauseHaltsRelease = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       vaaBytes = nttTransferVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       recipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
@@ -1779,12 +1764,11 @@ testReplaySurvivesAdminTransfer = do
   (vaa, nodeCid) <- submit (actAs gg <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = gg
       namespace = mgrAfter.namespace
       replayNodeCid = rootCid
   Some node <- queryContractId gg nodeCid
-  Set.member vaa.hash node.consumed === True
+  Set.member (suffixAfter 0 vaa.hash) node.consumed === True
   node.namespace === mgrAfter.namespace
 
   -- Replay: resolve the fresh covering node, still rejected (membership).
@@ -1792,7 +1776,6 @@ testReplaySurvivesAdminTransfer = do
   submitMustFail (actAs gg <> disclose csDisc <> disclose freshDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = gg
       namespace = mgrAfter.namespace
       replayNodeCid = freshCid
@@ -2234,7 +2217,6 @@ testNttSend = do
     exerciseCmd csId SubmitGovernanceVAA with
       submitter = gg
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
   csDisc <- fromSome <$> queryDisclosure gg csId
   emitterDisc <- fromSome <$> queryDisclosure gg d'.emitterCid
   factoryDisc <- discloseTransferFactory gg
@@ -2271,7 +2253,7 @@ testNttSend = do
       ntt = decodeNativeTokenTransfer mm.payload
   ntt.sourceToken === mgr.tokenAddress
   mm.sender === recipientAddressFor alice
-  assert (mm.sender /= mgr.managerAddress)
+  assert (hexBytesOf mm.sender /= hexBytesOf mgr.managerAddress)
 
   [(_, em)] <- query @Emitter gg
   em.sequence === 3
@@ -2330,7 +2312,6 @@ testNttTransferByDifferentUser = do
     exerciseCmd csId SubmitGovernanceVAA with
       submitter = gg
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
 
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 1000)
   dMgr     <- fromSome <$> queryDisclosure gg mgrCid
@@ -2416,11 +2397,11 @@ testNttTransferRequiresUserAuthority = do
 -- Signed NTT transfer VAA (guardian set 0, devnet guardian): source chain 2,
 -- emitter (peer transceiver) 0x..cc, peer manager 0x..bb, our manager 0x..aa,
 -- transfer of 1_000_000 @ 8 decimals of token 0x..dd to 0x..ee on chain 72.
-nttTransferVAA : Bytes
-nttTransferVAA = "010000000001009e180f3b0c9a9b4d77e9be4c25e67db813e222af53f3fff09219c2b1c43570ea003de6b1c3f91ad6a80a7c8c5b32ee349dd2e8778a77f1d2638414a18821de72016553f10000000000000200000000000000000000000000000000000000000000000000000000000000cc0000000000000001009945ff1000000000000000000000000000000000000000000000000000000000000000bb00000000000000000000000000000000000000000000000000000000000000aa0091000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000bb004f994e54540800000000000f424000000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee00480000"
+nttTransferVAA : EncodedVaa
+nttTransferVAA = parseHexTextOrAbort "010000000001009e180f3b0c9a9b4d77e9be4c25e67db813e222af53f3fff09219c2b1c43570ea003de6b1c3f91ad6a80a7c8c5b32ee349dd2e8778a77f1d2638414a18821de72016553f10000000000000200000000000000000000000000000000000000000000000000000000000000cc0000000000000001009945ff1000000000000000000000000000000000000000000000000000000000000000bb00000000000000000000000000000000000000000000000000000000000000aa0091000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000bb004f994e54540800000000000f424000000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee00480000"
 
 -- | The digest the fixture VAA consumes.
-nttTransferDigest : Text
+nttTransferDigest : VaaDigest
 nttTransferDigest = (parseVAA nttTransferVAA).hash
 
 -- | Create a manager whose @managerAddress@ is exactly the fixture's
@@ -2526,7 +2507,6 @@ testReceiveByExecutorRecipientMismatchFails = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       vaaBytes = nttTransferVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       recipient = wrongRecipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
@@ -2558,7 +2538,6 @@ testReceiveWrongChainRejected = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       vaaBytes = nttTransferVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       recipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
@@ -2610,7 +2589,6 @@ testReleaseReplayPathAfterAdminTransfer = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       vaaBytes = nttTransferVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       recipient = wrongRecipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
@@ -2631,7 +2609,7 @@ testReceivePinsGuardianGovernance = do
   let rogueInst = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   fakeCsId <- submit (actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = ["1111111111111111111111111111111111111111"])
+                 devnetGenesisGuardianSet
                  rogueInst rogueFeeCustody)
   (mgrCid, _, ledgerCid) <- setupFixedManager gg admin LockUnlock csId
   Some mgr <- queryContractId gg mgrCid
@@ -2644,7 +2622,6 @@ testReceivePinsGuardianGovernance = do
       coreStateCid = fakeCsId
       replayNodeCid = nodeCid
       vaaBytes = nttTransferVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       recipient
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
@@ -2679,7 +2656,6 @@ testReleaseRejectsForeignLedger = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       vaaBytes = nttTransferVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       recipient
       ledgerCid = foreignLedger
       inputHoldingCids = []
@@ -2705,7 +2681,7 @@ data NttReceiveMatchSetup = NttReceiveMatchSetup with
     recipient             : Party
     coreStateCid          : ContractId CoreState
     replayNodeCid         : ContractId ReplayNode
-    recipientAddress      : Bytes32
+    recipientAddress      : Text  -- hex of the UniversalAddress
     depositPreapprovalCid : ContractId DepositPreapproval
     factoryCid            : ContractId BurnMintFactory
   deriving (Eq, Show)
@@ -2730,7 +2706,7 @@ integrationNttReceiveMatchSetup = do
     recipient
     coreStateCid = csId
     replayNodeCid = nodeCid
-    recipientAddress = recipientAddressFor recipient
+    recipientAddress = hexTextOf (recipientAddressFor recipient)
     depositPreapprovalCid
     factoryCid = theBurnMintFactory factory
 
@@ -2742,7 +2718,7 @@ data NttReceiveMatchInput = NttReceiveMatchInput with
     recipient             : Party
     coreStateCid          : ContractId CoreState
     replayNodeCid         : ContractId ReplayNode
-    vaaBytes              : Bytes
+    vaaBytes              : Text  -- hex of the EncodedVaa
     depositPreapprovalCid : ContractId DepositPreapproval
     factoryCid            : ContractId BurnMintFactory
   deriving (Eq, Show)
@@ -2762,8 +2738,7 @@ integrationNttReceiveMatch input = do
       executor = input.relayer
       coreStateCid = input.coreStateCid
       replayNodeCid = input.replayNodeCid
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       recipient = input.recipient
       depositPreapprovalCid = input.depositPreapprovalCid
       extraArgs = emptyExtraArgs
@@ -2775,14 +2750,13 @@ integrationNttReceiveMatch input = do
 
   -- Replay: the digest is now consumed. Re-resolve the covering node and
   -- relay again — rejected on membership.
-  (freshNode, _) <- coveringDisclosure input.gg gg mgr.namespace (parseVAA input.vaaBytes).hash
+  (freshNode, _) <- coveringDisclosure input.gg gg mgr.namespace (parseVAA (parseHexTextOrAbort input.vaaBytes)).hash
   submitMustFail relayerOnly do
     exerciseCmd input.mgrId Mint with
       executor = input.relayer
       coreStateCid = input.coreStateCid
       replayNodeCid = freshNode
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       recipient = input.recipient
       depositPreapprovalCid = input.depositPreapprovalCid
       extraArgs = emptyExtraArgs
@@ -2803,11 +2777,11 @@ integrationNttReceiveMatch input = do
 -- emitter check.
 ----------------------------------------------------------------------
 
-acceptAdminHappyVAA : Bytes
-acceptAdminHappyVAA = "010000000001009391f78297b7bd3fd25a52651e2b18216b625228226059245ef77cf342f971d11beca86f1b1de69ee726c35616edb0f04fcaf69ec0dfbcc9f2be29e0c62fcdb1016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000010000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminHappyVAA : EncodedVaa
+acceptAdminHappyVAA = parseHexTextOrAbort "010000000001009391f78297b7bd3fd25a52651e2b18216b625228226059245ef77cf342f971d11beca86f1b1de69ee726c35616edb0f04fcaf69ec0dfbcc9f2be29e0c62fcdb1016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000010000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
-acceptAdminWrongModuleVAA : Bytes
-acceptAdminWrongModuleVAA = "010000000001006502d6d60ebb2c2452a430ac4510f0a5d13ad25a27a30fc54e062f9c9c88efaf3ef37c4db3b82a602cdbbfc95e663b4de642a28e5181c37434497287a3bede56006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000020000000000000000000000000000000000000000000000000000000000436f726501004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminWrongModuleVAA : EncodedVaa
+acceptAdminWrongModuleVAA = parseHexTextOrAbort "010000000001006502d6d60ebb2c2452a430ac4510f0a5d13ad25a27a30fc54e062f9c9c88efaf3ef37c4db3b82a602cdbbfc95e663b4de642a28e5181c37434497287a3bede56006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000020000000000000000000000000000000000000000000000000000000000436f726501004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
 -- | Action byte 9 -- unassigned on BOTH lineages that define NTT governance
 -- actions: this branch uses 1 (AcceptAdminToGovernance) and 4
@@ -2817,23 +2791,23 @@ acceptAdminWrongModuleVAA = "010000000001006502d6d60ebb2c2452a430ac4510f0a5d13ad
 -- sibling lineage assigns it, which would make this fixture start parsing
 -- successfully (and this test silently stop testing the unsupported-action
 -- path) the moment the two lineages merge.
-acceptAdminWrongActionVAA : Bytes
-acceptAdminWrongActionVAA = "010000000001004069f5c53af32a7e95f4e40ea9cddf48174b94cb8b3a2bfe58f3d9731544e05d62cfa08777f794fc2a2dd3338af225a9025be44c6da0cfa62cab7e361b90b539016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000030000000000000000000000000000000000000000000000000000000000004e747409004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminWrongActionVAA : EncodedVaa
+acceptAdminWrongActionVAA = parseHexTextOrAbort "010000000001004069f5c53af32a7e95f4e40ea9cddf48174b94cb8b3a2bfe58f3d9731544e05d62cfa08777f794fc2a2dd3338af225a9025be44c6da0cfa62cab7e361b90b539016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000030000000000000000000000000000000000000000000000000000000000004e747409004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
-acceptAdminWrongChainVAA : Bytes
-acceptAdminWrongChainVAA = "010000000001000c33a3788f18cfab0c4c88b141cee4d606138df7042cb13aeedc124e444462f4616adb4a026e5accd0569d276696d457ea754f996b571a006a712c48f2d8a989016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000004e747401000200000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminWrongChainVAA : EncodedVaa
+acceptAdminWrongChainVAA = parseHexTextOrAbort "010000000001000c33a3788f18cfab0c4c88b141cee4d606138df7042cb13aeedc124e444462f4616adb4a026e5accd0569d276696d457ea754f996b571a006a712c48f2d8a989016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000004e747401000200000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
-acceptAdminWrongManagerVAA : Bytes
-acceptAdminWrongManagerVAA = "010000000001007d8430c8f3051e6c1319809d71913091223f5abcb2350d13ba2e2ac5bb3471627229baf9f0772c94907e994f6bd0cd74e6786782114a8fc4edcc8fc57eedc4d7016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000050000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000ab0000000000000000"
+acceptAdminWrongManagerVAA : EncodedVaa
+acceptAdminWrongManagerVAA = parseHexTextOrAbort "010000000001007d8430c8f3051e6c1319809d71913091223f5abcb2350d13ba2e2ac5bb3471627229baf9f0772c94907e994f6bd0cd74e6786782114a8fc4edcc8fc57eedc4d7016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000050000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000ab0000000000000000"
 
-acceptAdminWrongEpochVAA : Bytes
-acceptAdminWrongEpochVAA = "010000000001008a0c8a47d3f583d7da598d3e58cca5827d7623341d9d9d7a945a6da5f1c50f32143fecb68546d4ddf51a78d441205b2e24ddf012e32c3388b1f64121c6dae9da016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000060000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001"
+acceptAdminWrongEpochVAA : EncodedVaa
+acceptAdminWrongEpochVAA = parseHexTextOrAbort "010000000001008a0c8a47d3f583d7da598d3e58cca5827d7623341d9d9d7a945a6da5f1c50f32143fecb68546d4ddf51a78d441205b2e24ddf012e32c3388b1f64121c6dae9da016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000060000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001"
 
-acceptAdminWrongEmitterChainVAA : Bytes
-acceptAdminWrongEmitterChainVAA = "010000000001009a0b57b39366cc0cc8b5b8fd421b84c8410634d5dda227af9a15b5deb2771a7b299cc17a77504befbf9f54a50798607689ca32021a9ebd5b815b30e02e86c797016553f100000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000070000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminWrongEmitterChainVAA : EncodedVaa
+acceptAdminWrongEmitterChainVAA = parseHexTextOrAbort "010000000001009a0b57b39366cc0cc8b5b8fd421b84c8410634d5dda227af9a15b5deb2771a7b299cc17a77504befbf9f54a50798607689ca32021a9ebd5b815b30e02e86c797016553f100000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000070000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
-acceptAdminWrongEmitterAddressVAA : Bytes
-acceptAdminWrongEmitterAddressVAA = "01000000000100bb2efbc2fdeb4fbc77cfce03574bb2ac7fc4a990984dc11f6fc1d6860b98ffe859416ea306aa664c44f5af643f6ea80d0ef37507b306fa8dd86c1a55adb779e5016553f100000000000001000000000000000000000000000000000000000000000000000000000000000500000000000000080000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+acceptAdminWrongEmitterAddressVAA : EncodedVaa
+acceptAdminWrongEmitterAddressVAA = parseHexTextOrAbort "01000000000100bb2efbc2fdeb4fbc77cfce03574bb2ac7fc4a990984dc11f6fc1d6860b98ffe859416ea306aa664c44f5af643f6ea80d0ef37507b306fa8dd86c1a55adb779e5016553f100000000000001000000000000000000000000000000000000000000000000000000000000000500000000000000080000000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
 -- | Codec round-trip plus a pinned hex vector for
 -- 'encodeNttGovernance'/'parseNttGovernance': chain 72, managerAddress
@@ -2847,7 +2821,7 @@ testNttGovernancePayloadCodec = do
         factoryEpoch = 0
   parseNttGovernance (encodeNttGovernance action) === action
   encodeNttGovernance action
-    === "00000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+    === hexValue "00000000000000000000000000000000000000000000000000000000004e747401004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
 -- | Shared fixture for every accept-admin-by-VAA test below: a
 -- 'setupFixedManager' deployment (fixed 0x00..aa address, matching the VAA
@@ -2875,7 +2849,7 @@ acceptAdminFixture gg admin config csId = do
 -- the standing proposal (queried as @admin@, its signatory), plus the
 -- ledger for lock/unlock.
 acceptAdminDiscs
-  : Party -> Party -> ContractId CoreState -> AcceptAdminFixture -> Text
+  : Party -> Party -> ContractId CoreState -> AcceptAdminFixture -> VaaDigest
   -> Script (ContractId ReplayNode, [Disclosure])
 acceptAdminDiscs gg admin csId fx digest = do
   dMgr <- fromSome <$> queryDisclosure gg fx.mgrCid
@@ -2892,7 +2866,7 @@ acceptAdminDiscs gg admin csId fx digest = do
 -- | The 'AcceptAdminTransferByVaa' exercise command against an
 -- 'AcceptAdminFixture'.
 acceptAdminByVaaCmd
-  : Party -> AcceptAdminFixture -> ContractId CoreState -> ContractId ReplayNode -> Bytes
+  : Party -> AcceptAdminFixture -> ContractId CoreState -> ContractId ReplayNode -> EncodedVaa
   -> Commands (ContractId NttManager, Optional (ContractId LockedLedger))
 acceptAdminByVaaCmd executor fx csId nodeCid vaaBytes =
   exerciseCmd fx.mgrCid AcceptAdminTransferByVaa with
@@ -2901,7 +2875,6 @@ acceptAdminByVaaCmd executor fx csId nodeCid vaaBytes =
     coreStateCid = csId
     replayNodeCid = nodeCid
     vaaBytes
-    pubKeys = [(0, devnetGuardianPubKey)]
     ledgerCid = fx.ledgerCid
     extraArgs = emptyExtraArgs
 
@@ -3054,8 +3027,8 @@ testAcceptAdminByVaaRequiresCurrentGuardianSet = do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
-        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = Some staleGuardianSetExpiry)
-        , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        [ (0, GuardianSet with members = [devnetGuardianMember], expirationTime = Some staleGuardianSetExpiry)
+        , (1, GuardianSet with members = [devnetGuardianMember], expirationTime = None)
         ]
 
   (nodeCid, discs) <- acceptAdminDiscs gg admin staleCsId fx (parseVAA acceptAdminHappyVAA).hash
@@ -3183,7 +3156,7 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
   let rogueInst = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   fakeCsId <- submit (actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGov solanaGovernanceChainId defaultGovernanceContract
-                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = ["1111111111111111111111111111111111111111"])
+                 devnetGenesisGuardianSet
                  rogueInst rogueFeeCustody)
   fx <- acceptAdminFixture gg admin BurnMint csId
   (nodeCid, _) <- coveringDisclosure gg gg fx.namespace (parseVAA acceptAdminHappyVAA).hash
@@ -3208,20 +3181,20 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
 -- already bumps the fresh manager's peerEpoch from 0 to 1 before any test runs.
 ----------------------------------------------------------------------
 
-setPeerHappyVAA : Bytes
-setPeerHappyVAA = "010000000001000468e8da4d2da344abc56d5cec2cad48d27c9c6602f3c96cc924d7e44ee2c3454e4fabb1584be81e4e09b1f911c804f0660822780b76d313404dd830584ecc00016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+setPeerHappyVAA : EncodedVaa
+setPeerHappyVAA = parseHexTextOrAbort "010000000001000468e8da4d2da344abc56d5cec2cad48d27c9c6602f3c96cc924d7e44ee2c3454e4fabb1584be81e4e09b1f911c804f0660822780b76d313404dd830584ecc00016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
 
-setPeerWrongChainVAA : Bytes
-setPeerWrongChainVAA = "01000000000100643c55d198fa60e0b3f8c5d6593922f4414082e8ea019db3bef0f7862c76a8e2218aa6aaef69aafb42eeb126afe323c0caefd00aa7c3d5b7ac2636890f60e5a3016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000680000000000000000000000000000000000000000000000000000000000004e747404000200000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+setPeerWrongChainVAA : EncodedVaa
+setPeerWrongChainVAA = parseHexTextOrAbort "01000000000100643c55d198fa60e0b3f8c5d6593922f4414082e8ea019db3bef0f7862c76a8e2218aa6aaef69aafb42eeb126afe323c0caefd00aa7c3d5b7ac2636890f60e5a3016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000680000000000000000000000000000000000000000000000000000000000004e747404000200000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
 
-setPeerWrongManagerVAA : Bytes
-setPeerWrongManagerVAA = "01000000000100d60aee71588e3a6a10bec70875e1f22f6e46ad2c7d0797182dfbeb4f6485303162f34e8f7561e9498afb39d37b6bc8aa8b6dbd64fbb558d59a11cd4f4c7beace016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000690000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000ab0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+setPeerWrongManagerVAA : EncodedVaa
+setPeerWrongManagerVAA = parseHexTextOrAbort "01000000000100d60aee71588e3a6a10bec70875e1f22f6e46ad2c7d0797182dfbeb4f6485303162f34e8f7561e9498afb39d37b6bc8aa8b6dbd64fbb558d59a11cd4f4c7beace016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000690000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000ab0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
 
-setPeerWrongEmitterChainVAA : Bytes
-setPeerWrongEmitterChainVAA = "0100000000010086fe05fc99eb9cedb0c82c49db91e171981c471eb4177ad316c046d10476453011c135c21ec89ae2e0b218ac93ef23e29519cb40715755170d38e901cf911c40016553f1000000000000020000000000000000000000000000000000000000000000000000000000000004000000000000006b0000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+setPeerWrongEmitterChainVAA : EncodedVaa
+setPeerWrongEmitterChainVAA = parseHexTextOrAbort "0100000000010086fe05fc99eb9cedb0c82c49db91e171981c471eb4177ad316c046d10476453011c135c21ec89ae2e0b218ac93ef23e29519cb40715755170d38e901cf911c40016553f1000000000000020000000000000000000000000000000000000000000000000000000000000004000000000000006b0000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
 
-setPeerWrongEmitterAddressVAA : Bytes
-setPeerWrongEmitterAddressVAA = "01000000000100a93323e15d5a1a053dd927a2d99b5593b01974a2f00e8533d6c959c6a8ae93573a2ab5b9c05273c46ad28cc3d7b101e2d9c4c7aba8156d972d576d6508610705016553f1000000000000010000000000000000000000000000000000000000000000000000000000000005000000000000006c0000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
+setPeerWrongEmitterAddressVAA : EncodedVaa
+setPeerWrongEmitterAddressVAA = parseHexTextOrAbort "01000000000100a93323e15d5a1a053dd927a2d99b5593b01974a2f00e8533d6c959c6a8ae93573a2ab5b9c05273c46ad28cc3d7b101e2d9c4c7aba8156d972d576d6508610705016553f1000000000000010000000000000000000000000000000000000000000000000000000000000005000000000000006c0000000000000000000000000000000000000000000000000000000000004e747404004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001000300000000000000000000000000000000000000000000000000000000000000dd00000000000000000000000000000000000000000000000000000000000000ee09"
 
 -- | The gg-adminned fixed manager every 'SetPeerByVaa' test builds on. Admin
 -- is gg directly (no TransferAdmin ceremony needed to reach the state
@@ -3243,7 +3216,7 @@ setPeerByVaaFixture gg csId = do
 -- the manager, the core state, the transceiver (for the nested 'SetPeer'),
 -- and the covering replay node for @digest@.
 setPeerByVaaDiscs
-  : Party -> ContractId CoreState -> SetPeerByVaaFixture -> Text
+  : Party -> ContractId CoreState -> SetPeerByVaaFixture -> VaaDigest
   -> Script (ContractId ReplayNode, [Disclosure])
 setPeerByVaaDiscs gg csId fx digest = do
   dMgr <- fromSome <$> queryDisclosure gg fx.mgrCid
@@ -3254,7 +3227,7 @@ setPeerByVaaDiscs gg csId fx digest = do
 
 -- | The 'SetPeerByVaa' exercise command against a 'SetPeerByVaaFixture'.
 setPeerByVaaCmd
-  : Party -> SetPeerByVaaFixture -> ContractId CoreState -> ContractId ReplayNode -> Bytes
+  : Party -> SetPeerByVaaFixture -> ContractId CoreState -> ContractId ReplayNode -> EncodedVaa
   -> Commands (ContractId NttManager, WormholeMessage)
 setPeerByVaaCmd executor fx csId nodeCid vaaBytes =
   exerciseCmd fx.mgrCid SetPeerByVaa with
@@ -3262,7 +3235,6 @@ setPeerByVaaCmd executor fx csId nodeCid vaaBytes =
     coreStateCid = csId
     replayNodeCid = nodeCid
     vaaBytes
-    pubKeys = [(0, devnetGuardianPubKey)]
     transceiverEmitterCid = fx.emitterCid
     consistencyLevel = 0
     feeAllocation = None
@@ -3324,8 +3296,8 @@ testSetPeerByVaaRequiresCurrentGuardianSet = do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
-        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = Some staleGuardianSetExpiry)
-        , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        [ (0, GuardianSet with members = [devnetGuardianMember], expirationTime = Some staleGuardianSetExpiry)
+        , (1, GuardianSet with members = [devnetGuardianMember], expirationTime = None)
         ]
   (nodeCid, discs) <- setPeerByVaaDiscs gg staleCsId fx (parseVAA setPeerHappyVAA).hash
   res <- trySubmitWithDiscs relayer discs do
@@ -3472,7 +3444,6 @@ testSetPeerByVaaFeeExecutorSelfFunds = do
     exerciseCmd csId SubmitGovernanceVAA with
       submitter = gg
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
   (nodeCid, discs) <- setPeerByVaaDiscs gg csId fx (parseVAA setPeerHappyVAA).hash
   feePay <- mintAndAllocate mockAdmin relayer feeRecipient inst (feeToDecimal 1000)
 
@@ -3482,7 +3453,6 @@ testSetPeerByVaaFeeExecutorSelfFunds = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       vaaBytes = setPeerHappyVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       transceiverEmitterCid = fx.emitterCid
       consistencyLevel = 0
       feeAllocation = Some feePay
@@ -3514,7 +3484,7 @@ data AcceptAdminSetup = AcceptAdminSetup with
     coreStateCid   : ContractId CoreState
     replayNodeCid  : ContractId ReplayNode
     proposalCid    : ContractId AdminTransferProposal
-    managerAddress : Bytes32
+    managerAddress : Text  -- hex of the NttManagerAddress
     factoryEpoch   : Int
   deriving (Eq, Show)
 
@@ -3535,7 +3505,7 @@ integrationAcceptAdminSetup = do
     coreStateCid = csId
     replayNodeCid = nodeCid
     proposalCid = propCid
-    managerAddress = mgr.managerAddress
+    managerAddress = hexTextOf mgr.managerAddress
     factoryEpoch = mgr.factoryEpoch
 
 data AcceptAdminInput = AcceptAdminInput with
@@ -3545,7 +3515,7 @@ data AcceptAdminInput = AcceptAdminInput with
     coreStateCid  : ContractId CoreState
     replayNodeCid : ContractId ReplayNode
     proposalCid   : ContractId AdminTransferProposal
-    vaaBytes      : Bytes
+    vaaBytes      : Text  -- hex of the EncodedVaa
   deriving (Eq, Show)
 
 -- | Step 2: relay the fresh, Go-signed VAA through 'AcceptAdminTransferByVaa'.
@@ -3559,8 +3529,7 @@ integrationAcceptAdminByVaa input = do
       proposalCid = input.proposalCid
       coreStateCid = input.coreStateCid
       replayNodeCid = input.replayNodeCid
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       ledgerCid = None
       extraArgs = emptyExtraArgs
   Some mgr <- queryContractId input.gg mgrCid'
@@ -3576,8 +3545,7 @@ integrationAcceptAdminByVaa input = do
       proposalCid = input.proposalCid
       coreStateCid = input.coreStateCid
       replayNodeCid = input.replayNodeCid
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       ledgerCid = None
       extraArgs = emptyExtraArgs
   case res of
@@ -3597,26 +3565,26 @@ integrationAcceptAdminByVaa input = do
 -- 'setupFixedManager'), factoryEpoch 0.
 ----------------------------------------------------------------------
 
-registerHappyVAA : Bytes
-registerHappyVAA = "01000000000100a67474776130521854fa617c73ef5960cc49ba787dd9b7306945fec0c6563c8917cf1e7eb31cafa39609ee63f6036539c48c77ba973ebb7c5ec2c79bf9911ff1006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
+registerHappyVAA : EncodedVaa
+registerHappyVAA = parseHexTextOrAbort "01000000000100a67474776130521854fa617c73ef5960cc49ba787dd9b7306945fec0c6563c8917cf1e7eb31cafa39609ee63f6036539c48c77ba973ebb7c5ec2c79bf9911ff1006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000650000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
 
-registerWrongEmitterChainVAA : Bytes
-registerWrongEmitterChainVAA = "01000000000100b96c02e6b0b016f779a3f6070fc1ad24f196e3e0b3bd16b1d07d4c024c5457462ee65b528221b1820b0b2b1255166194510d98591b393ed17a97d062d328bfd8006553f100000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000660000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
+registerWrongEmitterChainVAA : EncodedVaa
+registerWrongEmitterChainVAA = parseHexTextOrAbort "01000000000100b96c02e6b0b016f779a3f6070fc1ad24f196e3e0b3bd16b1d07d4c024c5457462ee65b528221b1820b0b2b1255166194510d98591b393ed17a97d062d328bfd8006553f100000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000660000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
 
-registerWrongEmitterAddressVAA : Bytes
-registerWrongEmitterAddressVAA = "010000000001005826de69e735575d94655fe4a01a68ce3695a2e4efafd3fa83becb310297859020b846bf0b73d41a6c9ba5eb603b42a63ff79723bff27fe451b2f20a40803091016553f100000000000001000000000000000000000000000000000000000000000000000000000000000500000000000000670000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
+registerWrongEmitterAddressVAA : EncodedVaa
+registerWrongEmitterAddressVAA = parseHexTextOrAbort "010000000001005826de69e735575d94655fe4a01a68ce3695a2e4efafd3fa83becb310297859020b846bf0b73d41a6c9ba5eb603b42a63ff79723bff27fe451b2f20a40803091016553f100000000000001000000000000000000000000000000000000000000000000000000000000000500000000000000670000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
 
-registerChainZeroVAA : Bytes
-registerChainZeroVAA = "0100000000010063363e0d4398a2d72dbf429c4bf3d5d54ff08032ed20759839450ca8439f3e6050b59f703895cff0c92907763d7eaaebf833f4a7afe64addbc904e5d4ab2d1c6006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000680000000000000000000000000000000000000000000000000000000000004e747402000000000000000000000000000000000000000000000000000000000000000000aa08"
+registerChainZeroVAA : EncodedVaa
+registerChainZeroVAA = parseHexTextOrAbort "0100000000010063363e0d4398a2d72dbf429c4bf3d5d54ff08032ed20759839450ca8439f3e6050b59f703895cff0c92907763d7eaaebf833f4a7afe64addbc904e5d4ab2d1c6006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000680000000000000000000000000000000000000000000000000000000000004e747402000000000000000000000000000000000000000000000000000000000000000000aa08"
 
-registerDecimalsOutOfRangeVAA : Bytes
-registerDecimalsOutOfRangeVAA = "01000000000100d83ef9c4c90ebdc32d319d4884c34be30817b5cabe225b9e4dc2e10dbd6abdab0b26085fe9b1db23fd0763b9a113a9971c4fd4587bb5a56bb7da1ee8472ce14b016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000690000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa0b"
+registerDecimalsOutOfRangeVAA : EncodedVaa
+registerDecimalsOutOfRangeVAA = parseHexTextOrAbort "01000000000100d83ef9c4c90ebdc32d319d4884c34be30817b5cabe225b9e4dc2e10dbd6abdab0b26085fe9b1db23fd0763b9a113a9971c4fd4587bb5a56bb7da1ee8472ce14b016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000690000000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa0b"
 
-rotateHappyVAA : Bytes
-rotateHappyVAA = "0100000000010088d597b295742eac595a92f786ca1e54aeab7d4f46b4eb6b0027e93a8e3a532e4afa355bd84afb6af7b7a413288697d88783c239f51b5a66c389fd62fb4ca810016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000c90000000000000000000000000000000000000000000000000000000000004e747403004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+rotateHappyVAA : EncodedVaa
+rotateHappyVAA = parseHexTextOrAbort "0100000000010088d597b295742eac595a92f786ca1e54aeab7d4f46b4eb6b0027e93a8e3a532e4afa355bd84afb6af7b7a413288697d88783c239f51b5a66c389fd62fb4ca810016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000c90000000000000000000000000000000000000000000000000000000000004e747403004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
-rotateWrongEpochVAA : Bytes
-rotateWrongEpochVAA = "01000000000100e50b6e1c58de444c05edbfed65204f385ef1f6414aebd2eb85f06a4492efc5d20051b05a16a72012467f3daacf00dde5183dc1066ec6519fa99ee5adfe4aad0f016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000ca0000000000000000000000000000000000000000000000000000000000004e747403004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001"
+rotateWrongEpochVAA : EncodedVaa
+rotateWrongEpochVAA = parseHexTextOrAbort "01000000000100e50b6e1c58de444c05edbfed65204f385ef1f6414aebd2eb85f06a4492efc5d20051b05a16a72012467f3daacf00dde5183dc1066ec6519fa99ee5adfe4aad0f016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000ca0000000000000000000000000000000000000000000000000000000000004e747403004800000000000000000000000000000000000000000000000000000000000000aa0000000000000001"
 
 ----------------------------------------------------------------------
 -- Codec: round trip + pinned hex for actions 2/3, and the registration
@@ -3633,7 +3601,7 @@ testNttGovernanceRegisterCodec = do
         tokenDecimals = 8
   parseNttGovernance (encodeNttGovernance action) === action
   encodeNttGovernance action
-    === "00000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
+    === hexValue "00000000000000000000000000000000000000000000000000000000004e747402004800000000000000000000000000000000000000000000000000000000000000aa08"
 
 testNttGovernanceRotateCodec : Script ()
 testNttGovernanceRotateCodec = do
@@ -3643,18 +3611,18 @@ testNttGovernanceRotateCodec = do
         factoryEpoch = 0
   parseNttGovernance (encodeNttGovernance action) === action
   encodeNttGovernance action
-    === "00000000000000000000000000000000000000000000000000000000004e747403004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
+    === hexValue "00000000000000000000000000000000000000000000000000000000004e747403004800000000000000000000000000000000000000000000000000000000000000aa0000000000000000"
 
 -- | The registration binding: fixed prefix-free 32-byte hash, distinct per
 -- guardianGovernance/admin/nonce, with no @nextId@ in the preimage — stable no matter
 -- how many other registrations landed on the shared root in the meantime.
 testNttRegistrationBindingFromTextVector : Script ()
 testNttRegistrationBindingFromTextVector = do
-  let a0 = nttRegistrationBindingFromText "vector-guardian-governance::1220deadbeef" "vector-admin::1220cafebabe" 0
-      a1 = nttRegistrationBindingFromText "vector-guardian-governance::1220deadbeef" "vector-admin::1220cafebabe" 1
-      b0 = nttRegistrationBindingFromText "vector-guardian-governance::1220aaaaaaaa" "vector-admin::1220cafebabe" 0
-      c0 = nttRegistrationBindingFromText "vector-guardian-governance::1220deadbeef" "vector-admin::1220babababa" 0
-  a0 === "6624cb448d197e0e75fe5cf0b3e92186af24545a293147f3c54de201c0b0dbbe"
+  let a0 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220deadbeef" "vector-admin::1220cafebabe" 0
+      a1 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220deadbeef" "vector-admin::1220cafebabe" 1
+      b0 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220aaaaaaaa" "vector-admin::1220cafebabe" 0
+      c0 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220deadbeef" "vector-admin::1220babababa" 0
+  a0 === hexValue "6624cb448d197e0e75fe5cf0b3e92186af24545a293147f3c54de201c0b0dbbe"
   assert (a0 /= a1)
   assert (a0 /= b0)
   assert (a0 /= c0)
@@ -3707,7 +3675,7 @@ registerByVaaFixture gg csId = do
   pure RegisterByVaaFixture with govCid, emReg, rrReg, discs = [govDisc, emRegDisc, rrRegDisc, csDisc]
 
 registerManagerByVaaCmd
-  : Party -> RegisterByVaaFixture -> ContractId CoreState -> Int -> NttFactory -> Bytes
+  : Party -> RegisterByVaaFixture -> ContractId CoreState -> Int -> NttFactory -> EncodedVaa
   -> Commands (ContractId NttGovernance, ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
 registerManagerByVaaCmd admin fx csId nonce factory vaaBytes =
   exerciseCmd fx.govCid RegisterManagerByVaa with
@@ -3722,7 +3690,6 @@ registerManagerByVaaCmd admin fx csId nonce factory vaaBytes =
     claimFeeAllocation = None
     feeAllocation = None
     vaaBytes
-    pubKeys = [(0, devnetGuardianPubKey)]
     extraArgs = emptyExtraArgs
 
 -- | Wrong emitter chain / address, the governance-hardening checks mirroring
@@ -3754,8 +3721,8 @@ testRegisterManagerByVaaRequiresCurrentGuardianSet = do
     createCmd cs with
       guardianSetIndex = 1
       guardianSets = Map.fromList
-        [ (0, GuardianSet with keys = [devnetGuardian], expirationTime = Some staleGuardianSetExpiry)
-        , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+        [ (0, GuardianSet with members = [devnetGuardianMember], expirationTime = Some staleGuardianSetExpiry)
+        , (1, GuardianSet with members = [devnetGuardianMember], expirationTime = None)
         ]
   fx <- registerByVaaFixture gg staleCsId
   let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unused; fails first
@@ -3791,8 +3758,9 @@ testRegisterManagerByVaaReplayRejected = do
   nttCustody <- nttCustodyOf gg
   govCid <- submit (actAs gg <> actAs nttCustody) do
     createCmd NttGovernance with
-      guardianGovernance = gg, nttCustody, nextId = 0
-      consumedGovernance = Set.fromList [(parseVAA registerHappyVAA).hash]
+      guardianGovernance = gg, nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity
+      consumedGovernance = Map.fromList [((parseVAA registerHappyVAA).hash, (parseVAA registerHappyVAA).timestamp)]
+      evictedGovernanceMaxTimestampSeconds = None
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
@@ -3811,7 +3779,6 @@ testRegisterManagerByVaaReplayRejected = do
       claimFeeAllocation = None
       feeAllocation = None
       vaaBytes = registerHappyVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       extraArgs = emptyExtraArgs
   expectAbort "registration VAA already consumed" res
 
@@ -3860,7 +3827,7 @@ createRogueCoreState partyHint = do
   rogueFeeInstrumentAdmin <- allocateParty (partyHint <> "RogueFeeInstrumentAdmin")
   rogueCoreStateCid <- submit (actAs rogueGuardianGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGuardianGovernance solanaGovernanceChainId defaultGovernanceContract
-                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 devnetGenesisGuardianSet
                  (InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED") rogueFeeCustody)
   pure (rogueGuardianGovernance, rogueCoreStateCid)
 
@@ -3907,7 +3874,6 @@ testVaaPathsRejectRogueCoreState = do
                 coreStateCid = rogueCoreStateCid
                 replayNodeCid = nodeCid
                 vaaBytes = nttTransferVAA
-                pubKeys = [(0, devnetGuardianPubKey)]
                 recipient
                 depositPreapprovalCid = preapprovalCid
                 extraArgs = emptyExtraArgs
@@ -3928,7 +3894,7 @@ testVaaPathsRejectRogueCoreState = do
 
 -- | The 'SetFactoryByVaa' exercise command against a fixed manager.
 rotateByVaaCmd
-  : ContractId NttManager -> NttFactory -> ContractId CoreState -> ContractId ReplayNode -> Bytes
+  : ContractId NttManager -> NttFactory -> ContractId CoreState -> ContractId ReplayNode -> EncodedVaa
   -> Commands (ContractId NttManager)
 rotateByVaaCmd mgrCid newFactory csId nodeCid vaaBytes =
   exerciseCmd mgrCid SetFactoryByVaa with
@@ -3936,7 +3902,6 @@ rotateByVaaCmd mgrCid newFactory csId nodeCid vaaBytes =
     coreStateCid = csId
     replayNodeCid = nodeCid
     vaaBytes
-    pubKeys = [(0, devnetGuardianPubKey)]
     extraArgs = emptyExtraArgs
 
 -- | Happy path: the committed factory is repointed at a real
@@ -4077,12 +4042,12 @@ data RegisterByVaaInput = RegisterByVaaInput with
     coreStateCid : ContractId CoreState
     factoryCid   : ContractId CoinFactory
     nonce        : Int
-    vaaBytes     : Bytes
+    vaaBytes     : Text  -- hex of the EncodedVaa
   deriving (Eq, Show)
 
 data RegisterByVaaResult = RegisterByVaaResult with
     mgrCid         : ContractId NttManager
-    managerAddress : Bytes32
+    managerAddress : Text  -- hex of the NttManagerAddress
     factoryEpoch   : Int
   deriving (Eq, Show)
 
@@ -4105,8 +4070,7 @@ integrationRegisterByVaa input = do
       emitterFeeAllocation = None
       claimFeeAllocation = None
       feeAllocation = None
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       extraArgs = emptyExtraArgs
 
   Some mgr <- queryContractId input.gg mgrCid
@@ -4134,14 +4098,13 @@ integrationRegisterByVaa input = do
       emitterFeeAllocation = None
       claimFeeAllocation = None
       feeAllocation = None
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       extraArgs = emptyExtraArgs
   expectAbort "registration VAA already consumed" res
 
   pure RegisterByVaaResult with
     mgrCid
-    managerAddress = mgr.managerAddress
+    managerAddress = hexTextOf mgr.managerAddress
     factoryEpoch = mgr.factoryEpoch
 
 data SetFactoryByVaaInput = SetFactoryByVaaInput with
@@ -4150,7 +4113,7 @@ data SetFactoryByVaaInput = SetFactoryByVaaInput with
     mgrCid       : ContractId NttManager
     coreStateCid : ContractId CoreState
     factoryCid   : ContractId CoinFactory
-    vaaBytes     : Bytes
+    vaaBytes     : Text  -- hex of the EncodedVaa
   deriving (Eq, Show)
 
 -- | Step 3: relay the Go-signed action-3 VAA, targeting the deployment's
@@ -4160,14 +4123,13 @@ integrationSetFactoryByVaa input = do
   Some mgr <- queryContractId input.gg input.mgrCid
   let newFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory input.factoryCid)
       actors = actAs input.admin <> readAs input.gg
-  (nodeCid, _) <- coveringDisclosure input.gg input.gg mgr.namespace (parseVAA input.vaaBytes).hash
+  (nodeCid, _) <- coveringDisclosure input.gg input.gg mgr.namespace (parseVAA (parseHexTextOrAbort input.vaaBytes)).hash
   mgrCid' <- submit actors do
     exerciseCmd input.mgrCid SetFactoryByVaa with
       newFactory
       coreStateCid = input.coreStateCid
       replayNodeCid = nodeCid
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       extraArgs = emptyExtraArgs
   Some mgr' <- queryContractId input.gg mgrCid'
   mgr'.factory === newFactory
@@ -4176,13 +4138,12 @@ integrationSetFactoryByVaa input = do
   -- Replay: re-resolve the covering node (the old one is now archived, having
   -- been consumed) and relay the same VAA again — rejected on digest
   -- membership alone.
-  (freshNode, _) <- coveringDisclosure input.gg input.gg mgr'.namespace (parseVAA input.vaaBytes).hash
+  (freshNode, _) <- coveringDisclosure input.gg input.gg mgr'.namespace (parseVAA (parseHexTextOrAbort input.vaaBytes)).hash
   res <- trySubmit actors do
     exerciseCmd mgrCid' SetFactoryByVaa with
       newFactory
       coreStateCid = input.coreStateCid
       replayNodeCid = freshNode
-      vaaBytes = input.vaaBytes
-      pubKeys = [(0, devnetGuardianPubKey)]
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
       extraArgs = emptyExtraArgs
   expectAbort "digest already consumed" res
