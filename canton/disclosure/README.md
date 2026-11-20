@@ -87,7 +87,7 @@ service rejects a different value with 400 before it reads the ledger. Give each
 rejects a repeated parameter and a parameter that the flow does not use. The
 query string is 1024 bytes or less.
 
-On the Ledger API, `ntt` 0.6.0 and core 0.12.0 encode each byte value as a
+On the Ledger API, `ntt` 0.6.x and core 0.12.x encode each byte value as a
 variant: `{"tag": "<type>", "value": "<lowercase hex>"}`. The service reads
 the `NttManagerAddress` of `NttManager`, `LockedLedger` and
 `AdminTransferProposal`, and the `DigestNibblePrefix` of `ReplayNode`, from

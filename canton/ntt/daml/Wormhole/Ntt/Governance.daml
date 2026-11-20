@@ -19,9 +19,6 @@
 -- this root.
 module Wormhole.Ntt.Governance where
 
-import DA.Action (foldlA)
-import DA.Foldable (maximum)
-import DA.List (sortOn)
 import DA.Map (Map)
 import DA.Map qualified as Map
 import Splice.Api.Token.AllocationV1 (Allocation)
@@ -227,33 +224,11 @@ template NttGovernance
           evictedGovernanceMaxTimestampSeconds = replayRecord.evictedGovernanceMaxTimestampSeconds
         pure (reg', mgr, emitterCid, ledger, msg)
 
--- | Governance replay state of a re-genesis 'NttGovernance' that replaces
--- @earlierRoots@, in the shape of the core 'tryGovernanceReplayRecordForRegenesis':
--- the highest earlier floor, then each earlier digest above it, inserted in
--- timestamp order through 'recordGovernanceDigest'. Fails on an empty list and
--- on a digest with two timestamps.
-tryNttGovernanceReplayRecordForRegenesis : [NttGovernance] -> Either Text GovernanceReplayRecord
-tryNttGovernanceReplayRecordForRegenesis earlierRoots = do
-  assertMsg "regenesis: no earlier NttGovernance" (not (null earlierRoots))
-  let earlierFloorSeconds = maximum (map (.evictedGovernanceMaxTimestampSeconds) earlierRoots)
-      earlierEntries = concatMap (\root -> Map.toList root.consumedGovernance) earlierRoots
-      mergeEntry merged (digest, timestampSeconds) = case Map.lookup digest merged of
-        Some recordedTimestampSeconds | recordedTimestampSeconds /= timestampSeconds ->
-          Left "regenesis: a digest carries two timestamps"
-        _ -> Right (Map.insert digest timestampSeconds merged)
-  mergedEntries <- foldlA mergeEntry Map.empty earlierEntries
-  let entriesByTimestamp = sortOn (\(digest, timestampSeconds) -> (timestampSeconds, digest)) (Map.toList mergedEntries)
-      recordEntry replayRecord (digest, timestampSeconds) =
-        if checkTimestampIsAboveEvictedGovernanceFloor replayRecord.evictedGovernanceMaxTimestampSeconds timestampSeconds
-          then recordGovernanceDigest replayRecord.evictedGovernanceMaxTimestampSeconds
-            replayRecord.consumedGovernance digest timestampSeconds
-          else replayRecord
-      regenesisRecord = foldl recordEntry
-        (GovernanceReplayRecord with consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = earlierFloorSeconds)
-        entriesByTimestamp
-  assertMsg "regenesis: NTT replay record is not bounded"
-    (checkConsumedGovernanceIsBounded regenesisRecord.evictedGovernanceMaxTimestampSeconds regenesisRecord.consumedGovernance)
-  pure regenesisRecord
+-- | The replay record of @root@, for 'Wormhole.Core.State.tryGovernanceReplayRecordForRegenesisFromRecords'.
+nttGovernanceReplayRecordOf : NttGovernance -> GovernanceReplayRecord
+nttGovernanceReplayRecordOf root = GovernanceReplayRecord with
+  consumedGovernance = root.consumedGovernance
+  evictedGovernanceMaxTimestampSeconds = root.evictedGovernanceMaxTimestampSeconds
 
 -- | Registration body shared by 'RegisterManager' and
 -- 'RegisterManagerByVaa': mints the transceiver 'Emitter', claims the

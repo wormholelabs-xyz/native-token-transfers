@@ -305,8 +305,9 @@ microsecondsSinceUnixEpoch genesisTime =
 
 -- | The identity of the 'Wormhole.Ntt.Governance.NttGovernance' root that a
 -- first genesis creates: @keccak256(tag ‖ lp(utf8(gg)) ‖ uint64(genesis ledger
--- time in microseconds))@. A second first genesis under the same gg runs at
--- another ledger time, so its root has another identity.
+-- time in microseconds))@. Two first geneses under one gg at the same ledger
+-- time, for example in one transaction, get the same identity. One root per gg
+-- is a guardian rule.
 nttGovernanceRootIdentityFor : Party -> Time -> NttGovernanceRootIdentity
 nttGovernanceRootIdentityFor guardianGovernance genesisTime =
   parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes nttGovernanceRootIdentityTag
