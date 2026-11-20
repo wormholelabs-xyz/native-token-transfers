@@ -84,10 +84,9 @@ export function resolveSendRecipient(
   }
 
   const solanaAddress = options.recipient ?? defaults.solanaAddress;
-  if (!solanaAddress)
-    throw new Error(
-      "no Solana recipient: pass --recipient <address> or set SOLANA_PRIVATE_KEY/SOLANA_PAYER_PATH"
-    );
+  if (!solanaAddress) {
+    throw new Error("no Solana recipient: pass --recipient <address>");
+  }
   return {
     recipient: parseSolanaAddressBytes32(solanaAddress),
     description: `Solana address ${solanaAddress}`,

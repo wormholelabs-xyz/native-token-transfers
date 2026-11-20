@@ -20,6 +20,8 @@ export interface ConfirmationIo {
   assumeYes: boolean;
   stdinIsTty: boolean;
   prompt: (question: string) => Promise<string>;
+  /** --yes-recipient: with --yes, must equal the Canton recipient party id. */
+  confirmedCantonRecipient?: string;
 }
 
 export function confirmationLines(confirmation: SubmitConfirmation): string[] {
@@ -36,7 +38,17 @@ export async function requireTypedConfirmation(
   confirmation: SubmitConfirmation,
   io: ConfirmationIo
 ): Promise<void> {
-  if (io.assumeYes) return;
+  if (io.assumeYes) {
+    if (
+      confirmation.cantonRecipientPartyId &&
+      io.confirmedCantonRecipient !== confirmation.cantonRecipientPartyId
+    ) {
+      throw new Error(
+        "--yes with a Canton recipient needs --yes-recipient <the same complete party id>; nothing has been submitted"
+      );
+    }
+    return;
+  }
   if (!io.stdinIsTty)
     throw new Error(
       "stdin is not a terminal: pass --yes to submit without the typed confirmation"

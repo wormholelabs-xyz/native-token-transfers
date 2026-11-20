@@ -102,9 +102,9 @@ function buildCantonClients(
   };
 }
 
-function readRecipientDefaults(): RecipientDefaults {
+function readRecipientDefaults(destinationChain: ChainName): RecipientDefaults {
   const defaults: RecipientDefaults = {};
-  if (process.env.ETH_PRIVATE_KEY)
+  if (destinationChain === "Ethereum" && process.env.ETH_PRIVATE_KEY)
     defaults.ethereumAddress = deriveEthereumAddress();
   return defaults;
 }
@@ -124,7 +124,8 @@ async function promptOnTerminal(question: string): Promise<string> {
 async function confirmSubmit(
   confirmation: SubmitConfirmation,
   dryRun: boolean,
-  assumeYes: boolean
+  assumeYes: boolean,
+  confirmedCantonRecipient: string | undefined
 ): Promise<void> {
   for (const line of confirmationLines(confirmation)) console.log(`  ${line}`);
   if (dryRun) {
@@ -133,6 +134,7 @@ async function confirmSubmit(
   }
   await requireTypedConfirmation(confirmation, {
     assumeYes,
+    confirmedCantonRecipient,
     stdinIsTty: Boolean(process.stdin.isTTY),
     prompt: promptOnTerminal,
   });
@@ -151,6 +153,7 @@ interface SendArguments {
   transferNonce?: string;
   dryRun: boolean;
   yes: boolean;
+  yesRecipient?: string;
 }
 
 async function runSend(sendArguments: SendArguments): Promise<void> {
@@ -174,7 +177,7 @@ async function runSend(sendArguments: SendArguments): Promise<void> {
       acceptRawRecipient: sendArguments.acceptRawRecipient,
       acceptUnchecksummedAddress: sendArguments.acceptUnchecksummedAddress,
     },
-    readRecipientDefaults()
+    readRecipientDefaults(destinationChain)
   );
   if (resolved.isRaw)
     console.log(
@@ -194,7 +197,8 @@ async function runSend(sendArguments: SendArguments): Promise<void> {
       cantonRecipientPartyId: resolved.cantonPartyId,
     },
     sendArguments.dryRun,
-    sendArguments.yes
+    sendArguments.yes,
+    sendArguments.yesRecipient
   );
 
   const options = { dryRun: sendArguments.dryRun };
@@ -262,6 +266,7 @@ interface RedeemArguments {
   recipient?: string;
   dryRun: boolean;
   yes: boolean;
+  yesRecipient?: string;
 }
 
 async function runRedeem(redeemArguments: RedeemArguments): Promise<void> {
@@ -311,7 +316,8 @@ async function runRedeem(redeemArguments: RedeemArguments): Promise<void> {
       cantonRecipientPartyId,
     },
     redeemArguments.dryRun,
-    redeemArguments.yes
+    redeemArguments.yes,
+    redeemArguments.yesRecipient
   );
 
   if (destinationChain === "Canton") {
@@ -376,6 +382,11 @@ const DRY_RUN_OPTION = {
   describe: "read and simulate only; submit nothing",
   type: "boolean",
   default: false,
+} as const;
+const YES_RECIPIENT_OPTION = {
+  describe:
+    "with --yes and a Canton recipient: the same complete party id again",
+  type: "string",
 } as const;
 const YES_OPTION = {
   describe: "skip the typed confirmation (scripts)",
@@ -444,6 +455,7 @@ export function registerPrivateCommands(yargs: Argv): Argv {
           })
           .option("dry-run", DRY_RUN_OPTION)
           .option("yes", YES_OPTION)
+          .option("yes-recipient", YES_RECIPIENT_OPTION)
           .option("deployments", DEPLOYMENTS_OPTION),
       (argv) =>
         runSend({
@@ -459,6 +471,7 @@ export function registerPrivateCommands(yargs: Argv): Argv {
           transferNonce: argv["transfer-nonce"],
           dryRun: argv["dry-run"],
           yes: argv.yes,
+          yesRecipient: argv["yes-recipient"],
         })
     )
     .command(
@@ -482,6 +495,7 @@ export function registerPrivateCommands(yargs: Argv): Argv {
           })
           .option("dry-run", DRY_RUN_OPTION)
           .option("yes", YES_OPTION)
+          .option("yes-recipient", YES_RECIPIENT_OPTION)
           .option("deployments", DEPLOYMENTS_OPTION),
       (argv) =>
         runRedeem({
@@ -491,6 +505,7 @@ export function registerPrivateCommands(yargs: Argv): Argv {
           recipient: argv.recipient,
           dryRun: argv["dry-run"],
           yes: argv.yes,
+          yesRecipient: argv["yes-recipient"],
         })
     )
     .demandCommand();

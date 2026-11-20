@@ -1,5 +1,6 @@
 // Private-deployments registry, schema version 2: types, path rules, loader.
 import { createHash } from "node:crypto";
+import { toChainId } from "@wormhole-foundation/sdk-base";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -376,6 +377,14 @@ export function validateRegistry(raw: unknown): PrivateRegistry {
       `chainIds.${chain}`,
       parseWormholeChainId
     );
+  }
+  for (const chain of CHAIN_NAMES) {
+    if (chainIds[chain] !== toChainId(chain)) {
+      failRegistryField(
+        `chainIds.${chain}`,
+        `${chainIds[chain]} differs from the SDK chain id ${toChainId(chain)}`
+      );
+    }
   }
   if (new Set(Object.values(chainIds)).size !== CHAIN_NAMES.length)
     failRegistryField("chainIds", "chain ids are not unique");
