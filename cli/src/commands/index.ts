@@ -5,6 +5,7 @@ export { createHypeCommand } from "./hype";
 export { createInitCommand } from "./init";
 export { createManualCommand } from "./manual";
 export { createNewCommand } from "./new";
+export { createPrivateCommand } from "./private";
 export { createPullCommand } from "./pull";
 export { createPushCommand } from "./push";
 export { createSetMintAuthorityCommand } from "./set-mint-authority";

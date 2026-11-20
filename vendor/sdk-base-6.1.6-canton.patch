@@ -1,0 +1,66 @@
+diff --git a/core/base/src/constants/chains.ts b/core/base/src/constants/chains.ts
+index 96ddada9..e53f0ed7 100644
+--- a/core/base/src/constants/chains.ts
++++ b/core/base/src/constants/chains.ts
+@@ -56,6 +56,7 @@ const chainIdAndChainEntries = [
+   [   72, "Robinhood"      ],
+   [   73, "Hydration"      ],
+   [   74, "Elysium"        ],
++  [   75, "Canton"         ],
+   [ 3104, "Wormchain"      ],
+   [ 4000, "Cosmoshub"      ],
+   [ 4001, "Evmos"          ],
+diff --git a/core/base/src/constants/decimals.ts b/core/base/src/constants/decimals.ts
+index 4b7401ec..9565e62b 100644
+--- a/core/base/src/constants/decimals.ts
++++ b/core/base/src/constants/decimals.ts
+@@ -15,6 +15,7 @@ const nativeDecimalEntries = [
+   ["Near",        12],
+   ["Stacks",       6],
+   ["Xrpl",         6],
++  ["Canton",      10],
+ ] as const satisfies MapLevel<Platform, number>;
+ 
+ /** Number of decimals for the native token on a given platform */
+diff --git a/core/base/src/constants/finality.ts b/core/base/src/constants/finality.ts
+index c2869a35..3e4f70a4 100644
+--- a/core/base/src/constants/finality.ts
++++ b/core/base/src/constants/finality.ts
+@@ -81,6 +81,7 @@ const finalityThresholds = [
+   ["Robinhood",  4096], // ~100ms blocks; matches other sub-second L2s (Converge, MegaETH)
+   ["Hydration",  5], // Inferred from Polkadot
+   ["Elysium",    4096], // Arbitrum Orbit (AnyTrust) settling to HyperEVM; matches other Orbit chains (Robinhood, Converge, Plume)
++  ["Canton",     0],
+   // Testnets
+   ["Sepolia", 72],
+   ["ArbitrumSepolia", 4096],
+@@ -162,6 +163,7 @@ const blockTimeMilliseconds = [
+   ["Robinhood",           100],
+   ["Hydration",        30_000],
+   ["Elysium",             200], // docs: 100-200ms blocks
++  ["Canton",            1_000],
+ ] as const satisfies MapLevel<Chain, number>;
+ 
+ /** The amount of time between block production, in milliseconds  */
+diff --git a/core/base/src/constants/platforms.ts b/core/base/src/constants/platforms.ts
+index ba79b032..d73eb36c 100644
+--- a/core/base/src/constants/platforms.ts
++++ b/core/base/src/constants/platforms.ts
+@@ -89,6 +89,9 @@ const platformAndChainsEntries = [[
+   ]], [
+     "Xrpl", [
+       "Xrpl"
++  ]], [
++    "Canton", [
++      "Canton"
+   ]]
+ ] as const satisfies MapLevel<string, RoArray<Chain>>;
+ 
+@@ -116,6 +119,7 @@ const platformAddressFormatEntries = [
+   ["Near",      "sha256"],
+   ["Stacks",    "keccak256"],
+   ["Xrpl",      "base58"],
++  ["Canton",    "hex"],
+ ] as const;
+ 
+ export const platformToAddressFormat = constMap(platformAddressFormatEntries);

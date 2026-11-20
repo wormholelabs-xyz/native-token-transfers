@@ -67,6 +67,7 @@ COPY tsconfig.esm.json tsconfig.esm.json
 COPY package.json package.json
 COPY bun.lock bun.lock
 COPY bunfig.toml bunfig.toml
+COPY vendor vendor
 COPY sdk sdk
 COPY cli/package.json cli/package.json
 COPY sui/ts/package.json sui/ts/package.json

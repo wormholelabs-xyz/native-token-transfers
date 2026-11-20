@@ -713,7 +713,8 @@ export namespace MultiTokenNttRoute {
     const destinationTokenId = await MultiTokenNttRoute.getDestinationTokenId(
       sourceTokenId,
       fromChain,
-      wh.getChain(payload.toChain),
+      // The published sdk-connect ChainContext declaration expands Chain without the vendored Canton chain.
+      wh.getChain(payload.toChain) as ChainContext<N>,
       contracts,
       originalTokenId
     );

@@ -26,6 +26,7 @@
     "@solana/spl-token-metadata": "^0.1.6",
     "@solana/web3.js": "^1.95.8",
     "@types/jest": "^29.5.12",
+    "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz",
     "@types/node": "^20.12.2",
     "@wormhole-foundation/sdk": "6.1.6",
     "@wormhole-foundation/wormchain-sdk": "^0.0.1",
@@ -48,7 +49,8 @@
   "overrides": {
     "@types/jest": "^29.5.12",
     "@wormhole-foundation/sdk-sui": "6.1.6",
-    "@wormhole-foundation/sdk-sui-core": "6.1.6"
+    "@wormhole-foundation/sdk-sui-core": "6.1.6",
+    "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz"
   },
   "dependencies": {
     "@wormhole-foundation/sdk-sui": "6.1.6",
