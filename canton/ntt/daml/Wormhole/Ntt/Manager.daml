@@ -6,7 +6,7 @@
 -- 'TIV1.TransferFactory', 'BurnMintFactory') directly, so any conforming token
 -- works without a per-token wrapper contract.
 --
--- Four parties sign every manager, and each signature has one job:
+-- Three parties sign every manager, and each signature has one job:
 --
 --   * @admin@ is the operational role: it maintains the peer table and
 --     rotates the committed factory. It is transferable ('TransferAdmin');
@@ -20,7 +20,6 @@
 --     each gg-adminned deployment. gg never owns a reserve: the reserve owner
 --     is the CIP-56 transfer sender, and the sender's authority runs in
 --     registry code (REDTEAM.md F1).
---   * @operator@ ties the deployment to its core bridge instance.
 --
 -- @reserveCustodian@ owns the lock/unlock reserve: @admin@ while @admin@ is
 -- not gg, @nttCustody@ while it is ('reserveCustodianFor').
@@ -172,16 +171,19 @@ requireCanonicalFactory guardianGovernance factory = do
     Some (_, cf) -> assertMsg "ntt governance: factory's admin does not match this deployment's guardianGovernance"
       (cf.admin == guardianGovernance)
 
--- | Fetch and pin a caller-supplied 'CoreState' to the deployment's committed
--- trust anchors. Both pinned members are CoreState signatories, so each
--- equality also proves the party authorized the contract's creation.
-requireCommittedCoreState : Party -> Party -> ContractId CoreState -> Update CoreState
-requireCommittedCoreState operator guardianGovernance coreStateCid = do
-  cs <- fetch coreStateCid
+-- | Pin a caller-supplied 'CoreState' to the deployment's committed trust
+-- anchor, then fetch it. guardianGovernance is a CoreState signatory, so the
+-- equality also proves gg authorized the contract's creation. The pin runs
+-- before the fetch: a 'CoreState' of another gg fails the pin, not the fetch
+-- authorization.
+requireCommittedCoreState : Party -> ContractId CoreState -> Update CoreState
+requireCommittedCoreState guardianGovernance coreStateCid = do
+  committedGuardianGovernance <- exercise coreStateCid GetGuardianGovernance with reader = guardianGovernance
   assertMsg "ntt: core state is not the committed guardian trust anchor"
+    (committedGuardianGovernance == guardianGovernance)
+  cs <- fetch coreStateCid
+  assertMsg "ntt: fetched core state is not the committed guardian trust anchor"
     (cs.guardianGovernance == guardianGovernance)
-  assertMsg "ntt: core state operator mismatch"
-    (cs.operator == operator)
   pure cs
 
 -- | A peer NTT deployment on another chain: its manager address (the
@@ -226,13 +228,13 @@ nttManagerAddressTag : Text
 nttManagerAddressTag = "wormhole:ntt-manager:v1"
 
 -- | The 32-byte NTT manager address of the 'NttManager' allocated at
--- @managerId@ for @(operator, admin)@, where @admin@ is the REGISTERING
+-- @managerId@ for @(guardianGovernance, admin)@, where @admin@ is the REGISTERING
 -- admin. Bound to the registering admin at creation, so it survives
 -- 'TransferAdmin' — the address is computed once and stored, not recomputed
 -- against the current (transferable) admin.
 nttManagerAddressFor : Party -> Party -> Int -> Bytes32
-nttManagerAddressFor operator admin managerId =
-  derivedAddress (DomainTag nttManagerAddressTag) operator admin (RegistryId managerId)
+nttManagerAddressFor guardianGovernance admin managerId =
+  derivedAddress (DomainTag nttManagerAddressTag) guardianGovernance admin (RegistryId managerId)
 
 -- | Domain-separation tag for NTT recipient-address bindings.
 recipientAddressTag : Text
@@ -290,23 +292,22 @@ nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
 -- | Text form of 'nttRegistrationBindingFor', split out so tests can pin
 -- the encoding against fixed strings.
 nttRegistrationBindingFromText : Text -> Text -> Int -> Bytes32
-nttRegistrationBindingFromText operatorText adminText nonce =
+nttRegistrationBindingFromText guardianGovernanceText adminText nonce =
   normalizeHex (keccak256 (toHex nttRegistrationBindingTag
-    <> unLenPrefixed (lenPrefixed (toHex operatorText))
+    <> unLenPrefixed (lenPrefixed (toHex guardianGovernanceText))
     <> unLenPrefixed (lenPrefixed (toHex adminText))
     <> intToBytesN nonce 8))
 
 -- | The 32-byte binding a guardian-signed
 -- 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA must carry in its
--- @registrationBinding@ field: hash-committed to (operator, admin, nonce),
+-- @registrationBinding@ field: hash-committed to (guardianGovernance, admin, nonce),
 -- with no @nextId@ in the preimage — a signed-off-chain VAA cannot predict
 -- which @NttGovernance.nextId@ will still be current when relayed, so binding
 -- to it would let a stranger grief a registration by racing a junk one first.
--- @operator@ is included so two instances sharing a @guardianGovernance@
--- cannot both register against the same (admin, nonce) pair.
+-- @guardianGovernance@ separates deployments: one gg is one bridge instance.
 nttRegistrationBindingFor : Party -> Party -> Int -> Bytes32
-nttRegistrationBindingFor operator admin nonce =
-  nttRegistrationBindingFromText (partyToText operator) (partyToText admin) nonce
+nttRegistrationBindingFor guardianGovernance admin nonce =
+  nttRegistrationBindingFromText (partyToText guardianGovernance) (partyToText admin) nonce
 
 -- | Domain-separation tag for the derived replay namespace.
 nttNamespaceTag : Text
@@ -374,15 +375,14 @@ partiesShareNamespace firstParty secondParty =
 -- create a ledger (it needs the root's signatures), and it creates exactly one
 -- per lock/unlock deployment, so matching the identity fields suffices. The
 -- ledger is named by @managerAddress@, which is unique per deployment, so
--- (operator, guardianGovernance, managerAddress) alone identifies it. The
+-- (guardianGovernance, managerAddress) alone identifies it. The
 -- observer-sync check is a bug-catcher, not identity: 'TransferAdmin' is the
 -- only admin-changing path and updates both contracts atomically.
 resolveLedger : NttManager -> ContractId LockedLedger -> Update LockedLedger
 resolveLedger mgr ledgerCid = do
   ledger <- fetch ledgerCid
   assertMsg "ntt: locked ledger does not belong to this deployment"
-    (ledger.operator == mgr.operator
-      && ledger.guardianGovernance == mgr.guardianGovernance
+    (ledger.guardianGovernance == mgr.guardianGovernance
       && ledger.managerAddress == mgr.managerAddress)
   assertMsg "ntt: ledger admin observer out of sync" (ledger.admin == mgr.admin)
   pure ledger
@@ -410,9 +410,8 @@ custodyHintFrom = \case
 -- configuration. In order:
 --
 --   1. Pin the disclosed 'CoreState' to the deployment's committed guardian
---      trust anchor (its @guardianGovernance@). Pinning the operator instead
---      would not help: a compromised operator can co-sign a forged 'CoreState'
---      under a throwaway gg party, but cannot forge the real gg's signature.
+--      trust anchor (its @guardianGovernance@), the CoreState signatory whose
+--      signature a forged 'CoreState' under a throwaway gg lacks.
 --   2. Verify the VAA's guardian signatures and consume its digest in gg's
 --      replay trie, sub-scoped to the deployment's derived @namespace@ (so
 --      replay protection is unaffected by 'TransferAdmin'), atomically.
@@ -460,7 +459,6 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes pubKeys r
 
 template NttManager
   with
-    operator             : Party
     namespace            : Text            -- derived replay-trie sub-scope under gg; nttNamespaceFor at registration
     admin                : Party           -- operational role; transferable
     guardianGovernance   : Party           -- gg: mint authority, transceiver owner, replay consumer, trust anchor
@@ -468,7 +466,7 @@ template NttManager
     reserveCustodian     : Party           -- owns the lock/unlock reserve; reserveCustodianFor of (guardianGovernance, nttCustody, admin)
     chainId              : Int             -- this deployment's own Wormhole chain id (uint16)
     managerId            : Int             -- allocated by NttGovernance; in the address preimage
-    managerAddress       : Bytes32         -- nttManagerAddressFor operator <registering admin> managerId
+    managerAddress       : Bytes32         -- nttManagerAddressFor guardianGovernance <registering admin> managerId
     transceiverEmitterId : Int             -- the deployment's transceiver Emitter (owner = guardianGovernance)
     instrumentId         : InstrumentId    -- the bridged CIP-56 instrument
     tokenConfig          : NttTokenConfig
@@ -480,18 +478,17 @@ template NttManager
     factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa': 'SetFactory' bumps this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
     peerEpoch            : Int             -- freshness pin for 'SetPeerByVaa': every 'SetPeer' bumps this deployment-wide counter, so a withheld/superseded peer VAA can never reinstate a since-replaced peer
   where
-    -- See the module header for what each signature contributes. All four
+    -- See the module header for what each signature contributes. All three
     -- signatures are inherited from the NttGovernance root at registration
     -- (admin from the registering caller); no signatory acts per transfer.
     -- @namespace@ is derived data, not a party. @reserveCustodian@ is always
     -- @admin@ or @nttCustody@, so its signature is already in this set.
-    signatory operator, admin, guardianGovernance, nttCustody
+    signatory admin, guardianGovernance, nttCustody
     ensure
       reserveCustodian == reserveCustodianFor ReserveCustodyParties with guardianGovernance, nttCustody, admin
         && reserveCustodian /= guardianGovernance
         && admin /= nttCustody
         && nttCustody /= guardianGovernance
-        && nttCustody /= operator
 
     -- | Register or replace a peer, broadcasting the registration through the transceiver. Consuming.
     -- @payer@ funds the broadcast: the admin path self-pays (@payer = admin@); 'SetPeerByVaa'
@@ -533,7 +530,7 @@ template NttManager
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
           (transceiver.owner == guardianGovernance
-            && transceiver.operator == operator
+            && transceiver.guardianGovernance == guardianGovernance
             && transceiver.emitterId == transceiverEmitterId)
         -- Publishes the registration for the accountant; write-once there, replacements are local-only.
         (_, msg) <- exercise transceiverEmitterCid PublishMessage with
@@ -705,7 +702,7 @@ template NttManager
         assertMsg "ntt: accept-admin-by-vaa proposal is not by the deployment's current admin"
           (proposal.admin == admin)
 
-        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
+        cs <- requireCommittedCoreState guardianGovernance coreStateCid
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
@@ -752,7 +749,7 @@ template NttManager
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)
       controller executor
       do
-        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
+        cs <- requireCommittedCoreState guardianGovernance coreStateCid
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
@@ -811,7 +808,7 @@ template NttManager
         assertMsg "ntt: SetFactoryByVaa is only for gg-minted burn/mint deployments"
           (tokenConfig == BurnMint)
 
-        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
+        cs <- requireCommittedCoreState guardianGovernance coreStateCid
 
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA = vaaBytes
@@ -894,7 +891,7 @@ template NttManager
         transceiver <- fetch transceiverEmitterCid
         assertMsg "ntt: transceiver emitter is not this deployment's"
           (transceiver.owner == guardianGovernance
-            && transceiver.operator == operator
+            && transceiver.guardianGovernance == guardianGovernance
             && transceiver.emitterId == transceiverEmitterId)
         case tokenConfig of
           -- Lock: move the user's holdings into the custodian's reserve, merge

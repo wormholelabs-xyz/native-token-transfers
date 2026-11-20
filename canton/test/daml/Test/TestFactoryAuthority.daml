@@ -252,11 +252,11 @@ testEvilBurnMintFactoryForgesGgContract = do
 registerBurnMint
   : Party -> Party -> InstrumentId -> ContractId BurnMintFactory -> ContractId CoreState
   -> Script ([Disclosure], Commands (ContractId M.NttManager, ContractId Emitter))
-registerBurnMint operator admin inst factoryCid csId = do
-  [(govCid, _)] <- query @NttGovernance operator
-  govDisc <- fromSome <$> queryDisclosure operator govCid
-  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries operator
-  csDisc <- fromSome <$> queryDisclosure operator csId
+registerBurnMint gg admin inst factoryCid csId = do
+  [(govCid, _)] <- query @NttGovernance gg
+  govDisc <- fromSome <$> queryDisclosure gg govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
+  csDisc <- fromSome <$> queryDisclosure gg csId
   let register = exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
@@ -279,12 +279,12 @@ registerBurnMint operator admin inst factoryCid csId = do
 -- and the attacker cannot supply gg's authority.
 testAttackerCannotRegisterGgMintedManager : Script ()
 testAttackerCannotRegisterGgMintedManager = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   attacker <- allocateParty "AttackerGgMint"
   evilFactory <- submit attacker do
     createCmd EvilBurnMintFactory with thief = attacker, viewAdmin = gg, attemptForge = True
   let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
-  (discs, register) <- registerBurnMint operator attacker inst
+  (discs, register) <- registerBurnMint gg attacker inst
     (toInterfaceContractId @BurnMintFactory evilFactory) csId
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
@@ -292,11 +292,11 @@ testAttackerCannotRegisterGgMintedManager = do
 -- the co-signature gate protects registration, not the factory's trustworthiness.
 testAttackerCannotRegisterGgMintedManagerWithRealFactory : Script ()
 testAttackerCannotRegisterGgMintedManagerWithRealFactory = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   factoryCid <- nttCoinFactorySetup gg
   attacker <- allocateParty "AttackerGgMintRealFactory"
   let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor attacker 0
-  (discs, register) <- registerBurnMint operator attacker inst
+  (discs, register) <- registerBurnMint gg attacker inst
     (toInterfaceContractId @BurnMintFactory factoryCid) csId
   submitMustFail (actAs attacker <> mconcat (map disclose discs)) register
 
@@ -358,13 +358,13 @@ nonCanonicalFactoryCases gg admin outsider = do
 -- even with gg co-signing.
 testRegisterBurnMintRejectsNonCanonicalFactory : Script ()
 testRegisterBurnMintRejectsNonCanonicalFactory = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   admin <- allocateParty "NonCanonicalRegisterAdmin"
   outsider <- allocateParty "NonCanonicalRegisterOutsider"
   cases <- nonCanonicalFactoryCases gg admin outsider
   let inst = InstrumentId with admin = gg, id = M.nttInstrumentIdFor admin 0
   forA_ cases \factoryCase -> do
-    (discs, register) <- registerBurnMint operator admin inst factoryCase.factoryCid csId
+    (discs, register) <- registerBurnMint gg admin inst factoryCase.factoryCid csId
     res <- trySubmit (actAs admin <> actAs gg <> mconcat (map disclose (factoryCase.factoryDisc :: discs))) register
     expectSubmissionRejected factoryCase.expectedRejection res
 
@@ -372,10 +372,10 @@ testRegisterBurnMintRejectsNonCanonicalFactory = do
 -- factory, even with gg co-signing.
 testSetFactoryBurnMintRejectsNonCanonicalFactory : Script ()
 testSetFactoryBurnMintRejectsNonCanonicalFactory = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   admin <- allocateParty "NonCanonicalRotateAdmin"
   outsider <- allocateParty "NonCanonicalRotateOutsider"
-  deployment <- deploy operator gg admin M.BurnMint csId
+  deployment <- deploy gg admin M.BurnMint csId
   cases <- nonCanonicalFactoryCases gg admin outsider
   forA_ cases \factoryCase -> do
     res <- trySubmit (actAs admin <> actAs gg <> disclose factoryCase.factoryDisc) do
@@ -387,11 +387,11 @@ testSetFactoryBurnMintRejectsNonCanonicalFactory = do
 -- party is rejected even when that party, the admin, and gg all co-sign.
 testRegisterBurnMintRejectsInstrumentNotAdministeredByGg : Script ()
 testRegisterBurnMintRejectsInstrumentNotAdministeredByGg = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   admin <- allocateParty "ForeignInstrumentAdmin"
   foreignMinter <- allocateParty "ForeignInstrumentMinter"
   factoryCid <- nttCoinFactorySetup gg
   let inst = InstrumentId with admin = foreignMinter, id = M.nttInstrumentIdFor admin 0
-  (discs, register) <- registerBurnMint operator admin inst (toInterfaceContractId @BurnMintFactory factoryCid) csId
+  (discs, register) <- registerBurnMint gg admin inst (toInterfaceContractId @BurnMintFactory factoryCid) csId
   res <- trySubmit (actAs admin <> actAs gg <> actAs foreignMinter <> mconcat (map disclose discs)) register
   expectAbort "burn/mint instrument is not administered by guardianGovernance" res

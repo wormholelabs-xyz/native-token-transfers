@@ -13,11 +13,10 @@
 # an interface implementer.
 sdk-version: 3.5.1
 name: ntt
-version: 0.4.2
+version: 0.5.0
 source: daml
-# 0.4.x is not upgrade-compatible with 0.3.x (README "Versions and
-# upgrades"). Set `upgrades:` to the vendored 0.4.2 release DAR before the
-# next release.
+# 0.5.x is not upgrade-compatible with 0.4.x: template fields and signatories
+# changed (README "Versions and upgrades").
 dependencies:
   - daml-prim
   - daml-stdlib
@@ -25,7 +24,7 @@ build-options:
   # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
   - --target=2.3
 data-dependencies:
-  - ../dars/wormhole-core-0.8.3.dar
+  - ../dars/wormhole-core-0.9.0.dar
   - ../dars/token-cip0056-0.2.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar

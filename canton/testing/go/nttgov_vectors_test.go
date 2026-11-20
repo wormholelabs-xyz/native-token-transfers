@@ -179,7 +179,7 @@ func TestNttRegistrationBindingFromTextPinned(t *testing.T) {
 	a1 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 1)
 	b0 := nttRegistrationBindingFromText("vector-guardian-governance::1220aaaaaaaa", "vector-admin::1220cafebabe", 0)
 	c0 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220babababa", 0)
-	require.Equal(t, "ade4a39770a697a4d00f9b97591986dedb27e8c1f51b12f1cc51b97a07f1e159", hex.EncodeToString(a0[:]))
+	require.Equal(t, "6624cb448d197e0e75fe5cf0b3e92186af24545a293147f3c54de201c0b0dbbe", hex.EncodeToString(a0[:]))
 	require.NotEqual(t, a0, a1)
 	require.NotEqual(t, a0, b0)
 	require.NotEqual(t, a0, c0)

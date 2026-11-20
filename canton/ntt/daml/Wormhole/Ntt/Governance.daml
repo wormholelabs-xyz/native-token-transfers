@@ -1,9 +1,9 @@
 -- | The NTT bootstrap root and manager registry.
 --
--- 'NttGovernance' is created once per operator by a guardian quorum ceremony —
--- the same k-of-n external-signing flow that creates the genesis @CoreState@.
--- That ceremony is the only time @guardianGovernance@ (gg) and @nttCustody@
--- actively sign for NTT. Afterwards, 'RegisterManager' lends the root's
+-- 'NttGovernance' is created once per @guardianGovernance@ (gg) by the
+-- guardian quorum, in the genesis transaction that also creates the core
+-- @CoreState@. That transaction is the only time gg and @nttCustody@ actively
+-- sign for NTT. Afterwards, 'RegisterManager' lends the root's
 -- inherited signatures to create a fully co-signed 'NttManager' per
 -- deployment, so deployment stays permissionless and crankless: any admin
 -- with a disclosure of this root can register (for burn/mint, co-signed by
@@ -40,7 +40,6 @@ import Wormhole.Ntt.Payload
 
 template NttGovernance
   with
-    operator           : Party
     guardianGovernance : Party
     nttCustody         : Party  -- owns quorum-held lock/unlock reserves; see 'Wormhole.Ntt.Manager.reserveCustodianFor'
     nextId             : Int
@@ -48,8 +47,8 @@ template NttGovernance
                                       -- (by VAA digest); mirrors CoreState.consumedGovernance,
                                       -- untouched by plain RegisterManager.
   where
-    signatory guardianGovernance, operator, nttCustody
-    ensure nttCustody /= guardianGovernance && nttCustody /= operator
+    signatory guardianGovernance, nttCustody
+    ensure nttCustody /= guardianGovernance
 
     -- | Stand up a deployment, atomically: allocate the next manager id, mint
     -- the deployment's gg-owned transceiver 'Emitter' and claim its gg-scoped
@@ -118,7 +117,7 @@ template NttGovernance
       controller admin :: (if tokenConfig == BurnMint then [guardianGovernance] else [])
       do
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
-          operator guardianGovernance nttCustody nextId admin chainId
+          guardianGovernance nttCustody nextId admin chainId
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce tokenConfig tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
@@ -131,9 +130,9 @@ template NttGovernance
     -- live gg signature is needed. @chainId@, @tokenDecimals@, @tokenConfig@
     -- and @instrumentId@ are derived from the VAA, not caller-supplied.
     --
-    -- Guardians should sign at most one 'NttGovernance' root per operator;
-    -- a duplicate root under a different gg key would let a second party
-    -- mint gg-administered instruments.
+    -- Guardians should sign at most one 'NttGovernance' root per gg; the
+    -- registration binding commits to gg, so a second root under the same gg
+    -- accepts the same registration VAA.
     --
     -- Guardians should sign this VAA in the same ceremony as a later
     -- 'Wormhole.Ntt.Manager.AcceptAdminTransferByVaa' handoff for the same
@@ -159,7 +158,7 @@ template NttGovernance
       controller admin
       do
         -- 1. Pin CoreState before trusting any of its fields.
-        cs <- requireCommittedCoreState operator guardianGovernance coreStateCid
+        cs <- requireCommittedCoreState guardianGovernance coreStateCid
 
         -- 2. Read-only VAA signature verification; nothing consumed yet.
         vaa <- exercise coreStateCid ParseAndVerifyVAA with
@@ -194,7 +193,7 @@ template NttGovernance
         -- 7. Binding: no static VAA can pass this, since party fingerprints
         -- are nondeterministic and only known once parties are allocated.
         assertMsg "ntt governance: registration binding does not match"
-          (normalizeHex registrationBinding == nttRegistrationBindingFor operator admin instrumentNonce)
+          (normalizeHex registrationBinding == nttRegistrationBindingFor guardianGovernance admin instrumentNonce)
 
         -- 8. Factory template-pin, ahead of the shared body's identical check.
         requireCanonicalFactory guardianGovernance factory
@@ -205,7 +204,7 @@ template NttGovernance
 
         -- 9. Run the shared registration body; recreate the root once.
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
-          operator guardianGovernance nttCustody nextId admin chainId
+          guardianGovernance nttCustody nextId admin chainId
           emitterRegistryCid replayRootRegistryCid
           instrumentId instrumentNonce BurnMint tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
@@ -222,8 +221,7 @@ template NttGovernance
 -- consuming @self@, without nest-exercising 'RegisterManager'. Callers create
 -- the successor 'NttGovernance' root themselves.
 registerManagerBody
-  : Party                          -- operator
-  -> Party                          -- guardianGovernance
+  : Party                          -- guardianGovernance
   -> Party                          -- nttCustody
   -> Int                            -- nextId (this deployment's managerId)
   -> Party                          -- admin (the registering admin)
@@ -242,7 +240,7 @@ registerManagerBody
   -> Optional (ContractId Allocation, ExtraArgs)  -- feeAllocation (TransceiverInit message fee)
   -> Update (ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
 registerManagerBody
-  operator guardianGovernance nttCustody nextId admin chainId
+  guardianGovernance nttCustody nextId admin chainId
   emitterRegistryCid replayRootRegistryCid
   instrumentId instrumentNonce tokenConfig tokenDecimals factory
   coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation = do
@@ -275,12 +273,14 @@ registerManagerBody
       payer = admin
       coreStateCid = Some coreStateCid
       feeAllocation = emitterFeeAllocation
-      expectedGuardianGovernance = Some guardianGovernance
+      expectedGuardianGovernance = guardianGovernance
     emitter <- fetch emitterCid
     assertMsg "ntt: emitter registry is not this bridge instance's"
-      (emitter.operator == operator && emitter.guardianGovernance == guardianGovernance)
+      (emitter.guardianGovernance == guardianGovernance)
+    assertMsg "ntt: transceiver emitter is not owned by guardianGovernance"
+      (emitter.owner == guardianGovernance)
 
-    let managerAddress = nttManagerAddressFor operator admin nextId
+    let managerAddress = nttManagerAddressFor guardianGovernance admin nextId
         namespace = nttNamespaceFor instrumentId admin nextId
 
     -- Claim the deployment's replay-trie root, sub-scoped under gg by the
@@ -292,18 +292,20 @@ registerManagerBody
       payer = admin
       coreStateCid = Some coreStateCid
       feeAllocation = claimFeeAllocation
+      expectedGuardianGovernance = guardianGovernance
     root <- fetch rootCid
-    -- operator is a ReplayNode signatory, so this equality also proves the
-    -- party co-signed the claimed root.
+    -- guardianGovernance is a ReplayNode signatory, so this equality also
+    -- proves gg co-signed the claimed root.
     assertMsg "ntt: replay root registry is not this bridge instance's"
-      (root.operator == operator)
+      (root.guardianGovernance == guardianGovernance)
+    assertMsg "ntt: replay root consumer is not guardianGovernance"
+      (root.consumer == guardianGovernance)
 
     let reserveCustodian = reserveCustodianFor ReserveCustodyParties with guardianGovernance, nttCustody, admin
     assertMsg "ntt: the custody party cannot hold the admin role" (admin /= nttCustody)
     assertMsg "ntt: guardianGovernance cannot own a lock/unlock reserve"
       (reserveCustodian /= guardianGovernance)
     mgr <- create NttManager with
-      operator
       namespace
       admin
       guardianGovernance
@@ -324,7 +326,6 @@ registerManagerBody
       peerEpoch = 0
     ledger <- case tokenConfig of
       LockUnlock -> Some <$> create LockedLedger with
-        operator
         guardianGovernance
         admin
         managerAddress
