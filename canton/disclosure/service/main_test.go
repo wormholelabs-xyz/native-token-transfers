@@ -320,12 +320,11 @@ const testPartyFingerprintSuffix = "::1220" + "7d1a8b3c5e9f0a2b4c6d8e0f1a3b5c7d9
 const (
 	testGuardianGovernanceParty = "gg" + testPartyFingerprintSuffix
 	testNttCustodyParty         = "nttCustody" + testPartyFingerprintSuffix
-	testOperatorParty           = "operator" + testPartyFingerprintSuffix
 )
 
-// testReaderParties holds the three test reader parties.
+// testReaderParties holds the two test reader parties.
 func testReaderParties() readerPartiesByRole {
-	return readerPartiesByRole{guardianGovernance: testGuardianGovernanceParty, nttCustody: testNttCustodyParty, operator: testOperatorParty}
+	return readerPartiesByRole{guardianGovernance: testGuardianGovernanceParty, nttCustody: testNttCustodyParty}
 }
 
 func newTestServer(t *testing.T, upstream *httptest.Server) *server {
@@ -365,7 +364,7 @@ func TestHandleHealthz(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code)
 	assert.JSONEq(t, `{"status":"ok"}`, rr.Body.String())
-	for _, party := range []string{testGuardianGovernanceParty, testNttCustodyParty, testOperatorParty} {
+	for _, party := range []string{testGuardianGovernanceParty, testNttCustodyParty} {
 		assert.NotContains(t, rr.Body.String(), party, "a public response carries no reader party id")
 	}
 }

@@ -30,7 +30,7 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.Setup
-  ( GenesisGuardianSet (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
+  ( GenesisGuardianSet (..), RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
   , solanaGovernanceChainId, defaultGovernanceContract )
 import Wormhole.Core.State (CoreState, Emitter (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA, addressFromPubKey, spkiPrefixSecp256k1)
@@ -94,7 +94,6 @@ signVaa key spec = do
 ----------------------------------------------------------------------
 
 data RedTeamEnv = RedTeamEnv with
-    operator         : Party
     gg               : Party
     nttCustody       : Party
     coreStateCid     : ContractId CoreState
@@ -111,21 +110,21 @@ redTeamSetup = redTeamSetupWithPartyHintPrefix "Rt"
 redTeamSetupWithPartyHintPrefix : Text -> Script RedTeamEnv
 redTeamSetupWithPartyHintPrefix partyHintPrefix = do
   guardianKey <- generateGuardianKey
-  operator <- allocateParty (partyHintPrefix <> "Operator")
   gg <- allocateParty (partyHintPrefix <> "Gg")
   nttCustody <- allocateParty (partyHintPrefix <> "NttCustody")
   issuer <- allocateParty (partyHintPrefix <> "Issuer")
   feeCustody <- allocateParty (partyHintPrefix <> "FeeCustody")
   feeInstrumentAdmin <- allocateParty (partyHintPrefix <> "FeeInstrumentAdmin")
-  coreStateCid <- submit (actAs operator <> actAs gg <> actAs feeCustody) do
-    createCmd (mkInitialCoreState operator gg solanaGovernanceChainId defaultGovernanceContract
+  onboardingFeeAdmin <- allocateParty (partyHintPrefix <> "OnboardingFeeAdmin")
+  let registryParties = RegistryParties with guardianGovernance = gg, onboardingFeeAdmin
+  coreStateCid <- submit (actAs gg <> actAs feeCustody) do
+    createCmd (mkInitialCoreState gg solanaGovernanceChainId defaultGovernanceContract
                  (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [addressFromPubKey guardianKey.publicKey])
                  (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
-  _ <- submit (actAs operator <> actAs gg) do
-    createCmd (mkInitialEmitterRegistry operator gg 0)
-  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator gg 0)
-  _ <- submit (actAs operator <> actAs gg <> actAs nttCustody) do
-    createCmd NttGovernance with operator, guardianGovernance = gg, nttCustody, nextId = 0, consumedGovernance = Set.empty
+  _ <- submit gg do createCmd (mkInitialEmitterRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  _ <- submit (actAs gg <> actAs nttCustody) do
+    createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, consumedGovernance = Set.empty
   issuerFactoryCid <- submit issuer do createCmd CoinFactory with admin = issuer
   pure RedTeamEnv with ..
 
@@ -134,7 +133,7 @@ issuerInstrument env = InstrumentId with admin = env.issuer, id = "USDX"
 
 -- | Submit as @actors@, reading as the parties whose contracts the call fetches.
 withReads : RedTeamEnv -> [Party] -> [Party] -> SubmitOptions
-withReads env actors readers = actAs actors <> readAs (env.operator :: env.gg :: env.nttCustody :: env.issuer :: readers)
+withReads env actors readers = actAs actors <> readAs (env.gg :: env.nttCustody :: env.issuer :: readers)
 
 peerChainId : Int
 peerChainId = 2
@@ -156,8 +155,8 @@ registerManagerAttempt
   : RedTeamEnv -> Party -> [Party] -> InstrumentId -> NttTokenConfig -> NttFactory
   -> Script (Either SubmitError (ContractId NttManager))
 registerManagerAttempt env admin coSigners instrumentId tokenConfig factory = do
-  [(govCid, _)] <- query @NttGovernance env.operator
-  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.operator
+  [(govCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
   fmap (\(_, mgrCid, _, _, _) -> mgrCid) <$> trySubmit (withReads env (admin :: coSigners) []) do
     exerciseCmd govCid RegisterManager with
       admin
@@ -177,7 +176,7 @@ registerManagerAttempt env admin coSigners instrumentId tokenConfig factory = do
 
 setTestPeer : RedTeamEnv -> ContractId NttManager -> Script (ContractId NttManager)
 setTestPeer env mgrCid = do
-  Some mgr <- queryContractId env.operator mgrCid
+  Some mgr <- queryContractId env.gg mgrCid
   transceiverEmitterCid <- resolveEmitter env.gg mgr.transceiverEmitterId
   (mgrCid', _) <- submit (withReads env [mgr.admin] []) do
     exerciseCmd mgrCid SetPeer with
@@ -209,11 +208,11 @@ deployBurnMint env admin = do
   >>= setTestPeer env
 
 managerOf : RedTeamEnv -> ContractId NttManager -> Script NttManager
-managerOf env mgrCid = fromSome <$> queryContractId env.operator mgrCid
+managerOf env mgrCid = fromSome <$> queryContractId env.gg mgrCid
 
 ledgerOf : RedTeamEnv -> Bytes32 -> Script (ContractId LockedLedger, LockedLedger)
 ledgerOf env managerAddress = do
-  ledgers <- query @LockedLedger env.operator
+  ledgers <- query @LockedLedger env.gg
   case [ entry | entry@(_, ledger) <- ledgers, ledger.managerAddress == managerAddress ] of
     [entry] -> pure entry
     found -> abort ("expected one ledger, got " <> show (length found))
@@ -732,7 +731,7 @@ testRedTeamGovernanceForgeriesRejected = do
   -- A genuine rotation bumps the epoch; its VAA and older accept-admin VAAs go stale.
   rotationVaa <- governanceVaa env 9 (rotate cantonChainId managerC.managerAddress 0)
   setFactoryByVaa mintC managerC.factory rotationVaa >>= expectAccepted "canonical rotation"
-  [(mintC', _)] <- filter (\(_, mgr) -> mgr.managerAddress == managerC.managerAddress) <$> query @NttManager env.operator
+  [(mintC', _)] <- filter (\(_, mgr) -> mgr.managerAddress == managerC.managerAddress) <$> query @NttManager env.gg
   proposalCid <- submit adminC do
     createCmd AdminTransferProposal with
       admin = adminC, newAdmin = env.gg, managerAddress = managerC.managerAddress
@@ -774,12 +773,12 @@ testRedTeamGovernanceForgeriesRejected = do
 
   -- RegisterManagerByVaa commits only the canonical factory.
   adminE <- allocateParty "RtGovAdminE"
-  [(govCid, _)] <- query @NttGovernance env.operator
-  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.operator
+  [(govCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
   let registerByVaa sequence emitterChain factory = do
         vaaBytes <- signedFrom emitterChain governanceEmitter 0 sequence RegisterBurnMintManager with
           chain = cantonChainId
-          registrationBinding = nttRegistrationBindingFor env.operator adminE 0
+          registrationBinding = nttRegistrationBindingFor env.gg adminE 0
           tokenDecimals = 8
         fmap (const ()) <$> trySubmit (withReads env [adminE] []) do
           exerciseCmd govCid RegisterManagerByVaa with
@@ -883,14 +882,12 @@ testRedTeamUnauthorizedMovesRejected = do
           payer = party
           feeAllocation = None
   checkAttacksRejected
-    [ AttackCase "operator takes the admin role" "requires authorizers" $ transferAdminAs [env.operator] env.operator
-    , AttackCase "admin hands custody to mallory without her" "requires authorizers" $ transferAdminAs [admin] mallory
+    [ AttackCase "admin hands custody to mallory without her" "requires authorizers" $ transferAdminAs [admin] mallory
     , AttackCase "mallory takes the admin role" "requires authorizers" $ transferAdminAs [mallory] mallory
     , AttackCase "relayer sets a peer" "requires authorizers" $ setPeerAs relayer
-    , AttackCase "operator sets a peer" "requires authorizers" $ setPeerAs env.operator
     , AttackCase "gg alone sets a peer" "requires authorizers" $ setPeerAs env.gg
-    , AttackCase "operator debits the ledger" "requires authorizers" $
-        fmap (const ()) <$> trySubmit (withReads env [env.operator] []) do
+    , AttackCase "mallory debits the ledger" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [mallory] []) do
           exerciseCmd ledgerA Debit with amount = 1.0, newCustodyHint = None
     , AttackCase "relayer releases from a non-custodian holding" "requires one of the stakeholders" $ do
         vaaBytes <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 10000000)
@@ -1254,7 +1251,7 @@ testQuorumCustodyReserveLifecycleOnCoinRegistry = do
       ledgerCid
       custodyHoldingCids = [potCid, donatedCid]
       extraArgs = receiverPreapprovalArgs custodyPreapprovalCid
-  Some ledger <- queryContractId env.operator ledgerCid
+  Some ledger <- queryContractId env.gg ledgerCid
   ledger.balance === 1.1
   mergedPot <- custodyPotOf env lockA
   Some mergedPotHolding <- queryInterfaceContractId env.nttCustody mergedPot
@@ -1427,14 +1424,14 @@ testRedTeamReserveCustodianIsNeverGuardianGovernance = do
   lockA <- deployLockUnlock env admin
   managerA <- managerOf env lockA
   (ledgerA, _) <- ledgerOf env managerA.managerAddress
-  let allSignatories = [env.operator, env.gg, env.nttCustody, admin]
+  let allSignatories = [env.gg, env.nttCustody, admin]
       createManagerAttempt manager = fmap (const ()) <$> trySubmit (withReads env allSignatories []) do
         createCmd manager
   checkAttacksRejected
     [ AttackCase "root with gg as the custody party" "precondition violated" $
-        fmap (const ()) <$> trySubmit (withReads env [env.operator, env.gg] []) do
+        fmap (const ()) <$> trySubmit (withReads env [env.gg] []) do
           createCmd NttGovernance with
-            operator = env.operator, guardianGovernance = env.gg, nttCustody = env.gg
+            guardianGovernance = env.gg, nttCustody = env.gg
             nextId = 0, consumedGovernance = Set.empty
     , AttackCase "manager with gg as admin and reserve custodian" "precondition violated" $
         createManagerAttempt managerA with admin = env.gg, reserveCustodian = env.gg
@@ -1444,8 +1441,8 @@ testRedTeamReserveCustodianIsNeverGuardianGovernance = do
         createManagerAttempt managerA with admin = env.gg
     , AttackCase "manager with nttCustody as admin" "precondition violated" $
         createManagerAttempt managerA with admin = env.nttCustody, reserveCustodian = env.nttCustody
-    , AttackCase "manager with the operator as nttCustody" "precondition violated" $
-        createManagerAttempt managerA with nttCustody = env.operator
+    , AttackCase "manager with gg as nttCustody" "precondition violated" $
+        createManagerAttempt managerA with nttCustody = env.gg
     , AttackCase "admin role handed to nttCustody" "the custody party cannot hold the admin role" $
         fmap (const ()) <$> trySubmit (withReads env [admin, env.nttCustody] []) do
           exerciseCmd lockA TransferAdmin with
@@ -1823,8 +1820,8 @@ testRedTeamLockUnlockAdminCannotUseGgAuthority = do
   canonicalCoinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
   let burnMintFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory canonicalCoinFactoryCid)
   (ledgerCid, ledger) <- ledgerOf env mgr.managerAddress
-  [(govCid, _)] <- query @NttGovernance env.operator
-  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.operator
+  [(govCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
   ledger.balance === 0.0
 
   checkAttacksRejected

@@ -69,6 +69,55 @@ One version number identifies one build. Do not use a version number again
 for a different build. Participants use the package name and version to put
 the upgrades of a package in order.
 
+### Version 0.5.x is not upgrade-compatible
+
+Version 0.5.0 removes the `operator` field and signatory from `NttGovernance`,
+`NttManager` and `LockedLedger`. `gg` is the only NTT anchor. Version 0.5.0
+builds against core 0.9.0 (`bba94798...`) and has the package id
+`449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e`.
+An upgrade cannot remove a template field or a signatory. Thus
+`ntt/daml.yaml` has no `upgrades:` field. Use participants that have no
+earlier `ntt` package.
+
+Version 0.5.0 changes these values:
+
+- The manager address preimage holds `gg`, not the operator.
+- The registration binding of a `RegisterBurnMintManager` VAA holds `gg`,
+  not the operator.
+- The transceiver address preimage holds `gg` as registrar (core 0.9.0).
+
+### Operator independence
+
+`gg` signs every NTT root and every manager. No NTT contract has the operator
+as a signatory, a controller or an observer. Thus each NTT function continues
+when the operator participant is offline or the operator key is lost.
+
+| Function                                       | Parties that act                        |
+| ---------------------------------------------- | --------------------------------------- |
+| `RegisterManager`, lock/unlock                 | `admin`                                 |
+| `RegisterManagerByVaa`, `gg`-minted burn/mint  | `admin`, with a guardian-signed VAA     |
+| `Transfer`                                     | the user                                |
+| `Release`, `Mint`, the VAA-gated admin choices | any relayer, with a guardian-signed VAA |
+
+`RegisterManager` of a `gg`-minted burn/mint deployment needs `gg` as a
+controller. Use `RegisterManagerByVaa` for it.
+
+One `gg` is one bridge instance. The manager address, the replay namespace
+and the registration binding do not hold another instance discriminator.
+The guardians must sign one `NttGovernance` root for each `gg`.
+
+NTT must be final at genesis. An upgrade-compatible NTT version needs only
+the vetting of the new DAR on each `gg` host. A breaking NTT version needs a
+new `NttGovernance` root, and thus one more `gg` transaction. That
+transaction must archive the earlier root and create the new root. If the
+earlier root stays active, both roots accept one registration VAA. Then one
+manager address gets two managers, and each inbound transfer mints two times.
+
+Vet no package with code that runs with `gg` authority and can claim a `gg`
+replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
+second trie in the namespace of a deployment. NTT reserves the replay
+namespace prefix `ntt:`.
+
 ### Version 0.4.x is not upgrade-compatible
 
 Version 0.4.0 added the `nttCustody` signatory to `NttGovernance` and
@@ -102,19 +151,19 @@ package name when it receives a DAR. Thus a participant that has an earlier
 
 To move a deployment from an earlier version, do these steps:
 
-1. Hold a new root ceremony. `gg`, `nttCustody`, and the operator sign the
-   new `NttGovernance`.
-2. Set `nextId` of the new root to the `nextId` of the old root. Thus no
-   manager address and no replay namespace occurs two times.
+1. Hold a new root ceremony. In one transaction, `gg` and `nttCustody`
+   archive the old `NttGovernance` and create the new one.
+2. In the same transaction, set `nextId` of the new root to the `nextId` of
+   the archived root. Thus no manager address and no replay namespace occurs
+   two times.
 3. Register each deployment again on the new root.
 4. On each peer chain, register the new manager and transceiver addresses.
 5. Move each reserve from its old custodian to the new `reserveCustodian`.
 
 ## Parties and the trust model
 
-Four parties sign every `NttManager`, and each signature has one job:
+Three parties sign every `NttManager`, and each signature has one job:
 
-- `operator` runs the core bridge instance and ties the deployment to it.
 - `admin` is the operational role: it maintains the peer table and rotates
   the committed factory. It is transferable (`TransferAdmin`, usually via the
   propose-accept `AdminTransferProposal`); handing it to `gg` is the guardian
@@ -247,7 +296,8 @@ The same registry cannot do these things:
 - Mint a `gg`-administered instrument through the canonical `CoinFactory`.
 - Change a manager: `SetPeer`, `SetFactory`, `SetPaused`, and `TransferAdmin`
   need the admin, which is `gg`.
-- Change a `LockedLedger`. Its choices need `operator` and `gg`.
+- Change a `LockedLedger` outside a manager choice. Its choices need `gg`,
+  and the `token-cip0056` package does not reference `LockedLedger`.
 - Make `nttCustody` the admin of a deployment.
 
 `TestRedTeam:testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority`
@@ -257,7 +307,7 @@ show the rejections.
 The rule above is for transfer registries only. The fee registry runs with
 the authority of `feeCustody`, not `gg`. Core 0.8.3 (`wormholelabs-xyz/wormhole`
 PR #81) moved fee custody from `gg` to `feeCustody`. The fee instrument
-admin is not `gg` and not the operator.
+admin is not `gg` and not `feeCustody` (core 0.9.0).
 
 ## Deployment
 
@@ -270,7 +320,7 @@ allocates a stable `managerId`; mints the deployment's transceiver `Emitter`
 claims the deployment's replay-trie root (`consumer = gg`, sub-scoped by the
 derived `namespace`); and creates the manager — with no separate approval
 step. The caller supplies only the `admin` signature; the root supplies
-`operator`'s and `gg`'s, and `admin` co-controls (pays) both nested core
+`gg`'s and `nttCustody`'s, and `admin` co-controls (pays) both nested core
 onboarding fees so `gg` is never made to fund a deployment's registration. For
 lock/unlock it also creates the deployment's `LockedLedger` at balance zero,
 with the reserve starting admin-owned (see "Custody follows the admin"
@@ -285,23 +335,24 @@ so they survive later admin handoffs (see the core README's message
 publishing section):
 
 - transceiver address =
-  `keccak256("wormhole:emitter:v1" ‖ operator ‖ gg ‖ emitterId)`. This is the
+  `keccak256("wormhole:emitter:v1" ‖ gg ‖ gg ‖ emitterId)` (registrar `gg`,
+  owner `gg`). This is the
   VAA emitter other chains register as the peer. It is derived by the
   watcher, not stored, and must be a single shared `Emitter` per deployment,
   since its address is the peer identity. (The preimage's owner ordinal is
   `gg`, not the registering admin — `gg` co-signs every `Emitter` it mints.)
 - manager address =
-  `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ registeringAdmin ‖ managerId)`,
+  `keccak256("wormhole:ntt-manager:v1" ‖ gg ‖ registeringAdmin ‖ managerId)`,
   computed once at registration and stored in `managerAddress`. The distinct
   domain tag keeps an emitter and a manager with the same ordinals from
   colliding. The registering admin's signature co-signs the manager at
-  creation, so a compromised operator cannot forge an existing manager's
-  address to consume that deployment's inbound VAAs; because the address is
+  creation, so a party without that signature cannot forge an existing
+  manager's address to consume that deployment's inbound VAAs; because the address is
   computed once and stored, not recomputed, it is unaffected by any later
   `TransferAdmin`.
 
 Because registration is permissionless, anyone can create junk managers
-co-signed by `gg` and the operator. They are inert (their choices cannot move
+co-signed by `gg` and `nttCustody`. They are inert (their choices cannot move
 anything the creator could not already move), but they do occupy the
 signatories' participants; that is ordinary spam, bounded by synchronizer
 costs rather than by this package.
@@ -457,7 +508,7 @@ governance action 4, a 142-byte packet: `module(32) ‖ action(1)=4 ‖ chain(2)
 ‖ managerAddress(32) ‖ peerEpoch(8) ‖ peerChain(2) ‖ peerManagerAddress(32) ‖
 peerTransceiverAddress(32) ‖ peerDecimals(1)`) runs the same verification
 ladder as `AcceptAdminTransferByVaa`: the disclosed `CoreState` pinned to this
-deployment's own guardian trust anchor and operator; the VAA verified and its
+deployment's own guardian trust anchor; the VAA verified and its
 digest consumed into `gg`'s replay trie, sub-scoped by the deployment's
 `namespace` (governance and transfer VAAs share one trie, so a governance VAA
 can never be replayed as, or by, a transfer one); signed by the CURRENT
@@ -479,10 +530,9 @@ no authority; verification is the gate. Both inbound choices run the same
 checks, in order:
 
 1. Pin the disclosed `CoreState` to the deployment's committed
-   `guardianGovernance` (via `GetGuardianGovernance`). Pinning the operator
-   instead would not help: a compromised operator can co-sign a forged
-   `CoreState` under a throwaway gg party, but cannot forge the real `gg`'s
-   signature (`TestNtt:testReceivePinsGuardianGovernance`).
+   `guardianGovernance` (via `GetGuardianGovernance`). A forged `CoreState`
+   under a throwaway gg party lacks the real `gg`'s signature and fails the
+   pin (`TestNtt:testReceivePinsGuardianGovernance`).
 2. Verify the VAA's guardian signatures and consume its digest, atomically,
    with the core `VerifyAndConsumeVAA` (`consumer = gg`, sub-scoped to the
    deployment's derived `namespace`, so each deployment consumes a VAA at most

@@ -33,12 +33,12 @@ ns : Text
 ns = "test"
 
 -- | Consumer-submitted root claim: the consumer holds the static disclosure of
--- the 'ReplayRootRegistry' anchor and submits alone. No operator crank.
+-- the 'ReplayRootRegistry' anchor and submits alone.
 -- @payer = consumer@: a direct claim is its own payer, controller set collapses.
 registerReplayRoot : Party -> Party -> Text -> Int -> Script (ContractId ReplayNode)
-registerReplayRoot operator consumer namespace threshold = do
-  [(regCid, _)] <- query @ReplayRootRegistry operator
-  regDisc <- fromSome <$> queryDisclosure operator regCid
+registerReplayRoot guardianGovernance consumer namespace threshold = do
+  [(regCid, _)] <- query @ReplayRootRegistry guardianGovernance
+  regDisc <- fromSome <$> queryDisclosure guardianGovernance regCid
   submit (actAs consumer <> disclose regDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
@@ -47,6 +47,7 @@ registerReplayRoot operator consumer namespace threshold = do
       payer = consumer
       coreStateCid = None    -- claimFee is 0 in the fixture
       feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s
 -- @namespace@ trie covering @digest@. Aborts unless coverage is exactly one —
@@ -83,10 +84,10 @@ consumeMustFail consumer namespace digest = do
 -- | Fixture: bridge + one consumer with a threshold-@t@ trie root under 'ns'.
 setupTrie : Int -> Script (Party, Party, ContractId ReplayNode)
 setupTrie t = do
-  (operator, _, _) <- setup
+  (gg, _) <- setup
   consumer <- allocateParty "TrieConsumer"
-  rootCid <- registerReplayRoot operator consumer ns t
-  pure (operator, consumer, rootCid)
+  rootCid <- registerReplayRoot gg consumer ns t
+  pure (gg, consumer, rootCid)
 
 -- | Inserts land in the root and replays are rejected.
 testTrieInsertAndReplay : Script ()
@@ -209,12 +210,12 @@ testStaleCidAndRetry = do
 -- 16); the 'ensure' shape invariants reject degenerate nodes.
 testDepth63NeverSplits : Script ()
 testDepth63NeverSplits = do
-  (operator, consumer, _) <- setupTrie 4
+  (gg, consumer, _) <- setupTrie 4
   let deepPrefix = mconcat (replicate 63 "f")
   -- Direct creation needs both signatories — fine for a test fixture.
-  deepCid <- submit (actAs consumer <> actAs operator) do
+  deepCid <- submit (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, operator, namespace = ns, prefix = deepPrefix, splitThreshold = 1, consumed = Set.empty
+      consumer, guardianGovernance = gg, namespace = ns, prefix = deepPrefix, splitThreshold = 1, consumed = Set.empty
   -- Two inserts exceed threshold 1, yet the node never splits.
   deepCid' <- submit consumer do exerciseCmd deepCid ConsumeDigest with digest = deepPrefix <> "0"
   deepCid'' <- submit consumer do exerciseCmd deepCid' ConsumeDigest with digest = deepPrefix <> "1"
@@ -224,23 +225,23 @@ testDepth63NeverSplits = do
   submitMustFail consumer do exerciseCmd deepCid'' ConsumeDigest with digest = deepPrefix <> "0"
   -- ensure: depth-64 prefixes, non-positive thresholds, and wrong-length
   -- suffixes are unrepresentable.
-  submitMustFail (actAs consumer <> actAs operator) do
+  submitMustFail (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, operator, namespace = ns, prefix = pad64 "", splitThreshold = 1, consumed = Set.empty
-  submitMustFail (actAs consumer <> actAs operator) do
+      consumer, guardianGovernance = gg, namespace = ns, prefix = pad64 "", splitThreshold = 1, consumed = Set.empty
+  submitMustFail (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, operator, namespace = ns, prefix = "", splitThreshold = 0, consumed = Set.empty
-  submitMustFail (actAs consumer <> actAs operator) do
+      consumer, guardianGovernance = gg, namespace = ns, prefix = "", splitThreshold = 0, consumed = Set.empty
+  submitMustFail (actAs consumer <> actAs gg) do
     createCmd ReplayNode with
-      consumer, operator, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.fromList ["00"]
+      consumer, guardianGovernance = gg, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.fromList ["00"]
 
 -- | Scopes are independent, authorization per-consumer: one party can neither
 -- advance another's trie nor be affected by it.
 testCrossConsumerScopes : Script ()
 testCrossConsumerScopes = do
-  (operator, alice, _) <- setupTrie 4
+  (gg, alice, _) <- setupTrie 4
   bob <- allocateParty "TrieBob"
-  _ <- registerReplayRoot operator bob ns 4
+  _ <- registerReplayRoot gg bob ns 4
   _ <- consume alice ns (pad64 "aa")
   -- Bob cannot exercise Alice's node, even seeing it via disclosure.
   (aliceCid, _) <- coveringNode alice ns (pad64 "bb")
@@ -251,31 +252,31 @@ testCrossConsumerScopes = do
   _ <- consume bob ns (pad64 "aa")
   pure ()
 
--- | Nodes are co-signed: neither consumer nor operator can archive a node alone.
+-- | Nodes are co-signed: neither consumer nor guardianGovernance can archive a node alone.
 testNodeArchiveNeedsBoth : Script ()
 testNodeArchiveNeedsBoth = do
-  (operator, consumer, rootCid) <- setupTrie 4
+  (gg, consumer, rootCid) <- setupTrie 4
   submitMustFail consumer do archiveCmd rootCid
-  submitMustFail operator do archiveCmd rootCid
+  submitMustFail gg do archiveCmd rootCid
   -- Both together can — coverage for the auto-generated Archive choices.
-  submit (actAs consumer <> actAs operator) do archiveCmd rootCid
-  [(regCid, _)] <- query @ReplayRootRegistry operator
-  submit operator do archiveCmd regCid
+  submit (actAs consumer <> actAs gg) do archiveCmd rootCid
+  [(regCid, _)] <- query @ReplayRootRegistry gg
+  submit gg do archiveCmd regCid
 
 -- | Root claims are free and self-serve; the registry pins WHOSE scope a claim
 -- touches. Claiming for a consumer needs that consumer's authority — nobody can
 -- fork someone else's scope. A consumer duplicating its own root is allowed
 -- (self-harm, detected off-ledger by 'coveringNode'). Roots can't be minted
--- outside the registry — the consumer alone lacks the operator's signature.
+-- outside the registry — the consumer alone lacks the guardianGovernance signature.
 testRootClaims : Script ()
 testRootClaims = do
-  (operator, consumer, rootCid) <- setupTrie 4
+  (gg, consumer, rootCid) <- setupTrie 4
   Some root <- queryContractId consumer rootCid
   root.prefix === ""
   root.splitThreshold === 4
   Set.size root.consumed === 0
-  [(regCid, _)] <- query @ReplayRootRegistry operator
-  regDisc <- fromSome <$> queryDisclosure operator regCid
+  [(regCid, _)] <- query @ReplayRootRegistry gg
+  regDisc <- fromSome <$> queryDisclosure gg regCid
   -- A third party cannot claim a root for someone else's scope.
   mallory <- allocateParty "TrieMallory"
   submitMustFail (actAs mallory <> disclose regDisc) do
@@ -286,6 +287,7 @@ testRootClaims = do
       payer = consumer
       coreStateCid = None
       feeAllocation = None
+      expectedGuardianGovernance = gg
   -- The consumer CAN duplicate its own root — by design, self-harm only.
   _ <- submit (actAs consumer <> disclose regDisc) do
     exerciseCmd regCid ClaimReplayRoot with
@@ -295,22 +297,23 @@ testRootClaims = do
       payer = consumer
       coreStateCid = None
       feeAllocation = None
+      expectedGuardianGovernance = gg
   roots <- query @ReplayNode consumer
   length roots === 2
   -- The consumer cannot create a co-signed node alone.
   submitMustFail consumer do
     createCmd ReplayNode with
-      consumer, operator, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.empty
+      consumer, guardianGovernance = gg, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.empty
 
 -- | End-to-end verify + consume through 'VerifyAndConsumeVAA' with a real
 -- guardian-signed VAA: replay fails on membership; a second consumer has its own
--- scope; nodes outside the (consumer, namespace, operator) scope are rejected.
+-- scope; nodes outside the (consumer, namespace, guardianGovernance) scope are rejected.
 testVerifyAndConsumeVAA : Script ()
 testVerifyAndConsumeVAA = do
-  (operator, _, csId) <- setup
+  (gg, csId) <- setup
   ntt <- allocateParty "NttManager"
-  rootCid <- registerReplayRoot operator ntt ns defaultSplitThreshold
-  csDisc <- fromSome <$> queryDisclosure operator csId
+  rootCid <- registerReplayRoot gg ntt ns defaultSplitThreshold
+  csDisc <- fromSome <$> queryDisclosure gg csId
   (vaa, nodeCid) <- submit (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
@@ -332,7 +335,7 @@ testVerifyAndConsumeVAA = do
       replayNodeCid = freshCid
   -- A different consumer party consumes the same VAA in its own trie.
   other <- allocateParty "OtherApp"
-  otherRoot <- registerReplayRoot operator other ns defaultSplitThreshold
+  otherRoot <- registerReplayRoot gg other ns defaultSplitThreshold
   _ <- submit (actAs other <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
@@ -350,12 +353,12 @@ testVerifyAndConsumeVAA = do
       consumer = ntt
       namespace = ns
       replayNodeCid = otherFresh
-  -- Operator mismatch: a shadow trie co-signed by an accomplice "operator" is
+  -- guardianGovernance mismatch: a shadow trie co-signed by a rogue gg is
   -- rejected even though the consumer authority and namespace match.
-  accomplice <- allocateParty "AccompliceOperator"
-  shadowCid <- submit (actAs ntt <> actAs accomplice) do
+  rogueGuardianGovernance <- allocateParty "RogueGuardianGovernance"
+  shadowCid <- submit (actAs ntt <> actAs rogueGuardianGovernance) do
     createCmd ReplayNode with
-      consumer = ntt, operator = accomplice, namespace = ns, prefix = ""
+      consumer = ntt, guardianGovernance = rogueGuardianGovernance, namespace = ns, prefix = ""
       splitThreshold = 4, consumed = Set.empty
   submitMustFail (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with

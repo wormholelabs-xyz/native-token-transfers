@@ -121,7 +121,8 @@ func signNttTransferVAA(recipientAddress [32]byte, sequence uint64) ([]byte, err
 // nttReceiveMatchSetup mirrors Test.TestNtt:NttReceiveMatchSetup's JSON shape.
 type nttReceiveMatchSetup struct {
 	MgrId                 string `json:"mgrId"`
-	Operator              string `json:"operator"`
+	Gg                    string `json:"gg"`
+	Relayer               string `json:"relayer"`
 	Admin                 string `json:"admin"`
 	Recipient             string `json:"recipient"`
 	CoreStateCid          string `json:"coreStateCid"`
@@ -207,8 +208,8 @@ func TestCantonNttReceiveMatchIntegration(t *testing.T) {
 	// All internal assertions (mint lands on the matching recipient; replay is
 	// rejected) live inside the script; a non-zero exit means one failed.
 	inputPayload := fmt.Sprintf(
-		`{"mgrId":%q,"operator":%q,"admin":%q,"recipient":%q,"coreStateCid":%q,"replayNodeCid":%q,"vaaBytes":%q,"depositPreapprovalCid":%q,"factoryCid":%q}`,
-		setup.MgrId, setup.Operator, setup.Admin, setup.Recipient, setup.CoreStateCid, setup.ReplayNodeCid,
+		`{"mgrId":%q,"gg":%q,"relayer":%q,"admin":%q,"recipient":%q,"coreStateCid":%q,"replayNodeCid":%q,"vaaBytes":%q,"depositPreapprovalCid":%q,"factoryCid":%q}`,
+		setup.MgrId, setup.Gg, setup.Relayer, setup.Admin, setup.Recipient, setup.CoreStateCid, setup.ReplayNodeCid,
 		hex.EncodeToString(vaaBytes), setup.DepositPreapprovalCid, setup.FactoryCid,
 	)
 	inputFile := filepath.Join(sandboxDir, "input.json")

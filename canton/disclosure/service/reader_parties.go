@@ -15,15 +15,12 @@ type readerRole int
 const (
 	readerGuardianGovernance readerRole = iota + 1
 	readerNttCustody
-	readerOperator
 )
 
-// readerPartiesByRole holds the configured party of each reader role. operator is empty when the
-// register flow is off.
+// readerPartiesByRole holds the configured party of each reader role.
 type readerPartiesByRole struct {
 	guardianGovernance partyID
 	nttCustody         partyID
-	operator           partyID
 }
 
 func (parties readerPartiesByRole) partyFor(role readerRole) partyID {
@@ -32,8 +29,6 @@ func (parties readerPartiesByRole) partyFor(role readerRole) partyID {
 		return parties.guardianGovernance
 	case readerNttCustody:
 		return parties.nttCustody
-	case readerOperator:
-		return parties.operator
 	default:
 		panic(fmt.Sprintf("disclosure-service: unknown reader role %d", role))
 	}
@@ -41,8 +36,8 @@ func (parties readerPartiesByRole) partyFor(role readerRole) partyID {
 
 // readerRolesByTail names the only reader roles of each flow template.
 //
-// SECURITY: each party reads only what its role needs. The operator party reads only
-// ReplayRootRegistry.
+// SECURITY: each party reads only what its role needs. gg signs every core and NTT root,
+// including ReplayRootRegistry.
 var readerRolesByTail = map[string][]readerRole{
 	tailNttManager:            {readerGuardianGovernance},
 	tailLockedLedger:          {readerGuardianGovernance},
@@ -56,7 +51,7 @@ var readerRolesByTail = map[string][]readerRole{
 	tailAdminTransferProposal: {readerGuardianGovernance},
 	tailTransferPreapproval:   {readerGuardianGovernance, readerNttCustody},
 	tailCoin:                  {readerNttCustody},
-	tailReplayRootRegistry:    {readerOperator},
+	tailReplayRootRegistry:    {readerGuardianGovernance},
 }
 
 func init() {
@@ -109,8 +104,8 @@ func parseReaderParty(flagName, rawParty string, required bool) (partyID, error)
 	return partyID(rawParty), nil
 }
 
-// parseReaderParties builds the three roles and requires them to be distinct parties.
-func parseReaderParties(rawGuardianGovernance, rawNttCustody, rawOperator string) (readerPartiesByRole, error) {
+// parseReaderParties builds the two roles and requires them to be distinct parties.
+func parseReaderParties(rawGuardianGovernance, rawNttCustody string) (readerPartiesByRole, error) {
 	guardianGovernance, err := parseReaderParty("guardian-governance-party", rawGuardianGovernance, true)
 	if err != nil {
 		return readerPartiesByRole{}, err
@@ -119,15 +114,8 @@ func parseReaderParties(rawGuardianGovernance, rawNttCustody, rawOperator string
 	if err != nil {
 		return readerPartiesByRole{}, err
 	}
-	operator, err := parseReaderParty("operator-party", rawOperator, false)
-	if err != nil {
-		return readerPartiesByRole{}, err
-	}
 	if guardianGovernance == nttCustody {
 		return readerPartiesByRole{}, fmt.Errorf("disclosure-service: --guardian-governance-party and --ntt-custody-party must be distinct parties")
 	}
-	if operator == guardianGovernance || operator == nttCustody {
-		return readerPartiesByRole{}, fmt.Errorf("disclosure-service: --operator-party must be distinct from the other reader parties")
-	}
-	return readerPartiesByRole{guardianGovernance: guardianGovernance, nttCustody: nttCustody, operator: operator}, nil
+	return readerPartiesByRole{guardianGovernance: guardianGovernance, nttCustody: nttCustody}, nil
 }

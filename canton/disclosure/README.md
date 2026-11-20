@@ -190,19 +190,18 @@ The routes are public. The owner accepts this exposure by design:
 
 The service reads each template as one role only:
 
-| Role flag                     | Party                       | Templates                                                                                                                                                                                   |
-| ----------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--guardian-governance-party` | `gg` (`guardianGovernance`) | `NttManager`, `LockedLedger`, `CoreState`, `Emitter`, `ReplayNode`, `NttGovernance`, `EmitterRegistry`, `CoinFactory`, `DepositPreapproval`, `AdminTransferProposal`, `TransferPreapproval` |
-| `--ntt-custody-party`         | `nttCustody`                | The custody pots, and `TransferPreapproval`                                                                                                                                                 |
-| `--operator-party`            | operator                    | `ReplayRootRegistry` (`register` flow only)                                                                                                                                                 |
+| Role flag                     | Party                       | Templates                                                                                                                                                                                                         |
+| ----------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--guardian-governance-party` | `gg` (`guardianGovernance`) | `NttManager`, `LockedLedger`, `CoreState`, `Emitter`, `ReplayNode`, `NttGovernance`, `EmitterRegistry`, `ReplayRootRegistry`, `CoinFactory`, `DepositPreapproval`, `AdminTransferProposal`, `TransferPreapproval` |
+| `--ntt-custody-party`         | `nttCustody`                | The custody pots, and `TransferPreapproval`                                                                                                                                                                       |
 
 The registry API reads `NttManager`, `CoinFactory`, `Coin`,
 `TransferPreapproval`, `CoinTransferInstruction` and `CoinAllocation` as `gg`
 only. `gg` is a stakeholder of each of these templates.
 
-The three parties must be different. Without `--operator-party`, the
-`register` flow returns 404. The `gg` parameter of `register` must be the
-`--guardian-governance-party` value.
+The two parties must be different. `gg` signs `ReplayRootRegistry` (core
+0.9.0), so the service serves the `register` flow with the `gg` reader. The
+`gg` parameter of `register` must be the `--guardian-governance-party` value.
 
 The `reserveCustodian` of a deployment owns its lock/unlock reserve. It is
 the admin, or `nttCustody` when the admin is `gg`. The service cannot see
@@ -244,9 +243,9 @@ Set the memory limit of the container to more than 512 MiB.
 - `--json-api` (required) — base URL of the JSON Ledger API v2. With
   `--access-token-file` or the `--oauth-*` flags, use `https`. Plain `http`
   works only to a loopback IP address.
-- `--guardian-governance-party`, `--ntt-custody-party` (required),
-  `--operator-party` — the reader parties. The token must grant `readAs` for
-  each. One participant must host all of them.
+- `--guardian-governance-party`, `--ntt-custody-party` (required) — the
+  reader parties. The token must grant `readAs` for each. One participant
+  must host both of them.
 - `--access-token-file` — bearer token for the upstream, 16 KiB or less. The
   service reads the file again for each request. Thus you can replace the
   token without a restart.
@@ -278,7 +277,6 @@ Set the memory limit of the container to more than 512 MiB.
 2. Run `./disclosure-service --json-api <url>
 --guardian-governance-party <gg-party> --ntt-custody-party
 <ntt-custody-party> [--access-token-file <jwt-file>]`.
-3. To serve the `register` flow, add `--operator-party <operator-party>`.
 
 Container: run `docker build -t disclosure-service canton/disclosure/service`.
 Then run the container with `--listen 0.0.0.0:7599
@@ -704,7 +702,6 @@ rights only:
 
 - `CanReadAs` for `gg`.
 - `CanReadAs` for `nttCustody`.
-- `CanReadAs` for the operator, only to serve the `register` flow.
 
 Do not give this user `CanActAs` for a party. Do not give it an admin right.
 The service reads the ledger only. It calls these endpoints:
@@ -714,9 +711,8 @@ The service reads the ledger only. It calls these endpoints:
 - `POST /v2/events/events-by-contract-id`, for the custody pot and the
   committed factory.
 
-The service reads `ReplayRootRegistry` as the operator. It reads each other
-template as `gg` or `nttCustody`. The section "Reader parties" gives the
-table.
+The service reads each template as `gg` or `nttCustody`. The section
+"Reader parties" gives the table.
 
 ### Edge
 
@@ -812,10 +808,8 @@ Example:
 ### What a gateway compromise exposes
 
 An attacker who controls the gateway host gets its credentials. These
-credentials give read access as `gg`, `nttCustody`, and the operator, if
-you set `--operator-party`. Thus the attacker can read the bridge state that
-these parties see. As the operator, the attacker can read each contract
-that the operator sees, not only `ReplayRootRegistry`. The attacker can also
+credentials give read access as `gg` and `nttCustody`. Thus the attacker can
+read the bridge state that these parties see. The attacker can also
 change or stop the responses of the gateway. The ledger user has no
 `CanActAs` right, so its credentials cannot submit a command.
 
@@ -911,6 +905,8 @@ Each guardian operator must do these steps:
 2. Vet a new version of such a package only after a review of its code.
 3. Find out if the Splice validator automation vets new Amulet packages
    automatically. Check this on your validator.
+4. Vet no package with code that runs with `gg` authority and can claim a
+   `gg` replay root. NTT reserves the replay namespace prefix `ntt:`.
 
 ### The gateway user must not act as a quorum party
 

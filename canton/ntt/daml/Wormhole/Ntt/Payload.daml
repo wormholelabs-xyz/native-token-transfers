@@ -229,7 +229,7 @@ data NttGovernanceAction
       factoryEpoch   : Int      -- uint64: the vetted (managerAddress, factoryEpoch) pair
   | RegisterBurnMintManager with
       chain               : Int      -- uint16: Wormhole chain id
-      registrationBinding : Bytes32  -- nttRegistrationBindingFor operator admin instrumentNonce
+      registrationBinding : Bytes32  -- nttRegistrationBindingFor guardianGovernance admin instrumentNonce
       tokenDecimals       : Int      -- uint8: 0..10
   | RotateToCanonicalFactory with
       chain          : Int      -- uint16: Wormhole chain id

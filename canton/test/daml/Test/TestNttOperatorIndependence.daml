@@ -1,0 +1,307 @@
+-- | Operator independence of NTT: guardianGovernance is the only NTT anchor,
+-- and each NTT function needs only the caller's authority. Submissions read as
+-- gg, nttCustody and the issuer for visibility; authority comes from @actAs@.
+module Test.TestNttOperatorIndependence where
+
+import Daml.Script hiding (AnyContractId)
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.List (dedup, sort)
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import DA.Set qualified as Set
+
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Splice.Api.Token.TransferInstructionV1 (TransferFactory)
+import Token.CIP0056.CoinFactory (CoinFactory (..))
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.Bytes (Bytes)
+import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
+import Wormhole.Core.State (ClaimReplayRoot (..), Emitter)
+import Wormhole.Core.VAA (parseVAA)
+import Wormhole.Ntt.Governance
+import Wormhole.Ntt.Ledger
+import Wormhole.Ntt.Manager
+import Wormhole.Ntt.Payload (NttGovernanceAction (..))
+import Test.TestNtt (b32, cantonChainId, coreRegistries, resolveEmitter)
+import Test.TestRedTeam
+import Test.TestReplay (coveringNode)
+
+----------------------------------------------------------------------
+-- Helpers
+----------------------------------------------------------------------
+
+checkFailsOnMissingAuthorization : Text -> Either SubmitError a -> Script ()
+checkFailsOnMissingAuthorization caseName submitResult = case submitResult of
+  Left (AuthorizationError _) -> pure ()
+  Left otherError -> abort (caseName <> ": expected an authorization failure, got: " <> rejectionText otherError)
+  Right _ -> abort (caseName <> ": accepted")
+
+discardResult : Script (Either SubmitError a) -> Script (Either SubmitError ())
+discardResult = fmap (fmap (const ()))
+
+-- | 'RegisterManagerByVaa' of a gg-minted burn/mint deployment, submitted by @admin@ alone.
+registerManagerByVaaAttempt : RedTeamEnv -> Party -> Int -> Script (Either SubmitError (ContractId NttManager))
+registerManagerByVaaAttempt env admin vaaSequence = do
+  [(governanceCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  coinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
+  vaaBytes <- governanceVaa env vaaSequence RegisterBurnMintManager with
+    chain = cantonChainId
+    registrationBinding = nttRegistrationBindingFor env.gg admin 0
+    tokenDecimals = 8
+  fmap (\(_, managerCid, _, _, _) -> managerCid) <$> trySubmit (withReads env [admin] []) do
+    exerciseCmd governanceCid RegisterManagerByVaa with
+      admin
+      emitterRegistryCid
+      replayRootRegistryCid
+      instrumentNonce = 0
+      factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid)
+      coreStateCid = env.coreStateCid
+      consistencyLevel = 0
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+      feeAllocation = None
+      vaaBytes
+      pubKeys = [(0, env.guardianKey.publicKey)]
+      extraArgs = emptyExtraArgs
+
+registerManagerByVaaAs : RedTeamEnv -> Party -> Int -> Script (ContractId NttManager)
+registerManagerByVaaAs env admin vaaSequence =
+  registerManagerByVaaAttempt env admin vaaSequence
+    >>= either (\submitError -> abort ("RegisterManagerByVaa failed: " <> rejectionText submitError)) pure
+
+replayRootOf : RedTeamEnv -> NttManager -> Script ReplayNode
+replayRootOf env manager = do
+  nodes <- query @ReplayNode env.gg
+  case [ node | (_, node) <- nodes, node.namespace == manager.namespace, node.prefix == "" ] of
+    [root] -> pure root
+    found -> abort ("expected one replay root, got " <> show (length found))
+
+----------------------------------------------------------------------
+-- Test 1: signatories and observers
+----------------------------------------------------------------------
+
+data StakeholderCase = StakeholderCase with
+    templateName        : Text
+    actualSignatories   : [Party]
+    actualObservers     : [Party]
+    expectedSignatories : [Party]
+    expectedObservers   : [Party]
+
+-- | Each NTT contract made through its production path has exactly the expected
+-- signatories and observers. 'signatory' lists a party once per template term,
+-- so the comparison is on the distinct parties.
+testNttTemplateSignatories : Script ()
+testNttTemplateSignatories = do
+  env <- redTeamSetupWithPartyHintPrefix "Sig"
+  lockAdmin <- allocateParty "SigLockAdmin"
+  mintAdmin <- allocateParty "SigMintAdmin"
+  let gg = env.gg
+  [(_, governance)] <- query @NttGovernance gg
+  lockManagerCid <- deployLockUnlock env lockAdmin
+  lockManager <- managerOf env lockManagerCid
+  mintManagerCid <- registerManagerByVaaAs env mintAdmin 1
+  mintManager <- managerOf env mintManagerCid
+  (_, ledger) <- ledgerOf env lockManager.managerAddress
+  transceiverEmitterCid <- resolveEmitter gg lockManager.transceiverEmitterId
+  Some transceiverEmitter <- queryContractId gg transceiverEmitterCid
+  replayRoot <- replayRootOf env lockManager
+  let cases =
+        [ StakeholderCase "NttGovernance" (signatory governance) (observer governance) [gg, env.nttCustody] []
+        , StakeholderCase "NttManager lock/unlock (RegisterManager)" (signatory lockManager) (observer lockManager)
+            [lockAdmin, gg, env.nttCustody] []
+        , StakeholderCase "NttManager burn/mint (RegisterManagerByVaa)" (signatory mintManager) (observer mintManager)
+            [mintAdmin, gg, env.nttCustody] []
+        , StakeholderCase "LockedLedger" (signatory ledger) (observer ledger) [gg] [lockAdmin]
+        , StakeholderCase "transceiver Emitter" (signatory transceiverEmitter) (observer transceiverEmitter) [gg] []
+        , StakeholderCase "NTT ReplayNode root" (signatory replayRoot) (observer replayRoot) [gg] []
+        ]
+  forA_ cases \stakeholderCase -> do
+    assertMsg (stakeholderCase.templateName <> ": signatories " <> show stakeholderCase.actualSignatories)
+      (sort (dedup stakeholderCase.actualSignatories) == sort stakeholderCase.expectedSignatories)
+    assertMsg (stakeholderCase.templateName <> ": observers " <> show stakeholderCase.actualObservers)
+      (sort stakeholderCase.actualObservers == sort stakeholderCase.expectedObservers)
+  governance.guardianGovernance === gg
+  governance.nextId === 0
+  governance.consumedGovernance === Set.empty
+  transceiverEmitter.owner === gg
+  transceiverEmitter.guardianGovernance === gg
+  replayRoot.consumer === gg
+  replayRoot.guardianGovernance === gg
+  ledger.guardianGovernance === gg
+  ledger.managerAddress === lockManager.managerAddress
+  lockManager.managerAddress === nttManagerAddressFor gg lockAdmin lockManager.managerId
+  mintManager.managerAddress === nttManagerAddressFor gg mintAdmin mintManager.managerId
+
+----------------------------------------------------------------------
+-- Test 2: each NTT function needs only the caller's authority
+----------------------------------------------------------------------
+
+-- | Each row acts as the listed parties only.
+testNttRegistrationNeedsNoGuardianTransaction : Script ()
+testNttRegistrationNeedsNoGuardianTransaction = do
+  env <- redTeamSetupWithPartyHintPrefix "Caller"
+  lockAdmin <- allocateParty "CallerLockAdmin"
+  mintAdmin <- allocateParty "CallerMintAdmin"
+  burnAdminWithoutGuardians <- allocateParty "CallerBurnAdmin"
+  user <- allocateParty "CallerUser"
+  recipient <- allocateParty "CallerRecipient"
+  relayer <- allocateParty "CallerRelayer"
+
+  -- Row 1: RegisterManager lock/unlock, admin only.
+  lockManagerResult <- registerManagerAttempt env lockAdmin [] (issuerInstrument env) LockUnlock
+    (TransferFactoryCid (toInterfaceContractId @TransferFactory env.issuerFactoryCid))
+  lockManagerCid <- either (\submitError -> abort ("row 1: " <> rejectionText submitError)) pure lockManagerResult
+  lockManagerCid <- setTestPeer env lockManagerCid
+
+  -- Row 2: RegisterManagerByVaa gg burn/mint, guardian-signed VAA, admin only.
+  mintManagerResult <- registerManagerByVaaAttempt env mintAdmin 2
+  mintManagerCid <- either (\submitError -> abort ("row 2: " <> rejectionText submitError)) pure mintManagerResult
+  mintManagerCid <- setTestPeer env mintManagerCid
+
+  -- Row 3: RegisterManager gg burn/mint, admin only: the VAA path is required.
+  coinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
+  burnWithoutGuardiansResult <- registerManagerAttempt env burnAdminWithoutGuardians []
+    (InstrumentId with admin = env.gg, id = nttInstrumentIdFor burnAdminWithoutGuardians 0) BurnMint
+    (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid))
+  checkFailsOnMissingAuthorization "row 3: RegisterManager burn/mint without gg" burnWithoutGuardiansResult
+
+  -- Row 4: Transfer (lock), user only.
+  lockFrom env user lockManagerCid 100000000
+  lockManager <- managerOf env lockManagerCid
+  (_, ledgerAfterLock) <- ledgerOf env lockManager.managerAddress
+  ledgerAfterLock.balance === 1.0
+
+  -- Row 5: Release with a guardian-signed inbound VAA, relayer only.
+  releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo lockManager.managerAddress recipient 1 40000000)
+  releaseAttempt env lockManagerCid (inboundCallBy env relayer recipient) releaseVaa >>= expectAccepted "row 5: release"
+  coinBalance env.issuer recipient (issuerInstrument env) >>= (=== 0.4)
+
+  -- Row 6: Mint with a guardian-signed inbound VAA, relayer only.
+  mintManager <- managerOf env mintManagerCid
+  mintVaa <- signInboundTransfer env.guardianKey (inboundTransferTo mintManager.managerAddress recipient 2 50000000)
+  mintAttempt env mintManagerCid (inboundCallBy env relayer recipient) mintVaa >>= expectAccepted "row 6: mint"
+  coinBalance env.gg recipient mintManager.instrumentId >>= (=== 0.5)
+
+----------------------------------------------------------------------
+-- Test 3: each create or archive by a former operator fails on gg authorization
+----------------------------------------------------------------------
+
+data FormerOperatorCase = FormerOperatorCase with
+    caseName : Text
+    attempt  : Script (Either SubmitError ())
+
+-- | A party that ran the deployment before (the Labs operator) cannot create or
+-- archive an NTT root, manager or ledger that names the real gg.
+testFormerOperatorHasNoNttPower : Script ()
+testFormerOperatorHasNoNttPower = do
+  env <- redTeamSetupWithPartyHintPrefix "Former"
+  labsOperator <- allocateParty "FormerLabsOperator"
+  admin <- allocateParty "FormerAdmin"
+  lockManagerCid <- deployLockUnlock env admin
+  lockManager <- managerOf env lockManagerCid
+  (ledgerCid, ledger) <- ledgerOf env lockManager.managerAddress
+  [(governanceCid, governance)] <- query @NttGovernance env.gg
+  governanceDisclosure <- fromSome <$> queryDisclosure env.gg governanceCid
+  managerDisclosure <- fromSome <$> queryDisclosure env.gg lockManagerCid
+  ledgerDisclosure <- fromSome <$> queryDisclosure env.gg ledgerCid
+  let asFormerOperator = actAs labsOperator
+      cases =
+        [ FormerOperatorCase "create NttGovernance naming the real gg" $ discardResult $ trySubmit asFormerOperator do
+            createCmd NttGovernance with
+              guardianGovernance = env.gg, nttCustody = env.nttCustody, nextId = 0, consumedGovernance = Set.empty
+        , FormerOperatorCase "create NttManager naming the real gg" $ discardResult $
+            trySubmit (asFormerOperator <> actAs admin) do
+              createCmd lockManager with managerId = 99, peers = Map.empty
+        , FormerOperatorCase "create LockedLedger naming the real gg" $ discardResult $ trySubmit asFormerOperator do
+            createCmd ledger with managerAddress = b32 "fe", balance = 1000.0
+        , FormerOperatorCase "archive the NttGovernance root" $ discardResult $
+            trySubmit (asFormerOperator <> disclose governanceDisclosure) do archiveCmd governanceCid
+        , FormerOperatorCase "archive the NttManager" $ discardResult $
+            trySubmit (asFormerOperator <> disclose managerDisclosure) do archiveCmd lockManagerCid
+        , FormerOperatorCase "archive the LockedLedger" $ discardResult $
+            trySubmit (asFormerOperator <> disclose ledgerDisclosure) do archiveCmd ledgerCid
+        , FormerOperatorCase "debit the LockedLedger" $ discardResult $
+            trySubmit (asFormerOperator <> disclose ledgerDisclosure) do
+              exerciseCmd ledgerCid Debit with amount = 1.0, newCustodyHint = None
+        ]
+  forA_ cases \formerOperatorCase ->
+    formerOperatorCase.attempt >>= checkFailsOnMissingAuthorization formerOperatorCase.caseName
+  governance.guardianGovernance === env.gg
+
+----------------------------------------------------------------------
+-- Test 4: one inbound message redeems once per deployment
+----------------------------------------------------------------------
+
+-- | 'Mint' with an explicit replay node, submitted by @relayer@ alone.
+mintWithReplayNode
+  : RedTeamEnv -> ContractId NttManager -> Party -> Party -> ContractId ReplayNode -> Bytes
+  -> Script (Either SubmitError ())
+mintWithReplayNode env managerCid relayer recipient replayNodeCid vaaBytes = do
+  manager <- managerOf env managerCid
+  depositPreapprovalCid <- depositPreapprovalOf recipient manager.instrumentId
+  discardResult $ trySubmit (withReads env [relayer] [recipient]) do
+    exerciseCmd managerCid Mint with
+      executor = relayer
+      coreStateCid = env.coreStateCid
+      replayNodeCid
+      vaaBytes
+      pubKeys = [(0, env.guardianKey.publicKey)]
+      recipient
+      depositPreapprovalCid
+      extraArgs = emptyExtraArgs
+
+-- | 'ClaimReplayRoot' for @consumer@ in @namespace@, submitted by @claimant@.
+claimReplayRootAttempt : RedTeamEnv -> Party -> Party -> Text -> Script (Either SubmitError (ContractId ReplayNode))
+claimReplayRootAttempt env claimant consumer namespace = do
+  (_, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  trySubmit (withReads env [claimant] []) do
+    exerciseCmd replayRootRegistryCid ClaimReplayRoot with
+      consumer
+      namespace
+      splitThreshold = defaultSplitThreshold
+      payer = claimant
+      coreStateCid = None
+      feeAllocation = None
+      expectedGuardianGovernance = env.gg
+
+-- | The inbound paths consume in gg's trie under the manager's stored
+-- namespace ('nttNamespaceFor' at registration, from the root's fresh
+-- @nextId@). A second registration by the same admin gets another namespace
+-- and address, and a root in an existing namespace needs gg authority.
+testInboundVaaRedeemsOncePerDeployment : Script ()
+testInboundVaaRedeemsOncePerDeployment = do
+  env <- redTeamSetupWithPartyHintPrefix "Once"
+  admin <- allocateParty "OnceAdmin"
+  recipient <- allocateParty "OnceRecipient"
+  relayer <- allocateParty "OnceRelayer"
+  firstManagerCid <- deployBurnMint env admin
+  secondManagerCid <- deployBurnMint env admin
+  firstManager <- managerOf env firstManagerCid
+  secondManager <- managerOf env secondManagerCid
+  assertMsg "second registration shares the replay namespace" (firstManager.namespace /= secondManager.namespace)
+  assertMsg "second registration shares the manager address" (firstManager.managerAddress /= secondManager.managerAddress)
+
+  mintVaa <- signInboundTransfer env.guardianKey (inboundTransferTo firstManager.managerAddress recipient 1 50000000)
+  let mintVaaDigest = (parseVAA mintVaa).hash
+  mintAttempt env firstManagerCid (inboundCallBy env relayer recipient) mintVaa >>= expectAccepted "first redemption"
+  coinBalance env.gg recipient firstManager.instrumentId >>= (=== 0.5)
+
+  (secondManagerNodeCid, _) <- coveringNode env.gg secondManager.namespace mintVaaDigest
+  checkAttacksRejected
+    [ AttackCase "same VAA through the same deployment" "digest already consumed" $
+        mintAttempt env firstManagerCid (inboundCallBy env relayer recipient) mintVaa
+    , AttackCase "same VAA with the trie of another deployment" "replay node namespace mismatch" $
+        mintWithReplayNode env firstManagerCid relayer recipient secondManagerNodeCid mintVaa
+    , AttackCase "same VAA through another deployment of the same admin" "wrong recipient manager" $
+        mintAttempt env secondManagerCid (inboundCallBy env relayer recipient) mintVaa
+    , AttackCase "second gg root in the deployment's namespace, claimed by the admin" "requires authorizers" $
+        discardResult (claimReplayRootAttempt env admin env.gg firstManager.namespace)
+    , AttackCase "same VAA with a root that the admin claims for itself in the deployment's namespace" "replay node consumer mismatch" $ do
+        adminRootCid <- claimReplayRootAttempt env admin admin firstManager.namespace
+          >>= either (\submitError -> abort ("admin root claim: " <> rejectionText submitError)) pure
+        mintWithReplayNode env firstManagerCid relayer recipient adminRootCid mintVaa
+    ]
+  coinBalance env.gg recipient firstManager.instrumentId >>= (=== 0.5)

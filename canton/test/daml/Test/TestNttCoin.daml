@@ -32,20 +32,20 @@ asBurnMintFactory = toInterfaceContractId @BurnMintFactory
 -- proving genuine sharing, not per-deployment duplication.
 testNttCoinFactoryServesTwoDistinctAdmins : Script ()
 testNttCoinFactoryServesTwoDistinctAdmins = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   factoryCid <- nttCoinFactorySetup gg
   alice <- allocateParty "CoinSharedAlice"
   bob <- allocateParty "CoinSharedBob"
   let instA = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
       instB = InstrumentId with admin = gg, id = nttInstrumentIdFor bob 0
 
-  (discsA, registerA) <- registerBurnMint operator alice instA (asBurnMintFactory factoryCid) csId
+  (discsA, registerA) <- registerBurnMint gg alice instA (asBurnMintFactory factoryCid) csId
   (mgrA, _) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsA)) registerA
-  (discsB, registerB) <- registerBurnMint operator bob instB (asBurnMintFactory factoryCid) csId
+  (discsB, registerB) <- registerBurnMint gg bob instB (asBurnMintFactory factoryCid) csId
   (mgrB, _) <- submit (actAs bob <> actAs gg <> mconcat (map disclose discsB)) registerB
 
-  Some ma <- queryContractId operator mgrA
-  Some mb <- queryContractId operator mgrB
+  Some ma <- queryContractId gg mgrA
+  Some mb <- queryContractId gg mgrB
   ma.factory === BurnMintFactoryCid (asBurnMintFactory factoryCid)
   mb.factory === BurnMintFactoryCid (asBurnMintFactory factoryCid)
   assert (ma.instrumentId /= mb.instrumentId)
@@ -59,16 +59,16 @@ testNttCoinFactoryServesTwoDistinctAdmins = do
 -- VAA-driven 'Mint', since a static VAA fixture can't name a fresh Party.
 testNttCoinEndToEndRoundTrip : Script ()
 testNttCoinEndToEndRoundTrip = do
-  (operator, gg, csId) <- nttSetup
+  (gg, csId) <- nttSetup
   factoryCid <- nttCoinFactorySetup gg
   alice <- allocateParty "CoinRoundTripAlice"
   let instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor alice 0
 
-  (discsReg, register) <- registerBurnMint operator alice instrumentId (asBurnMintFactory factoryCid) csId
+  (discsReg, register) <- registerBurnMint gg alice instrumentId (asBurnMintFactory factoryCid) csId
   (mgrCid, emitterCid) <- submit (actAs alice <> actAs gg <> mconcat (map disclose discsReg)) register
-  Some mgr <- queryContractId operator mgrCid
-  csDisc0 <- fromSome <$> queryDisclosure operator csId
-  emitterDisc0 <- fromSome <$> queryDisclosure operator emitterCid
+  Some mgr <- queryContractId gg mgrCid
+  csDisc0 <- fromSome <$> queryDisclosure gg csId
+  emitterDisc0 <- fromSome <$> queryDisclosure gg emitterCid
   (mgrCid', _) <- submit (actAs alice <> disclose csDisc0 <> disclose emitterDisc0) do
     exerciseCmd mgrCid SetPeer with
       chainId = 2
@@ -78,13 +78,13 @@ testNttCoinEndToEndRoundTrip = do
       consistencyLevel = 0
       payer = alice
       feeAllocation = None
-  Some mgr' <- queryContractId operator mgrCid'
+  Some mgr' <- queryContractId gg mgrCid'
   emitterCid <- resolveEmitter gg mgr'.transceiverEmitterId   -- SetPeer's own broadcast churned it
 
   coinCid <- mintCoin (asBurnMintFactory factoryCid) gg instrumentId alice 0.01
 
-  csDisc <- fromSome <$> queryDisclosure operator csId
-  emitterDisc <- fromSome <$> queryDisclosure operator emitterCid
+  csDisc <- fromSome <$> queryDisclosure gg csId
+  emitterDisc <- fromSome <$> queryDisclosure gg emitterCid
   factoryDisc <- fromSome <$> queryDisclosure gg factoryCid
   _ <- submit (actAs alice <> disclose csDisc <> disclose emitterDisc <> disclose factoryDisc) do
     exerciseCmd mgrCid' Transfer with
