@@ -47,6 +47,8 @@ export interface CantonLedgerClientOptions {
   oauthClientId: string;
   oauthClientSecret: string;
   userPartyId: CantonPartyId;
+  /** HTTP function; defaults to fetchJsonBounded. Tests inject a recorder. */
+  fetchJson?: typeof fetchJsonBounded;
 }
 
 interface CachedAccessToken {
@@ -58,12 +60,15 @@ export class CantonLedgerClient implements CantonLedger {
   readonly userPartyId: CantonPartyId;
   private cachedAccessToken?: CachedAccessToken;
 
+  private readonly fetchJson: typeof fetchJsonBounded;
+
   constructor(private readonly options: CantonLedgerClientOptions) {
     this.userPartyId = options.userPartyId;
+    this.fetchJson = options.fetchJson ?? fetchJsonBounded;
   }
 
   private async fetchAccessToken(): Promise<CachedAccessToken> {
-    const response = await fetchJsonBounded(this.options.oauthTokenUrl.href, {
+    const response = await this.fetchJson(this.options.oauthTokenUrl.href, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -117,7 +122,7 @@ export class CantonLedgerClient implements CantonLedger {
       attemptNumber <= LEDGER_REQUEST_MAX_ATTEMPTS;
       attemptNumber++
     ) {
-      const response = await fetchJsonBounded(
+      const response = await this.fetchJson(
         url,
         {
           method,
