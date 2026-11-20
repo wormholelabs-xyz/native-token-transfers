@@ -1,0 +1,77 @@
+# Canton <-> Ethereum NTT end-to-end test on the Wormhole devnet.
+#
+#   tilt up -f Tiltfile.canton-evm -- --canton
+#
+# This brings up eth-devnet, the Canton sandbox and the guardian from the wormhole
+# repo's Tiltfile, then runs canton/e2e/run.sh as the ntt-canton-evm-e2e resource.
+# canton/e2e/README.md describes the test.
+#
+# The wormhole repo comes from wormholelabs-xyz/wormhole, branch integration/canton,
+# checked out into .wormhole-canton/. To use a local wormhole checkout instead, set
+# NTT_WORMHOLE_DIR (absolute, or relative to this file):
+#
+#   NTT_WORMHOLE_DIR=../wormhole tilt up -f Tiltfile.canton-evm -- --canton
+#
+# The root Tiltfile is separate: it runs the Solana/EVM NTT CI tests against upstream
+# wormhole and starts none of this.
+
+load("ext://git_resource", "git_checkout")
+
+WORMHOLE_REPO = "https://github.com/wormholelabs-xyz/wormhole.git#integration/canton"
+
+# The load() below needs a fixed path, so a local override is a symlink at the same path.
+WORMHOLE_CHECKOUT = ".wormhole-canton"
+
+wormhole_dir = os.getenv("NTT_WORMHOLE_DIR", "")
+if wormhole_dir:
+    wormhole_dir = os.path.abspath(wormhole_dir)
+    if not os.path.exists(os.path.join(wormhole_dir, "Tiltfile")):
+        fail("NTT_WORMHOLE_DIR=%s has no Tiltfile" % wormhole_dir)
+    local(
+        [
+            "sh",
+            "-c",
+            'if [ -e "$1" ] && [ ! -L "$1" ]; then ' +
+            'echo "$1 is a git checkout; remove it to use NTT_WORMHOLE_DIR" >&2; exit 1; fi; ' +
+            'ln -sfn "$2" "$1"',
+            "sh",
+            WORMHOLE_CHECKOUT,
+            wormhole_dir,
+        ],
+        quiet = True,
+    )
+else:
+    # Never let git_checkout reset a local checkout through a leftover symlink.
+    local(["sh", "-c", 'if [ -L "$1" ]; then rm "$1"; fi', "sh", WORMHOLE_CHECKOUT], quiet = True)
+    git_checkout(WORMHOLE_REPO, WORMHOLE_CHECKOUT + "/", unsafe_mode = True)
+
+load(".wormhole-canton/Tiltfile", "cfg", "k8s_yaml_with_ns")
+
+if not cfg.get("canton", False):
+    fail("Tiltfile.canton-evm needs the Canton component: tilt up -f Tiltfile.canton-evm -- --canton")
+
+docker_build(
+    ref = "ntt-canton-evm-e2e",
+    context = ".",
+    dockerfile = "./canton/e2e/Dockerfile",
+    only = [
+        "./evm/foundry.toml",
+        "./evm/lib",
+        "./evm/src",
+        "./evm/script",
+        "./canton/multi-package.yaml",
+        "./canton/dars",
+        "./canton/ntt",
+        "./canton/test",
+        "./canton/e2e",
+    ],
+    ignore = ["./canton/ntt/.daml", "./canton/test/.daml"],
+)
+
+k8s_yaml_with_ns("./canton/e2e/ntt-canton-evm-e2e.yaml")
+
+k8s_resource(
+    "ntt-canton-evm-e2e",
+    labels = ["ntt-canton"],
+    resource_deps = ["eth-devnet", "guardian", "canton"],
+)
