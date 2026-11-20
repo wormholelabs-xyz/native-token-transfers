@@ -40,8 +40,10 @@ import { chainLegIdentity } from "./transfer-route.js";
 import {
   checkSolanaPeerIsRegistryManager,
   parseSolanaKeypairFileText,
+  checkRegistryDecimalsMatchChain,
+  checkSolanaKeyFileMode,
   runSolanaRedeemSteps,
-  waitForSolanaConfirmation,
+  sendSignedSolanaTransaction,
   type SolanaStatusRpc,
 } from "./solana-pure.js";
 
@@ -52,6 +54,7 @@ const DEFAULT_SOLANA_RPC_BY_NETWORK = {
   Testnet: "https://rpc.labsapis.com/testnet/solana",
 } as const;
 const RPC_PROXY_ORIGIN = "https://portalbridge.com";
+const SOLANA_RPC_TIMEOUT_MS = 15_000;
 const SEQUENCE_LOG_PREFIX = "Program log: Sequence: ";
 const SOLANA_KEYPAIR_FILE_BYTES_MAX = 4096;
 const FINALIZED_WAIT_MAX_POLLS = 30;
@@ -69,6 +72,11 @@ function buildSolanaConnection(registry: PrivateRegistry): Connection {
     {
       commitment: "confirmed",
       httpHeaders: { Origin: RPC_PROXY_ORIGIN },
+      fetchMiddleware: (info, init, fetchWithInit) =>
+        fetchWithInit(info, {
+          ...init,
+          signal: AbortSignal.timeout(SOLANA_RPC_TIMEOUT_MS),
+        }),
     }
   );
 }
@@ -76,14 +84,21 @@ function buildSolanaConnection(registry: PrivateRegistry): Connection {
 function loadSolanaKeypair(): Keypair {
   const payerPath = process.env.SOLANA_PAYER_PATH;
   if (payerPath) {
-    if (fs.statSync(payerPath).size > SOLANA_KEYPAIR_FILE_BYTES_MAX) {
-      throw new Error(
-        `SOLANA_PAYER_PATH is larger than ${SOLANA_KEYPAIR_FILE_BYTES_MAX} bytes`
+    const fileDescriptor = fs.openSync(payerPath, "r");
+    try {
+      const fileStats = fs.fstatSync(fileDescriptor);
+      checkSolanaKeyFileMode(fileStats.mode);
+      if (fileStats.size > SOLANA_KEYPAIR_FILE_BYTES_MAX) {
+        throw new Error(
+          `SOLANA_PAYER_PATH is larger than ${SOLANA_KEYPAIR_FILE_BYTES_MAX} bytes`
+        );
+      }
+      return Keypair.fromSecretKey(
+        parseSolanaKeypairFileText(fs.readFileSync(fileDescriptor, "utf8"))
       );
+    } finally {
+      fs.closeSync(fileDescriptor);
     }
-    return Keypair.fromSecretKey(
-      parseSolanaKeypairFileText(fs.readFileSync(payerPath, "utf8"))
-    );
   }
   const secretKeyBase58 = process.env.SOLANA_PRIVATE_KEY;
   if (!secretKeyBase58)
@@ -175,7 +190,6 @@ async function driveTransaction(
   const { transaction, signers } = unsigned.transaction;
   const { blockhash, lastValidBlockHeight } =
     await connection.getLatestBlockhash();
-  let signature: string;
   if (isVersionedTransaction(transaction)) {
     transaction.message.recentBlockhash = blockhash;
     transaction.sign([payer, ...(signers ?? [])]);
@@ -186,7 +200,15 @@ async function driveTransaction(
       );
       return undefined;
     }
-    signature = await connection.sendTransaction(transaction);
+    const signature = encoding.b58.encode(transaction.signatures[0]);
+    console.log(`  ${unsigned.description}: tx ${signature}`);
+    await sendSignedSolanaTransaction(
+      statusRpc(connection),
+      signature,
+      lastValidBlockHeight,
+      () => connection.sendRawTransaction(transaction.serialize())
+    );
+    return signature;
   } else {
     transaction.recentBlockhash = blockhash;
     transaction.lastValidBlockHeight = lastValidBlockHeight;
@@ -204,15 +226,18 @@ async function driveTransaction(
       return undefined;
     }
     transaction.partialSign(payer, ...(signers ?? []));
-    signature = await connection.sendRawTransaction(transaction.serialize());
+    if (!transaction.signature)
+      throw new Error("signed transaction has no signature");
+    const signature = encoding.b58.encode(transaction.signature);
+    console.log(`  ${unsigned.description}: tx ${signature}`);
+    await sendSignedSolanaTransaction(
+      statusRpc(connection),
+      signature,
+      lastValidBlockHeight,
+      () => connection.sendRawTransaction(transaction.serialize())
+    );
+    return signature;
   }
-  console.log(`  ${unsigned.description}: tx ${signature}`);
-  await waitForSolanaConfirmation(
-    statusRpc(connection),
-    signature,
-    lastValidBlockHeight
-  );
-  return signature;
 }
 
 async function driveGenerator(
@@ -266,6 +291,23 @@ export async function solanaSend(
   const payer = loadSolanaKeypair();
   const ntt = buildSolanaNtt(parameters.registry, connection, solana);
   await checkPeer(ntt, parameters.deployment, parameters.destinationChain);
+  const nttConfig = await ntt.getConfig();
+  if (!nttConfig.mint.equals(new PublicKey(solana.mint))) {
+    throw new Error(
+      `Solana NttManager mint is ${nttConfig.mint.toBase58()}; the registry mint is ${solana.mint}`
+    );
+  }
+  const mintInfo = await splToken.getMint(
+    connection,
+    nttConfig.mint,
+    "confirmed",
+    nttConfig.tokenProgram
+  );
+  checkRegistryDecimalsMatchChain(
+    mintInfo.decimals,
+    solana.decimals,
+    `Solana mint ${solana.mint}`
+  );
 
   const destination = {
     chain: parameters.destinationChain as Chain,
@@ -317,6 +359,11 @@ export async function solanaRedeem(
   const ntt = buildSolanaNtt(parameters.registry, connection, solana);
   const attestation = deserialize("Ntt:WormholeTransfer", parameters.vaaBytes);
 
+  if (options.dryRun) {
+    console.log(
+      "  [dry-run] each transaction simulates alone; a step that needs an earlier step shows ERROR"
+    );
+  }
   const signature = await runSolanaRedeemSteps(
     {
       async checkRecipientTokenAccount() {

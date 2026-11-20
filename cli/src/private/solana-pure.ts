@@ -41,9 +41,10 @@ export class SolanaTransactionExpiredError extends Error {
 }
 
 export class SolanaConfirmationUnknownError extends Error {
-  constructor(signature: string, waitedMs: number) {
+  constructor(signature: string, waitedMs: number, sendErrorText?: string) {
     super(
-      `${signature} not confirmed after ${waitedMs} ms and its blockhash is still valid; result unknown, check the signature before a retry`
+      `${signature}: result unknown${sendErrorText ? ` (send error: ${sendErrorText})` : ` after ${waitedMs} ms`}; ` +
+        `check the signature on an explorer before a retry`
     );
     this.name = "SolanaConfirmationUnknownError";
   }
@@ -90,12 +91,70 @@ export async function waitForSolanaConfirmation(
     )
       return;
     if ((await rpc.getBlockHeight()) > lastValidBlockHeight) {
+      // The status and height reads can reach different nodes: read the status again.
+      const recheckedStatus =
+        await rpc.getSignatureConfirmationStatus(signature);
+      if (recheckedStatus?.failed)
+        throw new Error(`${signature} failed on chain`);
+      if (
+        recheckedStatus?.confirmationStatus === "confirmed" ||
+        recheckedStatus?.confirmationStatus === "finalized"
+      )
+        return;
+      if (recheckedStatus) {
+        throw new SolanaConfirmationUnknownError(
+          signature,
+          Date.now() - startedMs
+        );
+      }
       throw new SolanaTransactionExpiredError(signature, lastValidBlockHeight);
     }
     if (Date.now() - startedMs >= bounds.wallClockCapMs) break;
     await bounds.sleep(bounds.pollIntervalMs);
   }
   throw new SolanaConfirmationUnknownError(signature, Date.now() - startedMs);
+}
+
+/** Sends a signed transaction. An error after the signature leaves the result unknown. */
+export async function sendSignedSolanaTransaction(
+  rpc: SolanaStatusRpc,
+  signature: string,
+  lastValidBlockHeight: number,
+  send: () => Promise<unknown>,
+  bounds: SolanaConfirmationBounds = DEFAULT_SOLANA_CONFIRMATION_BOUNDS
+): Promise<void> {
+  try {
+    await send();
+  } catch (err) {
+    throw new SolanaConfirmationUnknownError(
+      signature,
+      0,
+      (err as Error).message
+    );
+  }
+  await waitForSolanaConfirmation(rpc, signature, lastValidBlockHeight, bounds);
+}
+
+const KEY_FILE_GROUP_AND_OTHER_BITS = 0o077;
+
+export function checkSolanaKeyFileMode(fileMode: number): void {
+  if ((fileMode & KEY_FILE_GROUP_AND_OTHER_BITS) !== 0) {
+    throw new Error(
+      `SOLANA_PAYER_PATH has mode ${(fileMode & 0o777).toString(8)}; other users can read it. Run chmod 600 on it.`
+    );
+  }
+}
+
+export function checkRegistryDecimalsMatchChain(
+  onChainDecimals: number,
+  registryDecimals: number,
+  context: string
+): void {
+  if (onChainDecimals !== registryDecimals) {
+    throw new Error(
+      `${context} has ${onChainDecimals} decimals; the registry says ${registryDecimals}`
+    );
+  }
 }
 
 export function checkSolanaPeerIsRegistryManager(
