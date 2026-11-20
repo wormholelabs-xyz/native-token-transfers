@@ -8,10 +8,14 @@
 -- outside a VAA path. It creates only the five roots, and it checks each one
 -- against the agreed parameters.
 --
--- A re-genesis for a gg that ran governance before carries the consumed
--- governance digests and the id floors of the earlier roots. The seeds keep
--- each earlier governance VAA consumed on the new 'CoreState' and
--- 'NttGovernance', and keep each new emitter and manager id above the earlier ones.
+-- A re-genesis ('ReGenesisReplacing') names the earlier 'CoreState',
+-- 'EmitterRegistry', 'ReplayRootRegistry' and 'NttGovernance'. 'AcceptGenesis'
+-- checks that the parameters carry their consumed governance digests and
+-- their next ids, archives them, and creates the new roots in the same
+-- transaction. Thus one gg has one set of active roots, each earlier
+-- governance VAA stays consumed, and each new emitter and manager id is above
+-- the earlier ones. The earlier 'CoinFactory' stays active: burn/mint managers
+-- hold its cid.
 module Wormhole.Genesis where
 
 import DA.Foldable (forA_)
@@ -23,14 +27,31 @@ import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Core.Bytes (Bytes32, isLowerHex, normalizeHex)
 import Wormhole.Core.GuardianSet (checkGuardianAddressesAreWellFormed)
 import Wormhole.Core.Setup
-  ( GenesisGuardianSet (..), RegistryParties (..), cantonChainId
-  , mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry )
-import Wormhole.Core.State (CoreState (..), EmitterRegistry (..), ReplayRootRegistry (..))
+  ( GenesisGuardianSet (..), RegistryParties (..), cantonChainId, defaultGovernanceContract
+  , mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId )
+import Wormhole.Core.State (CoreState (..), EmitterRegistry (..), ReplayRootRegistry (..), maxEmitterId)
 import Wormhole.Ntt.Governance (NttGovernance (..))
 
 -- | Bound of each consumed governance digest list in 'GenesisParameters'.
 maxGenesisConsumedGovernanceDigests : Int
 maxGenesisConsumedGovernanceDigests = 1024
+
+-- | 2^53 - 1, as core 'maxEmitterId': manager ids stay exact in JSON doubles.
+maxNttManagerId : Int
+maxNttManagerId = 9007199254740991
+
+-- | The roots that a re-genesis archives.
+data EarlierGenesisRoots = EarlierGenesisRoots with
+    coreStateCid          : ContractId CoreState
+    emitterRegistryCid    : ContractId EmitterRegistry
+    replayRootRegistryCid : ContractId ReplayRootRegistry
+    nttGovernanceCid      : ContractId NttGovernance
+  deriving (Eq, Show)
+
+data GenesisKind
+  = FirstGenesis
+  | ReGenesisReplacing EarlierGenesisRoots
+  deriving (Eq, Show)
 
 -- | Every genesis parameter. Each gg owner compares it with its agreed copy.
 data GenesisParameters = GenesisParameters with
@@ -49,6 +70,7 @@ data GenesisParameters = GenesisParameters with
     firstNttManagerId             : Int                 -- NttGovernance nextId; the earlier root's nextId on a re-genesis
     consumedCoreGovernanceDigests : [Bytes32]           -- CoreState consumedGovernance of the earlier roots
     consumedNttGovernanceDigests  : [Bytes32]           -- NttGovernance consumedGovernance of the earlier roots
+    genesisKind                   : GenesisKind
   deriving (Eq, Show)
 
 -- | The contracts that 'AcceptGenesis' creates.
@@ -75,8 +97,8 @@ template WormholeGenesisOffer
     ensure checkConsumedGovernanceDigestListsAreBounded parameters
 
     -- | Creates the five roots. Authority: the actors gg, feeCustody and
-    -- nttCustody sign each root; the operator signs only this offer, which the
-    -- choice archives.
+    -- nttCustody sign each root and each earlier root that a re-genesis
+    -- archives; the operator signs only this offer, which the choice archives.
     choice AcceptGenesis : GenesisRoots
       with
         agreedParameters : GenesisParameters
@@ -84,6 +106,9 @@ template WormholeGenesisOffer
       do
         assertMsg "genesis: agreed parameters differ from the offer" (agreedParameters == parameters)
         either assertFail pure (checkGenesisParametersAreWellFormed parameters)
+        case parameters.genesisKind of
+          FirstGenesis -> either assertFail pure (checkFirstGenesisStartsEmpty parameters)
+          ReGenesisReplacing earlierRoots -> archiveEarlierRootsMatchingParameters parameters earlierRoots
         roots <- createGenesisRoots parameters
         checkGenesisRootsMatchParameters parameters roots
         pure roots
@@ -97,8 +122,17 @@ template WormholeGenesisOffer
 checkGenesisParametersAreWellFormed : GenesisParameters -> Either Text ()
 checkGenesisParametersAreWellFormed parameters = do
   checkGuardianAddressesAreWellFormed parameters.genesisGuardianSet.guardianAddresses
+  assertMsg "genesis: governance chain is not the Wormhole governance chain"
+    (parameters.governanceChainId == solanaGovernanceChainId)
+  assertMsg "genesis: governance contract is not the Wormhole governance contract"
+    (parameters.governanceContract == defaultGovernanceContract)
+  assertMsg "genesis: fee custody party is guardianGovernance" (parameters.feeCustody /= parameters.guardianGovernance)
+  assertMsg "genesis: NTT custody party is guardianGovernance" (parameters.nttCustody /= parameters.guardianGovernance)
+  assertMsg "genesis: fee custody party is the NTT custody party" (parameters.feeCustody /= parameters.nttCustody)
   assertMsg "genesis: first emitter id is negative" (parameters.firstEmitterId >= 0)
+  assertMsg "genesis: first emitter id exceeds the bound" (parameters.firstEmitterId <= maxEmitterId + 1)
   assertMsg "genesis: first NTT manager id is negative" (parameters.firstNttManagerId >= 0)
+  assertMsg "genesis: first NTT manager id exceeds the bound" (parameters.firstNttManagerId <= maxNttManagerId)
   assertMsg "genesis: consumed core governance digests exceed the bound"
     (length parameters.consumedCoreGovernanceDigests <= maxGenesisConsumedGovernanceDigests)
   assertMsg "genesis: consumed NTT governance digests exceed the bound"
@@ -110,6 +144,41 @@ checkGenesisParametersAreWellFormed parameters = do
     (length (dedup parameters.consumedCoreGovernanceDigests) == length parameters.consumedCoreGovernanceDigests)
   assertMsg "genesis: duplicate consumed NTT governance digest"
     (length (dedup parameters.consumedNttGovernanceDigests) == length parameters.consumedNttGovernanceDigests)
+
+checkFirstGenesisStartsEmpty : GenesisParameters -> Either Text ()
+checkFirstGenesisStartsEmpty parameters = do
+  assertMsg "genesis: a first genesis starts at emitter id 0" (parameters.firstEmitterId == 0)
+  assertMsg "genesis: a first genesis starts at NTT manager id 0" (parameters.firstNttManagerId == 0)
+  assertMsg "genesis: a first genesis has no consumed core governance digest" (null parameters.consumedCoreGovernanceDigests)
+  assertMsg "genesis: a first genesis has no consumed NTT governance digest" (null parameters.consumedNttGovernanceDigests)
+
+-- | Fetches the earlier roots, checks that the parameters carry their parties,
+-- next ids and consumed digests, then archives them.
+archiveEarlierRootsMatchingParameters : GenesisParameters -> EarlierGenesisRoots -> Update ()
+archiveEarlierRootsMatchingParameters parameters earlierRoots = do
+  let gg = parameters.guardianGovernance
+  earlierCoreState <- fetch earlierRoots.coreStateCid
+  earlierEmitterRegistry <- fetch earlierRoots.emitterRegistryCid
+  earlierReplayRootRegistry <- fetch earlierRoots.replayRootRegistryCid
+  earlierNttGovernance <- fetch earlierRoots.nttGovernanceCid
+  assertMsg "genesis: earlier CoreState has another guardianGovernance" (earlierCoreState.guardianGovernance == gg)
+  assertMsg "genesis: earlier CoreState has another fee custody party" (earlierCoreState.feeRecipient == parameters.feeCustody)
+  assertMsg "genesis: earlier EmitterRegistry has another guardianGovernance" (earlierEmitterRegistry.guardianGovernance == gg)
+  assertMsg "genesis: earlier ReplayRootRegistry has another guardianGovernance" (earlierReplayRootRegistry.guardianGovernance == gg)
+  assertMsg "genesis: earlier NttGovernance has another guardianGovernance" (earlierNttGovernance.guardianGovernance == gg)
+  assertMsg "genesis: earlier NttGovernance has another NTT custody party" (earlierNttGovernance.nttCustody == parameters.nttCustody)
+  assertMsg "genesis: first emitter id differs from the earlier EmitterRegistry nextId"
+    (parameters.firstEmitterId == earlierEmitterRegistry.nextId)
+  assertMsg "genesis: first NTT manager id differs from the earlier NttGovernance nextId"
+    (parameters.firstNttManagerId == earlierNttGovernance.nextId)
+  assertMsg "genesis: consumed core governance digests differ from the earlier CoreState"
+    (Set.fromList parameters.consumedCoreGovernanceDigests == earlierCoreState.consumedGovernance)
+  assertMsg "genesis: consumed NTT governance digests differ from the earlier NttGovernance"
+    (Set.fromList parameters.consumedNttGovernanceDigests == earlierNttGovernance.consumedGovernance)
+  archive earlierRoots.coreStateCid
+  archive earlierRoots.emitterRegistryCid
+  archive earlierRoots.replayRootRegistryCid
+  archive earlierRoots.nttGovernanceCid
 
 registryPartiesOf : GenesisParameters -> RegistryParties
 registryPartiesOf parameters = RegistryParties with
@@ -148,6 +217,7 @@ checkGenesisRootsMatchParameters parameters roots = do
   let gg = parameters.guardianGovernance
   coreState <- fetch roots.coreStateCid
   checkSignatoriesAre "CoreState" [gg, parameters.feeCustody] (signatory coreState)
+  assertMsg "genesis: CoreState has observers" (null (observer coreState))
   assertMsg "genesis: CoreState guardianGovernance" (coreState.guardianGovernance == gg)
   assertMsg "genesis: CoreState chainId" (coreState.chainId == cantonChainId)
   assertMsg "genesis: CoreState governanceChainId" (coreState.governanceChainId == parameters.governanceChainId)
@@ -164,6 +234,7 @@ checkGenesisRootsMatchParameters parameters roots = do
 
   emitterRegistry <- fetch roots.emitterRegistryCid
   checkSignatoriesAre "EmitterRegistry" [gg] (signatory emitterRegistry)
+  assertMsg "genesis: EmitterRegistry has observers" (null (observer emitterRegistry))
   assertMsg "genesis: EmitterRegistry guardianGovernance" (emitterRegistry.guardianGovernance == gg)
   assertMsg "genesis: EmitterRegistry onboardingFeeAdmin" (emitterRegistry.onboardingFeeAdmin == parameters.onboardingFeeAdmin)
   assertMsg "genesis: EmitterRegistry registrationFee" (emitterRegistry.registrationFee == parameters.registrationFee)
@@ -171,12 +242,14 @@ checkGenesisRootsMatchParameters parameters roots = do
 
   replayRootRegistry <- fetch roots.replayRootRegistryCid
   checkSignatoriesAre "ReplayRootRegistry" [gg] (signatory replayRootRegistry)
+  assertMsg "genesis: ReplayRootRegistry has observers" (null (observer replayRootRegistry))
   assertMsg "genesis: ReplayRootRegistry guardianGovernance" (replayRootRegistry.guardianGovernance == gg)
   assertMsg "genesis: ReplayRootRegistry onboardingFeeAdmin" (replayRootRegistry.onboardingFeeAdmin == parameters.onboardingFeeAdmin)
   assertMsg "genesis: ReplayRootRegistry claimFee" (replayRootRegistry.claimFee == parameters.replayRootClaimFee)
 
   nttGovernance <- fetch roots.nttGovernanceCid
   checkSignatoriesAre "NttGovernance" [gg, parameters.nttCustody] (signatory nttGovernance)
+  assertMsg "genesis: NttGovernance has observers" (null (observer nttGovernance))
   assertMsg "genesis: NttGovernance guardianGovernance" (nttGovernance.guardianGovernance == gg)
   assertMsg "genesis: NttGovernance nttCustody" (nttGovernance.nttCustody == parameters.nttCustody)
   assertMsg "genesis: NttGovernance nextId" (nttGovernance.nextId == parameters.firstNttManagerId)
@@ -185,4 +258,5 @@ checkGenesisRootsMatchParameters parameters roots = do
 
   coinFactory <- fetch roots.coinFactoryCid
   checkSignatoriesAre "CoinFactory" [gg] (signatory coinFactory)
+  assertMsg "genesis: CoinFactory has observers" (null (observer coinFactory))
   assertMsg "genesis: CoinFactory admin" (coinFactory.admin == gg)

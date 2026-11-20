@@ -1,8 +1,7 @@
 # The genesis package: the operator offers every genesis parameter, and the
 # guardians accept once. AcceptGenesis creates the core and NTT roots that gg
-# signs. Templates only, no daml-script, so it can be uploaded to a participant.
-# After genesis, each gg host can unvet this package: no contract of it stays
-# active.
+# signs. Templates only, so it can be uploaded to a participant. AcceptGenesis
+# archives the offer, so after genesis each gg and custody host can unvet it.
 sdk-version: 3.5.1
 name: wormhole-genesis
 version: 0.1.0

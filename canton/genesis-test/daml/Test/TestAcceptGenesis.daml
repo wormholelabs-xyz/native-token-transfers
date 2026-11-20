@@ -156,7 +156,7 @@ discardResult = fmap (fmap (const ()))
 -- | Expected rejection of a submission: an error kind, or a substring of the abort message.
 data ExpectedRejection
   = RejectedForMissingAuthorization
-  | RejectedForInactiveContract
+  | RejectedForUnknownContract
   | RejectedWithMessage Text
   deriving (Eq, Show)
 
@@ -168,7 +168,7 @@ checkRejection : Text -> ExpectedRejection -> Either SubmitError () -> Script ()
 checkRejection caseName expectedRejection result = case (expectedRejection, result) of
   (_, Right _) -> abort (caseName <> ": accepted")
   (RejectedForMissingAuthorization, Left (AuthorizationError _)) -> pure ()
-  (RejectedForInactiveContract, Left (ContractNotFound {})) -> pure ()
+  (RejectedForUnknownContract, Left (ContractNotFound {})) -> pure ()
   (RejectedWithMessage expectedText, Left submitError)
     | expectedText `T.isInfixOf` rejectionText submitError -> pure ()
   (_, Left submitError) ->
@@ -385,10 +385,10 @@ testAcceptGenesisRejects = do
               exerciseCmd offerCid AcceptGenesis with agreedParameters = offered
         , GenesisRejectionCase "withdraw by gg" RejectedForMissingAuthorization True \parties _ offerCid ->
             discardResult $ trySubmit parties.guardianGovernance do exerciseCmd offerCid WithdrawGenesisOffer
-        , GenesisRejectionCase "accept twice" RejectedForInactiveContract False \_ offered offerCid -> do
+        , GenesisRejectionCase "accept twice" RejectedForUnknownContract False \_ offered offerCid -> do
             _ <- acceptGenesisRoots offered offerCid
             discardResult (acceptAsGuardians offered offerCid offered)
-        , GenesisRejectionCase "accept after withdrawal" RejectedForInactiveContract False \parties offered offerCid -> do
+        , GenesisRejectionCase "accept after withdrawal" RejectedForUnknownContract False \parties offered offerCid -> do
             submit parties.operator do exerciseCmd offerCid WithdrawGenesisOffer
             discardResult (acceptAsGuardians offered offerCid offered)
         ]
@@ -552,18 +552,19 @@ testReGenesisReplacesEarlierRoots = do
         discardResult (relayCoreGovernance gg newRoots.coreStateCid relayer history.transferFeesVaa key)
     , ReplayCase "earlier RegisterBurnMintManager on the new root" (RejectedWithMessage "registration VAA already consumed") $
         discardResult (registerManagerByVaaAttempt gg newRoots admin history.registerVaa key)
-    , ReplayCase "fresh RegisterBurnMintManager on the archived root" RejectedForInactiveContract $
+    , ReplayCase "fresh RegisterBurnMintManager on the archived root" RejectedForUnknownContract $
         discardResult (registerManagerByVaaAttempt gg history.earlierRoots admin freshRegisterVaa key)
-    , ReplayCase "fresh TransferFees on the archived CoreState" RejectedForInactiveContract $
+    , ReplayCase "fresh TransferFees on the archived CoreState" RejectedForUnknownContract $
         discardResult (relayCoreGovernance gg history.earlierRoots.coreStateCid relayer freshTransferFeesVaa key)
     ]
 
   -- Control: fresh VAAs apply on the new roots, and the new ids start at the floors.
-  _ <- relayCoreGovernance gg newRoots.coreStateCid relayer freshTransferFeesVaa key >>= expectSuccess "fresh TransferFees"
+  newCoreStateCid <- relayCoreGovernance gg newRoots.coreStateCid relayer freshTransferFeesVaa key >>= expectSuccess "fresh TransferFees"
   feeWithdrawals <- query @FeeWithdrawalAuthorization gg
   sort [ withdrawal.vaaHash | (_, withdrawal) <- feeWithdrawals ]
     === sort [(parseVAA history.transferFeesVaa).hash, (parseVAA freshTransferFeesVaa).hash]
-  newManagerCid <- registerManagerByVaaAttempt gg newRoots admin freshRegisterVaa key >>= expectSuccess "fresh RegisterBurnMintManager"
+  newManagerCid <- registerManagerByVaaAttempt gg (newRoots with coreStateCid = newCoreStateCid) admin freshRegisterVaa key
+    >>= expectSuccess "fresh RegisterBurnMintManager"
   Some newManager <- queryContractId gg newManagerCid
   newManager.managerId === history.earlierManager.managerId + 1
   assertMsg "the new manager reuses the earlier manager address" (newManager.managerAddress /= history.earlierManager.managerAddress)
@@ -619,9 +620,9 @@ testReGenesisRejectsParametersThatDifferFromTheEarlierRoots = do
         , ReGenesisRejectionCase "another NTT custody party"
             (RejectedWithMessage "genesis: earlier NttGovernance has another NTT custody party") $
               acceptReGenesisWith \parameters -> parameters with nttCustody = parameters.onboardingFeeAdmin
-        , ReGenesisRejectionCase "earlier roots of another bridge" RejectedForMissingAuthorization $
+        , ReGenesisRejectionCase "earlier roots of another bridge" RejectedForUnknownContract $
             acceptReGenesisWith (withEarlierRoots (const (earlierGenesisRootsOf otherHistory.earlierRoots)))
-        , ReGenesisRejectionCase "earlier CoreState superseded by governance" RejectedForInactiveContract \history parameters -> do
+        , ReGenesisRejectionCase "earlier CoreState superseded by governance" RejectedForUnknownContract \history parameters -> do
             freshFeeVaa <- signGovernanceVaa history.key 9 (setMessageFeePayload 2000)
             _ <- relayCoreGovernance history.parties.guardianGovernance history.earlierRoots.coreStateCid history.relayer freshFeeVaa history.key
               >>= expectSuccess "SetMessageFee"
@@ -635,6 +636,6 @@ testReGenesisRejectsParametersThatDifferFromTheEarlierRoots = do
     history <- genesisWithHistory ("Differ" <> show position)
     reGenesisParameters <- reGenesisParametersFor history
     rejectionCase.attempt history reGenesisParameters >>= checkRejection rejectionCase.caseName rejectionCase.expectedRejection
-    if rejectionCase.expectedRejection == RejectedForInactiveContract
+    if rejectionCase.caseName == "earlier CoreState superseded by governance"
       then pure ()
       else checkEarlierRootsActivity rejectionCase.caseName True history
