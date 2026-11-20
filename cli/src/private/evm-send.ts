@@ -40,6 +40,12 @@ const tokenInterface = new Interface([
   "function allowance(address, address) view returns (uint256)",
   "function approve(address, uint256) returns (bool)",
 ]);
+const tokenReadInterface = new Interface([
+  "function decimals() view returns (uint8)",
+]);
+const managerTokenInterface = new Interface([
+  "function token() view returns (address)",
+]);
 const transceiverInterface = new Interface(["function receiveMessage(bytes)"]);
 
 export interface EthereumTransactionRequest {
@@ -60,12 +66,9 @@ export interface EthereumReceiptSummary {
   logs: readonly EthereumLogSummary[];
 }
 
-export interface EthereumBroadcast {
+export interface SignedEthereumTransaction {
+  signedTransactionHex: string;
   hash: string;
-  waitForReceipt(
-    confirmations: number,
-    timeoutMs: number
-  ): Promise<EthereumReceiptSummary | null>;
 }
 
 export interface EthereumSigner {
@@ -73,7 +76,15 @@ export interface EthereumSigner {
   getChainId(): Promise<bigint>;
   call(request: EthereumTransactionRequest): Promise<string>;
   estimateGas(request: EthereumTransactionRequest): Promise<bigint>;
-  broadcast(request: EthereumTransactionRequest): Promise<EthereumBroadcast>;
+  signTransaction(
+    request: EthereumTransactionRequest
+  ): Promise<SignedEthereumTransaction>;
+  broadcastSignedTransaction(signed: SignedEthereumTransaction): Promise<void>;
+  waitForReceipt(
+    hash: string,
+    confirmations: number,
+    timeoutMs: number
+  ): Promise<EthereumReceiptSummary | null>;
 }
 
 export class TransferBroadcastUnconfirmedError extends Error {
@@ -92,34 +103,37 @@ export class TransferBroadcastUnconfirmedError extends Error {
 
 type BroadcastOutcome =
   | { kind: "confirmed"; receipt: EthereumReceiptSummary }
+  | { kind: "reverted"; txHash: string }
   | { kind: "broadcastUnconfirmed"; txHash: string; cause: Error };
 
+/** Signs, prints the hash, then broadcasts. Every error after the signature is "unconfirmed". */
 async function broadcastAndWait(
   signer: EthereumSigner,
   request: EthereumTransactionRequest,
   description: string
 ): Promise<BroadcastOutcome> {
-  const broadcast = await signer.broadcast(request);
-  console.log(`  ${description}: tx ${broadcast.hash}`);
+  const signed = await signer.signTransaction(request);
+  console.log(`  ${description}: tx ${signed.hash}`);
   try {
-    const receipt = await broadcast.waitForReceipt(
+    await signer.broadcastSignedTransaction(signed);
+    const receipt = await signer.waitForReceipt(
+      signed.hash,
       EVM_RECEIPT_CONFIRMATIONS,
       EVM_RECEIPT_WAIT_TIMEOUT_MS
     );
-    if (!receipt)
+    if (!receipt) {
       return {
         kind: "broadcastUnconfirmed",
-        txHash: broadcast.hash,
+        txHash: signed.hash,
         cause: new Error("no receipt"),
       };
-    if (receipt.status !== 1)
-      throw new Error(`${description} ${broadcast.hash} reverted on chain`);
+    }
+    if (receipt.status !== 1) return { kind: "reverted", txHash: signed.hash };
     return { kind: "confirmed", receipt };
   } catch (err) {
-    if ((err as Error).message.includes("reverted on chain")) throw err;
     return {
       kind: "broadcastUnconfirmed",
-      txHash: broadcast.hash,
+      txHash: signed.hash,
       cause: err as Error,
     };
   }
@@ -131,6 +145,9 @@ async function broadcastConfirmedOrThrow(
   description: string
 ): Promise<EthereumReceiptSummary> {
   const outcome = await broadcastAndWait(signer, request, description);
+  if (outcome.kind === "reverted") {
+    throw new Error(`${description} ${outcome.txHash} reverted on chain`);
+  }
   if (outcome.kind === "broadcastUnconfirmed") {
     throw new TransferBroadcastUnconfirmedError(
       description,
@@ -187,6 +204,43 @@ export async function checkManagerPeerIsRegistryManager(
   if (peerManager !== expectedPeerManager) {
     throw new Error(
       `NttManager ${manager} peer for chain ${destinationChainId} is 0x${peerManager}; the registry manager is 0x${expectedPeerManager}`
+    );
+  }
+}
+
+/** The manager token and its decimals must equal the registry values. */
+export async function checkTokenMatchesRegistry(
+  signer: EthereumSigner,
+  manager: EvmAddress,
+  token: EvmAddress,
+  registryDecimals: number
+): Promise<void> {
+  const managerTokenResult = await signer.call({
+    to: manager,
+    data: managerTokenInterface.encodeFunctionData("token", []),
+    value: 0n,
+  });
+  const [managerToken] = managerTokenInterface.decodeFunctionResult(
+    "token",
+    managerTokenResult
+  );
+  if (String(managerToken).toLowerCase() !== token.toLowerCase()) {
+    throw new Error(
+      `NttManager ${manager} token is ${managerToken}; the registry token is ${token}`
+    );
+  }
+  const decimalsResult = await signer.call({
+    to: token,
+    data: tokenReadInterface.encodeFunctionData("decimals", []),
+    value: 0n,
+  });
+  const [onChainDecimals] = tokenReadInterface.decodeFunctionResult(
+    "decimals",
+    decimalsResult
+  );
+  if (Number(onChainDecimals) !== registryDecimals) {
+    throw new Error(
+      `token ${token} has ${onChainDecimals} decimals; the registry says ${registryDecimals}`
     );
   }
 }
@@ -267,6 +321,12 @@ export async function evmSendWithSigner(
   ).manager;
 
   await checkEthereumChainId(signer, parameters.registry.network);
+  await checkTokenMatchesRegistry(
+    signer,
+    ethereum.manager,
+    ethereum.token,
+    ethereum.decimals
+  );
   await checkManagerPeerIsRegistryManager(
     signer,
     ethereum.manager,
