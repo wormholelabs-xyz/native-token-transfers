@@ -12,7 +12,11 @@ const server = Bun.serve({
   port: 0,
   async fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname === "/hang") return new Promise<Response>(() => {});
+    if (url.pathname === "/hang") {
+      return new Promise<Response>((resolve) =>
+        setTimeout(() => resolve(new Response("late")), 1000)
+      );
+    }
     if (url.pathname === "/streamed-big") {
       const stream = new ReadableStream({
         start(controller) {
