@@ -20,14 +20,13 @@ import {
   isRedeemed,
   isSourceFinalized,
   isSourceInitiated,
-  routes,
   signSendWait,
   finality,
   isNative,
   guardians,
   chainToPlatform,
 } from "@wormhole-foundation/sdk-connect";
-import "@wormhole-foundation/sdk-definitions-ntt";
+import * as routes from "@wormhole-foundation/sdk-connect/routes";
 import { NttRoute } from "./types.js";
 
 type Op = NttRoute.Options;
@@ -158,25 +157,33 @@ export class NttManualRoute<N extends Network>
         amount: dstAmount,
       },
       eta:
+        params.normalizedParams.sourceContracts.eta ??
         finality.estimateFinalityTime(request.fromChain.chain) +
-        guardians.guardianAttestationEta * 1000,
+          guardians.guardianAttestationEta * 1000,
     };
-    const { fromChain, toChain } = request;
-    const dstNtt = await toChain.getProtocol("Ntt", {
-      ntt: params.normalizedParams.destinationContracts,
-    });
-    const duration = await dstNtt.getRateLimitDuration();
-    if (duration > 0n) {
-      const capacity = await dstNtt.getCurrentInboundCapacity(fromChain.chain);
-      if (
-        NttRoute.isCapacityThresholdExceeded(amount.units(dstAmount), capacity)
-      ) {
-        result.warnings = [
-          {
-            type: "DestinationCapacityWarning",
-            delayDurationSec: Number(duration),
-          },
-        ];
+    if (!params.options.skipDstRateLimitCheck) {
+      const { fromChain, toChain } = request;
+      const dstNtt = await toChain.getProtocol("Ntt", {
+        ntt: params.normalizedParams.destinationContracts,
+      });
+      const duration = await dstNtt.getRateLimitDuration();
+      if (duration > 0n) {
+        const capacity = await dstNtt.getCurrentInboundCapacity(
+          fromChain.chain
+        );
+        if (
+          NttRoute.isCapacityThresholdExceeded(
+            amount.units(dstAmount),
+            capacity
+          )
+        ) {
+          result.warnings = [
+            {
+              type: "DestinationCapacityWarning",
+              delayDurationSec: Number(duration),
+            },
+          ];
+        }
       }
     }
     return result;

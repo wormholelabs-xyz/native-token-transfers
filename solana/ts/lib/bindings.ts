@@ -7,7 +7,7 @@ export interface IdlBinding<V extends IdlVersion> {
   idl: {
     ntt: NttBindings.NativeTokenTransfer<V>;
     transceiver: NttBindings.Transceiver<V>;
-    quoter: NttBindings.Quoter<V>;
+    transceiverLegacy: NttBindings.TransceiverLegacy<V>;
   };
 }
 
@@ -26,20 +26,20 @@ export namespace NttBindings {
   export type NativeTokenTransfer<V extends IdlVersion> = V extends "1.0.0"
     ? _1_0_0.RawExampleNativeTokenTransfers
     : V extends "2.0.0"
-    ? _2_0_0.RawExampleNativeTokenTransfers
-    : _3_0_0.RawExampleNativeTokenTransfers;
-
-  export type Quoter<V extends IdlVersion> = V extends "1.0.0"
-    ? _1_0_0.RawNttQuoter
-    : V extends "2.0.0"
-    ? _2_0_0.RawNttQuoter
-    : _3_0_0.RawNttQuoter;
+      ? _2_0_0.RawExampleNativeTokenTransfers
+      : _3_0_0.RawExampleNativeTokenTransfers;
 
   export type Transceiver<V extends IdlVersion> = V extends "1.0.0"
     ? _1_0_0.RawExampleNativeTokenTransfers
     : V extends "2.0.0"
-    ? _2_0_0.RawExampleNativeTokenTransfers
-    : _3_0_0.RawNttTransceiver;
+      ? _2_0_0.RawExampleNativeTokenTransfers
+      : _3_0_0.RawNttTransceiver;
+
+  export type TransceiverLegacy<V extends IdlVersion> = V extends "1.0.0"
+    ? _1_0_0.RawExampleNativeTokenTransfers
+    : V extends "2.0.0"
+      ? _2_0_0.RawExampleNativeTokenTransfers
+      : _3_0_0.RawNttTransceiverLegacy;
 
   type ProgramAccounts<V extends IdlVersion> = IdlAccounts<
     NttBindings.NativeTokenTransfer<V>
@@ -74,25 +74,17 @@ export function getNttProgram<V extends IdlVersion>(
 export function getTransceiverProgram<V extends IdlVersion>(
   connection: Connection,
   address: string,
-  version: V
+  version: V,
+  useLegacy: boolean = false
 ) {
   const {
-    idl: { transceiver },
+    idl: { transceiver, transceiverLegacy },
   } = loadIdlVersion(version);
-  return new Program<NttBindings.Transceiver<V>>(transceiver, address, {
-    connection,
-  });
-}
 
-export function getQuoterProgram<V extends IdlVersion>(
-  connection: Connection,
-  address: string,
-  version: V
-) {
-  const {
-    idl: { quoter },
-  } = loadIdlVersion(version);
-  return new Program<NttBindings.Quoter<V>>(quoter, address, {
+  // Use legacy IDL when useLegacy is true (i.e., when svmShims is not set)
+  const selectedIdl = useLegacy ? transceiverLegacy : transceiver;
+
+  return new Program<NttBindings.Transceiver<V>>(selectedIdl as any, address, {
     connection,
   });
 }

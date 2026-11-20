@@ -1,0 +1,63 @@
+name: Vendor provenance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "vendor/**"
+      - ".github/workflows/vendor-provenance.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "vendor/**"
+
+permissions:
+  contents: read
+
+jobs:
+  vendor-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SDK_REPOSITORY: https://github.com/wormhole-foundation/wormhole-sdk-ts.git
+      SDK_TAG: "6.1.6"
+      SDK_TAG_COMMIT: 2a8ea439ef7c928aa0d0d139ec008c1a11909b2a
+      PACKED_VERSION: "6.1.6"
+      TARBALL: vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz
+      PATCH: vendor/sdk-base-6.1.6-canton.patch
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.22.1
+      - name: Check committed tarball against vendor/README.md
+        run: |
+          expected_tarball_sha256=$(grep -oE 'tarball sha256: `[0-9a-f]{64}`' vendor/README.md | grep -oE '[0-9a-f]{64}')
+          test -n "$expected_tarball_sha256"
+          echo "$expected_tarball_sha256  $TARBALL" | sha256sum --check --strict
+      - name: Rebuild sdk-base from the upstream tag plus the Canton patch
+        run: |
+          git clone --quiet --depth 1 --branch "$SDK_TAG" "$SDK_REPOSITORY" "$RUNNER_TEMP/sdk"
+          test "$(git -C "$RUNNER_TEMP/sdk" rev-parse HEAD)" = "$SDK_TAG_COMMIT"
+          git -C "$RUNNER_TEMP/sdk" apply --whitespace=nowarn "$GITHUB_WORKSPACE/$PATCH"
+          cd "$RUNNER_TEMP/sdk"
+          npm ci --ignore-scripts
+          npm audit signatures
+          npm run build -w core/base
+          cd core/base
+          npm pkg set version="$PACKED_VERSION"
+          mkdir -p "$RUNNER_TEMP/packed"
+          npm pack --pack-destination "$RUNNER_TEMP/packed"
+      - name: Compare rebuilt package contents with the committed tarball
+        run: |
+          rebuilt_tarball=$(ls "$RUNNER_TEMP"/packed/*.tgz)
+          committed_tar_sha256=$(gunzip -c "$TARBALL" | sha256sum | cut -d' ' -f1)
+          rebuilt_tar_sha256=$(gunzip -c "$rebuilt_tarball" | sha256sum | cut -d' ' -f1)
+          echo "committed tar sha256: $committed_tar_sha256"
+          echo "rebuilt tar sha256:   $rebuilt_tar_sha256"
+          echo "rebuilt tgz sha256:   $(sha256sum "$rebuilt_tarball" | cut -d' ' -f1)"
+          test "$committed_tar_sha256" = "$rebuilt_tar_sha256"
+          grep -q "tar sha256: \`$rebuilt_tar_sha256\`" vendor/README.md

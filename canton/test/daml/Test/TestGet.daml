@@ -1,0 +1,55 @@
+-- | Unit tests for the 'Wormhole.Ntt.Get' parser primitives, independent of
+-- any concrete NTT wire structure.
+module Test.TestGet where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Text (isInfixOf)
+
+import Wormhole.Core.Bytes (HexBytes, HexEncodedValue (..), parseHexTextOrAbort)
+import Wormhole.Ntt.Get
+import Wormhole.Ntt.Payload (encodeLengthPrefixed)
+
+hexBytes : Text -> HexBytes
+hexBytes = parseHexTextOrAbort
+
+-- | 'getBytes' fails, rather than slicing past the end, when fewer bytes
+-- remain than requested.
+testGetBytesPastEnd : Script ()
+testGetBytesPastEnd =
+  case runGet (getBytes 5) (hexBytes "aabb") of
+    Right _ -> abort "expected a bounds failure past the end of input"
+    Left e -> assertMsg ("expected a bounds message, got: " <> e) ("need 5 bytes" `isInfixOf` e)
+
+-- | 'runGet' rejects a parser that leaves bytes unconsumed, even when every
+-- individual field it read was in bounds.
+testRunGetRejectsLeftoverBytes : Script ()
+testRunGetRejectsLeftoverBytes =
+  case runGet (getBytes 2) (hexBytes "aabbcc") of
+    Right _ -> abort "expected runGet to reject the trailing byte"
+    Left e -> assertMsg ("expected a trailing-bytes message, got: " <> e) ("left over" `isInfixOf` e)
+
+-- | 'getLengthPrefixed' recovers exactly what 'encodeLengthPrefixed' wrote.
+testLengthPrefixedRoundTrip : Script ()
+testLengthPrefixedRoundTrip = do
+  let payload = hexBytes "deadbeef00112233"
+  runGet getLengthPrefixed (encodeLengthPrefixed payload) === Right payload
+
+-- | A failing parser short-circuits: nothing sequenced after it runs, so its
+-- error is the only one that can surface, no matter what would happen next.
+testShortCircuitsOnFirstFailure : Script ()
+testShortCircuitsOnFirstFailure =
+  runGet (abort "first failure" >>= \_ -> pure "shouldNeverAppear") (hexBytes "aabb")
+    === Left "first failure"
+
+-- | A 'HexBytes' buffer has one form: a trailing half byte, a non-hex
+-- character and uppercase fail to parse.
+testHexBytesRejectsMalformedHex : Script ()
+testHexBytesRejectsMalformedHex = do
+  forA_ [ ("odd length", "aabbc", "HexBytes: odd hex length 5")
+        , ("not hex", "aazz", "HexBytes: not lowercase hex")
+        , ("uppercase", "AABB", "HexBytes: not lowercase hex")
+        ] \(label, badHex, expectedError) ->
+    assertMsg ("buffer case " <> label) (parseHexText @HexBytes badHex == Left expectedError)
+  runGet (getBytes 2) (hexBytes "aabb") === Right (hexBytes "aabb")

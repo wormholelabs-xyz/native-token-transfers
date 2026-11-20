@@ -1,0 +1,58 @@
+{
+  "name": "@wormhole-foundation/sdk-xrpl-ntt",
+  "version": "1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wormhole-foundation/native-token-transfers.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wormhole-foundation/native-token-transfers"
+  },
+  "homepage": "https://github.com/wormhole-foundation/native-token-transfers#readme",
+  "directories": {
+    "test": "__tests__"
+  },
+  "license": "Apache-2.0",
+  "main": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "module": "./dist/esm/index.js",
+  "description": "NTT SDK for XRPL",
+  "files": [
+    "dist/esm"
+  ],
+  "keywords": [
+    "wormhole",
+    "sdk",
+    "typescript",
+    "ntt",
+    "xrpl"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "sideEffects": true,
+  "scripts": {
+    "build:esm": "tsc -p ./tsconfig.esm.json",
+    "build": "bun run build:esm",
+    "rebuild": "bun run clean && bun run build",
+    "clean": "rm -rf ./dist",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest --config ./jest.config.ts"
+  },
+  "dependencies": {
+    "@wormhole-foundation/sdk-definitions-ntt": "1.0.0",
+    "xrpl": "^4.6.0"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "default": "./dist/esm/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@wormhole-foundation/sdk-base": "6.1.6",
+    "@wormhole-foundation/sdk-definitions": "6.1.6",
+    "@wormhole-foundation/sdk-xrpl": "6.1.6"
+  }
+}

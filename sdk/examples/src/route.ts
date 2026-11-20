@@ -1,15 +1,22 @@
-import { canonicalAddress, routes, wormhole } from "@wormhole-foundation/sdk";
+import {
+  canonicalAddress,
+  routes,
+  Wormhole,
+  wormhole,
+} from "@wormhole-foundation/sdk";
 import evm from "@wormhole-foundation/sdk/evm";
 import solana from "@wormhole-foundation/sdk/solana";
 
 // register protocol implementations
-import "@wormhole-foundation/sdk-evm-ntt";
-import "@wormhole-foundation/sdk-solana-ntt";
+import { register as registerDefinitionsNtt } from "@wormhole-foundation/sdk-definitions-ntt";
+import { register as registerEvmNtt } from "@wormhole-foundation/sdk-evm-ntt";
+import { register as registerSolanaNtt } from "@wormhole-foundation/sdk-solana-ntt";
 
-import {
-  nttAutomaticRoute,
-  nttManualRoute,
-} from "@wormhole-foundation/sdk-route-ntt";
+registerDefinitionsNtt();
+registerEvmNtt();
+registerSolanaNtt();
+
+import { nttManualRoute } from "@wormhole-foundation/sdk-route-ntt";
 import { NttTokens } from "./consts.js";
 import { getSigner } from "./helpers.js";
 
@@ -22,18 +29,10 @@ import { getSigner } from "./helpers.js";
   const srcSigner = await getSigner(src);
   const dstSigner = await getSigner(dst);
 
-  const resolver = wh.resolver([
-    nttManualRoute({ tokens: NttTokens }),
-    nttAutomaticRoute({ tokens: NttTokens }),
-  ]);
+  const resolver = wh.resolver([nttManualRoute({ tokens: NttTokens })]);
 
-  const srcTokens = await resolver.supportedSourceTokens(src);
-  console.log(
-    "Allowed source tokens: ",
-    srcTokens.map((t) => canonicalAddress(t))
-  );
-  // Just grab the first one
-  const sendToken = srcTokens[0]!;
+  const { chain, token } = NttTokens.Test[0]!;
+  const sendToken = Wormhole.tokenId(chain, token);
 
   // given the send token, what can we possibly get on the destination chain?
   const destTokens = await resolver.supportedDestinationTokens(

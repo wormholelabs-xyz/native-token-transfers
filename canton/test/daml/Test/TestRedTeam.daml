@@ -1,0 +1,1863 @@
+-- | Red-team scripts: each test drives an attack end to end and asserts that
+-- it fails. A failing test here is a finding; see canton/REDTEAM.md.
+--
+-- The harness signs VAAs in-script with a generated guardian key, so inbound
+-- transfers can name freshly allocated recipients. Lock/unlock deployments
+-- bridge an issuer-administered 'Coin' through the issuer's 'CoinFactory',
+-- which validates input holdings like a production CIP-56 registry, with
+-- standing 'TransferPreapproval's for receivers.
+module Test.TestRedTeam where
+
+import Daml.Script hiding (AnyContractId)
+import DA.Assert ((===))
+import DA.Action (when)
+import DA.Foldable (forA_)
+import DA.Optional (catOptionals, fromSome)
+import DA.Map qualified as Map
+import DA.Text qualified as T
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.HoldingV1 (InstrumentId (..), Holding, HoldingView (..), Lock (..))
+import Splice.Api.Token.MetadataV1 (AnyValue (..), ChoiceContext (..), ExtraArgs (..), emptyMetadata)
+import Splice.Api.Token.BurnMintV1
+  (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
+import Splice.Api.Token.TransferInstructionV1 hiding (Transfer (..))
+import Token.CIP0056.Coin (Coin (..))
+import Token.CIP0056.CoinFactory (CoinFactory (..))
+import Token.CIP0056.CoinTransfer (TransferPreapproval (..), transferPreapprovalContextKey)
+import Wormhole.Core.Bytes
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.Replay (ReplayNode)
+import Wormhole.Core.GuardianSet (guardianAddressFromPublicKey)
+import Wormhole.Core.Setup
+  ( GenesisGuardianSet (..), GenesisGuardian (..), RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
+  , solanaGovernanceChainId, defaultGovernanceContract )
+import Wormhole.Core.State (CoreState, Emitter (..), PublishMessage (..))
+import Wormhole.Core.VAA (parseVAA, spkiPrefixSecp256k1)
+import Wormhole.Ntt.Bytes
+import Wormhole.Ntt.Deposit
+import Wormhole.Ntt.Governance
+import Wormhole.Ntt.Ledger
+import Wormhole.Ntt.Manager
+import Wormhole.Ntt.Payload
+import Test.TestNtt (ForgedHolding (..), MockTransferFactory (..), b32, cantonChainId, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
+import Test.TestReplay (coveringNode)
+
+----------------------------------------------------------------------
+-- In-script guardian signing
+----------------------------------------------------------------------
+
+data GuardianKey = GuardianKey with
+    privateKey : Text
+    publicKey  : GuardianPublicKey
+  deriving (Eq, Show)
+
+generateGuardianKey : Script GuardianKey
+generateGuardianKey = do
+  pair <- secp256k1generatekeypair
+  let spkiHex = T.asciiToLower pair.publicKey
+      prefixHex = hexTextOf spkiPrefixSecp256k1
+  assertMsg ("unexpected public key encoding: " <> spkiHex) (prefixHex `T.isPrefixOf` spkiHex)
+  let publicKey = parseHexTextOrAbort (T.drop (T.length prefixHex) spkiHex)
+  pure GuardianKey with privateKey = pair.privateKey, publicKey
+
+-- | The genesis guardian of @key@: its derived address and its public key.
+genesisGuardianOf : GuardianKey -> GenesisGuardian
+genesisGuardianOf key =
+  GenesisGuardian with address = guardianAddressFromPublicKey key.publicKey, publicKey = key.publicKey
+
+-- | DER @SEQUENCE { INTEGER r, INTEGER s }@ to 32-byte @r@ and @s@.
+derSignatureToRs : HexBytes -> (EcdsaSignatureR, EcdsaSignatureS)
+derSignatureToRs der =
+  let rLength = bytesToInt (sliceBytes 3 1 der)
+      r = sliceBytes 4 rLength der
+      sOffset = 4 + rLength
+      sLength = bytesToInt (sliceBytes (sOffset + 1) 1 der)
+      s = sliceBytes (sOffset + 2) sLength der
+  in ( parseHexBytesAsOrAbort (leftPadTo 32 (stripLeadingZeroBytes r))
+     , parseHexBytesAsOrAbort (leftPadTo 32 (stripLeadingZeroBytes s)) )
+
+data VaaSpec = VaaSpec with
+    guardianSetIndex : Int
+    emitterChain     : Int
+    emitterAddress   : EmitterAddress
+    sequence         : Int
+    payload          : MessagePayload
+  deriving (Eq, Show)
+
+-- | A single-signature VAA (guardian index 0) with body timestamp 0.
+signVaa : GuardianKey -> VaaSpec -> Script EncodedVaa
+signVaa key = signVaaAt key 0
+
+-- | 'signVaa' with the body timestamp @timestampSeconds@.
+signVaaAt : GuardianKey -> Int -> VaaSpec -> Script EncodedVaa
+signVaaAt key timestampSeconds spec = do
+  let body = intToBytesN timestampSeconds 4 <> intToBytesN 0 4
+        <> intToBytesN spec.emitterChain 2 <> hexBytesOf spec.emitterAddress
+        <> intToBytesN spec.sequence 8 <> intToHexByte 0 <> hexBytesOf spec.payload
+      digest = keccak256Bytes (keccak256Bytes body)
+  derHex <- secp256k1signWithEcdsaOnly key.privateKey (hexTextOf digest)
+  let (r, s) = derSignatureToRs (parseHexTextOrAbort (T.asciiToLower derHex))
+  pure (parseHexBytesAsOrAbort (intToHexByte 1 <> intToBytesN spec.guardianSetIndex 4 <> intToHexByte 1
+    <> intToHexByte 0 <> hexBytesOf r <> hexBytesOf s <> intToHexByte 0 <> body))
+
+----------------------------------------------------------------------
+-- Environment and deployments
+----------------------------------------------------------------------
+
+data RedTeamEnv = RedTeamEnv with
+    gg               : Party
+    nttCustody       : Party
+    coreStateCid     : ContractId CoreState
+    guardianKey      : GuardianKey
+    issuer           : Party
+    issuerFactoryCid : ContractId CoinFactory
+
+-- | Core + NTT root under a generated guardian key, plus a foreign issuer's
+-- 'CoinFactory' for lock/unlock deployments.
+redTeamSetup : Script RedTeamEnv
+redTeamSetup = redTeamSetupWithPartyHintPrefix "Rt"
+
+-- | 'redTeamSetup' with its own parties, for a script that needs more than one root.
+redTeamSetupWithPartyHintPrefix : Text -> Script RedTeamEnv
+redTeamSetupWithPartyHintPrefix partyHintPrefix = do
+  guardianKey <- generateGuardianKey
+  gg <- allocateParty (partyHintPrefix <> "Gg")
+  nttCustody <- allocateParty (partyHintPrefix <> "NttCustody")
+  issuer <- allocateParty (partyHintPrefix <> "Issuer")
+  feeCustody <- allocateParty (partyHintPrefix <> "FeeCustody")
+  feeInstrumentAdmin <- allocateParty (partyHintPrefix <> "FeeInstrumentAdmin")
+  onboardingFeeAdmin <- allocateParty (partyHintPrefix <> "OnboardingFeeAdmin")
+  let registryParties = RegistryParties with guardianGovernance = gg, onboardingFeeAdmin
+  coreStateCid <- submit (actAs gg <> actAs feeCustody) do
+    createCmd (mkInitialCoreState gg solanaGovernanceChainId defaultGovernanceContract
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardians = [genesisGuardianOf guardianKey])
+                 (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
+  _ <- submit gg do createCmd (mkInitialEmitterRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  _ <- submit (actAs gg <> actAs nttCustody) do
+    createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
+  issuerFactoryCid <- submit issuer do createCmd CoinFactory with admin = issuer
+  pure RedTeamEnv with ..
+
+issuerInstrument : RedTeamEnv -> InstrumentId
+issuerInstrument env = InstrumentId with admin = env.issuer, id = "USDX"
+
+-- | Submit as @actors@, reading as the parties whose contracts the call fetches.
+withReads : RedTeamEnv -> [Party] -> [Party] -> SubmitOptions
+withReads env actors readers = actAs actors <> readAs (env.gg :: env.nttCustody :: env.issuer :: readers)
+
+peerChainId : Int
+peerChainId = 2
+
+testPeerManagerAddress : NttManagerAddress
+testPeerManagerAddress = b32 "bb"
+
+testPeerTransceiverAddress : EmitterAddress
+testPeerTransceiverAddress = b32 "cc"
+
+registerManagerAs
+  : RedTeamEnv -> Party -> [Party] -> InstrumentId -> NttTokenConfig -> NttFactory
+  -> Script (ContractId NttManager)
+registerManagerAs env admin coSigners instrumentId tokenConfig factory =
+  registerManagerAttempt env admin coSigners instrumentId tokenConfig factory
+    >>= either (\err -> abort ("registration failed: " <> rejectionText err)) pure
+
+registerManagerAttempt
+  : RedTeamEnv -> Party -> [Party] -> InstrumentId -> NttTokenConfig -> NttFactory
+  -> Script (Either SubmitError (ContractId NttManager))
+registerManagerAttempt env admin coSigners instrumentId tokenConfig factory = do
+  [(govCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  fmap (\(_, mgrCid, _, _, _) -> mgrCid) <$> trySubmit (withReads env (admin :: coSigners) []) do
+    exerciseCmd govCid RegisterManager with
+      admin
+      chainId = cantonChainId
+      emitterRegistryCid
+      replayRootRegistryCid
+      instrumentId
+      instrumentNonce = 0
+      tokenConfig
+      tokenDecimals = 8
+      factory
+      coreStateCid = env.coreStateCid
+      consistencyLevel = 0
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+      feeAllocation = None
+
+setTestPeer : RedTeamEnv -> ContractId NttManager -> Script (ContractId NttManager)
+setTestPeer env mgrCid = do
+  Some mgr <- queryContractId env.gg mgrCid
+  transceiverEmitterCid <- resolveEmitter env.gg mgr.transceiverEmitterId
+  (mgrCid', _) <- submit (withReads env [mgr.admin] []) do
+    exerciseCmd mgrCid SetPeer with
+      chainId = peerChainId
+      peer = Peer with
+        managerAddress = testPeerManagerAddress
+        transceiverAddress = testPeerTransceiverAddress
+        decimals = 8
+      transceiverEmitterCid
+      coreStateCid = env.coreStateCid
+      consistencyLevel = 0
+      payer = mgr.admin
+      feeAllocation = None
+  pure mgrCid'
+
+deployLockUnlock : RedTeamEnv -> Party -> Script (ContractId NttManager)
+deployLockUnlock env admin =
+  registerManagerAs env admin [] (issuerInstrument env) LockUnlock
+    (TransferFactoryCid (toInterfaceContractId @TransferFactory env.issuerFactoryCid))
+  >>= setTestPeer env
+
+-- | Burn/mint deployment over a fresh gg-administered canonical 'CoinFactory'.
+deployBurnMint : RedTeamEnv -> Party -> Script (ContractId NttManager)
+deployBurnMint env admin = do
+  coinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
+  registerManagerAs env admin [env.gg]
+    (InstrumentId with admin = env.gg, id = nttInstrumentIdFor admin 0) BurnMint
+    (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid))
+  >>= setTestPeer env
+
+managerOf : RedTeamEnv -> ContractId NttManager -> Script NttManager
+managerOf env mgrCid = fromSome <$> queryContractId env.gg mgrCid
+
+ledgerOf : RedTeamEnv -> NttManagerAddress -> Script (ContractId LockedLedger, LockedLedger)
+ledgerOf env managerAddress = do
+  ledgers <- query @LockedLedger env.gg
+  case [ entry | entry@(_, ledger) <- ledgers, ledger.managerAddress == managerAddress ] of
+    [entry] -> pure entry
+    found -> abort ("expected one ledger, got " <> show (length found))
+
+custodyPotOf : RedTeamEnv -> ContractId NttManager -> Script (ContractId Holding)
+custodyPotOf env mgrCid = do
+  mgr <- managerOf env mgrCid
+  (_, ledger) <- ledgerOf env mgr.managerAddress
+  pure (fromSome ledger.custodyHoldingCid)
+
+transferPreapprovalOf : RedTeamEnv -> Party -> Script (ContractId TransferPreapproval)
+transferPreapprovalOf env owner = do
+  existing <- query @TransferPreapproval owner
+  case [ cid | (cid, pre) <- existing, pre.instrumentId == issuerInstrument env ] of
+    cid :: _ -> pure cid
+    [] -> submit owner do createCmd TransferPreapproval with owner, instrumentId = issuerInstrument env
+
+depositPreapprovalOf : Party -> InstrumentId -> Script (ContractId DepositPreapproval)
+depositPreapprovalOf owner instrumentId = do
+  existing <- query @DepositPreapproval owner
+  case [ cid | (cid, pre) <- existing, pre.instrumentId == instrumentId ] of
+    cid :: _ -> pure cid
+    [] -> submit owner do createCmd DepositPreapproval with owner, instrumentId
+
+receiverPreapprovalArgs : ContractId TransferPreapproval -> ExtraArgs
+receiverPreapprovalArgs preapprovalCid = ExtraArgs with
+  context = ChoiceContext with
+    values = TextMap.fromList
+      [(transferPreapprovalContextKey, AV_ContractId (coerceContractId preapprovalCid))]
+  meta = emptyMetadata
+
+mintIssuerCoin : RedTeamEnv -> Party -> Decimal -> Script (ContractId Holding)
+mintIssuerCoin env owner amount = mintCoinVia env.issuer (toInterfaceContractId env.issuerFactoryCid) (issuerInstrument env) owner amount
+
+mintCoinVia : Party -> ContractId BurnMintFactory -> InstrumentId -> Party -> Decimal -> Script (ContractId Holding)
+mintCoinVia factoryAdmin factoryCid instrumentId owner amount = do
+  result <- submit (actAs factoryAdmin <> actAs owner) do
+    exerciseCmd factoryCid BurnMintFactory_BurnMint with
+      expectedAdmin = factoryAdmin
+      instrumentId
+      inputHoldingCids = []
+      outputs = [BurnMintOutput with owner, amount, context = emptyExtraArgs.context]
+      extraActors = [owner]
+      extraArgs = emptyExtraArgs
+  case result.outputCids of
+    [coinCid] -> pure coinCid
+    outputs -> abort ("expected one minted coin, got " <> show outputs)
+
+coinBalance : Party -> Party -> InstrumentId -> Script Decimal
+coinBalance reader owner instrumentId = do
+  coins <- query @Coin reader
+  pure (sum [ coin.amount | (_, coin) <- coins, coin.owner == owner, coin.instrumentId == instrumentId ])
+
+wireUnitsPerToken : Decimal
+wireUnitsPerToken = 100000000.0
+
+----------------------------------------------------------------------
+-- Outbound
+----------------------------------------------------------------------
+
+data OutboundTransfer = OutboundTransfer with
+    rawAmount        : Int
+    recipientAddress : UniversalAddress
+    nonce            : Int
+    consistencyLevel : Int
+    inputHoldingCids : [ContractId Holding]
+
+outboundTransferOf : Int -> [ContractId Holding] -> OutboundTransfer
+outboundTransferOf rawAmount inputHoldingCids = OutboundTransfer with
+  rawAmount, inputHoldingCids
+  recipientAddress = b32 "ee"
+  nonce = 0
+  consistencyLevel = 0
+
+transferAttempt
+  : RedTeamEnv -> Party -> ContractId NttManager -> OutboundTransfer
+  -> Script (Either SubmitError ())
+transferAttempt env user mgrCid outbound = do
+  mgr <- managerOf env mgrCid
+  transceiverEmitterCid <- resolveEmitter env.gg mgr.transceiverEmitterId
+  ledgerCid <- case mgr.tokenConfig of
+    LockUnlock -> Some . fst <$> ledgerOf env mgr.managerAddress
+    BurnMint -> pure None
+  custodianPreapprovalCid <- transferPreapprovalOf env mgr.reserveCustodian
+  fmap (const ()) <$> trySubmit (withReads env [user] [mgr.admin]) do
+    exerciseCmd mgrCid Transfer with
+      user
+      transceiverEmitterCid
+      coreStateCid = env.coreStateCid
+      ledgerCid
+      recipientChain = peerChainId
+      recipientAddress = outbound.recipientAddress
+      rawAmount = outbound.rawAmount
+      nonce = outbound.nonce
+      consistencyLevel = outbound.consistencyLevel
+      inputHoldingCids = outbound.inputHoldingCids
+      feeAllocation = None
+      extraArgs = receiverPreapprovalArgs custodianPreapprovalCid
+
+-- | @user@ locks freshly minted issuer coins worth @rawAmount@ wire units.
+lockFrom : RedTeamEnv -> Party -> ContractId NttManager -> Int -> Script ()
+lockFrom env user mgrCid rawAmount = do
+  coinCid <- mintIssuerCoin env user (intToDecimal rawAmount / wireUnitsPerToken)
+  result <- transferAttempt env user mgrCid (outboundTransferOf rawAmount [coinCid])
+  either (\err -> abort ("lock failed: " <> show err)) pure result
+
+----------------------------------------------------------------------
+-- Inbound
+----------------------------------------------------------------------
+
+data InboundTransfer = InboundTransfer with
+    guardianSetIndex : Int
+    emitterChain     : Int
+    emitterAddress   : EmitterAddress
+    sequence         : Int
+    sourceManager    : NttManagerAddress
+    recipientManager : NttManagerAddress
+    recipient        : Party
+    wireDecimals     : Int
+    wireAmount       : Int
+    recipientChain   : Int
+
+inboundTransferTo : NttManagerAddress -> Party -> Int -> Int -> InboundTransfer
+inboundTransferTo recipientManager recipient sequence wireAmount = InboundTransfer with
+  guardianSetIndex = 0
+  emitterChain = peerChainId
+  emitterAddress = testPeerTransceiverAddress
+  sequence
+  sourceManager = testPeerManagerAddress
+  recipientManager
+  recipient
+  wireDecimals = 8
+  wireAmount
+  recipientChain = cantonChainId
+
+signInboundTransfer : GuardianKey -> InboundTransfer -> Script EncodedVaa
+signInboundTransfer key inbound = signVaa key VaaSpec with
+  guardianSetIndex = inbound.guardianSetIndex
+  emitterChain = inbound.emitterChain
+  emitterAddress = inbound.emitterAddress
+  sequence = inbound.sequence
+  payload = encodeWormholeTransceiverMessage WormholeTransceiverMessage with
+    sourceManager = inbound.sourceManager
+    recipientManager = inbound.recipientManager
+    managerPayload = encodeNttManagerMessage NttManagerMessage with
+      id = parseHexBytesAsOrAbort (intToBytesN inbound.sequence 32)
+      sender = b32 "01"
+      payload = encodeNativeTokenTransfer NativeTokenTransfer with
+        decimals = inbound.wireDecimals
+        amount = inbound.wireAmount
+        sourceToken = b32 "dd"
+        recipientAddress = recipientAddressFor inbound.recipient
+        recipientChain = inbound.recipientChain
+        additionalPayload = mempty
+    transceiverPayload = mempty
+
+data InboundCall = InboundCall with
+    executor             : Party
+    recipient            : Party
+    explicitInputs       : [ContractId Holding]
+    replayNamespace      : Optional Text  -- None: the manager's own
+
+inboundCallBy : RedTeamEnv -> Party -> Party -> InboundCall
+inboundCallBy env executor recipient = InboundCall with
+  executor, recipient
+  explicitInputs = []
+  replayNamespace = None
+
+replayNodeFor : RedTeamEnv -> NttManager -> InboundCall -> EncodedVaa -> Script (ContractId ReplayNode)
+replayNodeFor env mgr call vaaBytes = do
+  let namespace = optional mgr.namespace identity call.replayNamespace
+  fst <$> coveringNode env.gg namespace (parseVAA vaaBytes).hash
+
+releaseAttempt : RedTeamEnv -> ContractId NttManager -> InboundCall -> EncodedVaa -> Script (Either SubmitError ())
+releaseAttempt env mgrCid call vaaBytes = do
+  mgr <- managerOf env mgrCid
+  ledgerCid <- case mgr.tokenConfig of
+    LockUnlock -> fst <$> ledgerOf env mgr.managerAddress
+    BurnMint -> pure (coerceContractId mgrCid)
+  replayNodeCid <- replayNodeFor env mgr call vaaBytes
+  recipientPreapprovalCid <- transferPreapprovalOf env call.recipient
+  fmap (const ()) <$> trySubmit (withReads env [call.executor] [mgr.admin, call.recipient]) do
+    exerciseCmd mgrCid Release with
+      executor = call.executor
+      coreStateCid = env.coreStateCid
+      replayNodeCid
+      vaaBytes
+      recipient = call.recipient
+      ledgerCid
+      inputHoldingCids = call.explicitInputs
+      extraArgs = receiverPreapprovalArgs recipientPreapprovalCid
+
+mintAttempt : RedTeamEnv -> ContractId NttManager -> InboundCall -> EncodedVaa -> Script (Either SubmitError ())
+mintAttempt env mgrCid call vaaBytes = do
+  mgr <- managerOf env mgrCid
+  replayNodeCid <- replayNodeFor env mgr call vaaBytes
+  depositPreapprovalCid <- depositPreapprovalOf call.recipient mgr.instrumentId
+  fmap (const ()) <$> trySubmit (withReads env [call.executor] [call.recipient]) do
+    exerciseCmd mgrCid Mint with
+      executor = call.executor
+      coreStateCid = env.coreStateCid
+      replayNodeCid
+      vaaBytes
+      recipient = call.recipient
+      depositPreapprovalCid
+      extraArgs = emptyExtraArgs
+
+expectAccepted : Text -> Either SubmitError a -> Script ()
+expectAccepted label = \case
+  Right _ -> pure ()
+  Left err -> abort (label <> " was rejected: " <> rejectionText err)
+
+----------------------------------------------------------------------
+-- Governance
+----------------------------------------------------------------------
+
+governanceVaa : RedTeamEnv -> Int -> NttGovernanceAction -> Script EncodedVaa
+governanceVaa env sequence action = signVaa env.guardianKey VaaSpec with
+  guardianSetIndex = 0
+  emitterChain = solanaGovernanceChainId
+  emitterAddress = defaultGovernanceContract
+  sequence
+  payload = encodeNttGovernance action
+
+----------------------------------------------------------------------
+-- Attack tables
+----------------------------------------------------------------------
+
+data AttackCase = AttackCase with
+    label             : Text
+    expectedRejection : Text   -- "" accepts any rejection
+    attempt           : Script (Either SubmitError ())
+
+rejectionText : SubmitError -> Text
+rejectionText = \case
+  FailureStatusError failure -> failure.message
+  err -> show err
+
+-- | Run every case in order; fail once, listing each attack that succeeded
+-- or was rejected for an unexpected reason.
+checkAttacksRejected : [AttackCase] -> Script ()
+checkAttacksRejected cases = do
+  outcomes <- forA cases \attackCase -> do
+    result <- attackCase.attempt
+    pure case result of
+      Right _ -> Some (attackCase.label <> ": ATTACK SUCCEEDED")
+      Left err
+        | attackCase.expectedRejection `T.isInfixOf` rejectionText err -> None
+        | otherwise -> Some (attackCase.label <> ": unexpected rejection: " <> rejectionText err)
+  let failures = catOptionals outcomes
+  assertMsg (T.intercalate "\n" failures) (null failures)
+
+----------------------------------------------------------------------
+-- Harness control
+----------------------------------------------------------------------
+
+-- | The signed-VAA harness reaches a real release and a real mint, so every
+-- rejection below is the attack's own. Releases self-relay; see
+-- 'testRedTeamThirdPartyRelayerReleasesOnCoinRegistry'.
+testRedTeamHarnessReleasesAndMints : Script ()
+testRedTeamHarnessReleasesAndMints = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtAdmin"
+  alice <- allocateParty "RtAlice"
+  bob <- allocateParty "RtBob"
+  relayer <- allocateParty "RtRelayer"
+  lockMgr <- deployLockUnlock env admin
+  lockFrom env alice lockMgr 100000000
+  lockManager <- managerOf env lockMgr
+  releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo lockManager.managerAddress bob 1 40000000)
+  releaseAttempt env lockMgr (inboundCallBy env bob bob) releaseVaa >>= expectAccepted "release"
+  coinBalance env.issuer bob (issuerInstrument env) >>= (=== 0.4)
+  (_, ledger) <- ledgerOf env lockManager.managerAddress
+  ledger.balance === 0.6
+
+  mintMgr <- deployBurnMint env admin
+  mintManager <- managerOf env mintMgr
+  mintVaa <- signInboundTransfer env.guardianKey (inboundTransferTo mintManager.managerAddress bob 2 50000000)
+  mintAttempt env mintMgr (inboundCallBy env relayer bob) mintVaa >>= expectAccepted "mint"
+  coinBalance env.gg bob mintManager.instrumentId >>= (=== 0.5)
+
+----------------------------------------------------------------------
+-- A3: replay
+----------------------------------------------------------------------
+
+testRedTeamReplayRejected : Script ()
+testRedTeamReplayRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtReplayAdmin"
+  alice <- allocateParty "RtReplayAlice"
+  bob <- allocateParty "RtReplayBob"
+  relayer <- allocateParty "RtReplayRelayer"
+  otherRelayer <- allocateParty "RtReplayOtherRelayer"
+  lockA <- deployLockUnlock env admin
+  lockB <- deployLockUnlock env admin
+  lockFrom env alice lockA 100000000
+  lockFrom env alice lockB 100000000
+  mintC <- deployBurnMint env admin
+  mintD <- deployBurnMint env alice
+  managerA <- managerOf env lockA
+  managerB <- managerOf env lockB
+  managerC <- managerOf env mintC
+
+  releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 10000000)
+  releaseAttempt env lockA (inboundCallBy env bob bob) releaseVaa >>= expectAccepted "first release"
+  mintVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerC.managerAddress bob 2 10000000)
+  mintAttempt env mintC (inboundCallBy env relayer bob) mintVaa >>= expectAccepted "first mint"
+  potA <- custodyPotOf env lockA
+
+  checkAttacksRejected
+    [ AttackCase "release replay, same executor" "digest already consumed" $
+        releaseAttempt env lockA (inboundCallBy env relayer bob) releaseVaa
+    , AttackCase "release replay, other executor" "digest already consumed" $
+        releaseAttempt env lockA (inboundCallBy env otherRelayer bob) releaseVaa
+    , AttackCase "release replay with explicit custody holding" "digest already consumed" $
+        releaseAttempt env lockA ((inboundCallBy env relayer bob) with explicitInputs = [potA]) releaseVaa
+    , AttackCase "release VAA on a second manager of the same admin" "wrong recipient manager" $
+        releaseAttempt env lockB (inboundCallBy env relayer bob) releaseVaa
+    , AttackCase "release VAA against another deployment's replay trie" "replay node namespace mismatch" $
+        releaseAttempt env lockA ((inboundCallBy env relayer bob) with replayNamespace = Some managerB.namespace) releaseVaa
+    , AttackCase "mint replay" "digest already consumed" $
+        mintAttempt env mintC (inboundCallBy env relayer bob) mintVaa
+    , AttackCase "mint VAA on another burn/mint manager" "wrong recipient manager" $
+        mintAttempt env mintD (inboundCallBy env relayer bob) mintVaa
+    , AttackCase "release VAA relayed as a mint" "wrong recipient manager" $
+        mintAttempt env mintC (inboundCallBy env relayer bob) releaseVaa
+    , AttackCase "mint VAA relayed as a release" "release is only for lock/unlock" $
+        releaseAttempt env mintC (inboundCallBy env relayer bob) mintVaa
+    ]
+  coinBalance env.issuer bob (issuerInstrument env) >>= (=== 0.1)
+  coinBalance env.gg bob managerC.instrumentId >>= (=== 0.1)
+
+----------------------------------------------------------------------
+-- A10: LockedLedger overdraw
+----------------------------------------------------------------------
+
+testRedTeamLedgerOverdrawRejected : Script ()
+testRedTeamLedgerOverdrawRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtOverdrawAdmin"
+  alice <- allocateParty "RtOverdrawAlice"
+  bob <- allocateParty "RtOverdrawBob"
+  relayer <- allocateParty "RtOverdrawRelayer"
+  lockA <- deployLockUnlock env admin
+  lockB <- deployLockUnlock env admin
+  lockFrom env alice lockA 100000000
+  lockFrom env alice lockB 100000000
+  managerA <- managerOf env lockA
+  managerB <- managerOf env lockB
+  potB <- custodyPotOf env lockB
+  let signToA sequence wireAmount =
+        signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob sequence wireAmount)
+  aboveBalanceVaa <- signToA 1 150000000
+  aboveBalanceFromPotBVaa <- signToA 2 150000000
+  checkAttacksRejected
+    [ AttackCase "release more than locked" "exceeds this deployment's locked balance" $
+        releaseAttempt env lockA (inboundCallBy env relayer bob) aboveBalanceVaa
+    , AttackCase "release above balance from the sibling deployment's pot" "exceeds this deployment's locked balance" $
+        releaseAttempt env lockA ((inboundCallBy env relayer bob) with explicitInputs = [potB]) aboveBalanceFromPotBVaa
+    ]
+
+  -- A stranger merges both pots under A's hint: value-neutral.
+  potA <- custodyPotOf env lockA
+  (ledgerA, _) <- ledgerOf env managerA.managerAddress
+  _ <- submit (withReads env [relayer] [admin]) do
+    exerciseCmd lockA ConsolidateCustody with
+      caller = relayer
+      ledgerCid = ledgerA
+      custodyHoldingCids = [potA, potB]
+      extraArgs = emptyExtraArgs
+  afterConsolidationVaa <- signToA 3 150000000
+  checkAttacksRejected
+    [ AttackCase "release above balance after consolidation" "exceeds this deployment's locked balance" $
+        releaseAttempt env lockA (inboundCallBy env relayer bob) afterConsolidationVaa ]
+
+  drainVaa <- signToA 4 100000000
+  releaseAttempt env lockA (inboundCallBy env bob bob) drainVaa >>= expectAccepted "drain A"
+  afterDrainVaa <- signToA 5 1
+  checkAttacksRejected
+    [ AttackCase "release from a drained deployment holding the sibling's funds" "exceeds this deployment's locked balance" $
+        releaseAttempt env lockA (inboundCallBy env relayer bob) afterDrainVaa ]
+
+  -- B still pays out its own balance from the remaining custody holding.
+  potA' <- custodyPotOf env lockA
+  bVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerB.managerAddress bob 6 100000000)
+  releaseAttempt env lockB ((inboundCallBy env bob bob) with explicitInputs = [potA']) bVaa
+    >>= expectAccepted "B release from the merged pot"
+  coinBalance env.issuer admin (issuerInstrument env) >>= (=== 0.0)
+  coinBalance env.issuer bob (issuerInstrument env) >>= (=== 2.0)
+
+----------------------------------------------------------------------
+-- A11: wire and binding edge cases
+----------------------------------------------------------------------
+
+testRedTeamInboundEdgeCasesRejected : Script ()
+testRedTeamInboundEdgeCasesRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtEdgeAdmin"
+  alice <- allocateParty "RtEdgeAlice"
+  bob <- allocateParty "RtEdgeBob"
+  mallory <- allocateParty "RtEdgeMallory"
+  relayer <- allocateParty "RtEdgeRelayer"
+  strangerKey <- generateGuardianKey
+  lockA <- deployLockUnlock env admin
+  lockFrom env alice lockA 100000000
+  mintC <- deployBurnMint env admin
+  managerA <- managerOf env lockA
+  managerC <- managerOf env mintC
+  let base = inboundTransferTo managerA.managerAddress bob
+      release spec = do
+        vaaBytes <- signInboundTransfer env.guardianKey spec
+        releaseAttempt env lockA (inboundCallBy env relayer bob) vaaBytes
+      mint spec = do
+        vaaBytes <- signInboundTransfer env.guardianKey spec
+        mintAttempt env mintC (inboundCallBy env relayer bob) vaaBytes
+  checkAttacksRejected
+    [ AttackCase "wrong target chain" "not destined for this chain" $
+        release (base 1 1000) with recipientChain = 99
+    , AttackCase "zero amount" "zero at this token's decimals" $
+        release (base 2 0)
+    , AttackCase "dust below the local decimals" "zero at this token's decimals" $
+        release (base 3 5) with wireDecimals = 10
+    , AttackCase "wire decimals overflow" "ArithmeticError" $
+        release (base 4 1) with wireDecimals = 255
+    , AttackCase "max wire amount at zero decimals" "ArithmeticError" $
+        release (base 5 9223372036854775807) with wireDecimals = 0
+    , AttackCase "emitter is not the peer transceiver" "not the configured peer transceiver" $
+        release (base 6 1000) with emitterAddress = b32 "c1"
+    , AttackCase "source chain without a peer" "no peer for source chain" $
+        release (base 7 1000) with emitterChain = 3
+    , AttackCase "source manager is not the peer manager" "source manager is not the peer manager" $
+        release (base 8 1000) with sourceManager = b32 "b1"
+    , AttackCase "unknown guardian set" "unknown guardian set index" $
+        release (base 9 1000) with guardianSetIndex = 1
+    , AttackCase "signed by a non-guardian key" "invalid signature for guardian index 0" $ do
+        vaaBytes <- signInboundTransfer strangerKey (base 10 1000)
+        releaseAttempt env lockA (inboundCallBy env relayer bob) vaaBytes
+    , AttackCase "payout steered to another recipient" "recipient does not match VAA recipientAddress" $ do
+        vaaBytes <- signInboundTransfer env.guardianKey (base 11 1000)
+        releaseAttempt env lockA (inboundCallBy env relayer mallory) vaaBytes
+    , AttackCase "mint steered to another recipient" "recipient does not match VAA recipientAddress" $ do
+        vaaBytes <- signInboundTransfer env.guardianKey (inboundTransferTo managerC.managerAddress bob 12 1000)
+        mintAttempt env mintC (inboundCallBy env relayer mallory) vaaBytes
+    , AttackCase "mint with a zero amount" "zero at this token's decimals" $
+        mint (inboundTransferTo managerC.managerAddress bob 13 0)
+    , AttackCase "mint with wire decimals overflow" "ArithmeticError" $
+        mint (inboundTransferTo managerC.managerAddress bob 14 1) with wireDecimals = 255
+    ]
+  (_, ledger) <- ledgerOf env managerA.managerAddress
+  ledger.balance === 1.0
+
+----------------------------------------------------------------------
+-- A4 + A12: forged and stale governance, non-canonical factories
+----------------------------------------------------------------------
+
+testRedTeamGovernanceForgeriesRejected : Script ()
+testRedTeamGovernanceForgeriesRejected = do
+  env <- redTeamSetup
+  adminC <- allocateParty "RtGovAdminC"
+  adminD <- allocateParty "RtGovAdminD"
+  relayer <- allocateParty "RtGovRelayer"
+  mintC <- deployBurnMint env adminC
+  mintD <- deployBurnMint env adminD
+  managerC <- managerOf env mintC
+  managerD <- managerOf env mintD
+  let rotate chain managerAddress factoryEpoch =
+        RotateToCanonicalFactory with chain, managerAddress, factoryEpoch
+      setFactoryByVaa mgrCid newFactory vaaBytes = do
+        mgr <- managerOf env mgrCid
+        replayNodeCid <- replayNodeFor env mgr (inboundCallBy env relayer relayer) vaaBytes
+        fmap (const ()) <$> trySubmit (withReads env [mgr.admin] []) do
+          exerciseCmd mgrCid SetFactoryByVaa with
+            newFactory
+            coreStateCid = env.coreStateCid
+            replayNodeCid
+            vaaBytes
+            extraArgs = emptyExtraArgs
+      signedFrom emitterChain emitterAddress guardianSetIndex sequence action =
+        signVaa env.guardianKey VaaSpec with
+          guardianSetIndex, emitterChain, emitterAddress, sequence
+          payload = encodeNttGovernance action
+      governanceEmitter = defaultGovernanceContract
+  checkAttacksRejected
+    [ AttackCase "rotate from a non-governance emitter chain" "wrong emitter chain" $
+        signedFrom peerChainId governanceEmitter 0 1 (rotate cantonChainId managerC.managerAddress 0)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "rotate from a non-governance emitter address" "wrong emitter address" $
+        signedFrom solanaGovernanceChainId (b32 "05") 0 2 (rotate cantonChainId managerC.managerAddress 0)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "rotate under an unknown guardian set" "unknown guardian set index" $
+        signedFrom solanaGovernanceChainId governanceEmitter 1 3 (rotate cantonChainId managerC.managerAddress 0)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "rotate with a future epoch" "wrong factory epoch" $
+        governanceVaa env 4 (rotate cantonChainId managerC.managerAddress 1)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "rotate addressed to another manager" "wrong manager address" $
+        governanceVaa env 5 (rotate cantonChainId managerD.managerAddress 0)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "rotate for another chain" "wrong target chain" $
+        governanceVaa env 6 (rotate 99 managerC.managerAddress 0)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "accept-admin action relayed as a rotation" "not a rotate-to-canonical-factory action" $
+        governanceVaa env 7 (AcceptAdminToGovernance with chain = cantonChainId, managerAddress = managerC.managerAddress, factoryEpoch = 0)
+          >>= setFactoryByVaa mintC managerC.factory
+    , AttackCase "valid rotation to the admin's own CoinFactory" "factory's admin does not match this deployment's guardianGovernance" $ do
+        adminFactoryCid <- submit adminC do createCmd CoinFactory with admin = adminC
+        governanceVaa env 8 (rotate cantonChainId managerC.managerAddress 0)
+          >>= setFactoryByVaa mintC (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory adminFactoryCid))
+    ]
+
+  -- A genuine rotation bumps the epoch; its VAA and older accept-admin VAAs go stale.
+  rotationVaa <- governanceVaa env 9 (rotate cantonChainId managerC.managerAddress 0)
+  setFactoryByVaa mintC managerC.factory rotationVaa >>= expectAccepted "canonical rotation"
+  [(mintC', _)] <- filter (\(_, mgr) -> mgr.managerAddress == managerC.managerAddress) <$> query @NttManager env.gg
+  proposalCid <- submit adminC do
+    createCmd AdminTransferProposal with
+      admin = adminC, newAdmin = env.gg, managerAddress = managerC.managerAddress
+  let acceptByVaa vaaBytes = do
+        mgr <- managerOf env mintC'
+        replayNodeCid <- replayNodeFor env mgr (inboundCallBy env relayer relayer) vaaBytes
+        fmap (const ()) <$> trySubmit (withReads env [relayer] [adminC]) do
+          exerciseCmd mintC' AcceptAdminTransferByVaa with
+            executor = relayer
+            proposalCid
+            coreStateCid = env.coreStateCid
+            replayNodeCid
+            vaaBytes
+            ledgerCid = None
+            extraArgs = emptyExtraArgs
+  checkAttacksRejected
+    [ AttackCase "rotation VAA replayed" "digest already consumed" $ setFactoryByVaa mintC' managerC.factory rotationVaa
+    , AttackCase "accept-admin signed for the superseded factory epoch" "wrong factory epoch" $
+        governanceVaa env 10 (AcceptAdminToGovernance with chain = cantonChainId, managerAddress = managerC.managerAddress, factoryEpoch = 0)
+          >>= acceptByVaa
+    , AttackCase "set-peer relayed on a deployment the quorum does not admin" "not governance-adminned" $ do
+        vaaBytes <- governanceVaa env 11 SetPeerByGovernance with
+          chain = cantonChainId, managerAddress = managerD.managerAddress, peerEpoch = 1
+          peerChain = 5, peerManagerAddress = b32 "e1", peerTransceiverAddress = b32 "e2", peerDecimals = 8
+        replayNodeCid <- replayNodeFor env managerD (inboundCallBy env relayer relayer) vaaBytes
+        transceiverEmitterCid <- resolveEmitter env.gg managerD.transceiverEmitterId
+        fmap (const ()) <$> trySubmit (withReads env [relayer] []) do
+          exerciseCmd mintD SetPeerByVaa with
+            executor = relayer
+            coreStateCid = env.coreStateCid
+            replayNodeCid
+            vaaBytes
+            transceiverEmitterCid
+            consistencyLevel = 0
+            feeAllocation = None
+    ]
+
+  -- RegisterManagerByVaa commits only the canonical factory.
+  adminE <- allocateParty "RtGovAdminE"
+  [(govCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  let registerByVaa sequence emitterChain factory = do
+        vaaBytes <- signedFrom emitterChain governanceEmitter 0 sequence RegisterBurnMintManager with
+          chain = cantonChainId
+          registrationBinding = nttRegistrationBindingFor testNttGovernanceRootIdentity env.gg adminE 0
+          tokenDecimals = 8
+        fmap (const ()) <$> trySubmit (withReads env [adminE] []) do
+          exerciseCmd govCid RegisterManagerByVaa with
+            admin = adminE
+            emitterRegistryCid
+            replayRootRegistryCid
+            instrumentNonce = 0
+            factory
+            coreStateCid = env.coreStateCid
+            consistencyLevel = 0
+            emitterFeeAllocation = None
+            claimFeeAllocation = None
+            feeAllocation = None
+            vaaBytes
+            extraArgs = emptyExtraArgs
+  checkAttacksRejected
+    [ AttackCase "register-by-VAA with the admin's own CoinFactory" "factory's admin does not match this deployment's guardianGovernance" $ do
+        adminFactoryCid <- submit adminE do createCmd CoinFactory with admin = adminE
+        registerByVaa 12 solanaGovernanceChainId (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory adminFactoryCid))
+    , AttackCase "register-by-VAA from a non-governance emitter" "wrong emitter chain" $
+        registerByVaa 13 peerChainId managerC.factory
+    ]
+
+----------------------------------------------------------------------
+-- A5: lying holdings
+----------------------------------------------------------------------
+
+testRedTeamLyingHoldingsRejected : Script ()
+testRedTeamLyingHoldingsRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtLieAdmin"
+  alice <- allocateParty "RtLieAlice"
+  mallory <- allocateParty "RtLieMallory"
+  lockA <- deployLockUnlock env admin
+  mintC <- deployBurnMint env admin
+  managerC <- managerOf env mintC
+  let bridgedFactory = case managerC.factory of
+        BurnMintFactoryCid cid -> cid
+        TransferFactoryCid _ -> error "not a burn/mint factory"
+      forgedHolding instrument = toInterfaceContractId @Holding <$> submit mallory do
+        createCmd ForgedHolding with owner = mallory, instrument, amount = 1000.0
+  otherIssuer <- allocateParty "RtLieOtherIssuer"
+  otherFactory <- submit otherIssuer do createCmd CoinFactory with admin = otherIssuer
+  let otherInstrument = InstrumentId with admin = otherIssuer, id = "USDX"
+  aliceCoin <- mintIssuerCoin env alice 1.0
+  otherCoin <- mintCoinVia otherIssuer (toInterfaceContractId otherFactory) otherInstrument mallory 1.0
+  aliceBridgedCoin <- mintCoinVia env.gg bridgedFactory managerC.instrumentId alice 1.0
+  malloryBridgedCoin <- mintCoinVia env.gg bridgedFactory managerC.instrumentId mallory 0.01
+  checkAttacksRejected
+    [ AttackCase "lock a forged holding claiming the instrument" "not a Coin issued by this registry" $ do
+        forged <- forgedHolding (issuerInstrument env)
+        transferAttempt env mallory lockA (outboundTransferOf 100000000 [forged])
+    , AttackCase "lock another user's coin" "transfer input not owned by sender" $
+        transferAttempt env mallory lockA (outboundTransferOf 100000000 [aliceCoin])
+    , AttackCase "lock a coin of another instrument" "transfer input instrument mismatch" $
+        transferAttempt env mallory lockA (outboundTransferOf 100000000 [otherCoin])
+    , AttackCase "burn a forged holding claiming the bridged instrument" "burn input is not a Coin" $ do
+        forged <- forgedHolding managerC.instrumentId
+        transferAttempt env mallory mintC (outboundTransferOf 100000000 [forged])
+    , AttackCase "burn another user's coin" "burn holding not owned by sender" $
+        transferAttempt env mallory mintC (outboundTransferOf 100000000 [aliceBridgedCoin])
+    , AttackCase "burn one coin listed twice" "ntt: duplicate input holding" $
+        transferAttempt env mallory mintC (outboundTransferOf 2000000 [malloryBridgedCoin, malloryBridgedCoin])
+    ]
+  coinBalance env.gg mallory managerC.instrumentId >>= (=== 0.01)
+
+----------------------------------------------------------------------
+-- A13: authority
+----------------------------------------------------------------------
+
+testRedTeamUnauthorizedMovesRejected : Script ()
+testRedTeamUnauthorizedMovesRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtAuthAdmin"
+  alice <- allocateParty "RtAuthAlice"
+  bob <- allocateParty "RtAuthBob"
+  mallory <- allocateParty "RtAuthMallory"
+  relayer <- allocateParty "RtAuthRelayer"
+  lockA <- deployLockUnlock env admin
+  lockFrom env alice lockA 100000000
+  managerA <- managerOf env lockA
+  (ledgerA, _) <- ledgerOf env managerA.managerAddress
+  potA <- custodyPotOf env lockA
+  aliceCoin <- mintIssuerCoin env alice 1.0
+  transceiverEmitterCid <- resolveEmitter env.gg managerA.transceiverEmitterId
+  let transferAdminAs actors newAdmin =
+        fmap (const ()) <$> trySubmit (withReads env actors [admin]) do
+          exerciseCmd lockA TransferAdmin with
+            newAdmin
+            ledgerCid = Some ledgerA
+            vettedFactory = managerA.factory
+            extraArgs = emptyExtraArgs
+      setPeerAs party = fmap (const ()) <$> trySubmit (withReads env [party] []) do
+        exerciseCmd lockA SetPeer with
+          chainId = 9
+          peer = Peer with managerAddress = b32 "e1", transceiverAddress = b32 "e2", decimals = 8
+          transceiverEmitterCid
+          coreStateCid = env.coreStateCid
+          consistencyLevel = 0
+          payer = party
+          feeAllocation = None
+  checkAttacksRejected
+    [ AttackCase "admin hands custody to mallory without her" "requires authorizers" $ transferAdminAs [admin] mallory
+    , AttackCase "mallory takes the admin role" "requires authorizers" $ transferAdminAs [mallory] mallory
+    , AttackCase "relayer sets a peer" "requires authorizers" $ setPeerAs relayer
+    , AttackCase "gg alone sets a peer" "requires authorizers" $ setPeerAs env.gg
+    , AttackCase "mallory debits the ledger" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [mallory] []) do
+          exerciseCmd ledgerA Debit with amount = 1.0, newCustodyHint = None
+    , AttackCase "relayer releases from a non-custodian holding" "requires one of the stakeholders" $ do
+        vaaBytes <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 10000000)
+        releaseAttempt env lockA ((inboundCallBy env relayer bob) with explicitInputs = [aliceCoin]) vaaBytes
+    , AttackCase "relayer consolidates a non-custodian holding" "requires one of the stakeholders" $
+        fmap (const ()) <$> trySubmit (withReads env [relayer] [alice]) do
+          exerciseCmd lockA ConsolidateCustody with
+            caller = relayer
+            ledgerCid = ledgerA
+            custodyHoldingCids = [potA, aliceCoin]
+            extraArgs = emptyExtraArgs
+    , AttackCase "mallory locks from the custody pot" "transfer input not owned by sender" $
+        transferAttempt env mallory lockA (outboundTransferOf 100000000 [potA])
+    , AttackCase "mallory accepts her own proposal for the deployment" "requires one of the stakeholders" $ do
+        proposalCid <- submit mallory do
+          createCmd AdminTransferProposal with admin = mallory, newAdmin = mallory, managerAddress = managerA.managerAddress
+        fmap (const ()) <$> trySubmit (withReads env [mallory] []) do
+          exerciseCmd proposalCid AcceptAdminTransfer with
+            mgrCid = lockA
+            ledgerCid = Some ledgerA
+            vettedFactory = managerA.factory
+            extraArgs = emptyExtraArgs
+    , AttackCase "relayer completes a non-quorum handoff by VAA" "new admin is not the guardian trust anchor" $ do
+        proposalCid <- submit admin do
+          createCmd AdminTransferProposal with admin, newAdmin = mallory, managerAddress = managerA.managerAddress
+        vaaBytes <- governanceVaa env 2 AcceptAdminToGovernance with
+          chain = cantonChainId, managerAddress = managerA.managerAddress, factoryEpoch = 0
+        replayNodeCid <- replayNodeFor env managerA (inboundCallBy env relayer relayer) vaaBytes
+        fmap (const ()) <$> trySubmit (withReads env [relayer] [admin]) do
+          exerciseCmd lockA AcceptAdminTransferByVaa with
+            executor = relayer
+            proposalCid
+            coreStateCid = env.coreStateCid
+            replayNodeCid
+            vaaBytes
+            ledgerCid = Some ledgerA
+            extraArgs = emptyExtraArgs
+    ]
+  coinBalance env.issuer admin (issuerInstrument env) >>= (=== 1.0)
+
+----------------------------------------------------------------------
+-- Finding: quorum custody lends gg's authority to the registry
+----------------------------------------------------------------------
+
+-- | A lock/unlock registry whose transfer behaves honestly, but which uses
+-- the sender's authority to mint a gg-administered instrument through the
+-- canonical 'CoinFactory'.
+template SenderAuthorityRegistryFactory
+  with
+    registryAdmin    : Party
+    mintFactoryCid   : ContractId BurnMintFactory
+    targetInstrument : InstrumentId
+    mintAmount       : Decimal
+  where
+    signatory registryAdmin
+
+    interface instance TransferFactory for SenderAuthorityRegistryFactory where
+      view = TransferFactoryView with admin = registryAdmin, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+        _ <- exercise mintFactoryCid BurnMintFactory_BurnMint with
+          expectedAdmin = targetInstrument.admin
+          instrumentId = targetInstrument
+          inputHoldingCids = []
+          outputs = [BurnMintOutput with owner = registryAdmin, amount = mintAmount, context = emptyExtraArgs.context]
+          extraActors = [registryAdmin]
+          extraArgs = emptyExtraArgs
+        forA_ transfer.inputHoldingCids archive
+        receiverHoldingCid <- toInterfaceContractId @Holding <$> create RegistryHolding with
+          registryAdmin
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = [receiverHoldingCid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = registryAdmin, meta = emptyMetadata
+
+-- | The registry's holding: signed by its admin, as an issuer-custodied
+-- registry may do.
+template RegistryHolding
+  with
+    registryAdmin : Party
+    owner         : Party
+    instrumentId  : InstrumentId
+    amount        : Decimal
+  where
+    signatory registryAdmin
+    observer owner
+
+    interface instance Holding for RegistryHolding where
+      view = HoldingView with
+        owner, instrumentId, amount
+        lock = None
+        meta = emptyMetadata
+
+-- | After the quorum accepts custody of a lock/unlock deployment, every
+-- custody transfer runs the registry's 'TransferFactory_Transfer' with the
+-- reserve custodian as @sender@. The custodian is @nttCustody@, never gg, so
+-- the registry admin cannot mint another deployment's gg-administered
+-- instrument.
+testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument : Script ()
+testRedTeamQuorumCustodyRegistryCannotMintBridgedInstrument = do
+  env <- redTeamSetup
+  bridgeAdmin <- allocateParty "RtCustodyBridgeAdmin"
+  registryAdmin <- allocateParty "RtCustodyRegistryAdmin"
+  relayer <- allocateParty "RtCustodyRelayer"
+  mintC <- deployBurnMint env bridgeAdmin
+  managerC <- managerOf env mintC
+  let BurnMintFactoryCid canonicalFactoryCid = managerC.factory
+      registryInstrument = InstrumentId with admin = registryAdmin, id = "REG"
+  registryFactoryCid <- submit registryAdmin do
+    createCmd SenderAuthorityRegistryFactory with
+      registryAdmin
+      mintFactoryCid = canonicalFactoryCid
+      targetInstrument = managerC.instrumentId
+      mintAmount = 1000000.0
+  lockR <- registerManagerAs env registryAdmin [] registryInstrument LockUnlock
+      (TransferFactoryCid (toInterfaceContractId @TransferFactory registryFactoryCid))
+    >>= \mgrCid -> acceptQuorumCustody env relayer mgrCid 1
+  managerR <- managerOf env lockR
+  managerR.admin === env.gg
+  managerR.reserveCustodian === env.nttCustody
+
+  checkAttacksRejected
+    [ AttackCase "registry mints a gg-administered instrument as the custody sender" "CoinFactory:CoinFactory) requires authorizers" $ do
+        custodyHoldings <- forA [1.0, 2.0] \amount -> toInterfaceContractId @Holding <$> submit registryAdmin do
+          createCmd RegistryHolding with
+            registryAdmin, owner = reserveOwnerOf managerR, instrumentId = registryInstrument, amount
+        (ledgerR, _) <- ledgerOf env managerR.managerAddress
+        fmap (const ()) <$> trySubmit (withReads env [registryAdmin] []) do
+          exerciseCmd lockR ConsolidateCustody with
+            caller = registryAdmin
+            ledgerCid = ledgerR
+            custodyHoldingCids = custodyHoldings
+            extraArgs = emptyExtraArgs
+    ]
+  coinBalance env.gg registryAdmin managerC.instrumentId >>= (=== 0.0)
+
+-- | A relayer completes 'AcceptAdminTransferByVaa' for @mgrCid@ with a
+-- guardian-signed VAA. The extra args carry @nttCustody@'s issuer
+-- 'TransferPreapproval', which the issuer registry needs to move a pot.
+acceptQuorumCustody : RedTeamEnv -> Party -> ContractId NttManager -> Int -> Script (ContractId NttManager)
+acceptQuorumCustody env relayer mgrCid sequence = do
+  custodyPreapprovalCid <- transferPreapprovalOf env env.nttCustody
+  mgr <- managerOf env mgrCid
+  proposalCid <- submit mgr.admin do
+    createCmd AdminTransferProposal with
+      admin = mgr.admin, newAdmin = env.gg, managerAddress = mgr.managerAddress
+  acceptVaa <- governanceVaa env sequence AcceptAdminToGovernance with
+    chain = cantonChainId, managerAddress = mgr.managerAddress, factoryEpoch = mgr.factoryEpoch
+  replayNodeCid <- replayNodeFor env mgr (inboundCallBy env relayer relayer) acceptVaa
+  (ledgerCid, _) <- ledgerOf env mgr.managerAddress
+  (mgrCid', _) <- submit (withReads env [relayer] [mgr.admin]) do
+    exerciseCmd mgrCid AcceptAdminTransferByVaa with
+      executor = relayer
+      proposalCid
+      coreStateCid = env.coreStateCid
+      replayNodeCid
+      vaaBytes = acceptVaa
+      ledgerCid = Some ledgerCid
+      extraArgs = receiverPreapprovalArgs custodyPreapprovalCid
+  pure mgrCid'
+
+-- | The party that owns a deployment's lock/unlock reserve.
+reserveOwnerOf : NttManager -> Party
+reserveOwnerOf mgr = mgr.reserveCustodian
+
+forgedEmitterContextKey : Text
+forgedEmitterContextKey = "redteam:forged-emitter"
+
+forgedPayloadContextKey : Text
+forgedPayloadContextKey = "redteam:forged-payload"
+
+coreStateContextKey : Text
+coreStateContextKey = "redteam:core-state"
+
+hijackedManagerContextKey : Text
+hijackedManagerContextKey = "redteam:hijacked-manager"
+
+hijackedEmitterContextKey : Text
+hijackedEmitterContextKey = "redteam:hijacked-emitter"
+
+-- | A lock/unlock registry that settles honestly, then uses the sender's
+-- authority on contracts the caller discloses through @extraArgs@: it
+-- publishes a caller-chosen payload from a transceiver 'Emitter', and sets a
+-- peer on a manager.
+template SenderAuthorityGovernanceRegistryFactory
+  with
+    registryAdmin : Party
+  where
+    signatory registryAdmin
+
+    interface instance TransferFactory for SenderAuthorityGovernanceRegistryFactory where
+      view = TransferFactoryView with admin = registryAdmin, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+            contextValue key = TextMap.lookup key arg.extraArgs.context.values
+            contextCid key = case contextValue key of
+              Some (AV_ContractId cid) -> Some cid
+              _ -> None
+            coreStateCidOf = do
+              cid <- contextCid coreStateContextKey
+              pure (coerceContractId cid : ContractId CoreState)
+        forA_ (contextCid forgedEmitterContextKey) \emitterCid -> do
+          forgedPayload <- case contextValue forgedPayloadContextKey of
+            Some (AV_Text payload) -> pure payload
+            _ -> abort "redteam: forged payload missing"
+          _ <- exercise (coerceContractId emitterCid : ContractId Emitter) PublishMessage with
+            payload = parseHexTextOrAbort forgedPayload
+            nonce = 0
+            consistencyLevel = 0
+            coreStateCid = fromSome coreStateCidOf
+            payer = registryAdmin
+            feeAllocation = None
+          pure ()
+        forA_ (contextCid hijackedManagerContextKey) \mgrCid -> do
+          let hijackedMgrCid = coerceContractId mgrCid : ContractId NttManager
+          _ <- exercise hijackedMgrCid SetPeer with
+            chainId = 9
+            peer = Peer with managerAddress = b32 "e1", transceiverAddress = b32 "e2", decimals = 8
+            transceiverEmitterCid = coerceContractId (fromSome (contextCid hijackedEmitterContextKey))
+            coreStateCid = fromSome coreStateCidOf
+            consistencyLevel = 0
+            payer = registryAdmin
+            feeAllocation = None
+          pure ()
+        forA_ transfer.inputHoldingCids archive
+        receiverHoldingCid <- toInterfaceContractId @Holding <$> create RegistryHolding with
+          registryAdmin
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = [receiverHoldingCid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = registryAdmin, meta = emptyMetadata
+
+-- | After the quorum accepts custody of a lock/unlock deployment, its
+-- registry runs as the custody sender. With caller-supplied contract ids it
+-- must not publish from another deployment's transceiver, and must not set a
+-- peer on another quorum-adminned manager.
+testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority : Script ()
+testRedTeamQuorumCustodyRegistryCannotUseGovernanceAuthority = do
+  env <- redTeamSetup
+  victimAdmin <- allocateParty "RtForgeVictimAdmin"
+  registryAdmin <- allocateParty "RtForgeRegistryAdmin"
+  relayer <- allocateParty "RtForgeRelayer"
+  victimLock <- deployLockUnlock env victimAdmin >>= \mgrCid -> acceptQuorumCustody env relayer mgrCid 1
+  victim <- managerOf env victimLock
+  victim.admin === env.gg
+  victim.reserveCustodian === env.nttCustody
+
+  let registryInstrument = InstrumentId with admin = registryAdmin, id = "REG"
+  registryFactoryCid <- submit registryAdmin do
+    createCmd SenderAuthorityGovernanceRegistryFactory with registryAdmin
+  registryLock <- registerManagerAs env registryAdmin [] registryInstrument LockUnlock
+      (TransferFactoryCid (toInterfaceContractId @TransferFactory registryFactoryCid))
+    >>= \mgrCid -> acceptQuorumCustody env relayer mgrCid 2
+  registryManager <- managerOf env registryLock
+
+  let forgedTransfer = encodeWormholeTransceiverMessage WormholeTransceiverMessage with
+        sourceManager = victim.managerAddress
+        recipientManager = testPeerManagerAddress
+        managerPayload = encodeNttManagerMessage NttManagerMessage with
+          id = b32 "ff"
+          sender = b32 "01"
+          payload = encodeNativeTokenTransfer NativeTokenTransfer with
+            decimals = 8
+            amount = 1000000000000000
+            sourceToken = victim.tokenAddress
+            recipientAddress = b32 "ee"
+            recipientChain = peerChainId
+            additionalPayload = mempty
+        transceiverPayload = mempty
+      consolidateWithContext contextValues = do
+        custodyHoldings <- forA [1.0, 2.0] \amount -> toInterfaceContractId @Holding <$> submit registryAdmin do
+          createCmd RegistryHolding with
+            registryAdmin, owner = reserveOwnerOf registryManager, instrumentId = registryInstrument, amount
+        (ledgerCid, _) <- ledgerOf env registryManager.managerAddress
+        victimEmitterCid <- resolveEmitter env.gg victim.transceiverEmitterId
+        fmap (const ()) <$> trySubmit (withReads env [registryAdmin] []) do
+          exerciseCmd registryLock ConsolidateCustody with
+            caller = registryAdmin
+            ledgerCid
+            custodyHoldingCids = custodyHoldings
+            extraArgs = ExtraArgs with
+              context = ChoiceContext with
+                values = TextMap.fromList
+                  ((coreStateContextKey, AV_ContractId (coerceContractId env.coreStateCid))
+                    :: contextValues victimEmitterCid)
+              meta = emptyMetadata
+  victimEmitterBefore <- resolveEmitter env.gg victim.transceiverEmitterId >>= queryContractId env.gg
+  checkAttacksRejected
+    [ AttackCase "registry publishes a forged transfer from another deployment's transceiver" "Wormhole.Core.State:Emitter) requires authorizers" $
+        consolidateWithContext \victimEmitterCid ->
+          [ (forgedEmitterContextKey, AV_ContractId (coerceContractId victimEmitterCid))
+          , (forgedPayloadContextKey, AV_Text (hexTextOf forgedTransfer)) ]
+    , AttackCase "registry sets a peer on another quorum-adminned manager" "Wormhole.Ntt.Manager:NttManager) requires authorizers" $
+        consolidateWithContext \victimEmitterCid ->
+          [ (hijackedManagerContextKey, AV_ContractId (coerceContractId victimLock))
+          , (hijackedEmitterContextKey, AV_ContractId (coerceContractId victimEmitterCid)) ]
+    ]
+  victimEmitterAfter <- resolveEmitter env.gg victim.transceiverEmitterId >>= queryContractId env.gg
+  ((.sequence) <$> victimEmitterAfter) === ((.sequence) <$> victimEmitterBefore)
+  (victimAfter : NttManager) <- managerOf env victimLock
+  victimAfter.peers === victim.peers
+
+-- | With @nttCustody@ as the reserve custodian on the issuer's production-like
+-- registry: the hand-off to gg moves the pot to @nttCustody@, a lock merges
+-- into it, a third-party relayer releases from it, a stranger consolidates
+-- it with a donated holding, and the demotion moves the ledger balance to
+-- the next admin. The donated surplus stays with @nttCustody@.
+-- gg owns no custody holding at any step.
+testQuorumCustodyReserveLifecycleOnCoinRegistry : Script ()
+testQuorumCustodyReserveLifecycleOnCoinRegistry = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtLifecycleAdmin"
+  alice <- allocateParty "RtLifecycleAlice"
+  bob <- allocateParty "RtLifecycleBob"
+  relayer <- allocateParty "RtLifecycleRelayer"
+  nextAdmin <- allocateParty "RtLifecycleNextAdmin"
+  let instrument = issuerInstrument env
+      checkBalances expected = forA_ expected \(owner, amount) ->
+        coinBalance env.issuer owner instrument >>= (=== amount)
+  lockA <- deployLockUnlock env admin
+  lockFrom env alice lockA 100000000
+  (managerBefore : NttManager) <- managerOf env lockA
+  managerBefore.reserveCustodian === admin
+
+  lockA <- acceptQuorumCustody env relayer lockA 1
+  managerA <- managerOf env lockA
+  managerA.admin === env.gg
+  managerA.reserveCustodian === env.nttCustody
+  checkBalances [(env.nttCustody, 1.0), (admin, 0.0), (env.gg, 0.0)]
+
+  lockFrom env alice lockA 50000000
+  checkBalances [(env.nttCustody, 1.5), (env.gg, 0.0)]
+
+  releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 2 40000000)
+  releaseAttempt env lockA (inboundCallBy env relayer bob) releaseVaa >>= expectAccepted "third-party release from nttCustody"
+  checkBalances [(bob, 0.4), (env.nttCustody, 1.1), (env.gg, 0.0)]
+
+  potCid <- custodyPotOf env lockA
+  donatedCid <- mintIssuerCoin env env.nttCustody 0.2
+  custodyPreapprovalCid <- transferPreapprovalOf env env.nttCustody
+  (ledgerCid, _) <- ledgerOf env managerA.managerAddress
+  ledgerCid <- submit (withReads env [relayer] []) do
+    exerciseCmd lockA ConsolidateCustody with
+      caller = relayer
+      ledgerCid
+      custodyHoldingCids = [potCid, donatedCid]
+      extraArgs = receiverPreapprovalArgs custodyPreapprovalCid
+  Some ledger <- queryContractId env.gg ledgerCid
+  ledger.balance === 1.1
+  mergedPot <- custodyPotOf env lockA
+  Some mergedPotHolding <- queryInterfaceContractId env.nttCustody mergedPot
+  mergedPotHolding.owner === env.nttCustody
+  mergedPotHolding.amount === 1.3
+
+  nextAdminPreapprovalCid <- transferPreapprovalOf env nextAdmin
+  (lockA, _) <- submit (withReads env [env.gg, nextAdmin] []) do
+    exerciseCmd lockA TransferAdmin with
+      newAdmin = nextAdmin
+      ledgerCid = Some ledgerCid
+      vettedFactory = managerA.factory
+      extraArgs = receiverPreapprovalArgs nextAdminPreapprovalCid
+  managerAfter <- managerOf env lockA
+  managerAfter.admin === nextAdmin
+  managerAfter.reserveCustodian === nextAdmin
+  checkBalances [(nextAdmin, 1.1), (env.nttCustody, 0.2), (env.gg, 0.0)]
+
+-- | Who holds deployment A's admin role before and after its hand-off. B
+-- stays with A's old reserve custodian.
+data PooledHandOff
+  = QuorumDemotionToAdmin
+  | QuorumPromotionFromAdmin
+  | SuccessionBetweenAdmins
+  deriving (Eq, Show)
+
+-- | @admin@ and @newAdmin@ both authorize the hand-off of @mgrCid@. The extra
+-- args carry the new reserve custodian's issuer 'TransferPreapproval'.
+transferAdminAttempt
+  : RedTeamEnv -> ContractId NttManager -> Party -> NttFactory
+  -> Script (Either SubmitError (ContractId NttManager))
+transferAdminAttempt env mgrCid newAdmin vettedFactory = do
+  mgr <- managerOf env mgrCid
+  (ledgerCid, _) <- ledgerOf env mgr.managerAddress
+  let newReserveCustodian = if newAdmin == env.gg then env.nttCustody else newAdmin
+  newCustodianPreapprovalCid <- transferPreapprovalOf env newReserveCustodian
+  fmap fst <$> trySubmit (withReads env [mgr.admin, newAdmin] []) do
+    exerciseCmd mgrCid TransferAdmin with
+      newAdmin
+      ledgerCid = Some ledgerCid
+      vettedFactory
+      extraArgs = receiverPreapprovalArgs newCustodianPreapprovalCid
+
+-- | The issuer coins of @owner@.
+issuerCoinsOf : RedTeamEnv -> Party -> Script [(ContractId Coin, Coin)]
+issuerCoinsOf env owner = do
+  coins <- query @Coin env.issuer
+  pure [ entry | entry@(_, coin) <- coins, coin.owner == owner, coin.instrumentId == issuerInstrument env ]
+
+-- | Two deployments A and B share one reserve custodian, and a stranger
+-- merges their reserves into one pot under A's hint. A hand-off of A moves
+-- exactly A's ledger balance to A's new custodian. B's reserve stays with the
+-- old custodian, and B can still release its full balance. A hand-off must
+-- take exactly the balance from the old custodian and deliver exactly the
+-- balance to the new one.
+testRedTeamAdminTransferMovesOnlyTheLedgerBalance : Script ()
+testRedTeamAdminTransferMovesOnlyTheLedgerBalance = do
+  forA_ [QuorumDemotionToAdmin, QuorumPromotionFromAdmin, SuccessionBetweenAdmins] \pooledHandOff -> do
+    env <- redTeamSetupWithPartyHintPrefix ("RtPooled" <> show pooledHandOff)
+    registeringAdmin <- allocateParty ("RtPooledRegisteringAdmin" <> show pooledHandOff)
+    nextAdmin <- allocateParty ("RtPooledNextAdmin" <> show pooledHandOff)
+    alice <- allocateParty ("RtPooledAlice" <> show pooledHandOff)
+    bob <- allocateParty ("RtPooledBob" <> show pooledHandOff)
+    stranger <- allocateParty ("RtPooledStranger" <> show pooledHandOff)
+    let instrument = issuerInstrument env
+        checkBalance owner expected = coinBalance env.issuer owner instrument >>= (=== expected)
+    lockA <- deployLockUnlock env registeringAdmin
+    lockB <- deployLockUnlock env registeringAdmin
+    lockFrom env alice lockA 100000000
+    lockFrom env alice lockB 300000000
+    (lockA, lockB) <- case pooledHandOff of
+      QuorumDemotionToAdmin ->
+        (,) <$> acceptQuorumCustody env stranger lockA 1 <*> acceptQuorumCustody env stranger lockB 2
+      _ -> pure (lockA, lockB)
+    managerA <- managerOf env lockA
+    managerB <- managerOf env lockB
+    let oldCustodian = managerA.reserveCustodian
+    managerB.reserveCustodian === oldCustodian
+    let (newAdmin, newCustodian) = case pooledHandOff of
+          QuorumDemotionToAdmin -> (nextAdmin, nextAdmin)
+          QuorumPromotionFromAdmin -> (env.gg, env.nttCustody)
+          SuccessionBetweenAdmins -> (nextAdmin, nextAdmin)
+
+    potA <- custodyPotOf env lockA
+    potB <- custodyPotOf env lockB
+    oldCustodianPreapprovalCid <- transferPreapprovalOf env oldCustodian
+    (ledgerA, _) <- ledgerOf env managerA.managerAddress
+    _ <- submit (withReads env [stranger] [oldCustodian]) do
+      exerciseCmd lockA ConsolidateCustody with
+        caller = stranger
+        ledgerCid = ledgerA
+        custodyHoldingCids = [potA, potB]
+        extraArgs = receiverPreapprovalArgs oldCustodianPreapprovalCid
+    pooledPot <- custodyPotOf env lockA
+    Some pooledPotHolding <- queryInterfaceContractId oldCustodian pooledPot
+    pooledPotHolding.amount === 4.0
+
+    lockA <- transferAdminAttempt env lockA newAdmin managerA.factory
+      >>= either (\err -> abort ("hand-off failed: " <> rejectionText err)) pure
+    managerAfter <- managerOf env lockA
+    managerAfter.reserveCustodian === newCustodian
+    checkBalance newCustodian 1.0
+    checkBalance oldCustodian 3.0
+    checkBalance env.gg 0.0
+    (_, ledgerAfter) <- ledgerOf env managerA.managerAddress
+    ledgerAfter.balance === 1.0
+    Some handedOffHolding <- queryInterfaceContractId newCustodian (fromSome ledgerAfter.custodyHoldingCid)
+    handedOffHolding.owner === newCustodian
+    handedOffHolding.amount === 1.0
+
+    [(keptCoinCid, keptCoin)] <- issuerCoinsOf env oldCustodian
+    keptCoin.amount === 3.0
+    (ledgerB, _) <- ledgerOf env managerB.managerAddress
+    _ <- submit (withReads env [stranger] [oldCustodian]) do
+      exerciseCmd lockB ConsolidateCustody with
+        caller = stranger
+        ledgerCid = ledgerB
+        custodyHoldingCids = [toInterfaceContractId @Holding keptCoinCid]
+        extraArgs = emptyExtraArgs
+    releaseB <- signInboundTransfer env.guardianKey (inboundTransferTo managerB.managerAddress bob 10 300000000)
+    releaseAttempt env lockB (inboundCallBy env bob bob) releaseB >>= expectAccepted "B releases its full balance"
+    (_, ledgerBAfter) <- ledgerOf env managerB.managerAddress
+    ledgerBAfter.balance === 0.0
+    checkBalance bob 3.0
+    checkBalance oldCustodian 0.0
+
+  env <- redTeamSetupWithPartyHintPrefix "RtHandOffAttack"
+  admin <- allocateParty "RtHandOffAttackAdmin"
+  nextAdmin <- allocateParty "RtHandOffAttackNextAdmin"
+  alice <- allocateParty "RtHandOffAttackAlice"
+  let lockedDeployment = do
+        lockA <- deployLockUnlock env admin
+        lockFrom env alice lockA 100000000
+        pure lockA
+      handOffThrough newFactory = do
+        lockA <- lockedDeployment
+        lockA' <- submit admin do exerciseCmd lockA SetFactory with newFactory
+        fmap (const ()) <$> transferAdminAttempt env lockA' nextAdmin newFactory
+  checkAttacksRejected
+    [ AttackCase "hand-off with a pot below the ledger balance" "custody pot does not cover the locked balance" do
+        lockA <- lockedDeployment
+        managerA <- managerOf env lockA
+        (ledgerA, _) <- ledgerOf env managerA.managerAddress
+        smallHolding <- mintIssuerCoin env admin 0.5
+        _ <- submit (withReads env [admin] []) do
+          exerciseCmd lockA ConsolidateCustody with
+            caller = admin
+            ledgerCid = ledgerA
+            custodyHoldingCids = [smallHolding]
+            extraArgs = emptyExtraArgs
+        fmap (const ()) <$> transferAdminAttempt env lockA nextAdmin managerA.factory
+    , AttackCase "hand-off through a registry that surcharges the old custodian" "registry did not take the exact transfer amount from the sender" do
+        factoryCid <- submit env.issuer do
+          createCmd SenderSideMisreportingFactory with issuer = env.issuer, custodianSurcharge = 0.01, changeOwner = None
+        handOffThrough (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))
+    , AttackCase "hand-off through a registry that delivers less than the balance" "registry did not deliver the exact transfer amount" do
+        factoryCid <- submit (actAs env.issuer <> actAs nextAdmin) do
+          createCmd MockTransferFactory with admin = env.issuer, pending = False, skim = 0.01, preapprovedReceivers = [nextAdmin]
+        handOffThrough (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))
+    ]
+
+-- | gg is never a reserve custodian, and @nttCustody@ never holds the admin
+-- role: a root, a manager, a registration, or a hand-off that would make
+-- either true is rejected. Registering with gg as admin assigns the reserve
+-- to @nttCustody@.
+testRedTeamReserveCustodianIsNeverGuardianGovernance : Script ()
+testRedTeamReserveCustodianIsNeverGuardianGovernance = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtNeverGgAdmin"
+  lockA <- deployLockUnlock env admin
+  managerA <- managerOf env lockA
+  (ledgerA, _) <- ledgerOf env managerA.managerAddress
+  let allSignatories = [env.gg, env.nttCustody, admin]
+      createManagerAttempt manager = fmap (const ()) <$> trySubmit (withReads env allSignatories []) do
+        createCmd manager
+  checkAttacksRejected
+    [ AttackCase "root with gg as the custody party" "precondition violated" $
+        fmap (const ()) <$> trySubmit (withReads env [env.gg] []) do
+          createCmd NttGovernance with
+            guardianGovernance = env.gg, nttCustody = env.gg
+            nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
+    , AttackCase "manager with gg as admin and reserve custodian" "precondition violated" $
+        createManagerAttempt managerA with admin = env.gg, reserveCustodian = env.gg
+    , AttackCase "manager with an ordinary admin and gg as reserve custodian" "precondition violated" $
+        createManagerAttempt managerA with reserveCustodian = env.gg
+    , AttackCase "manager with gg as admin and the old admin as reserve custodian" "precondition violated" $
+        createManagerAttempt managerA with admin = env.gg
+    , AttackCase "manager with nttCustody as admin" "precondition violated" $
+        createManagerAttempt managerA with admin = env.nttCustody, reserveCustodian = env.nttCustody
+    , AttackCase "manager with gg as nttCustody" "precondition violated" $
+        createManagerAttempt managerA with nttCustody = env.gg
+    , AttackCase "admin role handed to nttCustody" "the custody party cannot hold the admin role" $
+        fmap (const ()) <$> trySubmit (withReads env [admin, env.nttCustody] []) do
+          exerciseCmd lockA TransferAdmin with
+            newAdmin = env.nttCustody
+            ledgerCid = Some ledgerA
+            vettedFactory = managerA.factory
+            extraArgs = emptyExtraArgs
+    , AttackCase "nttCustody registers a deployment as its admin" "the custody party cannot hold the admin role" $
+        fmap (const ()) <$> registerManagerAttempt env env.nttCustody []
+          (issuerInstrument env) LockUnlock
+          (TransferFactoryCid (toInterfaceContractId @TransferFactory env.issuerFactoryCid))
+    ]
+
+  quorumLock <- registerManagerAs env env.gg [] (issuerInstrument env) LockUnlock
+    (TransferFactoryCid (toInterfaceContractId @TransferFactory env.issuerFactoryCid))
+  quorumManager <- managerOf env quorumLock
+  quorumManager.admin === env.gg
+  quorumManager.reserveCustodian === env.nttCustody
+
+-- | The namespace of a party id is the fingerprint of @hint::fingerprint@.
+-- The IDE ledger allocates ids with no namespace, so the root ceremony, not
+-- an @ensure@, checks that @nttCustody@ and gg share a namespace.
+testPartyNamespaceFromText : Script ()
+testPartyNamespaceFromText = do
+  forA_
+    [ ("gg::1220ab", Some "1220ab")
+    , ("nttCustody::1220ab", Some "1220ab")
+    , ("nohint", None)
+    , ("::1220ab", None)
+    , ("gg::", None)
+    , ("a::b::c", None)
+    ] \(partyText, expectedNamespace) ->
+      (partyText, partyNamespaceFromText partyText) === (partyText, expectedNamespace)
+  forA_
+    [ ("gg::1220ab", "nttCustody::1220ab", True)
+    , ("gg::1220ab", "nttCustody::1220cd", False)
+    , ("gg::1220ab", "nttCustody", False)
+    , ("gg", "nttCustody", False)
+    ] \(firstPartyText, secondPartyText, expectedShared) -> do
+      let firstParty = fromSome (partyFromText firstPartyText)
+          secondParty = fromSome (partyFromText secondPartyText)
+      (firstPartyText, secondPartyText, partiesShareNamespace firstParty secondParty)
+        === (firstPartyText, secondPartyText, expectedShared)
+
+----------------------------------------------------------------------
+-- Finding: third-party relaying of a release on a production registry
+----------------------------------------------------------------------
+
+-- | 'Release' is permissionless: a relayer must deliver an unlock to a
+-- recipient whose holdings the relayer cannot sign for. Against the issuer's
+-- 'CoinFactory', the receiver holding is signed by the issuer and the
+-- recipient.
+testRedTeamThirdPartyRelayerReleasesOnCoinRegistry : Script ()
+testRedTeamThirdPartyRelayerReleasesOnCoinRegistry = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtRelayAdmin"
+  alice <- allocateParty "RtRelayAlice"
+  bob <- allocateParty "RtRelayBob"
+  relayer <- allocateParty "RtRelayRelayer"
+  lockA <- deployLockUnlock env admin
+  lockFrom env alice lockA 100000000
+  managerA <- managerOf env lockA
+  releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 40000000)
+  releaseAttempt env lockA (inboundCallBy env relayer bob) releaseVaa >>= expectAccepted "third-party release"
+  coinBalance env.issuer bob (issuerInstrument env) >>= (=== 0.4)
+
+-- | An issuer-signed registry that settles synchronously but misreports the
+-- custodian side: it takes @custodianSurcharge@ beyond the amount from the
+-- sender (negative: returns more change than due), and pays the change to
+-- @changeOwner@ when set.
+template SenderSideMisreportingFactory
+  with
+    issuer             : Party
+    custodianSurcharge : Decimal
+    changeOwner        : Optional Party
+  where
+    signatory issuer
+
+    interface instance TransferFactory for SenderSideMisreportingFactory where
+      view = TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+        inputTotal <- sum <$> forA transfer.inputHoldingCids \cid -> (.amount) . view <$> fetch cid
+        forA_ transfer.inputHoldingCids archive
+        receiverHoldingCid <- toInterfaceContractId @Holding <$> create RegistryHolding with
+          registryAdmin = issuer
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+        changeHoldingCid <- toInterfaceContractId @Holding <$> create MisroutedChangeHolding with
+          issuer
+          owner = optional transfer.sender identity changeOwner
+          custodian = transfer.sender
+          instrumentId = transfer.instrumentId
+          amount = inputTotal - transfer.amount - custodianSurcharge
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = [receiverHoldingCid]
+          senderChangeCids = [changeHoldingCid]
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+-- | Change holding that the custodian can fetch whoever its owner is.
+template MisroutedChangeHolding
+  with
+    issuer       : Party
+    owner        : Party
+    custodian    : Party
+    instrumentId : InstrumentId
+    amount       : Decimal
+  where
+    signatory issuer
+    observer owner, custodian
+
+    interface instance Holding for MisroutedChangeHolding where
+      view = HoldingView with
+        owner, instrumentId, amount
+        lock = None
+        meta = emptyMetadata
+
+-- | The custodian-side check of a third-party 'Release' rejects every
+-- settlement in which the custodian does not give up exactly the release
+-- amount, and a registry that does not settle synchronously.
+testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow : Script ()
+testRedTeamThirdPartyReleaseRejectsInexactCustodianOutflow = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtOutflowAdmin"
+  alice <- allocateParty "RtOutflowAlice"
+  bob <- allocateParty "RtOutflowBob"
+  stranger <- allocateParty "RtOutflowStranger"
+  relayer <- allocateParty "RtOutflowRelayer"
+  let releaseThrough newFactory call = do
+        lockA <- deployLockUnlock env admin
+        lockFrom env alice lockA 100000000
+        lockA' <- case newFactory of
+          None -> pure lockA
+          Some factory -> submit admin do exerciseCmd lockA SetFactory with newFactory = factory
+        managerA <- managerOf env lockA'
+        potA <- custodyPotOf env lockA'
+        releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 40000000)
+        releaseAttempt env lockA' (call potA) releaseVaa
+      misreportingFactory custodianSurcharge changeOwner = do
+        factoryCid <- submit env.issuer do
+          createCmd SenderSideMisreportingFactory with issuer = env.issuer, custodianSurcharge, changeOwner
+        pure (Some (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid)))
+      byRelayer _ = inboundCallBy env relayer bob
+  checkAttacksRejected
+    [ AttackCase "registry charges the custodian on top of the release" "did not take the exact transfer amount from the sender" do
+        factory <- misreportingFactory 0.01 None
+        releaseThrough factory byRelayer
+    , AttackCase "registry takes less than the release from the custodian" "did not take the exact transfer amount from the sender" do
+        factory <- misreportingFactory (-0.01) None
+        releaseThrough factory byRelayer
+    , AttackCase "registry pays the change to a stranger" "sender holding is not owned by the sender" do
+        factory <- misreportingFactory 0.0 (Some stranger)
+        releaseThrough factory byRelayer
+    , AttackCase "registry answers Pending" "did not settle synchronously" do
+        factoryCid <- submit env.issuer do
+          createCmd MockTransferFactory with admin = env.issuer, pending = True, skim = 0.0, preapprovedReceivers = []
+        releaseThrough (Some (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))) byRelayer
+    , AttackCase "custody pot listed twice" "duplicate input holding" $
+        releaseThrough None \potA -> (inboundCallBy env relayer bob) with explicitInputs = [potA, potA]
+    ]
+  -- Control: the same registry with exact settlement accepts a third-party release.
+  exactFactory <- misreportingFactory 0.0 None
+  releaseThrough exactFactory byRelayer >>= expectAccepted "exact third-party release"
+
+-- | How 'FlawedSettlementFactory' misreports a settlement.
+data SettlementFlaw
+  = ReceiverHoldingFlaw HoldingFlaw
+  | ReceiverHoldingListedTwice
+  | ChangeHoldingFlaw HoldingFlaw
+  | ChangeListedTwice
+  | ChangeReusesFirstInput
+  deriving (Eq, Show)
+
+-- | The defect of one reported holding.
+data HoldingFlaw
+  = OwnedBy Party
+  | OfInstrument InstrumentId
+  | LockedByIssuer
+  | SignedBySenderOnly
+  deriving (Eq, Show)
+
+-- | A registry that settles synchronously with the exact amounts but reports
+-- one defective holding, or a defective change list.
+template FlawedSettlementFactory
+  with
+    issuer         : Party
+    settlementFlaw : SettlementFlaw
+  where
+    signatory issuer
+
+    interface instance TransferFactory for FlawedSettlementFactory where
+      view = TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+            createReportedHolding owner amount holdingFlaw =
+              toInterfaceContractId @Holding <$> create FlawedHolding with
+                signer = if holdingFlaw == Some SignedBySenderOnly then transfer.sender else issuer
+                owner = case holdingFlaw of
+                  Some (OwnedBy flawedOwner) -> flawedOwner
+                  _ -> owner
+                viewers = [transfer.sender, transfer.receiver]
+                instrumentId = case holdingFlaw of
+                  Some (OfInstrument flawedInstrument) -> flawedInstrument
+                  _ -> transfer.instrumentId
+                amount
+                locked = holdingFlaw == Some LockedByIssuer
+            receiverFlaw = case settlementFlaw of
+              ReceiverHoldingFlaw holdingFlaw -> Some holdingFlaw
+              _ -> None
+            changeFlaw = case settlementFlaw of
+              ChangeHoldingFlaw holdingFlaw -> Some holdingFlaw
+              _ -> None
+        inputTotal <- sum <$> forA transfer.inputHoldingCids \cid -> (.amount) . view <$> fetch cid
+        when (settlementFlaw /= ChangeReusesFirstInput) (forA_ transfer.inputHoldingCids archive)
+        receiverHoldingCid <- createReportedHolding transfer.receiver transfer.amount receiverFlaw
+        let changeAmount = inputTotal - transfer.amount
+        senderChangeCids <- case settlementFlaw of
+          ChangeReusesFirstInput -> pure (take 1 transfer.inputHoldingCids)
+          ChangeListedTwice -> do
+            changeCid <- createReportedHolding transfer.sender changeAmount None
+            pure [changeCid, changeCid]
+          _ | changeAmount == 0.0 -> pure []
+            | otherwise -> (\changeCid -> [changeCid]) <$> createReportedHolding transfer.sender changeAmount changeFlaw
+        let receiverHoldingCids =
+              if settlementFlaw == ReceiverHoldingListedTwice
+                then [receiverHoldingCid, receiverHoldingCid]
+                else [receiverHoldingCid]
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids
+          senderChangeCids
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = issuer, meta = emptyMetadata
+
+template FlawedHolding
+  with
+    signer       : Party
+    owner        : Party
+    viewers      : [Party]
+    instrumentId : InstrumentId
+    amount       : Decimal
+    locked       : Bool
+  where
+    signatory signer
+    observer owner, viewers
+
+    interface instance Holding for FlawedHolding where
+      view = HoldingView with
+        owner, instrumentId, amount
+        lock = if locked
+          then Some Lock with holders = [signer], expiresAt = None, expiresAfter = None, context = None
+          else None
+        meta = emptyMetadata
+
+-- | Every holding a registry reports back is validated: a lock deposit that
+-- becomes the custody pot, and the change of a release that becomes the new
+-- pot, must be the custodian's own, of the instrument, unlocked, and signed
+-- by the instrument admin.
+testRedTeamRegistryMisreportedHoldingsRejected : Script ()
+testRedTeamRegistryMisreportedHoldingsRejected = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtFlawAdmin"
+  alice <- allocateParty "RtFlawAlice"
+  bob <- allocateParty "RtFlawBob"
+  stranger <- allocateParty "RtFlawStranger"
+  relayer <- allocateParty "RtFlawRelayer"
+  let otherInstrument = InstrumentId with admin = env.issuer, id = "OTHER"
+      flawedFactory settlementFlaw = do
+        factoryCid <- submit env.issuer do
+          createCmd FlawedSettlementFactory with issuer = env.issuer, settlementFlaw
+        pure (TransferFactoryCid (toInterfaceContractId @TransferFactory factoryCid))
+      firstLockThrough settlementFlaw = do
+        lockA <- deployLockUnlock env admin
+        factory <- flawedFactory settlementFlaw
+        lockA' <- submit admin do exerciseCmd lockA SetFactory with newFactory = factory
+        coinCid <- mintIssuerCoin env alice 1.0
+        transferAttempt env alice lockA' (outboundTransferOf 100000000 [coinCid])
+      releaseThrough settlementFlaw = do
+        lockA <- deployLockUnlock env admin
+        lockFrom env alice lockA 100000000
+        factory <- flawedFactory settlementFlaw
+        lockA' <- submit admin do exerciseCmd lockA SetFactory with newFactory = factory
+        managerA <- managerOf env lockA'
+        releaseVaa <- signInboundTransfer env.guardianKey (inboundTransferTo managerA.managerAddress bob 1 40000000)
+        releaseAttempt env lockA' (inboundCallBy env relayer bob) releaseVaa
+  checkAttacksRejected
+    [ AttackCase "lock deposit delivered to a stranger" "receiver holding is not owned by the receiver" $
+        firstLockThrough (ReceiverHoldingFlaw (OwnedBy stranger))
+    , AttackCase "lock deposit of another instrument" "receiver holding instrument mismatch" $
+        firstLockThrough (ReceiverHoldingFlaw (OfInstrument otherInstrument))
+    , AttackCase "lock deposit locked by the issuer" "receiver holding is locked" $
+        firstLockThrough (ReceiverHoldingFlaw LockedByIssuer)
+    , AttackCase "lock deposit the instrument admin did not sign" "receiver holding not signed by the instrument admin" $
+        firstLockThrough (ReceiverHoldingFlaw SignedBySenderOnly)
+    , AttackCase "lock deposit listed twice" "duplicate receiver holding" $
+        firstLockThrough ReceiverHoldingListedTwice
+    , AttackCase "release change locked by the issuer" "sender holding is locked" $
+        releaseThrough (ChangeHoldingFlaw LockedByIssuer)
+    , AttackCase "release change the instrument admin did not sign" "sender holding not signed by the instrument admin" $
+        releaseThrough (ChangeHoldingFlaw SignedBySenderOnly)
+    , AttackCase "release change of another instrument" "sender holding instrument mismatch" $
+        releaseThrough (ChangeHoldingFlaw (OfInstrument otherInstrument))
+    , AttackCase "release change listed twice" "duplicate sender change holding" $
+        releaseThrough ChangeListedTwice
+    , AttackCase "release change reuses the custody pot" "sender change reuses an input holding" $
+        releaseThrough ChangeReusesFirstInput
+    ]
+
+-- | 'Transfer' wire-field bounds: each out-of-range value is rejected by its
+-- own check, and each boundary value is accepted.
+testRedTeamTransferWireFieldBounds : Script ()
+testRedTeamTransferWireFieldBounds = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtBoundsAdmin"
+  alice <- allocateParty "RtBoundsAlice"
+  lockA <- deployLockUnlock env admin
+  let attemptWith overrideTransfer = do
+        coinCid <- mintIssuerCoin env alice 1.0
+        transferAttempt env alice lockA (overrideTransfer (outboundTransferOf 100000000 [coinCid]))
+      rejectedWith label expectedRejection overrideTransfer =
+        AttackCase label expectedRejection (attemptWith overrideTransfer)
+  checkAttacksRejected
+    [ rejectedWith "consistency level 256" "consistency level must be a uint8" \outbound -> outbound with consistencyLevel = 256
+    , rejectedWith "consistency level -1" "consistency level must be a uint8" \outbound -> outbound with consistencyLevel = -1
+    , rejectedWith "nonce 2^32" "nonce must be a uint32" \outbound -> outbound with nonce = 4294967296
+    , rejectedWith "nonce -1" "nonce must be a uint32" \outbound -> outbound with nonce = -1
+    , rejectedWith "zero recipient address" "recipient address must be non-zero" \outbound ->
+        outbound with recipientAddress = b32 "00"
+    ]
+  attemptWith (\outbound -> outbound with consistencyLevel = 255) >>= expectAccepted "consistency level 255"
+  attemptWith (\outbound -> outbound with nonce = 4294967295) >>= expectAccepted "nonce 2^32 - 1"
+  attemptWith (\outbound -> outbound with recipientAddress = b32 "01") >>= expectAccepted "recipient address 0x00..01"
+  let recipientHex = hexTextOf (b32 "ee" : UniversalAddress)
+  forA_
+    [ ("33-byte recipient address", "01" <> recipientHex, "UniversalAddress: expected 32 bytes, got 66 hex characters")
+    , ("31-byte recipient address", T.drop 2 recipientHex, "UniversalAddress: expected 32 bytes, got 62 hex characters")
+    , ("65-character recipient address", "0" <> recipientHex, "UniversalAddress: odd hex length 65")
+    , ("63-character recipient address", T.drop 1 recipientHex, "UniversalAddress: odd hex length 63")
+    , ("uppercase recipient address", T.drop 2 recipientHex <> "EE", "UniversalAddress: not lowercase hex")
+    ] \(label, malformedHex, expectedError) ->
+      assertMsg label (parseHexText @UniversalAddress malformedHex == Left expectedError)
+
+----------------------------------------------------------------------
+-- Lock/unlock admin and gg authority
+----------------------------------------------------------------------
+
+-- | An admin registers a lock/unlock deployment alone and gets a gg-owned
+-- transceiver 'Emitter'. The admin alone must not publish on it, move the
+-- deployment to burn/mint, hand the admin role to gg, or register a burn/mint
+-- deployment.
+testRedTeamLockUnlockAdminCannotUseGgAuthority : Script ()
+testRedTeamLockUnlockAdminCannotUseGgAuthority = do
+  env <- redTeamSetup
+  admin <- allocateParty "RtLockUnlockAdmin"
+  let lockUnlockFactory = TransferFactoryCid (toInterfaceContractId @TransferFactory env.issuerFactoryCid)
+  mgrCid <- registerManagerAs env admin [] (issuerInstrument env) LockUnlock lockUnlockFactory
+  mgr <- managerOf env mgrCid
+  mgr.admin === admin
+  mgr.tokenConfig === LockUnlock
+  transceiverEmitterCid <- resolveEmitter env.gg mgr.transceiverEmitterId
+  Some transceiverEmitter <- queryContractId env.gg transceiverEmitterCid
+  transceiverEmitter.owner === env.gg
+  transceiverEmitter.guardianGovernance === env.gg
+
+  canonicalCoinFactoryCid <- submit env.gg do createCmd CoinFactory with admin = env.gg
+  let burnMintFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory canonicalCoinFactoryCid)
+  (ledgerCid, ledger) <- ledgerOf env mgr.managerAddress
+  [(govCid, _)] <- query @NttGovernance env.gg
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  ledger.balance === 0.0
+
+  checkAttacksRejected
+    [ AttackCase "publish an arbitrary payload on the gg-owned emitter" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd transceiverEmitterCid PublishMessage with
+            nonce = 0
+            payload = parseHexTextOrAbort "deadbeef"
+            consistencyLevel = 0
+            coreStateCid = env.coreStateCid
+            payer = admin
+            feeAllocation = None
+    , AttackCase "move the deployment to burn/mint" "factory type does not match the token config" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd mgrCid SetFactory with newFactory = burnMintFactory
+    , AttackCase "hand the admin role to gg without gg" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd mgrCid TransferAdmin with
+            newAdmin = env.gg
+            ledgerCid = Some ledgerCid
+            vettedFactory = lockUnlockFactory
+            extraArgs = emptyExtraArgs
+    , AttackCase "register a burn/mint deployment alone" "requires authorizers" $
+        fmap (const ()) <$> trySubmit (withReads env [admin] []) do
+          exerciseCmd govCid RegisterManager with
+            admin
+            chainId = cantonChainId
+            emitterRegistryCid
+            replayRootRegistryCid
+            instrumentId = InstrumentId with admin = env.gg, id = nttInstrumentIdFor admin 1
+            instrumentNonce = 1
+            tokenConfig = BurnMint
+            tokenDecimals = 8
+            factory = burnMintFactory
+            coreStateCid = env.coreStateCid
+            consistencyLevel = 0
+            emitterFeeAllocation = None
+            claimFeeAllocation = None
+            feeAllocation = None
+    ]

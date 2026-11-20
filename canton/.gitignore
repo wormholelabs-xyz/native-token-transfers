@@ -1,0 +1,7 @@
+# Daml build output / compiler cache (dpm build / dpm test).
+# The compiled DAR lands in .daml/dist/ and is regenerated from daml/ sources.
+# The vendored DARs under dars/ are NOT build output — they are committed.
+.daml/
+
+# Test-vector / sandbox bootstrap artifacts (not sources).
+setup-result.json

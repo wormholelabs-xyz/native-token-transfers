@@ -1,0 +1,78 @@
+-- | The NTT "trimmed amount" and its conversions.
+--
+-- NTT sends amounts on the wire as an integer plus a scale byte, normalized to
+-- at most 8 decimals. Outbound, 'trimAmount' converts a local fixed-point
+-- amount to that wire form; inbound, 'untrimToDecimal' converts a wire amount
+-- to the local token's CIP-56 'Decimal' value. Both truncate: precision the
+-- other side cannot represent is dropped, never rounded up, so a receive can
+-- never pay out more than was sent.
+--
+-- This module deliberately depends only on the standard library, so anything
+-- can import it without pulling in the token-standard interfaces.
+module Wormhole.Ntt.Amount where
+
+-- | A wire amount: @amount@ integer units at @decimals@ decimal places.
+-- @decimals@ is at most 8 ('maxTrimmedDecimals'); the receiving chain rescales
+-- to its own token's decimals.
+data TrimmedAmount = TrimmedAmount with
+    decimals : Int
+    amount   : Int
+  deriving (Eq, Show)
+
+-- | NTT trims amounts to at most this many decimals on the wire.
+maxTrimmedDecimals : Int
+maxTrimmedDecimals = 8
+
+-- | @10 ^ n@ for @n >= 0@.
+tenPow : Int -> Int
+tenPow n = if n <= 0 then 1 else 10 * tenPow (n - 1)
+
+-- | Convert a local amount (@rawAmount@ integer units at @fromDecimals@) to
+-- the wire form, truncating anything below 10^-8. Trims by the source decimals
+-- alone; 'trimAmountTo' additionally accounts for the destination's decimals.
+trimAmount : Int -> Int -> TrimmedAmount
+trimAmount rawAmount fromDecimals =
+  if fromDecimals <= maxTrimmedDecimals
+    then TrimmedAmount with decimals = fromDecimals, amount = rawAmount
+    else TrimmedAmount with
+           decimals = maxTrimmedDecimals
+           amount = rawAmount / tenPow (fromDecimals - maxTrimmedDecimals)
+
+-- | Convert a local amount to the wire form, trimming to
+-- @min(8, fromDecimals, toDecimals)@ decimals. This mirrors the reference
+-- implementation, which trims to the destination's decimals so no precision is
+-- put on the wire that the receiving token cannot represent. The result never
+-- scales up: @toDecimals@ only lowers the wire precision. A caller that must
+-- not silently drop value should reject any @rawAmount@ that does not
+-- round-trip through the result (see the dust check in
+-- 'Wormhole.Ntt.Manager.Transfer').
+trimAmountTo : Int -> Int -> Int -> TrimmedAmount
+trimAmountTo rawAmount fromDecimals toDecimals =
+  let d = min maxTrimmedDecimals (min fromDecimals toDecimals)
+  in TrimmedAmount with
+       decimals = d
+       amount = rawAmount / tenPow (fromDecimals - d)
+
+-- | Rescale a wire amount to integer units at @toDecimals@, truncating
+-- precision the local token cannot represent.
+untrimAmount : TrimmedAmount -> Int -> Int
+untrimAmount ta toDecimals =
+  if toDecimals >= ta.decimals
+    then ta.amount * tenPow (toDecimals - ta.decimals)
+    else ta.amount / tenPow (ta.decimals - toDecimals)
+
+-- | A wire amount as a CIP-56 'Decimal': its value at @decimals@ places.
+-- Exact for @decimals <= 10@ (a Daml 'Decimal' has 10 fractional digits);
+-- registration enforces that bound on a deployment's token decimals.
+trimmedToDecimal : TrimmedAmount -> Decimal
+trimmedToDecimal ta = intToDecimal ta.amount / intToDecimal (tenPow ta.decimals)
+
+-- | A received wire amount as the local token's 'Decimal' value: rescaled to
+-- @tokenDecimals@ first (truncating, see 'untrimAmount'), then converted. Used
+-- on the inbound path so a release or mint never carries more precision than
+-- the local token supports.
+untrimToDecimal : TrimmedAmount -> Int -> Decimal
+untrimToDecimal ta tokenDecimals =
+  trimmedToDecimal TrimmedAmount with
+    decimals = tokenDecimals
+    amount = untrimAmount ta tokenDecimals
