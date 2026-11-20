@@ -7,3 +7,4 @@
 packages:
   - ./ntt
   - ./test
+  - ./genesis-test

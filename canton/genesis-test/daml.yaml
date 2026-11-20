@@ -1,0 +1,24 @@
+# Test package: Daml Scripts for the wormhole-genesis package. Kept separate
+# from the production package so daml-script stays out of the uploadable DAR.
+sdk-version: 3.5.1
+name: wormhole-genesis-test
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+build-options:
+  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
+  - --target=2.3
+data-dependencies:
+  - ../dars/wormhole-core-0.9.0.dar
+  - ../dars/token-cip0056-0.2.0.dar
+  - ../ntt/.daml/dist/ntt-0.5.0.dar
+  - ../genesis/.daml/dist/wormhole-genesis-0.1.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-allocation-v1-1.0.0.dar
+  - ../dars/splice-api-token-allocation-instruction-v1-1.0.0.dar
+  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
