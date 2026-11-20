@@ -2649,7 +2649,7 @@ testReceivePinsGuardianGovernance = do
       ledgerCid = fromSome ledgerCid
       inputHoldingCids = []
       extraArgs = emptyExtraArgs
-  expectAbort "committed guardian trust anchor" res
+  expectAbort coreStatePinRejection res
 
 -- | A 'Release' must present the deployment's own ledger; another
 -- deployment's ledger (different manager address) is rejected before any
@@ -3192,7 +3192,7 @@ testAcceptAdminByVaaPinsGuardianGovernance = do
   relayer <- allocateParty "AcceptPinRelayer"
   res <- trySubmit (actAs relayer <> readAs gg <> readAs rogueGov <> disclose dProp) do
     acceptAdminByVaaCmd relayer fx fakeCsId nodeCid acceptAdminHappyVAA
-  expectAbort "committed guardian trust anchor" res
+  expectAbort coreStatePinRejection res
 
 ----------------------------------------------------------------------
 -- SetPeerByVaa (NTT governance action 4)
@@ -3847,6 +3847,81 @@ testRegisterManagerByVaaBindingMismatch = do
   res <- trySubmitWithDiscs admin fx.discs do
     registerManagerByVaaCmd admin fx csId 0 dummyFactory registerHappyVAA
   expectAbort "registration binding does not match" res
+
+-- | The abort of the CoreState pin, before any fetch or VAA verification.
+coreStatePinRejection : Text
+coreStatePinRejection = "ntt: core state is not the committed guardian trust anchor"
+
+-- | A 'CoreState' signed by a throwaway gg and its fee custody party, with the
+-- devnet guardian set. Returns the throwaway gg (a reader of the contract).
+createRogueCoreState : Text -> Script (Party, ContractId CoreState)
+createRogueCoreState partyHint = do
+  rogueGuardianGovernance <- allocateParty (partyHint <> "RogueGuardianGovernance")
+  rogueFeeCustody <- allocateParty (partyHint <> "RogueFeeCustody")
+  rogueFeeInstrumentAdmin <- allocateParty (partyHint <> "RogueFeeInstrumentAdmin")
+  rogueCoreStateCid <- submit (actAs rogueGuardianGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGuardianGovernance solanaGovernanceChainId defaultGovernanceContract
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 (InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED") rogueFeeCustody)
+  pure (rogueGuardianGovernance, rogueCoreStateCid)
+
+data RogueCoreStateCase = RogueCoreStateCase with
+    choiceName : Text
+    attempt    : Party -> ContractId CoreState -> Script (Either SubmitError ())
+
+-- | Each VAA path pins the caller-supplied 'CoreState' to the deployment's gg
+-- before it fetches the contract or verifies the VAA. A guardian-signed VAA
+-- with a 'CoreState' of another gg fails at the pin.
+testVaaPathsRejectRogueCoreState : Script ()
+testVaaPathsRejectRogueCoreState = do
+  (gg, csId) <- nttSetup
+  relayer <- allocateParty "RogueCoreStateRelayer"
+  admin <- allocateParty "RogueCoreStateAdmin"
+  recipient <- allocateParty "RogueCoreStateRecipient"
+  setPeerFixture <- setPeerByVaaFixture gg csId
+  registerFixture <- registerByVaaFixture gg csId
+  (rotateManagerCid, _, _) <- setupFixedManager gg admin BurnMint csId
+  Some rotateManager <- queryContractId gg rotateManagerCid
+  realFactoryCid <- nttCoinFactorySetup gg
+  let realFactory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory realFactoryCid)
+      asRelayerReading rogueGuardianGovernance =
+        actAs relayer <> readAs gg <> readAs rogueGuardianGovernance <> readAs recipient
+      cases =
+        [ RogueCoreStateCase "SetPeerByVaa" \rogueGuardianGovernance rogueCoreStateCid -> do
+            (nodeCid, _) <- coveringDisclosure gg gg setPeerFixture.namespace (parseVAA setPeerHappyVAA).hash
+            fmap (const ()) <$> trySubmit (asRelayerReading rogueGuardianGovernance) do
+              setPeerByVaaCmd relayer setPeerFixture rogueCoreStateCid nodeCid setPeerHappyVAA
+        , RogueCoreStateCase "SetFactoryByVaa" \rogueGuardianGovernance rogueCoreStateCid -> do
+            (nodeCid, _) <- coveringDisclosure gg gg rotateManager.namespace (parseVAA rotateHappyVAA).hash
+            fmap (const ()) <$> trySubmit (actAs admin <> readAs gg <> readAs rogueGuardianGovernance) do
+              rotateByVaaCmd rotateManagerCid realFactory rogueCoreStateCid nodeCid rotateHappyVAA
+        , RogueCoreStateCase "RegisterManagerByVaa" \rogueGuardianGovernance rogueCoreStateCid ->
+            fmap (const ()) <$> trySubmit (actAs admin <> readAs gg <> readAs rogueGuardianGovernance) do
+              registerManagerByVaaCmd admin registerFixture rogueCoreStateCid 0 realFactory registerHappyVAA
+        , RogueCoreStateCase "Mint" \rogueGuardianGovernance rogueCoreStateCid -> do
+            (nodeCid, _) <- coveringDisclosure gg gg rotateManager.namespace nttTransferDigest
+            preapprovalCid <- submit recipient do
+              createCmd DepositPreapproval with owner = recipient, instrumentId = rotateManager.instrumentId
+            fmap (const ()) <$> trySubmit (asRelayerReading rogueGuardianGovernance) do
+              exerciseCmd rotateManagerCid Mint with
+                executor = relayer
+                coreStateCid = rogueCoreStateCid
+                replayNodeCid = nodeCid
+                vaaBytes = nttTransferVAA
+                pubKeys = [(0, devnetGuardianPubKey)]
+                recipient
+                depositPreapprovalCid = preapprovalCid
+                extraArgs = emptyExtraArgs
+        ]
+  forA_ cases \rogueCase -> do
+    (rogueGuardianGovernance, rogueCoreStateCid) <- createRogueCoreState rogueCase.choiceName
+    result <- rogueCase.attempt rogueGuardianGovernance rogueCoreStateCid
+    case result of
+      Right _ -> abort (rogueCase.choiceName <> ": accepted a rogue CoreState")
+      Left submitError -> case submitError of
+        FailureStatusError failure ->
+          assertMsg (rogueCase.choiceName <> ": " <> failure.message) (coreStatePinRejection `isInfixOf` failure.message)
+        otherError -> abort (rogueCase.choiceName <> ": expected the pin abort, got: " <> show otherError)
 
 ----------------------------------------------------------------------
 -- SetFactoryByVaa

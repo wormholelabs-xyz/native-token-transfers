@@ -109,28 +109,29 @@ func sortedPartySet(partySet map[partyID]bool) []partyID {
 }
 
 func TestRegisterFlowChecksGuardianGovernanceParam(t *testing.T) {
+	const gg = testGuardianGovernanceParty
+	registerFixtures := flowFixtures{
+		tailNttGovernance:      jsonArray(acsContractJSONWithArg("pkg:"+tailNttGovernance, "gov-cid-1", "Z292", "sync1", guardianAnchorArg(gg))),
+		tailEmitterRegistry:    jsonArray(acsContractJSONWithArg("pkg:"+tailEmitterRegistry, "emreg-cid-1", "ZW1yZWc=", "sync1", guardianAnchorArg(gg))),
+		tailReplayRootRegistry: jsonArray(acsContractJSONWithArg("pkg:"+tailReplayRootRegistry, "rrreg-cid-1", "cnJyZWc=", "sync1", guardianAnchorArg(gg))),
+		tailCoreState:          jsonArray(acsContractJSONWithArg("pkg:"+tailCoreState, "cs-cid-1", "Y3M=", "sync1", guardianAnchorArg(gg))),
+	}
 	cases := []struct {
-		name           string
-		query          string
-		wantRejected   bool
-		wantStatusCode int
+		name               string
+		query              string
+		wantStatusCode     int
+		wantUpstreamCalled bool
 	}{
-		{"gg param differs from the configured gg", "gg=other-gg" + testPartyFingerprintSuffix, true, http.StatusBadRequest},
-		{"no gg param", "", false, 0},
-		{"gg param equals the configured gg", "gg=" + testGuardianGovernanceParty, false, 0},
+		{"gg param differs from the configured gg", "gg=other-gg" + testPartyFingerprintSuffix, http.StatusBadRequest, false},
+		{"no gg param", "", http.StatusOK, true},
+		{"gg param equals the configured gg", "gg=" + gg, http.StatusOK, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, counter := newCountedFlowTestServer(t, flowFixtures{})
+			srv, counter := newCountedFlowTestServer(t, registerFixtures)
 			recorder := requestFlow(t, srv, "register", tc.query)
-			if tc.wantRejected {
-				assert.Equal(t, tc.wantStatusCode, recorder.Code, recorder.Body.String())
-				assert.Zero(t, counter.totalCalls())
-				return
-			}
-			assert.NotContains(t, recorder.Body.String(), "not enabled")
-			assert.NotContains(t, recorder.Body.String(), "gg must be")
-			assert.NotZero(t, counter.totalCalls(), "the register flow reads the ledger")
+			assert.Equal(t, tc.wantStatusCode, recorder.Code, recorder.Body.String())
+			assert.Equal(t, tc.wantUpstreamCalled, counter.totalCalls() > 0)
 		})
 	}
 }
