@@ -36,9 +36,9 @@ import Wormhole.Core.Setup
 import Wormhole.Core.State
   ( CoreState (..), EmitterRegistry (..), GovernanceReplayRecord (..), RegenesisGuardianSets (..)
   , ReplayRootRegistry (..), checkConsumedGovernanceIsBounded, maxEmitterId
-  , tryGovernanceReplayRecordForRegenesis, tryGuardianSetsForRegenesis )
+  , tryGovernanceReplayRecordForRegenesis, tryGovernanceReplayRecordForRegenesisFromRecords, tryGuardianSetsForRegenesis )
 import Wormhole.Ntt.Bytes (NttGovernanceRootIdentity)
-import Wormhole.Ntt.Governance (NttGovernance (..), tryNttGovernanceReplayRecordForRegenesis)
+import Wormhole.Ntt.Governance (NttGovernance (..), nttGovernanceReplayRecordOf)
 import Wormhole.Ntt.Manager (nttGovernanceRootIdentityFor)
 
 -- | 2^53 - 1, as core 'maxEmitterId': manager ids stay exact in JSON doubles.
@@ -75,7 +75,7 @@ data GenesisParameters = GenesisParameters with
     firstEmitterId             : Int                     -- EmitterRegistry nextId; the earlier registry's nextId on a re-genesis
     firstNttManagerId          : Int                     -- NttGovernance nextId; the earlier root's nextId on a re-genesis
     coreGovernanceReplayRecord : GovernanceReplayRecord  -- empty at a first genesis; tryGovernanceReplayRecordForRegenesis of the earlier CoreState
-    nttGovernanceReplayRecord  : GovernanceReplayRecord  -- empty at a first genesis; tryNttGovernanceReplayRecordForRegenesis of the earlier NttGovernance
+    nttGovernanceReplayRecord  : GovernanceReplayRecord  -- empty at a first genesis; tryGovernanceReplayRecordForRegenesisFromRecords of the earlier NttGovernance
     genesisKind                : GenesisKind
   deriving (Eq, Show)
 
@@ -226,7 +226,7 @@ archiveEarlierRootsMatchingParameters parameters earlierRoots = do
   earlierCoreReplayRecord <- either assertFail pure (tryGovernanceReplayRecordForRegenesis [earlierCoreState])
   assertMsg "genesis: core governance replay record differs from the earlier CoreState"
     (parameters.coreGovernanceReplayRecord == earlierCoreReplayRecord)
-  earlierNttReplayRecord <- either assertFail pure (tryNttGovernanceReplayRecordForRegenesis [earlierNttGovernance])
+  earlierNttReplayRecord <- either assertFail pure (tryGovernanceReplayRecordForRegenesisFromRecords [nttGovernanceReplayRecordOf earlierNttGovernance])
   assertMsg "genesis: NTT governance replay record differs from the earlier NttGovernance"
     (parameters.nttGovernanceReplayRecord == earlierNttReplayRecord)
   regenesisSets <- either assertFail pure (tryGuardianSetsForRegenesis [earlierCoreState])
