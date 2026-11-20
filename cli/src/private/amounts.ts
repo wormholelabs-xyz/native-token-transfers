@@ -1,56 +1,64 @@
-// Exact decimal-string <-> raw bigint conversion. No floats anywhere: a naive
-// Number()*10**decimals introduces artifacts (e.g. 0.1 * 1e18 is not exactly
-// 1e17) that would silently over/under-transfer on-chain.
+// Exact decimal-string <-> raw bigint conversion with integer arithmetic only.
+import { parseRawAmount, type RawAmount, type TokenDecimals } from "./types.js";
 
-const DECIMAL_RE = /^(-?)(\d+)(?:\.(\d+))?$/;
+const HUMAN_AMOUNT_PATTERN = /^(\d{1,78})(?:\.(\d{1,78}))?$/;
 
-/** Converts a human decimal string to a raw bigint at the given decimals. */
-export function toRaw(human: string, decimals: number): bigint {
-  const trimmed = human.trim();
-  const m = DECIMAL_RE.exec(trimmed);
-  if (!m) throw new Error(`"${human}" is not a valid decimal amount`);
-  const [, sign, intPart, fracPart = ""] = m;
-  if (sign === "-") throw new Error(`amount must be non-negative, got "${human}"`);
-  if (fracPart.length > decimals && /[^0]/.test(fracPart.slice(decimals))) {
+/** Human decimal string -> positive raw amount at the given decimals. */
+export function parseHumanAmount(
+  human: string,
+  decimals: TokenDecimals
+): RawAmount {
+  const match = HUMAN_AMOUNT_PATTERN.exec(human.trim());
+  if (!match)
+    throw new Error(`"${human}" is not a non-negative decimal amount`);
+  const [, integerDigits, fractionDigits = ""] = match;
+  if (
+    fractionDigits.length > decimals &&
+    /[^0]/.test(fractionDigits.slice(decimals))
+  ) {
     throw new Error(`"${human}" has more precision than ${decimals} decimals`);
   }
-  const fracPadded = fracPart.slice(0, decimals).padEnd(decimals, "0");
-  const digits = `${intPart}${fracPadded}`.replace(/^0+(?=\d)/, "");
-  return BigInt(digits.length === 0 ? "0" : digits);
+  const scaledFraction = fractionDigits
+    .slice(0, decimals)
+    .padEnd(decimals, "0");
+  return parseRawAmount(BigInt(`${integerDigits}${scaledFraction}`));
 }
 
-/** Converts a raw bigint at the given decimals back to a human decimal string. */
-export function fromRaw(raw: bigint, decimals: number): string {
+/** Raw amount at the given decimals -> human decimal string. */
+export function formatRawAmount(raw: bigint, decimals: number): string {
   if (raw < 0n) throw new Error("raw amount must be non-negative");
-  const s = raw.toString().padStart(decimals + 1, "0");
-  const cut = s.length - decimals;
-  const intPart = s.slice(0, cut) || "0";
-  const fracPart = decimals === 0 ? "" : s.slice(cut).replace(/0+$/, "");
-  return fracPart ? `${intPart}.${fracPart}` : intPart;
+  const digits = raw.toString().padStart(decimals + 1, "0");
+  const integerLength = digits.length - decimals;
+  const integerDigits = digits.slice(0, integerLength);
+  const fractionDigits =
+    decimals === 0 ? "" : digits.slice(integerLength).replace(/0+$/, "");
+  return fractionDigits ? `${integerDigits}.${fractionDigits}` : integerDigits;
 }
 
-/** Smallest representable step, as a decimal string, for `n` decimal places. */
-function stepString(step: number): string {
-  return step === 0 ? "1" : `0.${"0".repeat(step - 1)}1`;
+const NTT_WIRE_DECIMALS_MAX = 8;
+
+function smallestStepText(stepDecimals: number): string {
+  return stepDecimals === 0 ? "1" : `0.${"0".repeat(stepDecimals - 1)}1`;
 }
 
 /**
- * Rejects amounts that would round/truncate on the destination chain. The
- * dust threshold is min(8, srcDecimals, dstDecimals) — same rule ntt-lib.sh
- * enforces client-side rather than letting an on-chain assert fail later.
+ * Rejects an amount that the NTT trim would truncate. The step is
+ * min(8, source decimals, destination decimals), as in the NTT managers.
  */
-export function checkDust(
-  human: string,
-  srcDecimals: number,
-  dstDecimals: number
+export function checkAmountHasNoDust(
+  rawAmount: RawAmount,
+  sourceDecimals: TokenDecimals,
+  destinationDecimals: TokenDecimals
 ): void {
-  const step = Math.min(8, srcDecimals, dstDecimals);
-  const raw = toRaw(human, srcDecimals);
-  const scale = srcDecimals - step;
-  const divisor = 10n ** BigInt(scale);
-  if (raw % divisor !== 0n) {
+  const stepDecimals = Math.min(
+    NTT_WIRE_DECIMALS_MAX,
+    sourceDecimals,
+    destinationDecimals
+  );
+  const divisor = 10n ** BigInt(sourceDecimals - stepDecimals);
+  if (rawAmount % divisor !== 0n) {
     throw new Error(
-      `amount must be a multiple of ${stepString(step)} for this route`
+      `amount must be a multiple of ${smallestStepText(stepDecimals)} for this route`
     );
   }
 }

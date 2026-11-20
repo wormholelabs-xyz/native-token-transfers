@@ -1,324 +1,475 @@
-// Private-deployment registry: types, loader, validation, chain-alias parsing.
-// Deliberately SDK-free (no @wormhole-foundation/* imports) so this loads and
-// tests before the Canton-aware SDK fork lands. Chain names are local string
-// literals, not the SDK's Chain union.
+// Private-deployments registry, schema version 2: types, path rules, loader.
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type ChainName = "Canton" | "Ethereum" | "Solana";
-export type Mode = "locking" | "burning";
-export type DeploymentName = "canlock" | "canhub" | "ethlock" | "canburn";
+import {
+  checkOnlyKnownKeys,
+  failRegistryField,
+  parseEndpointUrl,
+  readNonEmptyString,
+  readObject,
+  readWithParser,
+} from "./registry-fields.js";
+import {
+  parseCantonPackageId,
+  parseCantonPartyId,
+  parseDeploymentName,
+  parseEvmAddress,
+  parseHex32,
+  parseSolanaAddressBytes32,
+  parseTokenDecimals,
+  parseWormholeChainId,
+  type CantonPackageId,
+  type CantonPartyId,
+  type DeploymentName,
+  type EvmAddress,
+  type Hex32,
+  type TokenDecimals,
+  type WormholeChainId,
+} from "./types.js";
 
-export const DEPLOYMENT_NAMES: readonly DeploymentName[] = [
-  "canlock",
-  "canhub",
-  "ethlock",
-  "canburn",
-];
+export const REGISTRY_SCHEMA_VERSION = 2;
+export const REGISTRY_FILE_BYTES_MAX = 1024 * 1024;
+export const DEPLOYMENT_COUNT_MAX = 64;
 
-export interface KeycloakConfig {
-  url: string;
-  realm: string;
-  clientId: string;
+export const CHAIN_NAMES = ["Canton", "Ethereum", "Solana"] as const;
+export type ChainName = (typeof CHAIN_NAMES)[number];
+export type TokenMode = "locking" | "burning";
+export type NetworkName = "Mainnet" | "Testnet";
+
+export interface CantonInstrumentId {
+  admin: CantonPartyId;
+  id: string;
 }
 
-export interface CantonConnection {
-  jsonApi: string;
-  keycloak: KeycloakConfig;
-  namespace: string;
-  parties: { user: string; operator: string; governance: string };
-  guardianPubkey: string;
+export interface CantonVettedPackageIds {
+  ntt: CantonPackageId;
+  core: CantonPackageId;
 }
 
 export interface CantonChainConfig {
-  mode: Mode;
-  decimals: number;
-  instrument: string;
-  manager: string; // 32-byte hex, no 0x
-  emitter: string; // 32-byte hex, no 0x
+  mode: TokenMode;
+  decimals: TokenDecimals;
+  manager: Hex32;
+  emitter: Hex32;
+  instrument: CantonInstrumentId;
+  vettedPackageIds: CantonVettedPackageIds;
 }
 
 export interface EthereumChainConfig {
-  mode: Mode;
-  decimals: number;
-  token: string; // 0x + 40 hex
-  manager: string; // 0x + 40 hex
-  transceiver: string; // 0x + 40 hex
-  emitter: string; // 32-byte hex, no 0x (padded transceiver address)
+  mode: TokenMode;
+  decimals: TokenDecimals;
+  token: EvmAddress;
+  manager: EvmAddress;
+  transceiver: EvmAddress;
+  emitter: Hex32;
 }
 
 export interface SolanaChainConfig {
-  mode: Mode;
-  decimals: number;
+  mode: TokenMode;
+  decimals: TokenDecimals;
   idlVersion: string;
-  manager: string; // base58 program id
-  mint: string; // base58
-  transceiver: string; // base58
-  emitter: string; // 32-byte hex, no 0x
+  coreBridge: string;
+  manager: string;
+  mint: string;
+  transceiver: string;
+  managerHex32: Hex32;
+  emitter: Hex32;
 }
 
 export interface DeploymentChains {
-  Canton: CantonChainConfig;
-  Ethereum: EthereumChainConfig;
+  Canton?: CantonChainConfig;
+  Ethereum?: EthereumChainConfig;
   Solana?: SolanaChainConfig;
 }
 
-export interface DeploymentConfig {
+export interface Deployment {
+  name: DeploymentName;
   chains: DeploymentChains;
 }
 
-export interface PrivateDeploymentsConfig {
-  network: string;
-  chainIds: Record<ChainName, number>;
-  canton: CantonConnection;
-  deployments: Record<DeploymentName, DeploymentConfig>;
+export interface CantonParticipantConfig {
+  jsonApiUrl: URL;
+  oauthTokenUrl: URL;
+  oauthClientId: string;
+  userPartyId: CantonPartyId;
 }
 
-/** Full Canton party id ("hint::namespace") for a registered party hint. */
-export function partyId(canton: CantonConnection, hint: string): string {
-  return `${hint}::${canton.namespace}`;
+export interface CantonConnectionConfig {
+  disclosureServiceUrl: URL;
+  participant?: CantonParticipantConfig;
 }
 
-const CHAIN_ALIASES: Record<string, ChainName> = {
-  canton: "Canton",
-  ethereum: "Ethereum",
-  eth: "Ethereum",
-  solana: "Solana",
-  sol: "Solana",
-};
+export interface RegistrySource {
+  absolutePath: string;
+  sha256Hex: string;
+  isRepositoryFile: boolean;
+}
 
-/** Case-insensitive chain alias -> SDK Chain name (canton/ethereum/eth/solana/sol). */
-export function parseChainAlias(input: string): ChainName {
-  const key = input.trim().toLowerCase();
-  const chain = CHAIN_ALIASES[key];
-  if (!chain) {
-    throw new Error(
-      `unknown chain "${input}"; expected one of canton, ethereum/eth, solana/sol`
+export interface PrivateRegistry {
+  network: NetworkName;
+  chainIds: Record<ChainName, WormholeChainId>;
+  canton: CantonConnectionConfig;
+  deployments: ReadonlyMap<DeploymentName, Deployment>;
+}
+
+function readTokenMode(value: unknown, context: string): TokenMode {
+  if (value !== "locking" && value !== "burning") {
+    failRegistryField(
+      context,
+      `expected "locking" or "burning", got ${JSON.stringify(value)}`
     );
   }
+  return value;
+}
+
+function readCantonChain(value: unknown, context: string): CantonChainConfig {
+  const chain = readObject(value, context);
+  checkOnlyKnownKeys(
+    chain,
+    [
+      "mode",
+      "decimals",
+      "manager",
+      "emitter",
+      "instrument",
+      "vettedPackageIds",
+    ],
+    context
+  );
+  const instrument = readObject(chain.instrument, `${context}.instrument`);
+  checkOnlyKnownKeys(instrument, ["admin", "id"], `${context}.instrument`);
+  const packageIds = readObject(
+    chain.vettedPackageIds,
+    `${context}.vettedPackageIds`
+  );
+  checkOnlyKnownKeys(
+    packageIds,
+    ["ntt", "core"],
+    `${context}.vettedPackageIds`
+  );
+  return {
+    mode: readTokenMode(chain.mode, `${context}.mode`),
+    decimals: readWithParser(
+      chain.decimals,
+      `${context}.decimals`,
+      parseTokenDecimals
+    ),
+    manager: readWithParser(chain.manager, `${context}.manager`, parseHex32),
+    emitter: readWithParser(chain.emitter, `${context}.emitter`, parseHex32),
+    instrument: {
+      admin: readWithParser(
+        instrument.admin,
+        `${context}.instrument.admin`,
+        parseCantonPartyId
+      ),
+      id: readNonEmptyString(instrument.id, `${context}.instrument.id`),
+    },
+    vettedPackageIds: {
+      ntt: readWithParser(
+        packageIds.ntt,
+        `${context}.vettedPackageIds.ntt`,
+        parseCantonPackageId
+      ),
+      core: readWithParser(
+        packageIds.core,
+        `${context}.vettedPackageIds.core`,
+        parseCantonPackageId
+      ),
+    },
+  };
+}
+
+function readEthereumChain(
+  value: unknown,
+  context: string
+): EthereumChainConfig {
+  const chain = readObject(value, context);
+  checkOnlyKnownKeys(
+    chain,
+    ["mode", "decimals", "token", "manager", "transceiver", "emitter"],
+    context
+  );
+  return {
+    mode: readTokenMode(chain.mode, `${context}.mode`),
+    decimals: readWithParser(
+      chain.decimals,
+      `${context}.decimals`,
+      parseTokenDecimals
+    ),
+    token: readWithParser(chain.token, `${context}.token`, parseEvmAddress),
+    manager: readWithParser(
+      chain.manager,
+      `${context}.manager`,
+      parseEvmAddress
+    ),
+    transceiver: readWithParser(
+      chain.transceiver,
+      `${context}.transceiver`,
+      parseEvmAddress
+    ),
+    emitter: readWithParser(chain.emitter, `${context}.emitter`, parseHex32),
+  };
+}
+
+function readSolanaAddress(value: unknown, context: string): string {
+  const base58Text = readNonEmptyString(value, context, 44);
+  readWithParser(base58Text, context, parseSolanaAddressBytes32);
+  return base58Text;
+}
+
+function readSolanaChain(value: unknown, context: string): SolanaChainConfig {
+  const chain = readObject(value, context);
+  checkOnlyKnownKeys(
+    chain,
+    [
+      "mode",
+      "decimals",
+      "idlVersion",
+      "coreBridge",
+      "manager",
+      "mint",
+      "transceiver",
+      "emitter",
+    ],
+    context
+  );
+  const manager = readSolanaAddress(chain.manager, `${context}.manager`);
+  return {
+    mode: readTokenMode(chain.mode, `${context}.mode`),
+    decimals: readWithParser(
+      chain.decimals,
+      `${context}.decimals`,
+      parseTokenDecimals
+    ),
+    idlVersion: readNonEmptyString(
+      chain.idlVersion,
+      `${context}.idlVersion`,
+      16
+    ),
+    coreBridge: readSolanaAddress(chain.coreBridge, `${context}.coreBridge`),
+    manager,
+    mint: readSolanaAddress(chain.mint, `${context}.mint`),
+    transceiver: readSolanaAddress(chain.transceiver, `${context}.transceiver`),
+    managerHex32: parseSolanaAddressBytes32(manager),
+    emitter: readWithParser(chain.emitter, `${context}.emitter`, parseHex32),
+  };
+}
+
+function readDeployment(value: unknown, name: DeploymentName): Deployment {
+  const context = `deployments.${name}`;
+  const deployment = readObject(value, context);
+  checkOnlyKnownKeys(deployment, ["chains"], context);
+  const chainsObject = readObject(deployment.chains, `${context}.chains`);
+  checkOnlyKnownKeys(chainsObject, CHAIN_NAMES, `${context}.chains`);
+  const chains: DeploymentChains = {};
+  if (chainsObject.Canton !== undefined)
+    chains.Canton = readCantonChain(
+      chainsObject.Canton,
+      `${context}.chains.Canton`
+    );
+  if (chainsObject.Ethereum !== undefined) {
+    chains.Ethereum = readEthereumChain(
+      chainsObject.Ethereum,
+      `${context}.chains.Ethereum`
+    );
+  }
+  if (chainsObject.Solana !== undefined)
+    chains.Solana = readSolanaChain(
+      chainsObject.Solana,
+      `${context}.chains.Solana`
+    );
+  if (Object.keys(chains).length < 2)
+    failRegistryField(
+      `${context}.chains`,
+      "a deployment needs at least two chains"
+    );
+  return { name, chains };
+}
+
+function readCantonConnection(value: unknown): CantonConnectionConfig {
+  const canton = readObject(value, "canton");
+  checkOnlyKnownKeys(canton, ["disclosureServiceUrl", "participant"], "canton");
+  const disclosureServiceUrl = parseEndpointUrl(
+    readNonEmptyString(
+      canton.disclosureServiceUrl,
+      "canton.disclosureServiceUrl"
+    ),
+    "canton.disclosureServiceUrl"
+  );
+  if (canton.participant === undefined) return { disclosureServiceUrl };
+  const participant = readObject(canton.participant, "canton.participant");
+  checkOnlyKnownKeys(
+    participant,
+    ["jsonApiUrl", "oauthTokenUrl", "oauthClientId", "userPartyId"],
+    "canton.participant"
+  );
+  return {
+    disclosureServiceUrl,
+    participant: {
+      jsonApiUrl: parseEndpointUrl(
+        readNonEmptyString(
+          participant.jsonApiUrl,
+          "canton.participant.jsonApiUrl"
+        ),
+        "canton.participant.jsonApiUrl"
+      ),
+      oauthTokenUrl: parseEndpointUrl(
+        readNonEmptyString(
+          participant.oauthTokenUrl,
+          "canton.participant.oauthTokenUrl"
+        ),
+        "canton.participant.oauthTokenUrl"
+      ),
+      oauthClientId: readNonEmptyString(
+        participant.oauthClientId,
+        "canton.participant.oauthClientId"
+      ),
+      userPartyId: readWithParser(
+        participant.userPartyId,
+        "canton.participant.userPartyId",
+        parseCantonPartyId
+      ),
+    },
+  };
+}
+
+function readNetwork(value: unknown): NetworkName {
+  if (value !== "Mainnet" && value !== "Testnet") {
+    failRegistryField(
+      "network",
+      `expected "Mainnet" or "Testnet", got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+/** Validates a parsed JSON value against schema version 2. */
+export function validateRegistry(raw: unknown): PrivateRegistry {
+  const root = readObject(raw, "<root>");
+  if (root.schemaVersion !== REGISTRY_SCHEMA_VERSION) {
+    failRegistryField(
+      "schemaVersion",
+      `must be ${REGISTRY_SCHEMA_VERSION}, got ${JSON.stringify(root.schemaVersion)}`
+    );
+  }
+  checkOnlyKnownKeys(
+    root,
+    ["schemaVersion", "network", "chainIds", "canton", "deployments"],
+    "<root>"
+  );
+  const chainIdsObject = readObject(root.chainIds, "chainIds");
+  checkOnlyKnownKeys(chainIdsObject, CHAIN_NAMES, "chainIds");
+  const chainIds = {} as Record<ChainName, WormholeChainId>;
+  for (const chain of CHAIN_NAMES) {
+    chainIds[chain] = readWithParser(
+      chainIdsObject[chain],
+      `chainIds.${chain}`,
+      parseWormholeChainId
+    );
+  }
+  if (new Set(Object.values(chainIds)).size !== CHAIN_NAMES.length)
+    failRegistryField("chainIds", "chain ids are not unique");
+
+  const deploymentsObject = readObject(root.deployments, "deployments");
+  const deploymentNames = Object.keys(deploymentsObject);
+  if (deploymentNames.length > DEPLOYMENT_COUNT_MAX) {
+    failRegistryField(
+      "deployments",
+      `more than ${DEPLOYMENT_COUNT_MAX} deployments`
+    );
+  }
+  const deployments = new Map<DeploymentName, Deployment>();
+  for (const rawName of deploymentNames) {
+    const name = readWithParser(
+      rawName,
+      `deployments.${rawName}`,
+      parseDeploymentName
+    );
+    deployments.set(name, readDeployment(deploymentsObject[rawName], name));
+  }
+  return {
+    network: readNetwork(root.network),
+    chainIds,
+    canton: readCantonConnection(root.canton),
+    deployments,
+  };
+}
+
+export function requireDeployment(
+  registry: PrivateRegistry,
+  name: string
+): Deployment {
+  const deployment = registry.deployments.get(name as DeploymentName);
+  if (!deployment) {
+    const known = [...registry.deployments.keys()];
+    throw new Error(
+      `unknown deployment "${name}"; the registry has ${known.length === 0 ? "no deployments" : known.join(", ")}`
+    );
+  }
+  return deployment;
+}
+
+export function chainNameForId(
+  registry: PrivateRegistry,
+  chainId: WormholeChainId
+): ChainName {
+  const chain = CHAIN_NAMES.find((name) => registry.chainIds[name] === chainId);
+  if (!chain)
+    throw new Error(
+      `Wormhole chain id ${chainId} is not in the registry chainIds`
+    );
   return chain;
 }
 
-// --- validation --------------------------------------------------------
+export const REGISTRY_FILENAME = "private-deployments.json";
 
-const HEX32_RE = /^[0-9a-fA-F]{64}$/;
-const EVM_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
+/** <repository>/private-deployments.json, at a fixed depth from cli/src/private/. */
+export const REPOSITORY_REGISTRY_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  REGISTRY_FILENAME
+);
 
-function fail(context: string, msg: string): never {
-  throw new Error(`private-deployments.json: ${context}: ${msg}`);
+/** Order: explicit path, then NTT_PRIVATE_DEPLOYMENTS, then the repository file. */
+export function resolveRegistryPath(
+  explicitPath: string | undefined,
+  environmentPath: string | undefined
+): string {
+  if (explicitPath) return path.resolve(explicitPath);
+  if (environmentPath) return path.resolve(environmentPath);
+  return REPOSITORY_REGISTRY_PATH;
 }
 
-function expectString(v: unknown, context: string): string {
-  if (typeof v !== "string" || v.length === 0) {
-    fail(context, `expected a non-empty string, got ${JSON.stringify(v)}`);
-  }
-  return v as string;
-}
-
-function expectInt(v: unknown, context: string): number {
-  if (typeof v !== "number" || !Number.isInteger(v)) {
-    fail(context, `expected an integer, got ${JSON.stringify(v)}`);
-  }
-  return v as number;
-}
-
-function expectMode(v: unknown, context: string): Mode {
-  if (v !== "locking" && v !== "burning") {
-    fail(context, `expected mode "locking" or "burning", got ${JSON.stringify(v)}`);
-  }
-  return v as Mode;
-}
-
-function expectHex32(v: unknown, context: string): string {
-  const s = expectString(v, context);
-  if (!HEX32_RE.test(s)) {
-    fail(context, `expected 32-byte hex (64 chars, no 0x), got "${s}"`);
-  }
-  return s;
-}
-
-function expectEvmAddress(v: unknown, context: string): string {
-  const s = expectString(v, context);
-  if (!EVM_ADDR_RE.test(s)) {
-    fail(context, `expected a 0x-prefixed 20-byte address, got "${s}"`);
-  }
-  return s;
-}
-
-function expectBase58(v: unknown, context: string): string {
-  const s = expectString(v, context);
-  if (!BASE58_RE.test(s)) {
-    fail(context, `expected a base58 address, got "${s}"`);
-  }
-  return s;
-}
-
-function expectObject(v: unknown, context: string): Record<string, unknown> {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) {
-    fail(context, `expected an object, got ${JSON.stringify(v)}`);
-  }
-  return v as Record<string, unknown>;
-}
-
-function validateCantonChain(v: unknown, context: string): CantonChainConfig {
-  const o = expectObject(v, context);
-  return {
-    mode: expectMode(o.mode, `${context}.mode`),
-    decimals: expectInt(o.decimals, `${context}.decimals`),
-    instrument: expectString(o.instrument, `${context}.instrument`),
-    manager: expectHex32(o.manager, `${context}.manager`),
-    emitter: expectHex32(o.emitter, `${context}.emitter`),
-  };
-}
-
-function validateEthereumChain(v: unknown, context: string): EthereumChainConfig {
-  const o = expectObject(v, context);
-  return {
-    mode: expectMode(o.mode, `${context}.mode`),
-    decimals: expectInt(o.decimals, `${context}.decimals`),
-    token: expectEvmAddress(o.token, `${context}.token`),
-    manager: expectEvmAddress(o.manager, `${context}.manager`),
-    transceiver: expectEvmAddress(o.transceiver, `${context}.transceiver`),
-    emitter: expectHex32(o.emitter, `${context}.emitter`),
-  };
-}
-
-function validateSolanaChain(v: unknown, context: string): SolanaChainConfig {
-  const o = expectObject(v, context);
-  return {
-    mode: expectMode(o.mode, `${context}.mode`),
-    decimals: expectInt(o.decimals, `${context}.decimals`),
-    idlVersion: expectString(o.idlVersion, `${context}.idlVersion`),
-    manager: expectBase58(o.manager, `${context}.manager`),
-    mint: expectBase58(o.mint, `${context}.mint`),
-    transceiver: expectBase58(o.transceiver, `${context}.transceiver`),
-    emitter: expectHex32(o.emitter, `${context}.emitter`),
-  };
-}
-
-function validateDeployment(v: unknown, name: string): DeploymentConfig {
-  const o = expectObject(v, `deployments.${name}`);
-  const chains = expectObject(o.chains, `deployments.${name}.chains`);
-  if (!("Canton" in chains)) fail(`deployments.${name}.chains`, `missing chain "Canton"`);
-  if (!("Ethereum" in chains)) fail(`deployments.${name}.chains`, `missing chain "Ethereum"`);
-  const result: DeploymentChains = {
-    Canton: validateCantonChain(chains.Canton, `deployments.${name}.chains.Canton`),
-    Ethereum: validateEthereumChain(
-      chains.Ethereum,
-      `deployments.${name}.chains.Ethereum`
-    ),
-  };
-  if ("Solana" in chains && chains.Solana !== undefined) {
-    result.Solana = validateSolanaChain(
-      chains.Solana,
-      `deployments.${name}.chains.Solana`
+export function loadRegistry(
+  explicitPath: string | undefined,
+  environmentPath: string | undefined = process.env.NTT_PRIVATE_DEPLOYMENTS
+): { registry: PrivateRegistry; source: RegistrySource } {
+  const absolutePath = resolveRegistryPath(explicitPath, environmentPath);
+  const fileBytes = fs.readFileSync(absolutePath);
+  if (fileBytes.length > REGISTRY_FILE_BYTES_MAX) {
+    throw new Error(
+      `${absolutePath} is larger than ${REGISTRY_FILE_BYTES_MAX} bytes`
     );
-  }
-  return { chains: result };
-}
-
-function validateCanton(v: unknown): CantonConnection {
-  const o = expectObject(v, "canton");
-  const keycloakO = expectObject(o.keycloak, "canton.keycloak");
-  const partiesO = expectObject(o.parties, "canton.parties");
-  return {
-    jsonApi: expectString(o.jsonApi, "canton.jsonApi"),
-    keycloak: {
-      url: expectString(keycloakO.url, "canton.keycloak.url"),
-      realm: expectString(keycloakO.realm, "canton.keycloak.realm"),
-      clientId: expectString(keycloakO.clientId, "canton.keycloak.clientId"),
-    },
-    namespace: expectString(o.namespace, "canton.namespace"),
-    parties: {
-      user: expectString(partiesO.user, "canton.parties.user"),
-      operator: expectString(partiesO.operator, "canton.parties.operator"),
-      governance: expectString(
-        partiesO.governance,
-        "canton.parties.governance"
-      ),
-    },
-    guardianPubkey: expectString(o.guardianPubkey, "canton.guardianPubkey"),
-  };
-}
-
-/** Validates a parsed JSON value against the private-deployments schema. */
-export function validateConfig(raw: unknown): PrivateDeploymentsConfig {
-  const o = expectObject(raw, "<root>");
-  const network = expectString(o.network, "network");
-  const chainIdsO = expectObject(o.chainIds, "chainIds");
-  const chainIds: Record<ChainName, number> = {
-    Canton: expectInt(chainIdsO.Canton, "chainIds.Canton"),
-    Ethereum: expectInt(chainIdsO.Ethereum, "chainIds.Ethereum"),
-    Solana: expectInt(chainIdsO.Solana, "chainIds.Solana"),
-  };
-  const canton = validateCanton(o.canton);
-  const deploymentsO = expectObject(o.deployments, "deployments");
-  for (const name of DEPLOYMENT_NAMES) {
-    if (!(name in deploymentsO)) {
-      fail("deployments", `missing required deployment "${name}"`);
-    }
-  }
-  const deployments: Record<DeploymentName, DeploymentConfig> = {} as Record<
-    DeploymentName,
-    DeploymentConfig
-  >;
-  for (const name of DEPLOYMENT_NAMES) {
-    deployments[name] = validateDeployment(deploymentsO[name], name);
-  }
-  return { network, chainIds, canton, deployments };
-}
-
-// --- loader --------------------------------------------------------------
-
-const CONFIG_FILENAME = "private-deployments.json";
-
-function findUpward(startDir: string, filename: string): string | undefined {
-  let dir = startDir;
-  for (;;) {
-    const candidate = path.join(dir, filename);
-    if (fs.existsSync(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-}
-
-/**
- * Resolves the config path with precedence: explicit path arg ->
- * NTT_PRIVATE_DEPLOYMENTS env -> ./private-deployments.json in CWD -> walk
- * upward from this module's directory (covers running from cli/ or repo root).
- */
-export function resolveConfigPath(explicitPath?: string): string {
-  if (explicitPath) return explicitPath;
-  const envPath = process.env.NTT_PRIVATE_DEPLOYMENTS;
-  if (envPath) return envPath;
-  const cwdPath = path.resolve(process.cwd(), CONFIG_FILENAME);
-  if (fs.existsSync(cwdPath)) return cwdPath;
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const found = findUpward(moduleDir, CONFIG_FILENAME);
-  if (found) return found;
-  throw new Error(
-    `${CONFIG_FILENAME} not found: pass --deployments, set NTT_PRIVATE_DEPLOYMENTS, ` +
-      `or place it in ${process.cwd()} or an ancestor of ${moduleDir}`
-  );
-}
-
-/** Loads and validates the private-deployments registry. */
-export function loadConfig(explicitPath?: string): PrivateDeploymentsConfig {
-  const configPath = resolveConfigPath(explicitPath);
-  let text: string;
-  try {
-    text = fs.readFileSync(configPath, "utf8");
-  } catch (err) {
-    throw new Error(`failed to read ${configPath}: ${(err as Error).message}`);
   }
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(fileBytes.toString("utf8"));
   } catch (err) {
-    throw new Error(`failed to parse ${configPath}: ${(err as Error).message}`);
+    throw new Error(
+      `failed to parse ${absolutePath}: ${(err as Error).message}`
+    );
   }
-  return validateConfig(raw);
+  return {
+    registry: validateRegistry(raw),
+    source: {
+      absolutePath,
+      sha256Hex: createHash("sha256").update(fileBytes).digest("hex"),
+      isRepositoryFile: absolutePath === REPOSITORY_REGISTRY_PATH,
+    },
+  };
 }
