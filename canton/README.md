@@ -114,8 +114,11 @@ new `NttGovernance` root, and thus one more `gg` transaction. That
 transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Then one
 manager address gets two managers, and each inbound transfer mints two times.
-A re-genesis (`ReGenesisReplacing`, see "Genesis") is this transaction. It
-replaces the core roots and the NTT root together.
+For roots of `ntt` 0.5.0 and core 0.9.0, a re-genesis (`ReGenesisReplacing`,
+see "Genesis") is this transaction. It replaces the core roots and the NTT
+root together. `EarlierGenesisRoots` names the templates of these package
+versions. Thus a breaking `ntt` or core version also needs a new
+`wormhole-genesis` version that depends on both package versions.
 
 Vet no package with code that runs with `gg` authority and can claim a `gg`
 replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
@@ -162,8 +165,8 @@ as a stakeholder. After genesis, each host of `gg`, `feeCustody` and
 
 For a re-genesis of a `gg`, set `genesisKind` to `ReGenesisReplacing` with the
 contract ids of the earlier `CoreState`, `EmitterRegistry`,
-`ReplayRootRegistry` and `NttGovernance`. Set these parameters from the same
-contracts:
+`ReplayRootRegistry`, `NttGovernance` and `CoinFactory`. Set these parameters
+from the same contracts:
 
 - `consumedCoreGovernanceDigests`: the `consumedGovernance` of the earlier
   `CoreState`.
@@ -177,8 +180,16 @@ root has another `gg` or custody party, or if a value differs from the
 earlier root. It then archives the four earlier roots and creates the new
 roots in the same transaction. Thus the new roots reject each earlier
 governance VAA. Each new emitter id is above the earlier ones. Each new
-manager id is also above the earlier ones. The earlier `CoinFactory` stays active, because burn/mint managers hold
-its contract id.
+manager id is also above the earlier ones.
+
+The earlier `CoinFactory` stays active and is the factory of the new roots.
+Burn/mint managers hold its contract id, and the disclosure service expects
+one `CoinFactory` for each `gg`.
+
+A re-genesis cannot change `feeCustody` or `nttCustody`. `AcceptGenesis`
+compares the genesis guardian set with the parameters only. It does not
+compare the guardian set index with the earlier `CoreState`. Each guardian
+must check that the index is the current global index.
 
 A governance action or a registration on an earlier root changes its
 contract id or its values. Then the accept fails, and the operator makes a
@@ -190,8 +201,8 @@ Each digest list holds 1024 digests or fewer. A longer history needs a new
 digest definition needs a review before a re-genesis.
 
 The ledger cannot see whether a `gg` had roots before a `FirstGenesis`. Each
-guardian must check that no `CoreState` and no `NttGovernance` of the `gg`
-is active before it accepts a `FirstGenesis`.
+guardian must check that no `CoreState`, no `EmitterRegistry` and no
+`NttGovernance` of the `gg` is active before it accepts a `FirstGenesis`.
 
 ### Version 0.4.x is not upgrade-compatible
 
@@ -226,14 +237,17 @@ package name when it receives a DAR. Thus a participant that has an earlier
 
 To move a deployment from an earlier version, do these steps:
 
-1. Hold a new root ceremony. In one transaction, `gg` and `nttCustody`
-   archive the old `NttGovernance` and create the new one.
+1. Hold a new root ceremony. In one transaction, archive the old
+   `NttGovernance` and create the new one. The signatories of both roots
+   act. For a 0.4.x root, the operator also acts.
 2. In the same transaction, set `nextId` of the new root to the `nextId` of
    the archived root. Thus no manager address and no replay namespace occurs
    two times.
-3. Register each deployment again on the new root.
-4. On each peer chain, register the new manager and transceiver addresses.
-5. Move each reserve from its old custodian to the new `reserveCustodian`.
+3. In the same transaction, copy `consumedGovernance` of the archived root to
+   the new root. Thus no earlier registration VAA applies again.
+4. Register each deployment again on the new root.
+5. On each peer chain, register the new manager and transceiver addresses.
+6. Move each reserve from its old custodian to the new `reserveCustodian`.
 
 ## Parties and the trust model
 
