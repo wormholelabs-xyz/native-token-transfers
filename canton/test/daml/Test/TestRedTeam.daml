@@ -85,10 +85,14 @@ data VaaSpec = VaaSpec with
     payload          : MessagePayload
   deriving (Eq, Show)
 
--- | A single-signature VAA (guardian index 0).
+-- | A single-signature VAA (guardian index 0) with body timestamp 0.
 signVaa : GuardianKey -> VaaSpec -> Script EncodedVaa
-signVaa key spec = do
-  let body = intToBytesN 0 4 <> intToBytesN 0 4
+signVaa key = signVaaAt key 0
+
+-- | 'signVaa' with the body timestamp @timestampSeconds@.
+signVaaAt : GuardianKey -> Int -> VaaSpec -> Script EncodedVaa
+signVaaAt key timestampSeconds spec = do
+  let body = intToBytesN timestampSeconds 4 <> intToBytesN 0 4
         <> intToBytesN spec.emitterChain 2 <> hexBytesOf spec.emitterAddress
         <> intToBytesN spec.sequence 8 <> intToHexByte 0 <> hexBytesOf spec.payload
       digest = keccak256Bytes (keccak256Bytes body)

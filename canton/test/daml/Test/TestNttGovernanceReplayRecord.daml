@@ -1,0 +1,155 @@
+-- | Tests of the bounded 'NttGovernance' replay record: the cap of
+-- 'maxRetainedGovernanceDigests' digests, the eviction floor, and the
+-- 'NttGovernance' precondition.
+module Test.TestNttGovernanceReplayRecord where
+
+import Daml.Script hiding (AnyContractId)
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Text qualified as T
+
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
+import Token.CIP0056.CoinFactory (CoinFactory (..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.Setup (defaultGovernanceContract, solanaGovernanceChainId)
+import Wormhole.Core.State (maxRetainedGovernanceDigests)
+import Wormhole.Core.VAA (parseVAA)
+import Wormhole.Ntt.Governance
+import Wormhole.Ntt.Manager
+import Wormhole.Ntt.Payload
+import Test.TestNtt (cantonChainId, coreRegistries, testNttGovernanceRootIdentity)
+import Test.TestRedTeam (RedTeamEnv (..), VaaSpec (..), redTeamSetupWithPartyHintPrefix, rejectionText, signVaaAt)
+
+-- | A digest label and its VAA body timestamp, for a hand-built record.
+digestsAtTimestamps : [Int] -> Map VaaDigest Int
+digestsAtTimestamps timestamps = Map.fromList
+  [ (parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes ("consumed registration " <> show timestampSeconds))), timestampSeconds)
+  | timestampSeconds <- timestamps ]
+
+-- | Replaces the root of @env@ with one that holds @consumedGovernance@ and
+-- @evictedFloorSeconds@.
+withNttGovernanceReplayRecord : RedTeamEnv -> Map VaaDigest Int -> Optional Int -> Script (ContractId NttGovernance)
+withNttGovernanceReplayRecord env consumedGovernance evictedFloorSeconds = do
+  [(rootCid, root)] <- query @NttGovernance env.gg
+  submit (actAs env.gg <> actAs env.nttCustody) do
+    archiveCmd rootCid *> createCmd root with
+      consumedGovernance
+      evictedGovernanceMaxTimestampSeconds = evictedFloorSeconds
+
+registrationVaaAt : RedTeamEnv -> Int -> Int -> Party -> Int -> Script EncodedVaa
+registrationVaaAt env timestampSeconds sequence admin instrumentNonce =
+  signVaaAt env.guardianKey timestampSeconds VaaSpec with
+    guardianSetIndex = 0
+    emitterChain = solanaGovernanceChainId
+    emitterAddress = defaultGovernanceContract
+    sequence
+    payload = encodeNttGovernance RegisterBurnMintManager with
+      chain = cantonChainId
+      registrationBinding = nttRegistrationBindingFor testNttGovernanceRootIdentity env.gg admin instrumentNonce
+      tokenDecimals = 8
+
+registerByVaaAttempt : RedTeamEnv -> ContractId NttGovernance -> Party -> Int -> EncodedVaa -> Script (Either SubmitError (ContractId NttGovernance))
+registerByVaaAttempt env rootCid admin instrumentNonce vaaBytes = do
+  (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  [(coinFactoryCid, _)] <- query @CoinFactory env.gg
+  fmap (\(successorCid, _, _, _, _) -> successorCid) <$> trySubmit (actAs admin <> readAs env.gg) do
+    exerciseCmd rootCid RegisterManagerByVaa with
+      admin
+      emitterRegistryCid
+      replayRootRegistryCid
+      instrumentNonce
+      factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid)
+      coreStateCid = env.coreStateCid
+      consistencyLevel = 0
+      emitterFeeAllocation = None
+      claimFeeAllocation = None
+      feeAllocation = None
+      vaaBytes
+      extraArgs = emptyExtraArgs
+
+replayRecordSetup : Text -> Script RedTeamEnv
+replayRecordSetup partyHintPrefix = do
+  env <- redTeamSetupWithPartyHintPrefix partyHintPrefix
+  _ <- submit env.gg do createCmd CoinFactory with admin = env.gg
+  pure env
+
+floorRejection : Text
+floorRejection = "ntt governance: VAA timestamp at or below the evicted governance timestamp floor"
+
+checkRejectedWith : Text -> Text -> Either SubmitError a -> Script ()
+checkRejectedWith caseName expectedText = \case
+  Right _ -> abort (caseName <> ": accepted")
+  Left submitError ->
+    assertMsg (caseName <> ": expected " <> expectedText <> ", got: " <> rejectionText submitError)
+      (expectedText `T.isInfixOf` rejectionText submitError)
+
+-- | A registration into a full record evicts the lowest timestamp and raises
+-- the floor to it. A VAA at the new floor is then rejected.
+testNttRegistrationEvictionRaisesTheFloor : Script ()
+testNttRegistrationEvictionRaisesTheFloor = do
+  env <- replayRecordSetup "Evict"
+  admin <- allocateParty "EvictAdmin"
+  let fullRecord = digestsAtTimestamps [1 .. maxRetainedGovernanceDigests]
+  rootCid <- withNttGovernanceReplayRecord env fullRecord None
+  registrationVaa <- registrationVaaAt env 100 1 admin 0
+  successorCid <- registerByVaaAttempt env rootCid admin 0 registrationVaa
+    >>= either (\submitError -> abort ("registration: " <> rejectionText submitError)) pure
+  Some successor <- queryContractId env.gg successorCid
+  Map.size successor.consumedGovernance === maxRetainedGovernanceDigests
+  successor.evictedGovernanceMaxTimestampSeconds === Some 1
+  Map.lookup (parseVAA registrationVaa).hash successor.consumedGovernance === Some 100
+  successor.consumedGovernance === Map.insert (parseVAA registrationVaa).hash 100
+    (digestsAtTimestamps [2 .. maxRetainedGovernanceDigests])
+  vaaAtNewFloor <- registrationVaaAt env 1 2 admin 1
+  registerByVaaAttempt env successorCid admin 1 vaaAtNewFloor >>= checkRejectedWith "VAA at the new floor" floorRejection
+
+-- | A registration VAA at or below the floor is rejected; one above it applies.
+testNttRegistrationAtOrBelowTheFloorIsRejected : Script ()
+testNttRegistrationAtOrBelowTheFloorIsRejected = do
+  env <- replayRecordSetup "Floor"
+  admin <- allocateParty "FloorAdmin"
+  let floorSeconds = 50
+  rootCid <- withNttGovernanceReplayRecord env Map.empty (Some floorSeconds)
+  forA_ [ ("below the floor", floorSeconds - 1, 1)
+        , ("at the floor", floorSeconds, 2)
+        , ("zero timestamp", 0, 3)
+        ] \(caseName, timestampSeconds, sequence) -> do
+    registrationVaa <- registrationVaaAt env timestampSeconds sequence admin 0
+    registerByVaaAttempt env rootCid admin 0 registrationVaa >>= checkRejectedWith caseName floorRejection
+  aboveFloorVaa <- registrationVaaAt env (floorSeconds + 1) 4 admin 0
+  successorCid <- registerByVaaAttempt env rootCid admin 0 aboveFloorVaa
+    >>= either (\submitError -> abort ("above the floor: " <> rejectionText submitError)) pure
+  Some successor <- queryContractId env.gg successorCid
+  successor.consumedGovernance === Map.fromList [((parseVAA aboveFloorVaa).hash, floorSeconds + 1)]
+  successor.evictedGovernanceMaxTimestampSeconds === Some floorSeconds
+
+-- | The 'NttGovernance' precondition bounds the replay record: the capacity,
+-- uint32 timestamps, and each retained timestamp above the floor.
+testNttGovernanceEnsureBoundsTheReplayRecord : Script ()
+testNttGovernanceEnsureBoundsTheReplayRecord = do
+  env <- replayRecordSetup "Bound"
+  [(_, root)] <- query @NttGovernance env.gg
+  let maxUint32 = 4294967295
+      cases =
+        [ ("32 digests, no floor", digestsAtTimestamps [1 .. maxRetainedGovernanceDigests], None, True)
+        , ("one digest above the floor", digestsAtTimestamps [6], Some 5, True)
+        , ("timestamp at uint32 max", digestsAtTimestamps [maxUint32], None, True)
+        , ("33 digests", digestsAtTimestamps [1 .. maxRetainedGovernanceDigests + 1], None, False)
+        , ("digest at the floor", digestsAtTimestamps [5], Some 5, False)
+        , ("digest below the floor", digestsAtTimestamps [4], Some 5, False)
+        , ("timestamp above uint32", digestsAtTimestamps [maxUint32 + 1], None, False)
+        , ("negative timestamp", digestsAtTimestamps [-1], None, False)
+        , ("floor above uint32", Map.empty, Some (maxUint32 + 1), False)
+        , ("negative floor", Map.empty, Some (-1), False)
+        ]
+  forA_ cases \(caseName, consumedGovernance, evictedFloorSeconds, expectAccepted) -> do
+    result <- trySubmit (actAs env.gg <> actAs env.nttCustody) do
+      createCmd root with
+        consumedGovernance
+        evictedGovernanceMaxTimestampSeconds = evictedFloorSeconds
+    if expectAccepted
+      then either (\submitError -> abort (caseName <> ": " <> rejectionText submitError)) (const (pure ())) result
+      else checkRejectedWith caseName "Template precondition violated: NttGovernance" result
