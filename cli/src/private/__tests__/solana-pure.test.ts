@@ -3,7 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   SolanaConfirmationUnknownError,
   SolanaTransactionExpiredError,
+  checkSolanaKeyFileMode,
   checkSolanaPeerIsRegistryManager,
+  checkRegistryDecimalsMatchChain,
+  sendSignedSolanaTransaction,
   parseSolanaKeypairFileText,
   runSolanaRedeemSteps,
   waitForSolanaConfirmation,
@@ -111,6 +114,75 @@ describe("waitForSolanaConfirmation", () => {
         }
       )
     ).rejects.toBeInstanceOf(SolanaConfirmationUnknownError);
+  });
+});
+
+describe("waitForSolanaConfirmation recheck after the height limit", () => {
+  test.each([
+    [
+      "stale status, recheck finds it confirmed: confirmed",
+      [null, "confirmed"],
+      "resolves",
+    ],
+    ["recheck finds it processed: unknown", [null, "processed"], "unknown"],
+    ["recheck finds nothing: expired", [null, null], "expired"],
+  ] as const)("%s", async (_caseName, statuses, expectedOutcome) => {
+    const waiting = waitForSolanaConfirmation(
+      fakeStatusRpc({ statuses: [...statuses], blockHeights: [201] }),
+      "sig",
+      200,
+      { pollIntervalMs: 1, wallClockCapMs: 10_000, sleep: noSleep }
+    );
+    if (expectedOutcome === "resolves")
+      await expect(waiting).resolves.toBeUndefined();
+    if (expectedOutcome === "unknown")
+      await expect(waiting).rejects.toBeInstanceOf(
+        SolanaConfirmationUnknownError
+      );
+    if (expectedOutcome === "expired")
+      await expect(waiting).rejects.toBeInstanceOf(
+        SolanaTransactionExpiredError
+      );
+  });
+});
+
+describe("sendSignedSolanaTransaction", () => {
+  test("a send error after signing is unknown and names the signature", async () => {
+    const sending = sendSignedSolanaTransaction(
+      fakeStatusRpc({ statuses: [null], blockHeights: [100] }),
+      "sig-123",
+      200,
+      async () => {
+        throw new Error("socket hang up");
+      },
+      { pollIntervalMs: 1, wallClockCapMs: 10_000, sleep: noSleep }
+    );
+    await expect(sending).rejects.toBeInstanceOf(
+      SolanaConfirmationUnknownError
+    );
+    await sending.catch((err: Error) =>
+      expect(err.message).toContain("sig-123")
+    );
+  });
+});
+
+describe("checkSolanaKeyFileMode", () => {
+  test.each([[0o600], [0o400]])("mode %o accepted", (mode) => {
+    expect(() => checkSolanaKeyFileMode(mode)).not.toThrow();
+  });
+  test.each([[0o644], [0o640], [0o604]])("mode %o rejected", (mode) => {
+    expect(() => checkSolanaKeyFileMode(mode)).toThrow(/chmod 600/);
+  });
+});
+
+describe("checkRegistryDecimalsMatchChain", () => {
+  test("equal passes, different rejects", () => {
+    expect(() =>
+      checkRegistryDecimalsMatchChain(9, 9, "Solana mint")
+    ).not.toThrow();
+    expect(() => checkRegistryDecimalsMatchChain(6, 9, "Solana mint")).toThrow(
+      /decimals/
+    );
   });
 });
 
