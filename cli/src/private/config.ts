@@ -378,11 +378,13 @@ export function validateRegistry(raw: unknown): PrivateRegistry {
       parseWormholeChainId
     );
   }
+  const network = readNetwork(root.network);
   for (const chain of CHAIN_NAMES) {
-    if (chainIds[chain] !== toChainId(chain)) {
+    const sdkChain = sdkChainForRegistryChain(network, chain);
+    if (chainIds[chain] !== toChainId(sdkChain)) {
       failRegistryField(
         `chainIds.${chain}`,
-        `${chainIds[chain]} differs from the SDK chain id ${toChainId(chain)}`
+        `${chainIds[chain]} differs from the SDK chain id ${toChainId(sdkChain)} of ${sdkChain} on ${network}`
       );
     }
   }
@@ -407,11 +409,20 @@ export function validateRegistry(raw: unknown): PrivateRegistry {
     deployments.set(name, readDeployment(deploymentsObject[rawName], name));
   }
   return {
-    network: readNetwork(root.network),
+    network,
     chainIds,
     canton: readCantonConnection(root.canton),
     deployments,
   };
+}
+
+/** SDK chain of a registry chain name: the Ethereum leg is Sepolia on Testnet. */
+export function sdkChainForRegistryChain(
+  network: NetworkName,
+  chain: ChainName
+): "Canton" | "Ethereum" | "Sepolia" | "Solana" {
+  if (chain === "Ethereum" && network === "Testnet") return "Sepolia";
+  return chain;
 }
 
 export function requireDeployment(
