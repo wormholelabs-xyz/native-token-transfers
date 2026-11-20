@@ -164,8 +164,11 @@ new registration. Thus a second trie is possible only in these cases:
 - A second `NttGovernance` root for the same `gg` starts at a used `nextId`.
   The guardians must sign one root for each `gg`. A second root from another
   ledger time has another `rootIdentity`, so it rejects each
-  `RegisterManagerByVaa` VAA of the first root. Two first geneses in one
-  transaction share one `rootIdentity`. A lock/unlock `RegisterManager` needs no VAA, so this rule stays.
+  `RegisterManagerByVaa` VAA of the first root. A lock/unlock
+  `RegisterManager` needs no VAA, so the rule of one root for each `gg`
+  stays. Two first geneses at one ledger time, for example in one
+  transaction, make two roots with one `rootIdentity`. Then each root accepts
+  the registration VAAs of the other root.
 - Code outside `ntt` that runs with `gg` authority claims a root. The
   canonical `CoinFactory` package does not depend on `wormhole-core`. Each
   `gg` host vets each new `token-cip0056` version.

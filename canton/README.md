@@ -76,10 +76,13 @@ the upgrades of a package in order.
 
 Version 0.6.1 builds against core 0.12.2 (`e162e0c0...`, SDK 3.7.3) and has
 the package id
-`23d8ac9ca0c2bcfcc88988e63996eef5d15016bfcd4356df4ecaaa0820c19457`.
+`37753fce5b8069ada4dd56523e36fe5e0abe86be784d49854e014ec248f0c3fc`.
+`wormhole-genesis` 0.2.1 builds against `ntt` 0.6.1 and core 0.12.2. It has
+the package id
+`8af94ec56cd660812074f23437bbd798e1c13c6be18f512437a413bd9775096c`.
 Version 0.6.0 built against core 0.12.0 (`aec76d21...`) and has the package
-id `79a1cc2c...`. `ntt/daml.yaml` has no `upgrades:` field. Use participants that have no
-earlier `ntt` package.
+id `79a1cc2c...`. `ntt/daml.yaml` has no `upgrades:` field. Use participants
+that have no earlier `ntt` package.
 
 Version 0.6.0 changes these values:
 
@@ -145,8 +148,8 @@ ledger time makes a root with another identity. That root rejects each
 registration VAA of the first root. Two first geneses at one ledger time, for
 example in one transaction, make two roots with one identity. Then each root
 accepts the registration VAAs of the other root. This is a residual risk. One
-root for each `gg` is a guardian rule. Before the guardians sign a registration VAA, they read the
-`rootIdentity` of their root.
+root for each `gg` is a guardian rule. Before the guardians sign a
+registration VAA, they read the `rootIdentity` of their root.
 
 NTT must be final at genesis. An upgrade-compatible NTT version needs only
 the vetting of the new DAR on each `gg` host. A breaking NTT version needs a
@@ -178,9 +181,9 @@ core rules (`recordGovernanceDigest`, `checkConsumedGovernanceIsBounded`):
 - The ledger rejects a registration VAA with a timestamp at or below the
   floor.
 
-After 32 registrations with newer timestamps, a pending registration VAA can
-be at or below the floor. Then the ledger rejects it, and the guardians sign
-the registration again with a newer timestamp.
+After 33 registrations with timestamps at or above its own timestamp, a
+pending registration VAA is at or below the floor. Then the ledger rejects
+it, and the guardians sign the registration again with a newer timestamp.
 
 A registration has no other replay protection. A second registration with
 one VAA makes a second manager for the same instrument. Thus the floor
@@ -261,9 +264,10 @@ eviction floor. For one earlier root, it equals the record of that root.
 
 `AcceptGenesis` fetches the earlier roots. It rejects the re-genesis if a
 root has another `gg` or custody party. It also rejects the re-genesis if one
-of these values differs from what the earlier roots give: the two id floors,
-the two replay records, the guardian set index, the guardian sets and the
-genesis guardians. The ledger compares only these values. Each guardian must
+of these values differs from what the earlier roots give: the two first ids
+(`firstEmitterId`, `firstNttManagerId`), the two replay records, the guardian
+set index and the genesis guardians. It also rejects an earlier `CoinFactory`
+with an admin other than `gg`. The ledger compares only these values. Each guardian must
 compare each other parameter with the earlier roots: the governance chain,
 the governance contract, the fee instrument, each fee, `onboardingFeeAdmin`.
 `AcceptGenesis` then archives the four earlier roots and creates the
@@ -340,8 +344,8 @@ To move a deployment from an earlier version, do these steps:
 3. In the same transaction, set the `rootIdentity` of the new root as a first
    genesis does. A root before 0.6.0 has no `rootIdentity`, and its digests
    have no timestamps. Set `consumedGovernance` to empty. Set
-   `evictedGovernanceMaxTimestampSeconds` to the latest timestamp of a
-   registration VAA of the archived root. Thus no earlier registration VAA
+   `evictedGovernanceMaxTimestampSeconds` to the latest body timestamp of
+   the registration VAAs that the guardians signed for the archived root. Thus no earlier registration VAA
    applies again.
 4. Register each deployment again on the new root.
 5. On each peer chain, register the new manager and transceiver addresses.
