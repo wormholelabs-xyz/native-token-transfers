@@ -1,314 +1,350 @@
-// Drives Solana sends/redeems directly against @solana/web3.js + SolanaNtt
-// (the vendored solana/ts SDK, whose AsyncGenerators natively produce
-// @solana/web3.js Transaction/VersionedTransaction objects — there is no kit
-// equivalent for this path).
+// SolanaNtt adapter. SolanaNtt yields @solana/web3.js transactions, so this module keeps web3.js;
+// address parsing uses parseSolanaAddressBytes32.
 import {
   Connection,
   Keypair,
   PublicKey,
   VersionedTransaction,
   type Signer,
-  type SimulatedTransactionResponse,
 } from "@solana/web3.js";
 import * as splToken from "@solana/spl-token";
 import * as fs from "node:fs";
 
-import { encoding, toUniversal, type Network } from "@wormhole-foundation/sdk";
-import { SolanaAddress, isVersionedTransaction } from "@wormhole-foundation/sdk-solana";
+import {
+  deserialize,
+  encoding,
+  toUniversal,
+  type Chain,
+  type Network,
+} from "@wormhole-foundation/sdk";
+import { register as registerNttPayloads } from "@wormhole-foundation/sdk-definitions-ntt";
+import {
+  SolanaAddress,
+  isVersionedTransaction,
+} from "@wormhole-foundation/sdk-solana";
 import { SolanaNtt } from "@wormhole-foundation/sdk-solana-ntt";
 
-import { toRaw } from "./amounts.js";
-import { hexToBytes } from "./binding.js";
+import {
+  hex32ToBytes,
+  hex32FromBytes,
+  type Hex32,
+  type RawAmount,
+} from "./types.js";
 import type {
   ChainName,
-  DeploymentConfig,
-  PrivateDeploymentsConfig,
+  Deployment,
+  PrivateRegistry,
   SolanaChainConfig,
 } from "./config.js";
+import { chainLegIdentity } from "./transfer-route.js";
+import {
+  checkSolanaPeerIsRegistryManager,
+  parseSolanaKeypairFileText,
+  runSolanaRedeemSteps,
+  waitForSolanaConfirmation,
+  type SolanaStatusRpc,
+} from "./solana-pure.js";
 
-const DEFAULT_SOL_RPC = "https://rpc.labsapis.com/mainnet/solana";
-const PROXY_ORIGIN = "https://portalbridge.com";
+registerNttPayloads();
 
-// Private-network Solana core bridge, fixed for every deployment (not part
-// of the per-deployment registry — see port-ntt-lib-to-cli-data.md).
-const SOLANA_CORE_BRIDGE = "worMq7dr1fGM24dUV2ciwMShz3p979L8LNcat9AhKsj";
+const DEFAULT_SOLANA_RPC_BY_NETWORK = {
+  Mainnet: "https://rpc.labsapis.com/mainnet/solana",
+  Testnet: "https://rpc.labsapis.com/testnet/solana",
+} as const;
+const RPC_PROXY_ORIGIN = "https://portalbridge.com";
+const SEQUENCE_LOG_PREFIX = "Program log: Sequence: ";
+const SOLANA_KEYPAIR_FILE_BYTES_MAX = 4096;
+const FINALIZED_WAIT_MAX_POLLS = 30;
+const FINALIZED_WAIT_POLL_INTERVAL_MS = 1_000;
+// A later transaction in the same generator reads the account that these create.
+const DESCRIPTIONS_THAT_NEED_FINALITY = new Set([
+  "Core.VerifySignature",
+  "Core.PostVAA",
+  "Redeem.CreateATA",
+]);
 
-const SEQ_LOG_PREFIX = "Program log: Sequence: ";
-
-// Descriptions (from solana/ts/sdk/ntt.ts) whose created account another
-// yielded tx in the same generator depends on. Cross-RPC-node replica lag
-// means "confirmed" on our own send doesn't guarantee visibility to whatever
-// node handles the next sendTransaction call, so we wait for "finalized"
-// before proceeding past these.
-const NEEDS_FINALITY = new Set(["Core.VerifySignature", "Core.PostVAA", "Redeem.CreateATA"]);
-
-export interface SolanaOpOptions {
-  dryRun?: boolean;
+function buildSolanaConnection(registry: PrivateRegistry): Connection {
+  return new Connection(
+    process.env.SOL_RPC ?? DEFAULT_SOLANA_RPC_BY_NETWORK[registry.network],
+    {
+      commitment: "confirmed",
+      httpHeaders: { Origin: RPC_PROXY_ORIGIN },
+    }
+  );
 }
 
-export interface SolanaSendResult {
-  signature: string;
-  sequence?: string;
-}
-
-export interface SolanaRedeemResult {
-  signature?: string;
-}
-
-function buildSolanaConnection(): Connection {
-  const url = process.env.SOL_RPC ?? DEFAULT_SOL_RPC;
-  return new Connection(url, { commitment: "confirmed", httpHeaders: { Origin: PROXY_ORIGIN } });
-}
-
-/** Keypair from SOLANA_PRIVATE_KEY (base58 secret key) or SOLANA_PAYER_PATH (JSON keypair file). */
 function loadSolanaKeypair(): Keypair {
   const payerPath = process.env.SOLANA_PAYER_PATH;
   if (payerPath) {
-    const raw = JSON.parse(fs.readFileSync(payerPath, "utf8"));
-    return Keypair.fromSecretKey(new Uint8Array(raw));
+    if (fs.statSync(payerPath).size > SOLANA_KEYPAIR_FILE_BYTES_MAX) {
+      throw new Error(
+        `SOLANA_PAYER_PATH is larger than ${SOLANA_KEYPAIR_FILE_BYTES_MAX} bytes`
+      );
+    }
+    return Keypair.fromSecretKey(
+      parseSolanaKeypairFileText(fs.readFileSync(payerPath, "utf8"))
+    );
   }
-  const pk = process.env.SOLANA_PRIVATE_KEY;
-  if (!pk) {
+  const secretKeyBase58 = process.env.SOLANA_PRIVATE_KEY;
+  if (!secretKeyBase58)
     throw new Error("SOLANA_PRIVATE_KEY or SOLANA_PAYER_PATH env var not set");
-  }
-  return Keypair.fromSecretKey(encoding.b58.decode(pk));
+  return Keypair.fromSecretKey(encoding.b58.decode(secretKeyBase58));
 }
 
-/** Payer pubkey (base58), pure aside from a local keypair load — no RPC calls. */
 export function deriveSolanaAddress(): string {
   return loadSolanaKeypair().publicKey.toBase58();
 }
 
+function solanaLeg(deployment: Deployment): SolanaChainConfig {
+  const solana = deployment.chains.Solana;
+  if (!solana)
+    throw new Error(`deployment "${deployment.name}" has no Solana leg`);
+  return solana;
+}
+
 function buildSolanaNtt(
-  cfg: PrivateDeploymentsConfig,
+  registry: PrivateRegistry,
   connection: Connection,
-  sol: SolanaChainConfig
-): SolanaNtt<Network, "Solana"> {
+  solana: SolanaChainConfig
+) {
   return new SolanaNtt(
-    cfg.network as Network,
+    registry.network as Network,
     "Solana",
     connection,
     {
-      coreBridge: SOLANA_CORE_BRIDGE,
+      coreBridge: solana.coreBridge,
       ntt: {
-        manager: sol.manager,
-        token: sol.mint,
-        transceiver: { wormhole: sol.transceiver },
+        manager: solana.manager,
+        token: solana.mint,
+        transceiver: { wormhole: solana.transceiver },
       },
     },
-    sol.idlVersion
+    solana.idlVersion
   );
 }
 
-function logSimulation(description: string, sim: SimulatedTransactionResponse): void {
-  if (sim.err) {
-    console.log(`  [dry-run] ${description}: ERROR ${JSON.stringify(sim.err)}`);
-  } else {
-    console.log(`  [dry-run] ${description}: ok, ~${sim.unitsConsumed ?? "?"} CU`);
-  }
-  for (const log of sim.logs ?? []) console.log(`    ${log}`);
+function statusRpc(connection: Connection): SolanaStatusRpc {
+  return {
+    async getSignatureConfirmationStatus(signature) {
+      const status = (
+        await connection.getSignatureStatus(signature, {
+          searchTransactionHistory: true,
+        })
+      ).value;
+      if (!status) return undefined;
+      return {
+        confirmationStatus: status.confirmationStatus ?? "processed",
+        failed: status.err !== null,
+      };
+    },
+    getBlockHeight: () => connection.getBlockHeight("confirmed"),
+  };
 }
 
-/** Signs and sends (or simulates, in dry-run mode) one yielded unsigned tx. */
-async function driveTx(
-  connection: Connection,
-  payer: Keypair,
-  utx: { transaction: { transaction: any; signers?: Signer[] }; description: string },
-  dryRun: boolean | undefined
-): Promise<string | undefined> {
-  const { transaction, signers } = utx.transaction;
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-
-  if (isVersionedTransaction(transaction)) {
-    transaction.message.recentBlockhash = blockhash;
-    transaction.sign([payer, ...(signers ?? [])]);
-    if (dryRun) {
-      const sim = await connection.simulateTransaction(transaction);
-      logSimulation(utx.description, sim.value);
-      return undefined;
-    }
-    const sig = await connection.sendTransaction(transaction);
-    await confirmByStatusPoll(connection, sig);
-    console.log(`  ${utx.description}: tx ${sig}`);
-    return sig;
-  }
-
-  transaction.recentBlockhash = blockhash;
-  transaction.lastValidBlockHeight = lastValidBlockHeight;
-  transaction.feePayer = transaction.feePayer ?? payer.publicKey;
-
-  if (dryRun) {
-    // Simulate via the non-deprecated VersionedTransaction overload rather
-    // than simulateTransaction(Transaction, ...), which web3.js deprecates.
-    const versioned = new VersionedTransaction(transaction.compileMessage());
-    const sim = await connection.simulateTransaction(versioned, { sigVerify: false });
-    logSimulation(utx.description, sim.value);
-    return undefined;
-  }
-
-  transaction.partialSign(payer, ...(signers ?? []));
-  const sig = await connection.sendRawTransaction(transaction.serialize());
-  await confirmByStatusPoll(connection, sig);
-  console.log(`  ${utx.description}: tx ${sig}`);
-  return sig;
-}
-
-/**
- * connection.confirmTransaction's block-height strategy misses statuses behind
- * the load-balanced proxy (txs land but the wait expires). Poll
- * getSignatureStatus with history search instead.
- */
-async function confirmByStatusPoll(
-  connection: Connection,
-  signature: string,
-  retries = 45,
-  delayMs = 2000
-): Promise<void> {
-  for (let i = 0; i < retries; i++) {
-    const status = await connection.getSignatureStatus(signature, {
-      searchTransactionHistory: true,
-    });
-    const v = status.value;
-    if (v?.err) throw new Error(`${signature} failed on-chain: ${JSON.stringify(v.err)}`);
-    if (v?.confirmationStatus === "confirmed" || v?.confirmationStatus === "finalized") return;
-    await new Promise((r) => setTimeout(r, delayMs));
-  }
-  throw new Error(`${signature} not confirmed after ${(retries * delayMs) / 1000}s`);
-}
-
-/** Bounded poll for a signature to reach "finalized" — the replica-lag guard. */
 async function waitFinalized(
   connection: Connection,
-  signature: string,
-  retries = 20,
-  delayMs = 1000
+  signature: string
 ): Promise<void> {
-  for (let i = 0; i < retries; i++) {
+  for (
+    let pollNumber = 1;
+    pollNumber <= FINALIZED_WAIT_MAX_POLLS;
+    pollNumber++
+  ) {
     const status = await connection.getSignatureStatus(signature, {
       searchTransactionHistory: true,
     });
     if (status.value?.confirmationStatus === "finalized") return;
-    await new Promise((r) => setTimeout(r, delayMs));
+    await new Promise((resolve) =>
+      setTimeout(resolve, FINALIZED_WAIT_POLL_INTERVAL_MS)
+    );
   }
   throw new Error(
-    `timed out waiting for ${signature} to reach finalized commitment (replica lag?) — ` +
-      `safe to re-run: posted-VAA and redeem are idempotent`
+    `${signature} did not reach finalized in ${FINALIZED_WAIT_MAX_POLLS} polls; posted VAA and redeem are idempotent, a re-run is safe`
   );
+}
+
+async function driveTransaction(
+  connection: Connection,
+  payer: Keypair,
+  unsigned: {
+    transaction: { transaction: any; signers?: Signer[] };
+    description: string;
+  },
+  dryRun: boolean
+): Promise<string | undefined> {
+  const { transaction, signers } = unsigned.transaction;
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash();
+  let signature: string;
+  if (isVersionedTransaction(transaction)) {
+    transaction.message.recentBlockhash = blockhash;
+    transaction.sign([payer, ...(signers ?? [])]);
+    if (dryRun) {
+      const simulation = await connection.simulateTransaction(transaction);
+      console.log(
+        `  [dry-run] ${unsigned.description}: ${simulation.value.err ? `ERROR ${JSON.stringify(simulation.value.err)}` : "ok"}`
+      );
+      return undefined;
+    }
+    signature = await connection.sendTransaction(transaction);
+  } else {
+    transaction.recentBlockhash = blockhash;
+    transaction.lastValidBlockHeight = lastValidBlockHeight;
+    transaction.feePayer = transaction.feePayer ?? payer.publicKey;
+    if (dryRun) {
+      const simulation = await connection.simulateTransaction(
+        new VersionedTransaction(transaction.compileMessage()),
+        {
+          sigVerify: false,
+        }
+      );
+      console.log(
+        `  [dry-run] ${unsigned.description}: ${simulation.value.err ? `ERROR ${JSON.stringify(simulation.value.err)}` : "ok"}`
+      );
+      return undefined;
+    }
+    transaction.partialSign(payer, ...(signers ?? []));
+    signature = await connection.sendRawTransaction(transaction.serialize());
+  }
+  console.log(`  ${unsigned.description}: tx ${signature}`);
+  await waitForSolanaConfirmation(
+    statusRpc(connection),
+    signature,
+    lastValidBlockHeight
+  );
+  return signature;
 }
 
 async function driveGenerator(
   connection: Connection,
   payer: Keypair,
   generator: AsyncGenerator<any>,
-  dryRun: boolean | undefined
-): Promise<string | undefined> {
-  let lastSig: string | undefined;
-  for await (const utx of generator) {
-    const sig = await driveTx(connection, payer, utx, dryRun);
-    if (sig) {
-      if (NEEDS_FINALITY.has(utx.description)) await waitFinalized(connection, sig);
-      lastSig = sig;
-    }
+  dryRun: boolean
+) {
+  let lastSignature: string | undefined;
+  for await (const unsigned of generator) {
+    const signature = await driveTransaction(
+      connection,
+      payer,
+      unsigned,
+      dryRun
+    );
+    if (signature && DESCRIPTIONS_THAT_NEED_FINALITY.has(unsigned.description))
+      await waitFinalized(connection, signature);
+    lastSignature = signature ?? lastSignature;
   }
-  return lastSig;
+  return lastSignature;
 }
 
-async function fetchSequence(connection: Connection, signature: string): Promise<string | undefined> {
-  const tx = await connection.getTransaction(signature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0,
-  });
-  const line = tx?.meta?.logMessages?.find((l) => l.startsWith(SEQ_LOG_PREFIX));
-  return line ? line.slice(SEQ_LOG_PREFIX.length) : undefined;
+async function checkPeer(
+  ntt: SolanaNtt<Network, "Solana">,
+  deployment: Deployment,
+  peerChain: ChainName
+) {
+  const peer = await ntt.getPeer(peerChain as Chain);
+  if (!peer) throw new Error(`Solana NttManager has no peer for ${peerChain}`);
+  const observedPeer = hex32FromBytes(peer.address.address.toUint8Array());
+  checkSolanaPeerIsRegistryManager(
+    observedPeer,
+    chainLegIdentity(deployment, peerChain).manager,
+    peerChain
+  );
 }
 
 export async function solanaSend(
-  cfg: PrivateDeploymentsConfig,
-  dep: DeploymentConfig,
-  amountHuman: string,
-  destChain: ChainName,
-  recipient32Hex: string,
-  opts: SolanaOpOptions = {}
-): Promise<SolanaSendResult | undefined> {
-  const sol = dep.chains.Solana;
-  if (!sol) throw new Error("deployment has no Solana leg");
-
-  const connection = buildSolanaConnection();
+  parameters: {
+    registry: PrivateRegistry;
+    deployment: Deployment;
+    destinationChain: ChainName;
+    rawAmount: RawAmount;
+    recipient: Hex32;
+  },
+  options: { dryRun: boolean }
+): Promise<{ signature: string; sequence?: string } | undefined> {
+  const solana = solanaLeg(parameters.deployment);
+  const connection = buildSolanaConnection(parameters.registry);
   const payer = loadSolanaKeypair();
-  const ntt = buildSolanaNtt(cfg, connection, sol);
-  const rawAmount = toRaw(amountHuman, sol.decimals);
+  const ntt = buildSolanaNtt(parameters.registry, connection, solana);
+  await checkPeer(ntt, parameters.deployment, parameters.destinationChain);
 
-  const sender = new SolanaAddress(payer.publicKey);
   const destination = {
-    chain: destChain,
-    address: toUniversal(destChain, hexToBytes(recipient32Hex)),
+    chain: parameters.destinationChain as Chain,
+    address: toUniversal(
+      parameters.destinationChain as Chain,
+      hex32ToBytes(parameters.recipient)
+    ),
   };
-
-  const generator = ntt.transfer(sender as any, rawAmount, destination as any, {
-    queue: false,
-    automatic: false,
+  const generator = ntt.transfer(
+    new SolanaAddress(payer.publicKey),
+    parameters.rawAmount,
+    destination,
+    {
+      queue: false,
+      automatic: false,
+    }
+  );
+  const lastSignature = await driveGenerator(
+    connection,
+    payer,
+    generator,
+    options.dryRun
+  );
+  if (options.dryRun || !lastSignature) return undefined;
+  const transaction = await connection.getTransaction(lastSignature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0,
   });
-
-  const lastSig = await driveGenerator(connection, payer, generator, opts.dryRun);
-  if (opts.dryRun || !lastSig) return undefined;
-  const sequence = await fetchSequence(connection, lastSig);
-  return { signature: lastSig, sequence };
-}
-
-/**
- * Fails fast with an actionable error if the recipient's ATA doesn't exist.
- * SolanaNtt.redeem only ever creates an ATA for the *payer* (the signer
- * submitting the redeem), not for the VAA's recipient — a foreign recipient
- * (recipient != payer) whose ATA was never created would otherwise fail deep
- * inside the final combined instruction, after everything else has already
- * landed on-chain.
- */
-async function checkRecipientAtaExists(
-  connection: Connection,
-  ntt: SolanaNtt<Network, "Solana">,
-  attestation: any
-): Promise<void> {
-  const config = await ntt.getConfig();
-  const recipient = new PublicKey(
-    attestation.payload.nttManagerPayload.payload.recipientAddress.toUint8Array()
+  const sequenceLine = transaction?.meta?.logMessages?.find((line) =>
+    line.startsWith(SEQUENCE_LOG_PREFIX)
   );
-  const ata = splToken.getAssociatedTokenAddressSync(
-    config.mint,
-    recipient,
-    true,
-    config.tokenProgram
-  );
-  const info = await connection.getAccountInfo(ata);
-  if (!info) {
-    throw new Error(
-      `recipient ${recipient.toBase58()}'s associated token account ${ata.toBase58()} ` +
-        `does not exist; SolanaNtt.redeem only creates the ATA for the payer submitting the ` +
-        `redeem, not for a foreign recipient — create it first (e.g. via an ATA-create tx funded ` +
-        `by any payer) and re-run. The VAA is unaffected and stays redeemable.`
-    );
-  }
+  return {
+    signature: lastSignature,
+    sequence: sequenceLine?.slice(SEQUENCE_LOG_PREFIX.length),
+  };
 }
 
 export async function solanaRedeem(
-  cfg: PrivateDeploymentsConfig,
-  dep: DeploymentConfig,
-  attestation: unknown,
-  opts: SolanaOpOptions = {}
-): Promise<SolanaRedeemResult | undefined> {
-  const sol = dep.chains.Solana;
-  if (!sol) throw new Error("deployment has no Solana leg");
-
-  const connection = buildSolanaConnection();
+  parameters: {
+    registry: PrivateRegistry;
+    deployment: Deployment;
+    vaaBytes: Uint8Array;
+  },
+  options: { dryRun: boolean }
+): Promise<{ signature?: string }> {
+  const solana = solanaLeg(parameters.deployment);
+  const connection = buildSolanaConnection(parameters.registry);
   const payer = loadSolanaKeypair();
-  const ntt = buildSolanaNtt(cfg, connection, sol);
+  const ntt = buildSolanaNtt(parameters.registry, connection, solana);
+  const attestation = deserialize("Ntt:WormholeTransfer", parameters.vaaBytes);
 
-  if (!opts.dryRun) {
-    await checkRecipientAtaExists(connection, ntt, attestation);
-  }
-
-  const payerAddr = new SolanaAddress(payer.publicKey);
-  const generator = ntt.redeem([attestation as any], payerAddr as any);
-
-  const lastSig = await driveGenerator(connection, payer, generator, opts.dryRun);
-  return opts.dryRun ? undefined : { signature: lastSig };
+  const signature = await runSolanaRedeemSteps(
+    {
+      async checkRecipientTokenAccount() {
+        const nttConfig = await ntt.getConfig();
+        const recipient = new PublicKey(
+          attestation.payload.nttManagerPayload.payload.recipientAddress.toUint8Array()
+        );
+        const tokenAccount = splToken.getAssociatedTokenAddressSync(
+          nttConfig.mint,
+          recipient,
+          true,
+          nttConfig.tokenProgram
+        );
+        if (!(await connection.getAccountInfo(tokenAccount))) {
+          throw new Error(
+            `recipient ${recipient.toBase58()} has no associated token account ${tokenAccount.toBase58()}; create it, then run the redeem again. The VAA stays redeemable.`
+          );
+        }
+      },
+      driveRedeem: (dryRun) =>
+        driveGenerator(
+          connection,
+          payer,
+          ntt.redeem([attestation], new SolanaAddress(payer.publicKey)),
+          dryRun
+        ),
+    },
+    options
+  );
+  return { signature };
 }
