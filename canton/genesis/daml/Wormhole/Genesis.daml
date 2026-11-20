@@ -27,8 +27,8 @@ import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Core.Bytes (Bytes32, isLowerHex, normalizeHex)
 import Wormhole.Core.GuardianSet (checkGuardianAddressesAreWellFormed)
 import Wormhole.Core.Setup
-  ( GenesisGuardianSet (..), RegistryParties (..), cantonChainId, defaultGovernanceContract
-  , mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId )
+  ( GenesisGuardianSet (..), RegistryParties (..), cantonChainId
+  , mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry )
 import Wormhole.Core.State (CoreState (..), EmitterRegistry (..), ReplayRootRegistry (..), maxEmitterId)
 import Wormhole.Ntt.Governance (NttGovernance (..))
 
@@ -122,10 +122,12 @@ template WormholeGenesisOffer
 checkGenesisParametersAreWellFormed : GenesisParameters -> Either Text ()
 checkGenesisParametersAreWellFormed parameters = do
   checkGuardianAddressesAreWellFormed parameters.genesisGuardianSet.guardianAddresses
-  assertMsg "genesis: governance chain is not the Wormhole governance chain"
-    (parameters.governanceChainId == solanaGovernanceChainId)
-  assertMsg "genesis: governance contract is not the Wormhole governance contract"
-    (parameters.governanceContract == defaultGovernanceContract)
+  -- sdk/vaa ChainID is a uint16, and 0 is ChainIDUnset.
+  assertMsg "genesis: governance chain is not a nonzero uint16"
+    (parameters.governanceChainId >= 1 && parameters.governanceChainId <= 65535)
+  -- The lowercase form that mkInitialCoreState stores.
+  assertMsg "genesis: governance contract is not 32 bytes of lowercase hex"
+    (T.length parameters.governanceContract == 64 && isLowerHex parameters.governanceContract)
   assertMsg "genesis: fee custody party is guardianGovernance" (parameters.feeCustody /= parameters.guardianGovernance)
   assertMsg "genesis: NTT custody party is guardianGovernance" (parameters.nttCustody /= parameters.guardianGovernance)
   assertMsg "genesis: fee custody party is the NTT custody party" (parameters.feeCustody /= parameters.nttCustody)
