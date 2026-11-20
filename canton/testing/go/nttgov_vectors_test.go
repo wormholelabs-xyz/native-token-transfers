@@ -148,7 +148,7 @@ func signGovernanceVAA(t *testing.T, body []byte) []byte {
 // ---------------------------------------------------------------------------
 
 // nttRegistrationBindingTag is Wormhole.Ntt.Manager.nttRegistrationBindingTag.
-const nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
+const nttRegistrationBindingTag = "wormhole:ntt-registration:v2"
 
 // lenPrefix4 prepends a 4-byte big-endian length to b -- Wormhole.Core.Bytes.lenPrefixed
 // (NOT the 2-byte wire-codec prefix lenPrefixedMatch builds).
@@ -160,9 +160,10 @@ func lenPrefix4(b []byte) []byte {
 
 // nttRegistrationBindingFromText mirrors Wormhole.Ntt.Manager.nttRegistrationBindingFromText:
 //
-//	keccak256(tag ‖ lp4(utf8(guardianGovernanceText)) ‖ lp4(utf8(adminText)) ‖ uint64be(nonce))
-func nttRegistrationBindingFromText(guardianGovernanceText, adminText string, nonce uint64) [32]byte {
+//	keccak256(tag ‖ rootIdentity(32) ‖ lp4(utf8(guardianGovernanceText)) ‖ lp4(utf8(adminText)) ‖ uint64be(nonce))
+func nttRegistrationBindingFromText(rootIdentity [32]byte, guardianGovernanceText, adminText string, nonce uint64) [32]byte {
 	pre := []byte(nttRegistrationBindingTag)
+	pre = append(pre, rootIdentity[:]...)
 	pre = append(pre, lenPrefix4([]byte(guardianGovernanceText))...)
 	pre = append(pre, lenPrefix4([]byte(adminText))...)
 	pre = append(pre, be64(nonce)...)
@@ -175,14 +176,17 @@ func nttRegistrationBindingFromText(guardianGovernanceText, adminText string, no
 // against Test.TestNtt's fixed vector. If it fails, this encoder has drifted
 // from the Daml side -- fix here, not the Daml constant.
 func TestNttRegistrationBindingFromTextPinned(t *testing.T) {
-	a0 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 0)
-	a1 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 1)
-	b0 := nttRegistrationBindingFromText("vector-guardian-governance::1220aaaaaaaa", "vector-admin::1220cafebabe", 0)
-	c0 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220babababa", 0)
-	require.Equal(t, "6624cb448d197e0e75fe5cf0b3e92186af24545a293147f3c54de201c0b0dbbe", hex.EncodeToString(a0[:]))
+	rootIdentity := b32Tail(0x11)
+	a0 := nttRegistrationBindingFromText(rootIdentity, "vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 0)
+	a1 := nttRegistrationBindingFromText(rootIdentity, "vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 1)
+	b0 := nttRegistrationBindingFromText(rootIdentity, "vector-guardian-governance::1220aaaaaaaa", "vector-admin::1220cafebabe", 0)
+	c0 := nttRegistrationBindingFromText(rootIdentity, "vector-guardian-governance::1220deadbeef", "vector-admin::1220babababa", 0)
+	d0 := nttRegistrationBindingFromText(b32Tail(0x22), "vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 0)
+	require.Equal(t, "307a467bf6f8a75781619463d8621dc56f5577d7dd8769dc017977ec171faa7d", hex.EncodeToString(a0[:]))
 	require.NotEqual(t, a0, a1)
 	require.NotEqual(t, a0, b0)
 	require.NotEqual(t, a0, c0)
+	require.NotEqual(t, a0, d0)
 }
 
 // ---------------------------------------------------------------------------

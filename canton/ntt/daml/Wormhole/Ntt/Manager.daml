@@ -315,24 +315,27 @@ nttGovernanceRootIdentityFor guardianGovernance genesisTime =
 
 -- | Domain-separation tag for NTT registration-VAA bindings.
 nttRegistrationBindingTag : Text
-nttRegistrationBindingTag = "wormhole:ntt-registration:v1"
+nttRegistrationBindingTag = "wormhole:ntt-registration:v2"
 
 -- | Text form of 'nttRegistrationBindingFor', split out so tests can pin
 -- the encoding against fixed strings.
 nttRegistrationBindingFromText : NttGovernanceRootIdentity -> Text -> Text -> Int -> NttRegistrationBinding
-nttRegistrationBindingFromText _rootIdentity guardianGovernanceText adminText nonce =
+nttRegistrationBindingFromText rootIdentity guardianGovernanceText adminText nonce =
   parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes nttRegistrationBindingTag
+    <> hexBytesOf rootIdentity
     <> unLenPrefixed (lenPrefixed (utf8Bytes guardianGovernanceText))
     <> unLenPrefixed (lenPrefixed (utf8Bytes adminText))
     <> intToBytesN nonce 8))
 
 -- | The 32-byte binding a guardian-signed
 -- 'Wormhole.Ntt.Payload.RegisterBurnMintManager' VAA must carry in its
--- @registrationBinding@ field: hash-committed to (guardianGovernance, admin, nonce),
--- with no @nextId@ in the preimage — a signed-off-chain VAA cannot predict
--- which @NttGovernance.nextId@ will still be current when relayed, so binding
--- to it would let a stranger grief a registration by racing a junk one first.
--- @guardianGovernance@ separates deployments: one gg is one bridge instance.
+-- @registrationBinding@ field: hash-committed to (root identity,
+-- guardianGovernance, admin, nonce), with no @nextId@ in the preimage — a
+-- signed-off-chain VAA cannot predict which @NttGovernance.nextId@ will still
+-- be current when relayed, so binding to it would let a stranger grief a
+-- registration by racing a junk one first. The root identity binds the VAA to
+-- one 'Wormhole.Ntt.Governance.NttGovernance' lineage: a second root of the
+-- same gg rejects it.
 nttRegistrationBindingFor : NttGovernanceRootIdentity -> Party -> Party -> Int -> NttRegistrationBinding
 nttRegistrationBindingFor rootIdentity guardianGovernance admin nonce =
   nttRegistrationBindingFromText rootIdentity (partyToText guardianGovernance) (partyToText admin) nonce

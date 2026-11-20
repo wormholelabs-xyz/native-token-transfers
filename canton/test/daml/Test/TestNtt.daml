@@ -3622,10 +3622,12 @@ testNttRegistrationBindingFromTextVector = do
       a1 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220deadbeef" "vector-admin::1220cafebabe" 1
       b0 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220aaaaaaaa" "vector-admin::1220cafebabe" 0
       c0 = nttRegistrationBindingFromText testNttGovernanceRootIdentity "vector-guardian-governance::1220deadbeef" "vector-admin::1220babababa" 0
-  a0 === hexValue "6624cb448d197e0e75fe5cf0b3e92186af24545a293147f3c54de201c0b0dbbe"
+      d0 = nttRegistrationBindingFromText (b32 "22") "vector-guardian-governance::1220deadbeef" "vector-admin::1220cafebabe" 0
+  a0 === hexValue "307a467bf6f8a75781619463d8621dc56f5577d7dd8769dc017977ec171faa7d"
   assert (a0 /= a1)
   assert (a0 /= b0)
   assert (a0 /= c0)
+  assert (a0 /= d0)
 
 ----------------------------------------------------------------------
 -- Cross-confusion negatives: a well-formed, guardian-signed VAA for one NTT
@@ -4021,17 +4023,19 @@ data RegisterByVaaSetup = RegisterByVaaSetup with
     rrReg        : ContractId ReplayRootRegistry
     coreStateCid : ContractId CoreState
     factoryCid   : ContractId CoinFactory
+    rootIdentity : Text  -- hex of the NttGovernanceRootIdentity
   deriving (Eq, Show)
 
 integrationRegisterByVaaSetup : Script RegisterByVaaSetup
 integrationRegisterByVaaSetup = do
   (gg, csId) <- nttSetup
   admin <- allocateParty "IntegrationRegisterAdmin"
-  [(govCid, _)] <- query @NttGovernance gg
+  [(govCid, root)] <- query @NttGovernance gg
   (emReg, _, rrReg, _) <- coreRegistries gg
   factoryCid <- nttCoinFactorySetup gg
   pure RegisterByVaaSetup with
     admin, gg, govCid, emReg, rrReg, coreStateCid = csId, factoryCid
+    rootIdentity = hexTextOf root.rootIdentity
 
 data RegisterByVaaInput = RegisterByVaaInput with
     admin        : Party
