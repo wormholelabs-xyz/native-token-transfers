@@ -27,6 +27,7 @@ node_modules
 
 # Tilt
 .wormhole
+.wormhole-canton
 
 # Claude code
 .claude/settings.local.json
