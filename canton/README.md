@@ -114,6 +114,8 @@ new `NttGovernance` root, and thus one more `gg` transaction. That
 transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Then one
 manager address gets two managers, and each inbound transfer mints two times.
+A re-genesis (`ReGenesisReplacing`, see "Genesis") is this transaction. It
+replaces the core roots and the NTT root together.
 
 Vet no package with code that runs with `gg` authority and can claim a `gg`
 replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
@@ -126,27 +128,42 @@ The operator does the deployment work. The guardians sign one transaction.
 
 1. Upload the `wormhole-core`, `token-cip0056`, `ntt` and `wormhole-genesis`
    DARs to the participant of the operator.
-2. Write the `GenesisParameters`. Each guardian keeps an agreed copy.
-3. As the operator, create one `WormholeGenesisOffer` with the parameters.
-4. As `gg`, `feeCustody` and `nttCustody`, exercise `AcceptGenesis` on the
+2. On each participant that hosts `gg`, `feeCustody` or `nttCustody`, vet
+   the same DARs. The vetting of `wormhole-genesis` on these hosts is the
+   security decision: its code runs once with the authority of the three
+   parties.
+3. Write the `GenesisParameters`. Set `genesisKind` to `FirstGenesis`. Each
+   guardian keeps an agreed copy.
+4. As the operator, create one `WormholeGenesisOffer` with the parameters.
+5. As `gg`, `feeCustody` and `nttCustody`, exercise `AcceptGenesis` on the
    offer. Give the agreed copy as `agreedParameters`.
 
-`AcceptGenesis` rejects parameters that differ from the offer. It then creates
-these contracts:
+`AcceptGenesis` rejects parameters that differ from the offer. It also
+rejects these parameters:
 
-| Contract             | Signatories         |
-| -------------------- | ------------------- |
-| `CoreState`          | `gg`, `feeCustody`  |
-| `EmitterRegistry`    | `gg`                |
-| `ReplayRootRegistry` | `gg`                |
-| `NttGovernance`      | `gg`, `nttCustody`  |
-| `CoinFactory`        | `gg` (also `admin`) |
+- `feeCustody` or `nttCustody` is `gg`, or `feeCustody` is `nttCustody`.
+- The governance chain is not 1, or the governance contract is not
+  `0000…0004`.
+- A `FirstGenesis` with an id floor above 0 or with a consumed digest.
+
+It then creates these contracts:
+
+| Contract             | Signatories        |
+| -------------------- | ------------------ |
+| `CoreState`          | `gg`, `feeCustody` |
+| `EmitterRegistry`    | `gg`               |
+| `ReplayRootRegistry` | `gg`               |
+| `NttGovernance`      | `gg`, `nttCustody` |
+| `CoinFactory`        | `gg`               |
 
 The same transaction archives the offer. No created contract has the operator
-as a stakeholder. After genesis, each `gg` host can unvet `wormhole-genesis`.
+as a stakeholder. After genesis, each host of `gg`, `feeCustody` and
+`nttCustody` can unvet `wormhole-genesis`.
 
-For a re-genesis of a `gg` that ran governance before, set these parameters
-from the earlier roots:
+For a re-genesis of a `gg`, set `genesisKind` to `ReGenesisReplacing` with the
+contract ids of the earlier `CoreState`, `EmitterRegistry`,
+`ReplayRootRegistry` and `NttGovernance`. Set these parameters from the same
+contracts:
 
 - `consumedCoreGovernanceDigests`: the `consumedGovernance` of the earlier
   `CoreState`.
@@ -155,9 +172,26 @@ from the earlier roots:
 - `firstEmitterId`: the `nextId` of the earlier `EmitterRegistry`.
 - `firstNttManagerId`: the `nextId` of the earlier `NttGovernance`.
 
-Each digest list holds 1024 digests or fewer. With these values, the new
-roots reject each earlier governance VAA. Each new emitter id and manager id
-is also above the earlier ones.
+`AcceptGenesis` fetches the earlier roots. It rejects the re-genesis if a
+root has another `gg` or custody party, or if a value differs from the
+earlier root. It then archives the four earlier roots and creates the new
+roots in the same transaction. Thus the new roots reject each earlier
+governance VAA. Each new emitter id is above the earlier ones. Each new
+manager id is also above the earlier ones. The earlier `CoinFactory` stays active, because burn/mint managers hold
+its contract id.
+
+A governance action or a registration on an earlier root changes its
+contract id or its values. Then the accept fails, and the operator makes a
+new offer with the current values.
+
+Each digest list holds 1024 digests or fewer. A longer history needs a new
+`wormhole-genesis` version. The seeded digests are the core VAA digest
+(`keccak256(keccak256(body))`). An earlier root of a version with another
+digest definition needs a review before a re-genesis.
+
+The ledger cannot see whether a `gg` had roots before a `FirstGenesis`. Each
+guardian must check that no `CoreState` and no `NttGovernance` of the `gg`
+is active before it accepts a `FirstGenesis`.
 
 ### Version 0.4.x is not upgrade-compatible
 
