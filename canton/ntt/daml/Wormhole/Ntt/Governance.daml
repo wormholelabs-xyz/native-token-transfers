@@ -218,7 +218,9 @@ template NttGovernance
         let replayRecord = recordGovernanceDigest
               evictedGovernanceMaxTimestampSeconds consumedGovernance vaa.hash vaa.timestamp
         assertMsg "ntt governance: VAA digest not recorded"
-          (Map.lookup vaa.hash replayRecord.consumedGovernance == Some vaa.timestamp)
+          (Map.lookup vaa.hash replayRecord.consumedGovernance == Some vaa.timestamp
+            || not (checkTimestampIsAboveEvictedGovernanceFloor
+                 replayRecord.evictedGovernanceMaxTimestampSeconds vaa.timestamp))
         reg' <- create this with
           nextId = nextId + 1
           consumedGovernance = replayRecord.consumedGovernance
