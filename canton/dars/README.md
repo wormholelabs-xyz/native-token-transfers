@@ -18,15 +18,26 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: built from `wormholelabs-xyz/wormhole` branch `integration/canton`
-at commit `9c7b639e7` (the PR #84 squash), version 0.9.0, SDK 3.5.1. The PR
-#84 head `f6ac7ac0d` has the same tree. The main package id is
-`bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`.
+Provenance: built from wormhole integration/canton b2de948da (PR #100 squash),
+commit `b2de948da498f6fd741f3c0d9892de29e7de29aa`, version 0.12.0, SDK 3.7.3,
+LF target 2.3. The main package id is
+`aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b`.
 
-Version 0.9.0 has no `upgrades:` baseline. It removes the operator from each
-core template, so it is not upgrade-compatible with 0.8.x. Versions 0.8.0 to
-0.8.3 are withdrawn. A 0.8.x contract cannot run under 0.9.0, so 0.9.0
-starts from a fresh genesis.
+Version 0.12.0 has no `upgrades:` baseline. It is not upgrade-compatible with
+0.11.1: the `GuardianSet` type and the VAA choice signatures changed. A
+contract of an earlier version cannot run under 0.12.0, so 0.12.0 starts from
+a fresh genesis. Versions 0.8.0 to 0.8.3 are withdrawn.
+
+Version 0.12.0 has these changes for `ntt`:
+
+- Each byte value has a constrained type with a private constructor
+  (`Wormhole.Core.Bytes`). On the Ledger API, each value is a variant
+  `{"tag": "<type>", "value": "<lowercase hex>"}`.
+- `CoreState` holds the public key of each guardian.
+  `ParseAndVerifyVAA`, `VerifyAndConsumeVAA` and `SubmitGovernanceVAA` have
+  no `pubKeys` argument.
+- `CoreState.consumedGovernance` maps each digest to its VAA timestamp. It
+  holds 32 digests or fewer, with an eviction floor.
 
 `guardianGovernance` (`gg`) is the only core anchor. It signs `CoreState`,
 `EmitterRegistry`, `ReplayRootRegistry`, each `Emitter` and each
@@ -42,7 +53,12 @@ The `CoreState` precondition has these rules:
 - The fee instrument admin is not the fee recipient.
 - The message fee is 0 or more.
 - The current guardian set exists and has no expiry. Each other set has a
-  lower index and an expiry.
+  lower index and an expiry. `CoreState` stores 4 sets or fewer.
+- Each byte value passes the rule of its type.
+- The governance replay record holds 32 digests or fewer, each above the
+  floor.
+- With no governance history, each guardian has a public key that derives its
+  address.
 
 When a fee is due, `chargeFee` repeats the rules for the payer, the fee
 recipient and the fee instrument admin. The test setups use a placeholder
@@ -70,6 +86,8 @@ https://github.com/digital-asset/decentralized-canton-sync/releases/tag/v0.6.14
 immutable and distributed identically across releases (verified byte-for-byte
 by sha256 against the copies shipped in cn-quickstart). Built `--target=2.1`;
 our packages target LF 2.3, which may data-depend on lower LF 2.x versions.
+The wormhole repository at `b2de948da` vendors the same three core interface
+DARs with the same sha256 (from the 0.6.12 bundle).
 
 ## `token-cip0056` (the CIP-0056 coin template and factory)
 
@@ -93,11 +111,15 @@ Provenance: built from `wormholelabs-xyz/CantonExamples` branch `dev` at
 commit `b448589d8742ef5983ec8dc7c6ddd275ceccd1b7` — package `token-cip0056`
 version `0.2.0`, sdk-version 3.5.1, LF target 2.3.
 
+The SDK 3.7.3 packages use this DAR without a rebuild. LF 2.3 is valid on
+protocol versions 36 and 37. A rebuild makes a new package id, and each `gg`
+host vets the package id.
+
 ## sha256
 
 | DAR                                                    | consumed by  | sha256                                                             |
 | ------------------------------------------------------ | ------------ | ------------------------------------------------------------------ |
-| `wormhole-core-0.9.0.dar`                              | each package | `b4717e4fa9c7f9332a8847cee3d2f0fbfccb5e5b67456e006810da95a81a9ca2` |
+| `wormhole-core-0.12.0.dar`                             | each package | `5f1c491bfe41f116c272a7e2c97c0db969f2fb1f8019716a23c8defec5c2b663` |
 | `token-cip0056-0.2.0.dar`                              | each package | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar`               | each package | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar`                | each package | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |

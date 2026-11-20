@@ -40,14 +40,15 @@ reason.)
 
 ## Build & test
 
-Requires the `dpm` toolchain (Daml SDK 3.5.1, declared in every `daml.yaml`)
-and a JDK. Both packages build against the vendored core and CIP-0056
+Requires the `dpm` toolchain (Daml SDK 3.7.3, declared in every `daml.yaml`)
+and a JDK 21. Each package builds against the vendored core and CIP-0056
 interface DARs; core is never rebuilt here.
 
 ```sh
 # from this directory
-dpm build --all        # builds ntt, then test (in dep order)
-cd test && dpm test    # runs the Daml Script suite
+dpm build --all                # builds ntt, test, genesis and genesis-test
+cd test && dpm test            # runs the NTT Daml Script suite
+cd ../genesis-test && dpm test # runs the wormhole-genesis suite
 ```
 
 A live-sandbox Go integration harness (the recipient-binding match test) lives
@@ -70,6 +71,29 @@ The build fails when the new package is not upgrade-compatible with it.
 One version number identifies one build. Do not use a version number again
 for a different build. Participants use the package name and version to put
 the upgrades of a package in order.
+
+### Version 0.6.x is not upgrade-compatible
+
+Version 0.6.0 builds against core 0.12.0 (`aec76d21...`, SDK 3.7.3) and has
+the package id
+`79a1cc2c865653eafc03a39a2d81ed0f8bdafb86aa2cc7e9d3f17464faeb9536`.
+`ntt/daml.yaml` has no `upgrades:` field. Use participants that have no
+earlier `ntt` package.
+
+Version 0.6.0 changes these values:
+
+- Each byte value has a constrained type with one valid form: lowercase hex
+  of an exact width. NTT uses the core types (`UniversalAddress`,
+  `EmitterAddress`, `EncodedVaa`, `MessagePayload`, `VaaDigest`, `HexBytes`)
+  and its own types (`NttManagerAddress`, `NttMessageId`,
+  `NttRegistrationBinding`, `NttGovernanceRootIdentity`). On the Ledger API,
+  each value is a variant: `{"tag": "<type>", "value": "<hex>"}`.
+- The VAA choices have no `pubKeys` argument. `CoreState` holds each guardian
+  public key.
+- `NttGovernance` has a `rootIdentity`, and its replay record holds 32
+  digests or fewer, with an eviction floor.
+- The registration binding of a `RegisterBurnMintManager` VAA holds the root
+  identity (tag `wormhole:ntt-registration:v2`).
 
 ### Version 0.5.x is not upgrade-compatible
 
@@ -104,9 +128,17 @@ when the operator participant is offline or the operator key is lost.
 `RegisterManager` of a `gg`-minted burn/mint deployment needs `gg` as a
 controller. Use `RegisterManagerByVaa` for it.
 
-One `gg` is one bridge instance. The manager address, the replay namespace
-and the registration binding do not hold another instance discriminator.
-The guardians must sign one `NttGovernance` root for each `gg`.
+One `gg` is one bridge instance. The manager address and the replay namespace
+do not hold another instance discriminator. The guardians must sign one
+`NttGovernance` root for each `gg`.
+
+The registration binding holds the `rootIdentity` of one `NttGovernance`
+root. A first genesis sets it to
+`keccak256(tag ‖ lp(utf8(gg)) ‖ uint64(ledger time in microseconds))`. A
+re-genesis keeps the identity of the earlier root. Thus a second first genesis
+under one `gg` makes a root that rejects each registration VAA of the first
+root. Before the guardians sign a registration VAA, they read the
+`rootIdentity` of their root.
 
 NTT must be final at genesis. An upgrade-compatible NTT version needs only
 the vetting of the new DAR on each `gg` host. A breaking NTT version needs a
@@ -114,7 +146,7 @@ new `NttGovernance` root, and thus one more `gg` transaction. That
 transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Then one
 manager address gets two managers, and each inbound transfer mints two times.
-For roots of `ntt` 0.5.0 and core 0.9.0, a re-genesis (`ReGenesisReplacing`,
+For roots of `ntt` 0.6.0 and core 0.12.0, a re-genesis (`ReGenesisReplacing`,
 see "Genesis") is this transaction. It replaces the core roots and the NTT
 root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
@@ -124,6 +156,28 @@ Vet no package with code that runs with `gg` authority and can claim a `gg`
 replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
 second trie in the namespace of a deployment. NTT reserves the replay
 namespace prefix `ntt:`.
+
+### Governance VAA replay
+
+`RegisterManagerByVaa` records the digest and the timestamp of each
+registration VAA in the `NttGovernance` replay record. The record uses the
+core rules (`recordGovernanceDigest`, `checkConsumedGovernanceIsBounded`):
+
+- The record holds 32 digests or fewer.
+- On a full record, `recordGovernanceDigest` removes the digest with the
+  lowest timestamp. The floor (`evictedGovernanceMaxTimestampSeconds`)
+  increases to that timestamp.
+- The ledger rejects a registration VAA with a timestamp at or below the
+  floor.
+
+A registration has no other replay protection. A second registration with
+one VAA makes a second manager for the same instrument. Thus the floor
+applies to each registration.
+
+`AcceptAdminTransferByVaa`, `SetPeerByVaa` and `SetFactoryByVaa` do not use
+this record. Each of them consumes its VAA in the `gg` replay trie of the
+deployment (`VerifyAndConsumeVAA`). The trie keeps each digest, and the
+`factoryEpoch` or `peerEpoch` in the VAA must equal the current value.
 
 ### Genesis
 
@@ -145,9 +199,19 @@ The operator does the deployment work. The guardians sign one transaction.
 rejects these parameters:
 
 - `feeCustody` or `nttCustody` is `gg`, or `feeCustody` is `nttCustody`.
-- The governance chain is not 1 to 65535, or the governance contract is not
-  32 bytes of lowercase hex.
-- A `FirstGenesis` with an id floor above 0 or with a consumed digest.
+- A genesis guardian whose public key does not derive its address. Each
+  guardian of `genesisGuardianSet` has an address and a public key.
+- The governance chain is not 1 to 65535, or it is 75 (Canton).
+- A governance contract that is not a well-formed `EmitterAddress`.
+- A replay record with more than 32 digests, or with a digest at or below
+  its floor.
+- A `FirstGenesis` with an id floor above 0, a consumed digest, or an
+  eviction floor.
+
+The ledger accepts each other governance emitter. Before a guardian accepts
+the offer, it must check that the governance emitter is the standard Wormhole
+governance emitter: chain 1, address
+`0000000000000000000000000000000000000000000000000000000000000004`.
 
 It then creates these contracts:
 
@@ -159,6 +223,9 @@ It then creates these contracts:
 | `NttGovernance`      | `gg`, `nttCustody` |
 | `CoinFactory`        | `gg`               |
 
+A first genesis creates the `CoinFactory`. A re-genesis keeps the earlier
+`CoinFactory`.
+
 The same transaction archives the offer. No created contract has the operator
 as a stakeholder. After genesis, each host of `gg`, `feeCustody` and
 `nttCustody` can unvet `wormhole-genesis`.
@@ -168,37 +235,47 @@ contract ids of the earlier `CoreState`, `EmitterRegistry`,
 `ReplayRootRegistry`, `NttGovernance` and `CoinFactory`. Set these parameters
 from the same contracts:
 
-- `consumedCoreGovernanceDigests`: the `consumedGovernance` of the earlier
-  `CoreState`.
-- `consumedNttGovernanceDigests`: the `consumedGovernance` of the earlier
-  `NttGovernance`.
+- `coreGovernanceReplayRecord`: `tryGovernanceReplayRecordForRegenesis` of
+  the earlier `CoreState`.
+- `nttGovernanceReplayRecord`: `tryNttGovernanceReplayRecordForRegenesis` of
+  the earlier `NttGovernance`.
+- `genesisGuardianSet`: the index and the current set of the earlier
+  `CoreState`, with the public key of each guardian.
 - `firstEmitterId`: the `nextId` of the earlier `EmitterRegistry`.
 - `firstNttManagerId`: the `nextId` of the earlier `NttGovernance`.
 
+A replay record is the consumed digests (digest to VAA timestamp) and the
+eviction floor. For one earlier root, it equals the record of that root.
+
 `AcceptGenesis` fetches the earlier roots. It rejects the re-genesis if a
-root has another `gg` or custody party, or if a value differs from the
-earlier root. It then archives the four earlier roots and creates the new
-roots in the same transaction. Thus the new roots reject each earlier
-governance VAA. Each new emitter id is above the earlier ones. Each new
-manager id is also above the earlier ones.
+root has another `gg` or custody party, or if a value differs from what the
+earlier roots give. It then archives the four earlier roots and creates the
+new roots in the same transaction. The new `CoreState` gets the guardian set
+index and the stored sets of the earlier `CoreState`
+(`tryGuardianSetsForRegenesis`). The new `NttGovernance` gets the earlier
+`rootIdentity`. Thus the new roots reject each earlier governance VAA: a
+consumed digest stays in the record or at or below the floor, and an earlier
+GuardianSetUpgrade does not match the current index. Each new emitter id is
+above the earlier ones. Each new manager id is also above the earlier ones.
 
 The earlier `CoinFactory` stays active and is the factory of the new roots.
 Burn/mint managers hold its contract id, and the disclosure service expects
 one `CoinFactory` for each `gg`.
 
-A re-genesis cannot change `feeCustody` or `nttCustody`. `AcceptGenesis`
-compares the genesis guardian set with the parameters only. It does not
-compare the guardian set index with the earlier `CoreState`. Each guardian
-must check that the index is the current global index.
+A re-genesis cannot change `feeCustody` or `nttCustody`. The core key
+precondition applies only to a `CoreState` with no governance history, so
+`AcceptGenesis` checks the keys for a re-genesis too. If a guardian of the
+earlier current set has no public key, the accept fails. First run
+`AttachGuardianPublicKeys` on the earlier `CoreState`. Each guardian must
+check that the guardian set index is the current global index.
 
 A governance action or a registration on an earlier root changes its
 contract id or its values. Then the accept fails, and the operator makes a
 new offer with the current values.
 
-Each digest list holds 1024 digests or fewer. A longer history needs a new
-`wormhole-genesis` version. The seeded digests are the core VAA digest
-(`keccak256(keccak256(body))`). An earlier root of a version with another
-digest definition needs a review before a re-genesis.
+Each replay record holds 32 digests or fewer. The seeded digests are the core
+VAA digest (`keccak256(keccak256(body))`). An earlier root of a version with
+another digest definition needs a review before a re-genesis.
 
 The ledger cannot see whether a `gg` had roots before a `FirstGenesis`. Each
 guardian must check that no `CoreState`, no `EmitterRegistry` and no
@@ -243,8 +320,9 @@ To move a deployment from an earlier version, do these steps:
 2. In the same transaction, set `nextId` of the new root to the `nextId` of
    the archived root. Thus no manager address and no replay namespace occurs
    two times.
-3. In the same transaction, copy `consumedGovernance` of the archived root to
-   the new root. Thus no earlier registration VAA applies again.
+3. In the same transaction, copy `rootIdentity`, `consumedGovernance` and
+   `evictedGovernanceMaxTimestampSeconds` of the archived root to the new
+   root. Thus no earlier registration VAA applies again.
 4. Register each deployment again on the new root.
 5. On each peer chain, register the new manager and transceiver addresses.
 6. Move each reserve from its old custodian to the new `reserveCustodian`.
@@ -396,7 +474,7 @@ show the rejections.
 The rule above is for transfer registries only. The fee registry runs with
 the authority of `feeCustody`, not `gg`. Core 0.8.3 (`wormholelabs-xyz/wormhole`
 PR #81) moved fee custody from `gg` to `feeCustody`. The fee instrument
-admin is not `gg` and not `feeCustody` (core 0.9.0).
+admin is not `gg` and not `feeCustody` (since core 0.9.0).
 
 ## Deployment
 
@@ -926,6 +1004,4 @@ retried.
   `LockedLedger` cap. Not required for isolation, so deferred.
 - Sharding the `LockedLedger` if lock-mode send/release contention ever
   matters in practice.
-- Hint-free verification (persist guardian pubkeys) so the inbound path needs
-  no `pubKeys` hints. Core-wide, tracked in the core repo.
 - The permanent recipient-address binding (see "Recipient binding").

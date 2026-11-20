@@ -62,7 +62,8 @@ fill the cap.
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
   `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
-  parameter of a flow.
+  parameter of a flow. The response gives `managerAddress` as 64 lowercase
+  hex characters.
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
@@ -85,6 +86,13 @@ lowercase hex characters. The
 service rejects a different value with 400 before it reads the ledger. Give each parameter one time only. The service
 rejects a repeated parameter and a parameter that the flow does not use. The
 query string is 1024 bytes or less.
+
+On the Ledger API, `ntt` 0.6.0 and core 0.12.0 encode each byte value as a
+variant: `{"tag": "<type>", "value": "<lowercase hex>"}`. The service reads
+the `NttManagerAddress` of `NttManager`, `LockedLedger` and
+`AdminTransferProposal`, and the `DigestNibblePrefix` of `ReplayNode`, from
+these variants. A value with another tag, another width or uppercase hex
+gives 500.
 
 A flow response has a `disclosures` array and a `missing` array. Each
 `disclosures` entry has a role, `templateId`, `contractId`,
