@@ -3,7 +3,10 @@
 # (see dars/README.md; core is consumed as a pinned artifact, never built
 # here). The separate `ntt-test` package carries the Daml Scripts, which keeps
 # daml-script and the test code out of the uploadable production DAR.
-# `dpm build --all` builds `ntt`, then `test`, which data-depends on it.
+# `wormhole-genesis` data-depends on `ntt`; `genesis-test` on both.
+# `dpm build --all` builds `ntt`, then `test`, `genesis` and `genesis-test`.
 packages:
   - ./ntt
   - ./test
+  - ./genesis
+  - ./genesis-test

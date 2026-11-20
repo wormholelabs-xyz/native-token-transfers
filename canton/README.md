@@ -23,12 +23,14 @@ trie, disclosed-cid submission, the trust model) is in the core
 
 ## Packages
 
-| Directory (Daml package) | Contents                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ntt` (`ntt`)            | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
-| `disclosure/service`     | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md).                                                                                                                                                                                                                                  |
-| `test` (`ntt-test`)      | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`.                                                                                                                                                                                                 |
-| `dars/`                  | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md).                                                                                                                                                                                                                                   |
+| Directory (Daml package)                 | Contents                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ntt` (`ntt`)                            | The protocol. `Manager` (the `NttManager`), `Governance` (the `NttGovernance` bootstrap root and manager registry), `Ledger` (per-deployment `LockedLedger` custody accounting), `Deposit` (the recipient's `DepositPreapproval`), `Payload` (wire codec), `Amount` (`TrimmedAmount` and conversions), `Cip56` (token-standard helpers). Templates only; uploadable to a participant. |
+| `genesis` (`wormhole-genesis`)           | `Wormhole.Genesis`: the `WormholeGenesisOffer` template and its `AcceptGenesis` choice. One accept creates the core and NTT roots. Templates only; uploadable to a participant.                                                                                                                                                                                                       |
+| `genesis-test` (`wormhole-genesis-test`) | The Daml Script tests of `wormhole-genesis` (`Test.TestAcceptGenesis`).                                                                                                                                                                                                                                                                                                               |
+| `disclosure/service`                     | The production disclosure service: a Go binary that serves each flow's disclosure set over HTTP; see [`disclosure/README.md`](disclosure/README.md).                                                                                                                                                                                                                                  |
+| `test` (`ntt-test`)                      | The Daml Script test suite (`Test.TestNtt`) plus a copied subset of core test helpers (`Test.TestCore`, `Test.TestReplay`, `Test.MockToken`) so NTT runs end to end under `dpm test`.                                                                                                                                                                                                 |
+| `dars/`                                  | Vendored DAR binaries: the pinned `wormhole-core` DAR and the CIP-0056 interface DARs. Provenance and sha256 in [`dars/README.md`](dars/README.md).                                                                                                                                                                                                                                   |
 
 The manager drives the CIP-0056 token-standard interfaces (`Holding`,
 `TransferFactory`, `BurnMintFactory`) directly, so any conforming token works
@@ -112,11 +114,95 @@ new `NttGovernance` root, and thus one more `gg` transaction. That
 transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Then one
 manager address gets two managers, and each inbound transfer mints two times.
+For roots of `ntt` 0.5.0 and core 0.9.0, a re-genesis (`ReGenesisReplacing`,
+see "Genesis") is this transaction. It replaces the core roots and the NTT
+root together. `EarlierGenesisRoots` names the templates of these package
+versions. Thus a breaking `ntt` or core version also needs a new
+`wormhole-genesis` version that depends on both package versions.
 
 Vet no package with code that runs with `gg` authority and can claim a `gg`
 replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
 second trie in the namespace of a deployment. NTT reserves the replay
 namespace prefix `ntt:`.
+
+### Genesis
+
+The operator does the deployment work. The guardians sign one transaction.
+
+1. Upload the `wormhole-core`, `token-cip0056`, `ntt` and `wormhole-genesis`
+   DARs to the participant of the operator.
+2. On each participant that hosts `gg`, `feeCustody` or `nttCustody`, vet
+   the same DARs. The vetting of `wormhole-genesis` on these hosts is the
+   security decision: its code runs once with the authority of the three
+   parties.
+3. Write the `GenesisParameters`. Set `genesisKind` to `FirstGenesis`. Each
+   guardian keeps an agreed copy.
+4. As the operator, create one `WormholeGenesisOffer` with the parameters.
+5. As `gg`, `feeCustody` and `nttCustody`, exercise `AcceptGenesis` on the
+   offer. Give the agreed copy as `agreedParameters`.
+
+`AcceptGenesis` rejects parameters that differ from the offer. It also
+rejects these parameters:
+
+- `feeCustody` or `nttCustody` is `gg`, or `feeCustody` is `nttCustody`.
+- The governance chain is not 1 to 65535, or the governance contract is not
+  32 bytes of lowercase hex.
+- A `FirstGenesis` with an id floor above 0 or with a consumed digest.
+
+It then creates these contracts:
+
+| Contract             | Signatories        |
+| -------------------- | ------------------ |
+| `CoreState`          | `gg`, `feeCustody` |
+| `EmitterRegistry`    | `gg`               |
+| `ReplayRootRegistry` | `gg`               |
+| `NttGovernance`      | `gg`, `nttCustody` |
+| `CoinFactory`        | `gg`               |
+
+The same transaction archives the offer. No created contract has the operator
+as a stakeholder. After genesis, each host of `gg`, `feeCustody` and
+`nttCustody` can unvet `wormhole-genesis`.
+
+For a re-genesis of a `gg`, set `genesisKind` to `ReGenesisReplacing` with the
+contract ids of the earlier `CoreState`, `EmitterRegistry`,
+`ReplayRootRegistry`, `NttGovernance` and `CoinFactory`. Set these parameters
+from the same contracts:
+
+- `consumedCoreGovernanceDigests`: the `consumedGovernance` of the earlier
+  `CoreState`.
+- `consumedNttGovernanceDigests`: the `consumedGovernance` of the earlier
+  `NttGovernance`.
+- `firstEmitterId`: the `nextId` of the earlier `EmitterRegistry`.
+- `firstNttManagerId`: the `nextId` of the earlier `NttGovernance`.
+
+`AcceptGenesis` fetches the earlier roots. It rejects the re-genesis if a
+root has another `gg` or custody party, or if a value differs from the
+earlier root. It then archives the four earlier roots and creates the new
+roots in the same transaction. Thus the new roots reject each earlier
+governance VAA. Each new emitter id is above the earlier ones. Each new
+manager id is also above the earlier ones.
+
+The earlier `CoinFactory` stays active and is the factory of the new roots.
+Burn/mint managers hold its contract id, and the disclosure service expects
+one `CoinFactory` for each `gg`.
+
+A re-genesis cannot change `feeCustody` or `nttCustody`. `AcceptGenesis`
+compares the genesis guardian set with the parameters only. It does not
+compare the guardian set index with the earlier `CoreState`. Each guardian
+must check that the index is the current global index.
+
+A governance action or a registration on an earlier root changes its
+contract id or its values. Then the accept fails, and the operator makes a
+new offer with the current values.
+
+Each digest list holds 1024 digests or fewer. A longer history needs a new
+`wormhole-genesis` version. The seeded digests are the core VAA digest
+(`keccak256(keccak256(body))`). An earlier root of a version with another
+digest definition needs a review before a re-genesis.
+
+The ledger cannot see whether a `gg` had roots before a `FirstGenesis`. Each
+guardian must check that no `CoreState`, no `EmitterRegistry` and no
+`NttGovernance` of the `gg` is active before it accepts a `FirstGenesis`.
 
 ### Version 0.4.x is not upgrade-compatible
 
@@ -151,14 +237,17 @@ package name when it receives a DAR. Thus a participant that has an earlier
 
 To move a deployment from an earlier version, do these steps:
 
-1. Hold a new root ceremony. In one transaction, `gg` and `nttCustody`
-   archive the old `NttGovernance` and create the new one.
+1. Hold a new root ceremony. In one transaction, archive the old
+   `NttGovernance` and create the new one. The signatories of both roots
+   act. For a 0.4.x root, the operator also acts.
 2. In the same transaction, set `nextId` of the new root to the `nextId` of
    the archived root. Thus no manager address and no replay namespace occurs
    two times.
-3. Register each deployment again on the new root.
-4. On each peer chain, register the new manager and transceiver addresses.
-5. Move each reserve from its old custodian to the new `reserveCustodian`.
+3. In the same transaction, copy `consumedGovernance` of the archived root to
+   the new root. Thus no earlier registration VAA applies again.
+4. Register each deployment again on the new root.
+5. On each peer chain, register the new manager and transceiver addresses.
+6. Move each reserve from its old custodian to the new `reserveCustodian`.
 
 ## Parties and the trust model
 

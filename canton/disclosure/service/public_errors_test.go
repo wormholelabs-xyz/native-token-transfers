@@ -137,8 +137,10 @@ func TestPublicErrorsHideUpstreamDetail(t *testing.T) {
 			assert.Equal(t, publicMessageForStatus(tc.wantStatus), body.Error)
 			assert.Regexp(t, requestIDPattern, body.RequestID)
 			assert.Equal(t, body.RequestID, recorder.Header().Get("X-Request-Id"))
+			// The request id is random hex, so it can contain a forbidden status such as "401".
+			bodyWithoutRequestID := strings.Replace(recorder.Body.String(), body.RequestID, "", 1)
 			for _, forbidden := range tc.forbiddenInBody {
-				assert.NotContains(t, recorder.Body.String(), forbidden)
+				assert.NotContains(t, bodyWithoutRequestID, forbidden)
 			}
 
 			logged := captured.String()
