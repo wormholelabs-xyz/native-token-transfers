@@ -70,8 +70,8 @@ func parseVAADigestHex(raw string) (vaaDigestHex, error) {
 	return vaaDigestHex{hex: lowercaseHex}, err
 }
 
-// parseHex64 lowercases raw and requires exactly 64 hex characters (32 bytes), matching the Daml
-// module's Bytes32/normalizeHex convention.
+// parseHex64 lowercases raw and requires exactly 64 hex characters (32 bytes): the lowercase
+// form of the Daml 32-byte types (NttManagerAddress, VaaDigest).
 func parseHex64(raw, paramName string) (string, error) {
 	trimmedHex := strings.ToLower(strings.TrimSpace(raw))
 	if len(trimmedHex) != 64 {

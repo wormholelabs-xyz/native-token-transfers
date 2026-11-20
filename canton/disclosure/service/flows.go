@@ -91,31 +91,31 @@ type daNttFactory struct {
 }
 
 type daNttManager struct {
-	Admin                partyID        `json:"admin"`
-	GuardianGovernance   partyID        `json:"guardianGovernance"`
-	NttCustody           partyID        `json:"nttCustody"`
-	ReserveCustodian     partyID        `json:"reserveCustodian"`
-	Namespace            string         `json:"namespace"`
-	ManagerAddress       string         `json:"managerAddress"`
-	ChainId              json.Number    `json:"chainId"`
-	ManagerId            json.Number    `json:"managerId"`
-	TransceiverEmitterId json.Number    `json:"transceiverEmitterId"`
-	InstrumentId         daInstrumentId `json:"instrumentId"`
-	TokenConfig          string         `json:"tokenConfig"`
-	TokenDecimals        json.Number    `json:"tokenDecimals"`
-	Factory              daNttFactory   `json:"factory"`
-	Paused               bool           `json:"paused"`
+	Admin                partyID                `json:"admin"`
+	GuardianGovernance   partyID                `json:"guardianGovernance"`
+	NttCustody           partyID                `json:"nttCustody"`
+	ReserveCustodian     partyID                `json:"reserveCustodian"`
+	Namespace            string                 `json:"namespace"`
+	ManagerAddress       nttManagerAddressValue `json:"managerAddress"`
+	ChainId              json.Number            `json:"chainId"`
+	ManagerId            json.Number            `json:"managerId"`
+	TransceiverEmitterId json.Number            `json:"transceiverEmitterId"`
+	InstrumentId         daInstrumentId         `json:"instrumentId"`
+	TokenConfig          string                 `json:"tokenConfig"`
+	TokenDecimals        json.Number            `json:"tokenDecimals"`
+	Factory              daNttFactory           `json:"factory"`
+	Paused               bool                   `json:"paused"`
 }
 
 type daLockedLedger struct {
-	ManagerAddress    string  `json:"managerAddress"`
-	CustodyHoldingCid *string `json:"custodyHoldingCid"`
+	ManagerAddress    nttManagerAddressValue `json:"managerAddress"`
+	CustodyHoldingCid *string                `json:"custodyHoldingCid"`
 }
 
 type daReplayNode struct {
-	Consumer  partyID `json:"consumer"`
-	Namespace string  `json:"namespace"`
-	Prefix    string  `json:"prefix"`
+	Consumer  partyID                 `json:"consumer"`
+	Namespace string                  `json:"namespace"`
+	Prefix    digestNibblePrefixValue `json:"prefix"`
 }
 
 // daGuardianAnchor decodes the guardianGovernance field shared by CoreState, NttGovernance,
@@ -136,9 +136,9 @@ type daPreapproval struct {
 }
 
 type daAdminTransferProposal struct {
-	Admin          partyID `json:"admin"`
-	NewAdmin       partyID `json:"newAdmin"`
-	ManagerAddress string  `json:"managerAddress"`
+	Admin          partyID                `json:"admin"`
+	NewAdmin       partyID                `json:"newAdmin"`
+	ManagerAddress nttManagerAddressValue `json:"managerAddress"`
 }
 
 type daCoinFactory struct {
@@ -358,7 +358,7 @@ func checkReserveCustodianFollowsAdmin(mgr daNttManager) error {
 // or more is a 500: managerAddress is meant to be unique per deployment.
 func findManager(entries []decodedEntry[daNttManager], manager managerAddressHex) (decodedEntry[daNttManager], error) {
 	match, matchCount := matchOne(entries, func(entry decodedEntry[daNttManager]) bool {
-		return strings.ToLower(entry.value.ManagerAddress) == manager.hex
+		return entry.value.ManagerAddress.hex == manager.hex
 	})
 	switch {
 	case matchCount == 0:
@@ -406,13 +406,13 @@ func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer partyID, 
 	return exactlyOne(entries, roleCoveringReplayNode, func(entry decodedEntry[daReplayNode]) bool {
 		return entry.value.Consumer == consumer &&
 			entry.value.Namespace == namespace &&
-			strings.HasPrefix(digest.hex, strings.ToLower(entry.value.Prefix))
+			strings.HasPrefix(digest.hex, entry.value.Prefix.hex)
 	})
 }
 
 func findLockedLedger(entries []decodedEntry[daLockedLedger], manager managerAddressHex) (decodedEntry[daLockedLedger], error) {
 	return exactlyOne(entries, roleLockedLedger, func(entry decodedEntry[daLockedLedger]) bool {
-		return strings.ToLower(entry.value.ManagerAddress) == manager.hex
+		return entry.value.ManagerAddress.hex == manager.hex
 	})
 }
 
@@ -487,7 +487,7 @@ func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], 
 	match, matchCount := matchOne(entries, func(entry decodedEntry[daAdminTransferProposal]) bool {
 		return entry.value.Admin == manager.Admin &&
 			entry.value.NewAdmin == manager.GuardianGovernance &&
-			strings.EqualFold(entry.value.ManagerAddress, manager.ManagerAddress)
+			entry.value.ManagerAddress == manager.ManagerAddress
 	})
 	switch {
 	case matchCount == 0:
@@ -502,7 +502,7 @@ func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], 
 // --- Fetch wrappers: one upstream query plus the matching selector ---
 
 func (s *server) fetchManager(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daNttManager], error) {
-	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(manager.hex, "managerAddress"))
+	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(manager.hex, "managerAddress", "value"))
 	if err != nil {
 		return decodedEntry[daNttManager]{}, err
 	}
@@ -537,7 +537,7 @@ func (s *server) fetchCoveringNode(ctx context.Context, consumer partyID, namesp
 	entries, err := fetchDecoded[daReplayNode](ctx, s, tailReplayNode, offset,
 		partyFieldMatch(consumer, "consumer"),
 		exactFieldMatch(namespace, "namespace"),
-		createArgumentFieldMatch{fieldPath: []string{"prefix"}, wantValues: digestPrefixes(digest), compareHex: true})
+		createArgumentFieldMatch{fieldPath: []string{"prefix", "value"}, wantValues: digestPrefixes(digest), compareHex: true})
 	if err != nil {
 		return decodedEntry[daReplayNode]{}, err
 	}
@@ -545,7 +545,7 @@ func (s *server) fetchCoveringNode(ctx context.Context, consumer partyID, namesp
 }
 
 func (s *server) fetchLedger(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daLockedLedger], error) {
-	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(manager.hex, "managerAddress"))
+	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(manager.hex, "managerAddress", "value"))
 	if err != nil {
 		return decodedEntry[daLockedLedger]{}, err
 	}
@@ -841,7 +841,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset,
 		partyFieldMatch(mgr.value.Admin, "admin"),
 		partyFieldMatch(mgr.value.GuardianGovernance, "newAdmin"),
-		hexFieldMatch(mgr.value.ManagerAddress, "managerAddress"))
+		hexFieldMatch(mgr.value.ManagerAddress.hex, "managerAddress", "value"))
 	if err != nil {
 		return nil, err
 	}
@@ -1140,7 +1140,7 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 	out := make([]managerEntry, 0, len(managers))
 	for _, manager := range managers {
 		out = append(out, managerEntry{
-			ManagerAddress:   manager.value.ManagerAddress,
+			ManagerAddress:   manager.value.ManagerAddress.hex,
 			ContractID:       manager.entry.ContractID,
 			ChainId:          manager.value.ChainId,
 			ManagerId:        manager.value.ManagerId,
