@@ -160,10 +160,10 @@ func lenPrefix4(b []byte) []byte {
 
 // nttRegistrationBindingFromText mirrors Wormhole.Ntt.Manager.nttRegistrationBindingFromText:
 //
-//	keccak256(tag ‖ lp4(utf8(operatorText)) ‖ lp4(utf8(adminText)) ‖ uint64be(nonce))
-func nttRegistrationBindingFromText(operatorText, adminText string, nonce uint64) [32]byte {
+//	keccak256(tag ‖ lp4(utf8(guardianGovernanceText)) ‖ lp4(utf8(adminText)) ‖ uint64be(nonce))
+func nttRegistrationBindingFromText(guardianGovernanceText, adminText string, nonce uint64) [32]byte {
 	pre := []byte(nttRegistrationBindingTag)
-	pre = append(pre, lenPrefix4([]byte(operatorText))...)
+	pre = append(pre, lenPrefix4([]byte(guardianGovernanceText))...)
 	pre = append(pre, lenPrefix4([]byte(adminText))...)
 	pre = append(pre, be64(nonce)...)
 	var out [32]byte
@@ -175,10 +175,10 @@ func nttRegistrationBindingFromText(operatorText, adminText string, nonce uint64
 // against Test.TestNtt's fixed vector. If it fails, this encoder has drifted
 // from the Daml side -- fix here, not the Daml constant.
 func TestNttRegistrationBindingFromTextPinned(t *testing.T) {
-	a0 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220cafebabe", 0)
-	a1 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220cafebabe", 1)
-	b0 := nttRegistrationBindingFromText("vector-operator::1220aaaaaaaa", "vector-admin::1220cafebabe", 0)
-	c0 := nttRegistrationBindingFromText("vector-operator::1220deadbeef", "vector-admin::1220babababa", 0)
+	a0 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 0)
+	a1 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220cafebabe", 1)
+	b0 := nttRegistrationBindingFromText("vector-guardian-governance::1220aaaaaaaa", "vector-admin::1220cafebabe", 0)
+	c0 := nttRegistrationBindingFromText("vector-guardian-governance::1220deadbeef", "vector-admin::1220babababa", 0)
 	require.Equal(t, "ade4a39770a697a4d00f9b97591986dedb27e8c1f51b12f1cc51b97a07f1e159", hex.EncodeToString(a0[:]))
 	require.NotEqual(t, a0, a1)
 	require.NotEqual(t, a0, b0)
