@@ -2,10 +2,11 @@
 -- genesis parameter in a 'WormholeGenesisOffer'. guardianGovernance (gg) and
 -- the two custody parties accept it once with 'AcceptGenesis'. That one
 -- transaction creates the 'CoreState', the 'EmitterRegistry', the
--- 'ReplayRootRegistry', the 'NttGovernance' root and the gg 'CoinFactory'.
+-- 'ReplayRootRegistry' and the 'NttGovernance' root. A first genesis also
+-- creates the gg 'CoinFactory'.
 --
 -- SECURITY: 'AcceptGenesis' is the only code that runs with gg authority
--- outside a VAA path. It creates only the five roots, and it checks each one
+-- outside a VAA path. It creates only the roots, and it checks each one
 -- against the agreed parameters.
 --
 -- A re-genesis ('ReGenesisReplacing') names the earlier 'CoreState',
@@ -14,8 +15,9 @@
 -- their next ids, archives them, and creates the new roots in the same
 -- transaction. Thus one gg has one set of active roots, each earlier
 -- governance VAA stays consumed, and each new emitter and manager id is above
--- the earlier ones. The earlier 'CoinFactory' stays active: burn/mint managers
--- hold its cid.
+-- the earlier ones. The earlier 'CoinFactory' stays active and is the
+-- 'CoinFactory' of the new roots: burn/mint managers hold its cid, and one gg
+-- has one canonical factory.
 module Wormhole.Genesis where
 
 import DA.Foldable (forA_)
@@ -40,12 +42,13 @@ maxGenesisConsumedGovernanceDigests = 1024
 maxNttManagerId : Int
 maxNttManagerId = 9007199254740991
 
--- | The roots that a re-genesis archives.
+-- | The roots that a re-genesis archives, and the 'CoinFactory' that it keeps.
 data EarlierGenesisRoots = EarlierGenesisRoots with
     coreStateCid          : ContractId CoreState
     emitterRegistryCid    : ContractId EmitterRegistry
     replayRootRegistryCid : ContractId ReplayRootRegistry
     nttGovernanceCid      : ContractId NttGovernance
+    coinFactoryCid        : ContractId CoinFactory
   deriving (Eq, Show)
 
 data GenesisKind
@@ -96,7 +99,7 @@ template WormholeGenesisOffer
     observer parameters.guardianGovernance, parameters.feeCustody, parameters.nttCustody
     ensure checkConsumedGovernanceDigestListsAreBounded parameters
 
-    -- | Creates the five roots. Authority: the actors gg, feeCustody and
+    -- | Creates the roots. Authority: the actors gg, feeCustody and
     -- nttCustody sign each root and each earlier root that a re-genesis
     -- archives; the operator signs only this offer, which the choice archives.
     choice AcceptGenesis : GenesisRoots
@@ -106,10 +109,14 @@ template WormholeGenesisOffer
       do
         assertMsg "genesis: agreed parameters differ from the offer" (agreedParameters == parameters)
         either assertFail pure (checkGenesisParametersAreWellFormed parameters)
-        case parameters.genesisKind of
-          FirstGenesis -> either assertFail pure (checkFirstGenesisStartsEmpty parameters)
-          ReGenesisReplacing earlierRoots -> archiveEarlierRootsMatchingParameters parameters earlierRoots
-        roots <- createGenesisRoots parameters
+        coinFactoryCid <- case parameters.genesisKind of
+          FirstGenesis -> do
+            either assertFail pure (checkFirstGenesisStartsEmpty parameters)
+            create CoinFactory with admin = parameters.guardianGovernance
+          ReGenesisReplacing earlierRoots -> do
+            archiveEarlierRootsMatchingParameters parameters earlierRoots
+            requireEarlierCoinFactoryOf parameters.guardianGovernance earlierRoots.coinFactoryCid
+        roots <- createGenesisRoots parameters coinFactoryCid
         checkGenesisRootsMatchParameters parameters roots
         pure roots
 
@@ -194,8 +201,16 @@ expectedCoreStateOf parameters =
       messageFee = parameters.initialMessageFee
       consumedGovernance = Set.fromList parameters.consumedCoreGovernanceDigests
 
-createGenesisRoots : GenesisParameters -> Update GenesisRoots
-createGenesisRoots parameters = do
+-- | The earlier 'CoinFactory', checked to be administered by gg.
+requireEarlierCoinFactoryOf : Party -> ContractId CoinFactory -> Update (ContractId CoinFactory)
+requireEarlierCoinFactoryOf guardianGovernance earlierCoinFactoryCid = do
+  earlierCoinFactory <- fetch earlierCoinFactoryCid
+  assertMsg "genesis: earlier CoinFactory has another admin" (earlierCoinFactory.admin == guardianGovernance)
+  pure earlierCoinFactoryCid
+
+-- | Creates the core and NTT roots; @coinFactoryCid@ is the gg factory of the roots.
+createGenesisRoots : GenesisParameters -> ContractId CoinFactory -> Update GenesisRoots
+createGenesisRoots parameters coinFactoryCid = do
   coreStateCid <- create (expectedCoreStateOf parameters)
   emitterRegistryCid <- create (mkInitialEmitterRegistry (registryPartiesOf parameters) parameters.registrationFee) with
     nextId = parameters.firstEmitterId
@@ -205,7 +220,6 @@ createGenesisRoots parameters = do
     nttCustody = parameters.nttCustody
     nextId = parameters.firstNttManagerId
     consumedGovernance = Set.fromList parameters.consumedNttGovernanceDigests
-  coinFactoryCid <- create CoinFactory with admin = parameters.guardianGovernance
   pure GenesisRoots with ..
 
 checkSignatoriesAre : Text -> [Party] -> [Party] -> Update ()
