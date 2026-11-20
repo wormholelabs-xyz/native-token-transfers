@@ -43,8 +43,8 @@ describe("parseSolanaKeypairFileText", () => {
 });
 
 function fakeStatusRpc(script: {
-  statuses: (string | null)[];
-  blockHeights: number[];
+  statuses: (string | null | "throw")[];
+  blockHeights: (number | "throw")[];
 }): SolanaStatusRpc {
   let statusCallCount = 0;
   let heightCallCount = 0;
@@ -53,6 +53,7 @@ function fakeStatusRpc(script: {
       const status =
         script.statuses[Math.min(statusCallCount, script.statuses.length - 1)];
       statusCallCount++;
+      if (status === "throw") throw new Error("status read failed");
       return status === null
         ? undefined
         : { confirmationStatus: status, failed: false };
@@ -63,6 +64,7 @@ function fakeStatusRpc(script: {
           Math.min(heightCallCount, script.blockHeights.length - 1)
         ];
       heightCallCount++;
+      if (height === "throw") throw new Error("height read failed");
       return height;
     },
   };
@@ -143,6 +145,57 @@ describe("waitForSolanaConfirmation recheck after the height limit", () => {
       await expect(waiting).rejects.toBeInstanceOf(
         SolanaTransactionExpiredError
       );
+  });
+});
+
+describe("waitForSolanaConfirmation read errors", () => {
+  test.each([
+    [
+      "status read throws, then confirmed: confirmed",
+      { statuses: ["throw", "confirmed"], blockHeights: [100] },
+      "resolves",
+    ],
+    [
+      "height read throws, then confirmed: confirmed",
+      { statuses: [null, "confirmed"], blockHeights: ["throw", 100] },
+      "resolves",
+    ],
+    [
+      "status read always throws: unknown",
+      { statuses: ["throw"], blockHeights: [100] },
+      "unknown",
+    ],
+    [
+      "height read always throws: unknown",
+      { statuses: [null], blockHeights: ["throw"] },
+      "unknown",
+    ],
+    [
+      "recheck after the limit throws: unknown",
+      { statuses: [null, "throw"], blockHeights: [201] },
+      "unknown",
+    ],
+  ] as const)("%s", async (_caseName, script, expectedOutcome) => {
+    const waiting = waitForSolanaConfirmation(
+      fakeStatusRpc({
+        statuses: [...script.statuses],
+        blockHeights: [...script.blockHeights],
+      }),
+      "sig-777",
+      200,
+      { pollIntervalMs: 1, wallClockCapMs: 20, sleep: noSleep }
+    );
+    if (expectedOutcome === "resolves") {
+      await expect(waiting).resolves.toBeUndefined();
+      return;
+    }
+    await expect(waiting).rejects.toBeInstanceOf(
+      SolanaConfirmationUnknownError
+    );
+    await waiting.catch((err: Error) => {
+      expect(err.message).toContain("sig-777");
+      expect(err.message).toContain("do not re-run; check the signature");
+    });
   });
 });
 

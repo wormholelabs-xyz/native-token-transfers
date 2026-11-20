@@ -1,7 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
 
-import { fetchJsonBounded } from "../canton/http.js";
-import { CantonLedgerClient } from "../canton/ledger-client.js";
+import { HTTP_REQUEST_TIMEOUT_MS, fetchJsonBounded } from "../canton/http.js";
+import {
+  CantonLedgerClient,
+  LEDGER_SUBMIT_TIMEOUT_MS,
+} from "../canton/ledger-client.js";
 import { parseCantonPartyId } from "../types.js";
 
 let tokenRequestCount = 0;
@@ -102,6 +105,41 @@ function ledgerClient(): CantonLedgerClient {
     userPartyId: parseCantonPartyId(`alice::1220${"ab".repeat(32)}`),
   });
 }
+
+describe("CantonLedgerClient timeouts", () => {
+  test("submit uses the 120 s bound; ledger-end uses the 15 s bound", async () => {
+    const recordedTimeoutsByPath = new Map<string, number>();
+    const client = new CantonLedgerClient({
+      jsonApiUrl: new URL(base),
+      oauthTokenUrl: new URL(`${base}/token`),
+      oauthClientId: "client",
+      oauthClientSecret: "secret",
+      userPartyId: parseCantonPartyId(`alice::1220${"ab".repeat(32)}`),
+      fetchJson: async (url, init, bounds) => {
+        const ledgerPath = new URL(url).pathname;
+        if (bounds) recordedTimeoutsByPath.set(ledgerPath, bounds.timeoutMs);
+        if (ledgerPath === "/token")
+          return {
+            status: 200,
+            text: "",
+            json: { access_token: "t", expires_in: 300 },
+          };
+        if (ledgerPath === "/v2/state/ledger-end")
+          return { status: 200, text: "", json: { offset: 1 } };
+        return { status: 200, text: "", json: { transaction: { events: [] } } };
+      },
+    });
+    await client.ledgerEndOffset();
+    await client.submitAndWaitForTransaction({});
+    expect(
+      recordedTimeoutsByPath.get("/v2/commands/submit-and-wait-for-transaction")
+    ).toBe(LEDGER_SUBMIT_TIMEOUT_MS);
+    expect(recordedTimeoutsByPath.get("/v2/state/ledger-end")).toBe(
+      HTTP_REQUEST_TIMEOUT_MS
+    );
+    expect(LEDGER_SUBMIT_TIMEOUT_MS).toBe(120_000);
+  });
+});
 
 describe("CantonLedgerClient 401 handling", () => {
   test("401 then 200: 2 requests, 1 token refresh", async () => {

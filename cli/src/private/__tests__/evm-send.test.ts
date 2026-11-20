@@ -253,6 +253,29 @@ describe("evmSendWithSigner", () => {
     expect(broadcasts.length).toBe(0);
   });
 
+  test("the hash is printed before the broadcast call", async () => {
+    const { signer } = fakeSigner({ allowance: 10n ** 30n });
+    const events: string[] = [];
+    const originalBroadcast = signer.broadcastSignedTransaction;
+    signer.broadcastSignedTransaction = async (signed) => {
+      events.push(`broadcast ${signed.hash}`);
+      return originalBroadcast(signed);
+    };
+    const originalLog = console.log;
+    console.log = (...parts: unknown[]) => {
+      const line = parts.join(" ");
+      if (line.includes("tx 0x"))
+        events.push(`print ${line.trim().split("tx ")[1]}`);
+    };
+    try {
+      await evmSendWithSigner(signer, sendParameters, { dryRun: false });
+    } finally {
+      console.log = originalLog;
+    }
+    const hash = `0x${"1".padStart(64, "0")}`;
+    expect(events).toEqual([`print ${hash}`, `broadcast ${hash}`]);
+  });
+
   test("dry run: 0 broadcasts", async () => {
     const { signer, broadcasts } = fakeSigner({ allowance: 0n });
     expect(

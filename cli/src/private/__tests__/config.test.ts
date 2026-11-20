@@ -8,6 +8,7 @@ import {
   loadRegistry,
   requireDeployment,
   resolveRegistryPath,
+  sdkChainForRegistryChain,
   validateRegistry,
 } from "../config.js";
 import { retiredCanburnRegistryJson } from "./fixtures/registry.js";
@@ -122,6 +123,38 @@ describe("validateRegistry", () => {
   ])("rejects %s", (_caseName, change) => {
     expect(() => validateRegistry(withChange(change))).toThrow();
   });
+
+  test.each([
+    ["Mainnet", 2, true],
+    ["Mainnet", 10002, false],
+    ["Testnet", 10002, true],
+    ["Testnet", 2, false],
+  ] as const)(
+    "network %s with Ethereum chain id %d: accepted %p",
+    (network, ethereumChainId, isAccepted) => {
+      const registryJson = withChange((r) => {
+        r.network = network;
+        r.chainIds.Ethereum = ethereumChainId;
+      });
+      if (isAccepted)
+        expect(validateRegistry(registryJson).chainIds.Ethereum as number).toBe(
+          ethereumChainId
+        );
+      else expect(() => validateRegistry(registryJson)).toThrow(/SDK chain id/);
+    }
+  );
+
+  test.each([
+    ["Mainnet", "Ethereum", "Ethereum"],
+    ["Testnet", "Ethereum", "Sepolia"],
+    ["Testnet", "Solana", "Solana"],
+    ["Testnet", "Canton", "Canton"],
+  ] as const)(
+    "%s %s maps to the SDK chain %s",
+    (network, chain, expectedSdkChain) => {
+      expect(sdkChainForRegistryChain(network, chain)).toBe(expectedSdkChain);
+    }
+  );
 
   test("accepts http for a loopback participant", () => {
     const registry = validateRegistry(
