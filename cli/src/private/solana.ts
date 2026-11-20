@@ -30,11 +30,12 @@ import {
   type Hex32,
   type RawAmount,
 } from "./types.js";
-import type {
-  ChainName,
-  Deployment,
-  PrivateRegistry,
-  SolanaChainConfig,
+import {
+  sdkChainForRegistryChain,
+  type ChainName,
+  type Deployment,
+  type PrivateRegistry,
+  type SolanaChainConfig,
 } from "./config.js";
 import { chainLegIdentity } from "./transfer-route.js";
 import {
@@ -165,10 +166,14 @@ async function waitFinalized(
     pollNumber <= FINALIZED_WAIT_MAX_POLLS;
     pollNumber++
   ) {
-    const status = await connection.getSignatureStatus(signature, {
-      searchTransactionHistory: true,
-    });
-    if (status.value?.confirmationStatus === "finalized") return;
+    try {
+      const status = await connection.getSignatureStatus(signature, {
+        searchTransactionHistory: true,
+      });
+      if (status.value?.confirmationStatus === "finalized") return;
+    } catch {
+      // A read error continues the bounded poll.
+    }
     await new Promise((resolve) =>
       setTimeout(resolve, FINALIZED_WAIT_POLL_INTERVAL_MS)
     );
@@ -263,10 +268,13 @@ async function driveGenerator(
 
 async function checkPeer(
   ntt: SolanaNtt<Network, "Solana">,
+  registry: PrivateRegistry,
   deployment: Deployment,
   peerChain: ChainName
 ) {
-  const peer = await ntt.getPeer(peerChain as Chain);
+  const peer = await ntt.getPeer(
+    sdkChainForRegistryChain(registry.network, peerChain)
+  );
   if (!peer) throw new Error(`Solana NttManager has no peer for ${peerChain}`);
   const observedPeer = hex32FromBytes(peer.address.address.toUint8Array());
   checkSolanaPeerIsRegistryManager(
@@ -290,7 +298,12 @@ export async function solanaSend(
   const connection = buildSolanaConnection(parameters.registry);
   const payer = loadSolanaKeypair();
   const ntt = buildSolanaNtt(parameters.registry, connection, solana);
-  await checkPeer(ntt, parameters.deployment, parameters.destinationChain);
+  await checkPeer(
+    ntt,
+    parameters.registry,
+    parameters.deployment,
+    parameters.destinationChain
+  );
   const nttConfig = await ntt.getConfig();
   if (!nttConfig.mint.equals(new PublicKey(solana.mint))) {
     throw new Error(
@@ -309,10 +322,14 @@ export async function solanaSend(
     `Solana mint ${solana.mint}`
   );
 
+  const destinationSdkChain = sdkChainForRegistryChain(
+    parameters.registry.network,
+    parameters.destinationChain
+  );
   const destination = {
-    chain: parameters.destinationChain as Chain,
+    chain: destinationSdkChain,
     address: toUniversal(
-      parameters.destinationChain as Chain,
+      destinationSdkChain,
       hex32ToBytes(parameters.recipient)
     ),
   };
@@ -332,13 +349,20 @@ export async function solanaSend(
     options.dryRun
   );
   if (options.dryRun || !lastSignature) return undefined;
-  const transaction = await connection.getTransaction(lastSignature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0,
-  });
-  const sequenceLine = transaction?.meta?.logMessages?.find((line) =>
-    line.startsWith(SEQUENCE_LOG_PREFIX)
-  );
+  let sequenceLine: string | undefined;
+  try {
+    const transaction = await connection.getTransaction(lastSignature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    sequenceLine = transaction?.meta?.logMessages?.find((line) =>
+      line.startsWith(SEQUENCE_LOG_PREFIX)
+    );
+  } catch (err) {
+    console.log(
+      `  ${lastSignature} confirmed; the sequence read failed (${(err as Error).message})`
+    );
+  }
   return {
     signature: lastSignature,
     sequence: sequenceLine?.slice(SEQUENCE_LOG_PREFIX.length),

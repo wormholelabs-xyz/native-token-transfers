@@ -41,10 +41,10 @@ export class SolanaTransactionExpiredError extends Error {
 }
 
 export class SolanaConfirmationUnknownError extends Error {
-  constructor(signature: string, waitedMs: number, sendErrorText?: string) {
+  constructor(signature: string, waitedMs: number, detailText?: string) {
     super(
-      `${signature}: result unknown${sendErrorText ? ` (send error: ${sendErrorText})` : ` after ${waitedMs} ms`}; ` +
-        `check the signature on an explorer before a retry`
+      `${signature}: result unknown after ${waitedMs} ms${detailText ? ` (${detailText})` : ""}; ` +
+        `do not re-run; check the signature on an explorer`
     );
     this.name = "SolanaConfirmationUnknownError";
   }
@@ -71,6 +71,42 @@ export const DEFAULT_SOLANA_CONFIRMATION_BOUNDS: SolanaConfirmationBounds = {
 };
 
 /** Ends on confirmation, on a block height past lastValidBlockHeight, or at the wall-clock cap. */
+type SolanaPollOutcome =
+  | "confirmed"
+  | "failedOnChain"
+  | "pending"
+  | "expired"
+  | "presentButUnconfirmedAfterLimit";
+
+function isConfirmedStatus(
+  status: { confirmationStatus: string } | undefined
+): boolean {
+  return (
+    status?.confirmationStatus === "confirmed" ||
+    status?.confirmationStatus === "finalized"
+  );
+}
+
+async function readSolanaPollOutcome(
+  rpc: SolanaStatusRpc,
+  signature: string,
+  lastValidBlockHeight: number
+): Promise<SolanaPollOutcome> {
+  const status = await rpc.getSignatureConfirmationStatus(signature);
+  if (status?.failed) return "failedOnChain";
+  if (isConfirmedStatus(status)) return "confirmed";
+  if ((await rpc.getBlockHeight()) <= lastValidBlockHeight) return "pending";
+  // The status and height reads can reach different nodes: read the status again.
+  const recheckedStatus = await rpc.getSignatureConfirmationStatus(signature);
+  if (recheckedStatus?.failed) return "failedOnChain";
+  if (isConfirmedStatus(recheckedStatus)) return "confirmed";
+  return recheckedStatus ? "presentButUnconfirmedAfterLimit" : "expired";
+}
+
+/**
+ * Ends on confirmation, on a confirmed absence after lastValidBlockHeight, or at the wall-clock
+ * cap. A read error continues the poll; a poll that ends without an answer is "unknown".
+ */
 export async function waitForSolanaConfirmation(
   rpc: SolanaStatusRpc,
   signature: string,
@@ -82,37 +118,36 @@ export async function waitForSolanaConfirmation(
     1,
     Math.ceil(bounds.wallClockCapMs / Math.max(1, bounds.pollIntervalMs)) + 1
   );
+  let lastReadErrorText: string | undefined;
   for (let pollNumber = 1; pollNumber <= maxPolls; pollNumber++) {
-    const status = await rpc.getSignatureConfirmationStatus(signature);
-    if (status?.failed) throw new Error(`${signature} failed on chain`);
-    if (
-      status?.confirmationStatus === "confirmed" ||
-      status?.confirmationStatus === "finalized"
-    )
-      return;
-    if ((await rpc.getBlockHeight()) > lastValidBlockHeight) {
-      // The status and height reads can reach different nodes: read the status again.
-      const recheckedStatus =
-        await rpc.getSignatureConfirmationStatus(signature);
-      if (recheckedStatus?.failed)
-        throw new Error(`${signature} failed on chain`);
-      if (
-        recheckedStatus?.confirmationStatus === "confirmed" ||
-        recheckedStatus?.confirmationStatus === "finalized"
-      )
-        return;
-      if (recheckedStatus) {
-        throw new SolanaConfirmationUnknownError(
-          signature,
-          Date.now() - startedMs
-        );
-      }
+    let outcome: SolanaPollOutcome;
+    try {
+      outcome = await readSolanaPollOutcome(
+        rpc,
+        signature,
+        lastValidBlockHeight
+      );
+    } catch (err) {
+      lastReadErrorText = (err as Error).message;
+      outcome = "pending";
+    }
+    if (outcome === "confirmed") return;
+    if (outcome === "failedOnChain")
+      throw new Error(`${signature} failed on chain`);
+    if (outcome === "expired") {
       throw new SolanaTransactionExpiredError(signature, lastValidBlockHeight);
     }
+    if (outcome === "presentButUnconfirmedAfterLimit") break;
     if (Date.now() - startedMs >= bounds.wallClockCapMs) break;
     await bounds.sleep(bounds.pollIntervalMs);
   }
-  throw new SolanaConfirmationUnknownError(signature, Date.now() - startedMs);
+  throw new SolanaConfirmationUnknownError(
+    signature,
+    Date.now() - startedMs,
+    lastReadErrorText === undefined
+      ? undefined
+      : `last read error: ${lastReadErrorText}`
+  );
 }
 
 /** Sends a signed transaction. An error after the signature leaves the result unknown. */
@@ -129,7 +164,7 @@ export async function sendSignedSolanaTransaction(
     throw new SolanaConfirmationUnknownError(
       signature,
       0,
-      (err as Error).message
+      `send error: ${(err as Error).message}`
     );
   }
   await waitForSolanaConfirmation(rpc, signature, lastValidBlockHeight, bounds);
