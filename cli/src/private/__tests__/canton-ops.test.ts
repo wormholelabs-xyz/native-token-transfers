@@ -198,6 +198,10 @@ describe("cantonSend", () => {
     expect(exercise.contractId).toBe(contractIdNumber(1));
     expect(exercise.choiceArgument.ledgerCid).toBeNull();
     expect(exercise.choiceArgument.nonce).toBe("7");
+    expect(exercise.choiceArgument.recipientAddress).toEqual({
+      tag: "UniversalAddress",
+      value: sendInput(setup).recipient,
+    });
     expect(exercise.choiceArgument.inputHoldingCids).toEqual([
       contractIdNumber(90),
     ]);
@@ -460,8 +464,11 @@ describe("cantonRedeem", () => {
     const argument = commands.commands[0].ExerciseCommand.choiceArgument;
     expect(argument.replayNodeCid).toBe(contractIdNumber(3));
     expect(argument.executor).toBe(USER);
-    expect(argument.pubKeys.length).toBe(1);
-    expect(argument.pubKeys[0]._1).toBe("0");
+    expect(argument.vaaBytes).toEqual({
+      tag: "EncodedVaa",
+      value: Buffer.from(parsedVaa.bytes).toString("hex"),
+    });
+    expect("pubKeys" in argument).toBe(false);
   });
 
   test("flow without the covering ReplayNode: 0 submits", async () => {
