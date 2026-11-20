@@ -14,6 +14,7 @@ import DA.Text qualified as T
 
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Governance (coreModule)
@@ -288,6 +289,7 @@ placeholderEarlierRootsFrom unrelatedCid = EarlierGenesisRoots with
   emitterRegistryCid = coerceContractId unrelatedCid
   replayRootRegistryCid = coerceContractId unrelatedCid
   nttGovernanceCid = coerceContractId unrelatedCid
+  coinFactoryCid = coerceContractId unrelatedCid
 
 mismatchedParameterCases : [(Text, GenesisParameters -> GenesisParameters)]
 mismatchedParameterCases =
@@ -512,6 +514,7 @@ earlierGenesisRootsOf roots = EarlierGenesisRoots with
   emitterRegistryCid = roots.emitterRegistryCid
   replayRootRegistryCid = roots.replayRootRegistryCid
   nttGovernanceCid = roots.nttGovernanceCid
+  coinFactoryCid = roots.coinFactoryCid
 
 -- | Re-genesis parameters read from the earlier roots.
 reGenesisParametersFor : GenesisWithHistory -> Script GenesisParameters
@@ -568,6 +571,9 @@ testReGenesisReplacesEarlierRoots = do
   reGenesisParameters.consumedNttGovernanceDigests === [(parseVAA history.registerVaa).hash]
   newRoots <- offerGenesis history.parties reGenesisParameters >>= acceptGenesisRoots reGenesisParameters
   checkEarlierRootsActivity "after the re-genesis" False history
+  newRoots.coinFactoryCid === history.earlierRoots.coinFactoryCid
+  coinFactories <- query @CoinFactory gg
+  [ coinFactoryCid | (coinFactoryCid, coinFactory) <- coinFactories, coinFactory.admin == gg ] === [history.earlierRoots.coinFactoryCid]
 
   freshRegisterVaa <- registerVaaFor key gg admin 4
   freshTransferFeesVaa <- signGovernanceVaa key 5 (transferFeesPayload 7 (digestOf "fresh fee recipient"))
@@ -648,6 +654,8 @@ testReGenesisRejectsParametersThatDifferFromTheEarlierRoots = do
               acceptReGenesisWith \parameters -> parameters with nttCustody = parameters.onboardingFeeAdmin
         , ReGenesisRejectionCase "earlier roots of another bridge" RejectedForUnknownContract $
             acceptReGenesisWith (withEarlierRoots (const (earlierGenesisRootsOf otherHistory.earlierRoots)))
+        , ReGenesisRejectionCase "earlier CoinFactory of another bridge" RejectedForUnknownContract $
+            acceptReGenesisWith (withEarlierRoots (\earlierRoots -> earlierRoots with coinFactoryCid = otherHistory.earlierRoots.coinFactoryCid))
         , ReGenesisRejectionCase "earlier CoreState superseded by governance" RejectedForUnknownContract \history parameters -> do
             freshFeeVaa <- signGovernanceVaa history.key 9 (setMessageFeePayload 2000)
             _ <- relayCoreGovernance history.parties.guardianGovernance history.earlierRoots.coreStateCid history.relayer freshFeeVaa history.key
