@@ -18,8 +18,8 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: built from wormhole integration/canton f97543564 (PR #103 squash),
-commit `f9754356450b3c4cbdb48d38d7a397fca93d274b`, version 0.12.3, SDK 3.7.3,
+Provenance: built from wormhole integration/canton 0f31a2bf6 (PR #103),
+commit `0f31a2bf6bb118c47578aa381aeffbffbfa155cf`, version 0.12.3, SDK 3.7.3,
 LF target 2.3. The main package id is
 `32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371`.
 The sha256 of the DAR is
@@ -100,7 +100,7 @@ https://github.com/digital-asset/decentralized-canton-sync/releases/tag/v0.6.14
 immutable and distributed identically across releases (verified byte-for-byte
 by sha256 against the copies shipped in cn-quickstart). Built `--target=2.1`;
 our packages target LF 2.3, which may data-depend on lower LF 2.x versions.
-The wormhole repository at `f97543564` vendors the same three core interface
+The wormhole repository at `0f31a2bf6` vendors the same three core interface
 DARs with the same sha256 (from the 0.6.12 bundle).
 
 ## `token-cip0056` (the CIP-0056 coin template and factory)
