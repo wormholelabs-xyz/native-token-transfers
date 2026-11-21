@@ -74,13 +74,14 @@ the upgrades of a package in order.
 
 ### Version 0.6.x is not upgrade-compatible
 
-Version 0.6.1 builds against core 0.12.2 (`e162e0c0...`, SDK 3.7.3) and has
+Version 0.6.2 builds against core 0.12.3 (`32abbcd2...`, SDK 3.7.3) and has
 the package id
-`37753fce5b8069ada4dd56523e36fe5e0abe86be784d49854e014ec248f0c3fc`.
-`wormhole-genesis` 0.2.1 builds against `ntt` 0.6.1 and core 0.12.2. It has
+`3aa43a1c498bd8c13467a8d9438d568c1a325bc948119395195bc2fbcb427093`.
+`wormhole-genesis` 0.2.2 builds against `ntt` 0.6.2 and core 0.12.3. It has
 the package id
-`8af94ec56cd660812074f23437bbd798e1c13c6be18f512437a413bd9775096c`.
-Version 0.6.0 built against core 0.12.0 (`aec76d21...`) and has the package
+`4a69c9c01de4f71eecc442d3aa48f197fec850e49115f91f8ace3340cf99c510`.
+Version 0.6.1 built against core 0.12.2 (`e162e0c0...`) and has the package
+id `37753fce...`. Version 0.6.0 built against core 0.12.0 (`aec76d21...`) and has the package
 id `79a1cc2c...`. `ntt/daml.yaml` has no `upgrades:` field. Use participants
 that have no earlier `ntt` package.
 
@@ -102,6 +103,11 @@ Version 0.6.0 changes these values:
 Version 0.6.1 has the templates and choices of 0.6.0. A re-genesis merges the
 NTT replay record with the core function
 `tryGovernanceReplayRecordForRegenesisFromRecords`.
+
+Version 0.6.2 adds the argument `claimedRootsNodeCid` to `RegisterManager`
+and `RegisterManagerByVaa` (see "Deployment"). `wormhole-genesis` 0.2.2
+creates the root of the `gg` claimed-roots tree at a first genesis. Its
+`GenesisRoots` has the field `claimedRootsNodeCid`.
 
 ### Version 0.5.x is not upgrade-compatible
 
@@ -146,17 +152,22 @@ root. A first genesis sets it to
 re-genesis keeps the identity of the earlier root. A first genesis at another
 ledger time makes a root with another identity. That root rejects each
 registration VAA of the first root. Two first geneses at one ledger time, for
-example in one transaction, make two roots with one identity. Then each root
-accepts the registration VAAs of the other root. This is a residual risk. One
-root for each `gg` is a guardian rule. Before the guardians sign a
-registration VAA, they read the `rootIdentity` of their root.
+example in one transaction, make two roots with one identity. They also make
+two claimed-roots trees for one `gg`. A registration claims its (`gg`,
+namespace) pair in the tree of the node that the caller gives. Thus one
+registration VAA registers one time in each tree. The two managers have one
+manager address. This is a residual risk. The disclosure service then finds
+two covering nodes and returns 500. One root for each `gg` is a guardian
+rule. Before the guardians sign a registration VAA, they read the
+`rootIdentity` of their root.
 
 NTT must be final at genesis. An upgrade-compatible NTT version needs only
 the vetting of the new DAR on each `gg` host. A breaking NTT version needs a
 new `NttGovernance` root, and thus one more `gg` transaction. That
 transaction must archive the earlier root and create the new root. If the
-earlier root stays active, both roots accept one registration VAA. Then one
-manager address gets two managers, and each inbound transfer mints two times.
+earlier root stays active, both roots accept one registration VAA. Both
+roots compute one namespace. The core rejects the second claim of that pair
+in the one claimed-roots tree of the `gg`, with "digest already consumed".
 For roots of `ntt` 0.6.1 and core 0.12.2, a re-genesis (`ReGenesisReplacing`,
 see "Genesis") is this transaction. It replaces the core roots and the NTT
 root together. `EarlierGenesisRoots` names the templates of these package
@@ -164,9 +175,11 @@ versions. Thus a breaking `ntt` or core version also needs a new
 `wormhole-genesis` version that depends on both package versions.
 
 Vet no package with code that runs with `gg` authority and can claim a `gg`
-replay root (`ClaimReplayRoot` with `consumer = gg`). Such code can open a
-second trie in the namespace of a deployment. NTT reserves the replay
-namespace prefix `ntt:`.
+replay root (`ClaimReplayRoot` with `consumer = gg`). The core claims each
+(consumer, namespace) pair one time in the claimed-roots tree of the `gg`.
+Thus such code cannot open a second trie in the namespace of a deployment.
+But it can claim the pair of a future deployment first. Then that
+registration fails. NTT reserves the replay namespace prefix `ntt:`.
 
 ### Governance VAA replay
 
@@ -237,9 +250,15 @@ It then creates these contracts:
 | `ReplayRootRegistry` | `gg`               |
 | `NttGovernance`      | `gg`, `nttCustody` |
 | `CoinFactory`        | `gg`               |
+| `ReplayNode`         | `gg`               |
 
-A first genesis creates the `CoinFactory`. A re-genesis keeps the earlier
-`CoinFactory`.
+A first genesis creates the `CoinFactory` and the `ReplayNode` root of the
+claimed-roots tree (`mkInitialClaimedRootsNode gg`). Its namespace is
+`wormhole-core:replay-roots`. `GenesisRoots.claimedRootsNodeCid` holds its
+contract id. A re-genesis keeps the earlier `CoinFactory` and the
+claimed-roots tree. It creates no node of the tree and archives no node.
+Thus each pair that a registration claimed before the re-genesis stays
+claimed. `GenesisRoots.claimedRootsNodeCid` is `None` after a re-genesis.
 
 The same transaction archives the offer. No created contract has the operator
 as a stakeholder. After genesis, each host of `gg`, `feeCustody` and
@@ -299,8 +318,9 @@ VAA digest (`keccak256(keccak256(body))`). An earlier root of a version with
 another digest definition needs a review before a re-genesis.
 
 The ledger cannot see whether a `gg` had roots before a `FirstGenesis`. Each
-guardian must check that no `CoreState`, no `EmitterRegistry` and no
-`NttGovernance` of the `gg` is active before it accepts a `FirstGenesis`.
+guardian must check that no `CoreState`, no `EmitterRegistry`, no
+`NttGovernance` and no claimed-roots `ReplayNode` of the `gg` is active before
+it accepts a `FirstGenesis`.
 
 ### Version 0.4.x is not upgrade-compatible
 
@@ -519,6 +539,20 @@ below). For burn/mint it checks the mint capability: `gg` must administer the
 instrument and co-sign the registration, the factory must be the canonical
 `CoinFactory` (see "gg is the only minter" below), and the instrument id must
 be bound to the registering admin (see "Instrument binding" below).
+
+The deployer also gives `claimedRootsNodeCid` and its disclosure. To find the
+node, do these steps:
+
+1. Read the `nextId` of the `NttGovernance` root.
+2. Calculate the namespace: `nttNamespaceFor instrumentId admin nextId`.
+3. Get the `register` flow with the `namespace` parameter from the disclosure
+   service.
+4. Give the `covering claimed-roots ReplayNode` as `claimedRootsNodeCid`.
+
+The node covers `claimedRootDigest gg namespace` in the `gg` claimed-roots
+tree. `ClaimReplayRoot` records this digest. A second registration of one
+pair fails with "digest already consumed". A wrong node fails with the core
+text. If a registration changes `nextId` first, get the node again.
 
 Two key-derived identities, both bound to the REGISTERING admin — present as a
 controller at registration, and whose signature co-signs the created manager —

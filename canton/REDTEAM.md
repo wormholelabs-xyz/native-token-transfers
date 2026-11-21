@@ -2,6 +2,7 @@
 
 This document records the attacks in `test/daml/Test/TestRedTeam.daml`.
 Rows O1 and O2 are in `test/daml/Test/TestNttOperatorIndependence.daml`.
+Row N7 is in `test/daml/Test/TestNtt.daml`, and row N7a is in `genesis-test/daml/Test/TestAcceptGenesis.daml`.
 Each test runs one or more attacks and asserts that each attack fails.
 A failing test is a finding.
 
@@ -38,6 +39,8 @@ The `NttGovernance` root has a separate custody party, `nttCustody`.
 | N4  | A third-party relayer releases Canton Coin from an aged custody pot                                                                                             | LocalNet, `NTT_RELEASE_AFTER_ROUNDS=5 ntt_lock_unlock.sh`            | Held                 |
 | N5  | The DSO expires an idle custody pot of Canton Coin as dust                                                                                                      | Splice 0.10.2 source                                                 | Open (F4)            |
 | N6  | A lock/unlock admin alone publishes on its gg-owned `Emitter`, sets a burn/mint factory, hands the admin role to gg, or registers a burn/mint deployment        | `testRedTeamLockUnlockAdminCannotUseGgAuthority`                     | Held                 |
+| N7  | Claim one (`gg`, namespace) pair two times, or claim with a wrong claimed-roots node                                                                            | `testRegistrationClaimsTheDeploymentPairOnce`                        | Held                 |
+| N7a | Two first geneses of one `gg` in one transaction register one VAA two times                                                                                     | `testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees`        | Open (guardian rule) |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.
@@ -157,21 +160,25 @@ compute the namespace from the instrument, the registering admin and the
 `nextId` of the root. The caller cannot choose it. `nextId` increases by one
 for each registration, so each deployment of one root has its own namespace.
 
-The core has no rule of one root per namespace. A second root in the
-namespace of a deployment needs `gg` authority. NTT claims a root only in a
-new registration. Thus a second trie is possible only in these cases:
+Core 0.12.3 permits one root for each (consumer, namespace) pair.
+`ClaimReplayRoot` records the pair digest in the claimed-roots tree of `gg`.
+A second claim of the pair fails with "digest already consumed". A second
+`NttGovernance` root of one `gg` at a used `nextId` computes a used namespace.
+Thus its registration fails, also for a lock/unlock `RegisterManager`
+(`testRegistrationClaimsTheDeploymentPairOnce`). A re-genesis keeps the tree.
 
-- A second `NttGovernance` root for the same `gg` starts at a used `nextId`.
-  The guardians must sign one root for each `gg`. A second root from another
-  ledger time has another `rootIdentity`, so it rejects each
-  `RegisterManagerByVaa` VAA of the first root. A lock/unlock
-  `RegisterManager` needs no VAA, so the rule of one root for each `gg`
-  stays. Two first geneses at one ledger time, for example in one
-  transaction, make two roots with one `rootIdentity`. Then each root accepts
-  the registration VAAs of the other root.
-- Code outside `ntt` that runs with `gg` authority claims a root. The
-  canonical `CoinFactory` package does not depend on `wormhole-core`. Each
-  `gg` host vets each new `token-cip0056` version.
+A second trie is possible only with a second claimed-roots tree of one `gg`:
+
+- Each first genesis creates a tree. Two first geneses of one `gg` make two
+  trees. The caller of a registration selects the tree. Two first geneses at
+  one ledger time, for example in one transaction, also make two roots with
+  one `rootIdentity`. Then one registration VAA registers on each root, one
+  time in each tree
+  (`testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees`). The
+  guardians must sign one first genesis for each `gg`.
+- Code outside `ntt` that runs with `gg` authority creates a claimed-roots
+  node. The canonical `CoinFactory` package does not depend on
+  `wormhole-core`. Each `gg` host vets each new `token-cip0056` version.
 
 ## F2: a third-party relayer cannot deliver a release
 
