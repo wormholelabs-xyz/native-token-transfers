@@ -58,7 +58,7 @@ func claimedRootDigest(consumer partyID, namespace replayNamespace) vaaDigestHex
 	preimage := []byte(claimedRootDomainTag)
 	preimage = append(preimage, coreLengthPrefixed([]byte(consumer))...)
 	preimage = append(preimage, coreLengthPrefixed([]byte(namespace.text))...)
-	digest := keccak256(preimage)
+	digest := keccak256Digest(preimage)
 	digestHex := hex.EncodeToString(digest[:])
 	if len(digestHex) != 64 {
 		panic("disclosure-service: claimedRootDigest is not 64 hex characters")

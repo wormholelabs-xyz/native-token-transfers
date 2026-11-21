@@ -20,7 +20,7 @@ func patternedBytes(byteCount, multiplier, offset int) []byte {
 }
 
 // Expected values computed with `cast keccak`. The lengths cross the 136-byte rate.
-func TestKeccak256Vectors(t *testing.T) {
+func TestKeccak256DigestVectors(t *testing.T) {
 	cases := []struct {
 		name           string
 		input          []byte
@@ -32,10 +32,14 @@ func TestKeccak256Vectors(t *testing.T) {
 		{"rate", patternedBytes(136, 1, 0), "7ce759f1ab7f9ce437719970c26b0a66ff11fe3e38e17df89cf5d29c7d7f807e"},
 		{"rate plus one", patternedBytes(137, 7, 0), "a595973359b39ba1fec5cf8f40710c5a213e76281dd4f174f1ea83106ee7759b"},
 		{"two blocks plus", patternedBytes(300, 13, 5), "63a7d381328d6b94142df0280facdac854b61eef4a17e80d0054873547121f2c"},
+		{"two rates minus one", patternedBytes(271, 3, 1), "a0a8191ad31bb1b46380c071c80d0e96b79c8def412ab0222a0ffa56faacf270"},
+		{"two rates", patternedBytes(272, 5, 2), "9e542bb28c090926d47131d7eba9fc1e9c166206d61302b1b7a7b518750e06ce"},
+		{"two rates plus one", patternedBytes(273, 11, 3), "327f943497cdbc00972eb0b5e996b07b276401d48f688be564f63d34de752b80"},
+		{"many blocks", patternedBytes(1000, 17, 9), "f98fab6131aac28811eed906c9537ca085cafc5191d06a48a205bc44d459d6c9"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			digest := keccak256(tc.input)
+			digest := keccak256Digest(tc.input)
 			assert.Equal(t, tc.expectedDigest, hex.EncodeToString(digest[:]))
 		})
 	}
