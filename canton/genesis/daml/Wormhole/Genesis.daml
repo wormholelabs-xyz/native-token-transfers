@@ -3,7 +3,7 @@
 -- the two custody parties accept it once with 'AcceptGenesis'. That one
 -- transaction creates the 'CoreState', the 'EmitterRegistry', the
 -- 'ReplayRootRegistry' and the 'NttGovernance' root. A first genesis also
--- creates the gg 'CoinFactory'.
+-- creates the gg 'CoinFactory' and the root of the gg claimed-roots tree.
 --
 -- SECURITY: 'AcceptGenesis' is the only code that runs with gg authority
 -- outside a VAA path. It creates only the roots, and it checks each one
@@ -19,20 +19,23 @@
 -- each new emitter and manager id is above the earlier ones. The new
 -- 'NttGovernance' keeps the earlier root identity. The earlier 'CoinFactory'
 -- stays active and is the 'CoinFactory' of the new roots: burn/mint managers
--- hold its cid, and one gg has one canonical factory.
+-- hold its cid, and one gg has one canonical factory. The gg claimed-roots tree
+-- stays active, so each (consumer, namespace) pair claimed before stays claimed.
 module Wormhole.Genesis where
 
 import DA.List (dedup, sort)
 import DA.Map qualified as Map
 import DA.Optional (isNone)
+import DA.Set qualified as Set
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Token.CIP0056.CoinFactory (CoinFactory (..))
-import Wormhole.Core.Bytes (EmitterAddress, checkHexValueIsWellFormed)
+import Wormhole.Core.Bytes (EmitterAddress, checkHexValueIsWellFormed, hexTextOf)
 import Wormhole.Core.GuardianSet
   ( attachedPublicKeyCount, checkGuardianSetMembersAreWellFormed, numGuardians )
+import Wormhole.Core.Replay (ReplayNode (..), claimedRootsNamespace, defaultSplitThreshold)
 import Wormhole.Core.Setup
   ( GenesisGuardianSet (..), RegistryParties (..), cantonChainId, guardianSetMemberOfGenesisGuardian
-  , mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry )
+  , mkInitialClaimedRootsNode, mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry )
 import Wormhole.Core.State
   ( CoreState (..), EmitterRegistry (..), GovernanceReplayRecord (..), RegenesisGuardianSets (..)
   , ReplayRootRegistry (..), checkConsumedGovernanceIsBounded, maxEmitterId
@@ -86,6 +89,7 @@ data GenesisRoots = GenesisRoots with
     replayRootRegistryCid : ContractId ReplayRootRegistry
     nttGovernanceCid      : ContractId NttGovernance
     coinFactoryCid        : ContractId CoinFactory
+    claimedRootsNodeCid   : Optional (ContractId ReplayNode)  -- the claimed-roots tree root; a first genesis only
   deriving (Eq, Show)
 
 -- | The guardian set state and the root identity of the new roots: from the
@@ -281,6 +285,9 @@ createGenesisRoots parameters lineage coinFactoryCid = do
     nextId = parameters.firstEmitterId
   replayRootRegistryCid <- create (mkInitialReplayRootRegistry (registryPartiesOf parameters) parameters.replayRootClaimFee)
   nttGovernanceCid <- create (expectedNttGovernanceOf parameters lineage)
+  claimedRootsNodeCid <- case parameters.genesisKind of
+    FirstGenesis -> Some <$> create (mkInitialClaimedRootsNode parameters.guardianGovernance)
+    ReGenesisReplacing _ -> pure None
   pure GenesisRoots with ..
 
 checkSignatoriesAre : Text -> [Party] -> [Party] -> Update ()
@@ -344,3 +351,24 @@ checkGenesisRootsMatchParameters parameters lineage roots = do
   checkSignatoriesAre "CoinFactory" [gg] (signatory coinFactory)
   assertMsg "genesis: CoinFactory has observers" (null (observer coinFactory))
   assertMsg "genesis: CoinFactory admin" (coinFactory.admin == gg)
+
+  case (parameters.genesisKind, roots.claimedRootsNodeCid) of
+    (FirstGenesis, Some claimedRootsNodeCid) -> checkInitialClaimedRootsNode gg claimedRootsNodeCid
+    (FirstGenesis, None) -> abort "genesis: a first genesis has no claimed-roots node"
+    (ReGenesisReplacing _, None) -> pure ()
+    (ReGenesisReplacing _, Some _) -> abort "genesis: a re-genesis created a claimed-roots node"
+
+-- | The root of a new gg claimed-roots tree: gg alone signs, and the tree is empty.
+checkInitialClaimedRootsNode : Party -> ContractId ReplayNode -> Update ()
+checkInitialClaimedRootsNode gg claimedRootsNodeCid = do
+  claimedRootsNode <- fetch claimedRootsNodeCid
+  checkSignatoriesAre "claimed-roots ReplayNode" [gg] (signatory claimedRootsNode)
+  assertMsg "genesis: claimed-roots ReplayNode has observers" (null (observer claimedRootsNode))
+  assertMsg "genesis: claimed-roots ReplayNode consumer" (claimedRootsNode.consumer == gg)
+  assertMsg "genesis: claimed-roots ReplayNode guardianGovernance" (claimedRootsNode.guardianGovernance == gg)
+  assertMsg "genesis: claimed-roots ReplayNode namespace" (claimedRootsNode.namespace == claimedRootsNamespace)
+  assertMsg "genesis: claimed-roots ReplayNode prefix" (hexTextOf claimedRootsNode.prefix == "")
+  assertMsg "genesis: claimed-roots ReplayNode splitThreshold" (claimedRootsNode.splitThreshold == defaultSplitThreshold)
+  assertMsg "genesis: claimed-roots ReplayNode consumed" (Set.null claimedRootsNode.consumed)
+  assertMsg "genesis: claimed-roots ReplayNode differs from the expected root"
+    (claimedRootsNode == mkInitialClaimedRootsNode gg)
