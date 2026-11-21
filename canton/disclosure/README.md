@@ -67,15 +67,15 @@ fill the cap.
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
-  | Flow           | Parameters                                  |
-  | -------------- | ------------------------------------------- |
-  | `release`      | `manager`, `digest`, `recipient` (optional) |
-  | `mint`         | `manager`, `digest`, `recipient`            |
-  | `set-peer`     | `manager`, `digest`                         |
-  | `accept-admin` | `manager`, `digest`                         |
-  | `transfer`     | `manager`                                   |
-  | `register`     | `gg` (optional), `by-vaa` (bool, optional)  |
-  | `consolidate`  | `manager`                                   |
+  | Flow           | Parameters                                                         |
+  | -------------- | ------------------------------------------------------------------ |
+  | `release`      | `manager`, `digest`, `recipient` (optional)                        |
+  | `mint`         | `manager`, `digest`, `recipient`                                   |
+  | `set-peer`     | `manager`, `digest`                                                |
+  | `accept-admin` | `manager`, `digest`                                                |
+  | `transfer`     | `manager`                                                          |
+  | `register`     | `gg` (optional), `by-vaa` (bool, optional), `namespace` (optional) |
+  | `consolidate`  | `manager`                                                          |
 
 `manager` is the manager address and `digest` is the VAA hash. Each is a hex
 string of 64 characters. `recipient` and `gg` are party ids with the format
@@ -99,6 +99,16 @@ A flow response has a `disclosures` array and a `missing` array. Each
 `createdEventBlob`, and `synchronizerId`. All entries have the same
 synchronizer. The `missing` array names the set members that no reader party
 can see, for example a proposal or a preapproval. The client supplies them.
+
+The `namespace` of `register` is the replay namespace that the registration
+claims: `nttNamespaceFor instrumentId admin nextId`, with the `nextId` of the
+`NttGovernance` root. It has 1 to 128 characters of valid UTF-8, and it is not
+`wormhole-core:replay-roots`. The service calculates
+`claimedRootDigest gg namespace` as the core does. It serves the node of the
+`gg` claimed-roots tree that covers this digest, with the role
+`covering claimed-roots ReplayNode`. Give this node as `claimedRootsNodeCid`.
+Without `namespace`, the `missing` array names this role. Two covering nodes
+give 500: the `gg` has two claimed-roots trees.
 
 The service does not serve a template outside a flow set. The service serves
 a `Coin` or an `Amulet` only as the custody pot that a `LockedLedger` names.
@@ -913,8 +923,10 @@ Each guardian operator must do these steps:
 2. Vet a new version of such a package only after a review of its code.
 3. Find out if the Splice validator automation vets new Amulet packages
    automatically. Check this on your validator.
-4. Vet no package with code that runs with `gg` authority and can claim a
-   `gg` replay root. NTT reserves the replay namespace prefix `ntt:`.
+4. Vet no package whose code runs with `gg` authority and can create a
+   `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. Such code
+   can open a second trie in the namespace of a live deployment. NTT reserves
+   the replay namespace prefix `ntt:`.
 
 ### The gateway user must not act as a quorum party
 

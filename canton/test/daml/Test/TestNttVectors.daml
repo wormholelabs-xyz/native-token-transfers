@@ -13,11 +13,13 @@ module Test.TestNttVectors where
 import Daml.Script
 import DA.Assert ((===))
 import DA.Exception (GeneralError (..))
+import DA.Foldable (forA_)
 import DA.Text (isInfixOf)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 
 import Wormhole.Core.Bytes
+import Wormhole.Core.Replay (claimedRootDigest)
 import Wormhole.Ntt.Amount
 import Wormhole.Ntt.Bytes
 import Wormhole.Ntt.Payload
@@ -426,3 +428,29 @@ testVectorTokenAddress = do
   admin <- allocateParty "TokenAddressVectorAdmin"
   let inst = InstrumentId with admin, id = "VECTOR-TOKEN-2"
   nttTokenAddressFor inst === nttTokenAddressFromText (partyToText admin) inst.id
+
+-- | 'claimedRootDigest' pins. The same values are in
+-- canton/disclosure/service/claimed_root_digest_test.go. Computed with @cast keccak@.
+data ClaimedRootDigestVector = ClaimedRootDigestVector with
+    consumerText   : Text
+    namespace      : Text
+    expectedDigest : Text
+
+claimedRootDigestVectors : [ClaimedRootDigestVector]
+claimedRootDigestVectors =
+  [ ClaimedRootDigestVector "GoldenConsumer" "golden-namespace"
+      "58d4dc29f0852dca5f0f626ac31c93ace1028ca0a41ba3ef972c0d681a841b4b"
+  , ClaimedRootDigestVector
+      "GuardianGovernance::1220d8f2a6b7c1e4f00112233445566778899aabbccddeeff00112233445566778899"
+      "ntt:6e0a3c51f1c0b3cb5f0f5f4c7a3c0a36b6f0ba0ef8b25f4ab2b2d1c6e0e8f4a1"
+      "f763c5a8862e48c783303def423d496debd8fe1b4b4ac865eb106c95dee28d4c"
+  ]
+
+testVectorClaimedRootDigest : Script ()
+testVectorClaimedRootDigest = forA_ claimedRootDigestVectors \vector -> do
+  consumer <- case partyFromText vector.consumerText of
+    Some consumer -> pure consumer
+    None -> abort ("not a party text: " <> vector.consumerText)
+  let digest = claimedRootDigest consumer vector.namespace
+  checkHexValueIsWellFormed digest === True
+  hexTextOf digest === vector.expectedDigest

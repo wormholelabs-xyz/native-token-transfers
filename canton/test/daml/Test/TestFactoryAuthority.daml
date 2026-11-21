@@ -44,7 +44,7 @@ import Token.CIP0056.CoinFactory (CoinFactory (..))
 import Wormhole.Ntt.Manager qualified as M
 import Test.TestNtt
   ( MockBurnMintFactory (..)
-  , nttSetup, nttCoinFactorySetup, coreRegistries, cantonChainId, deploy, expectAbort )
+  , nttSetup, nttCoinFactorySetup, claimedRootsNodeForRegistration, coreRegistries, cantonChainId, deploy, expectAbort )
 
 -- | A contract signed by @victim@. If an attacker-authored factory can create
 -- one of these, it wielded @victim@'s (gg's) authority.
@@ -257,11 +257,13 @@ registerBurnMint gg admin inst factoryCid csId = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid inst admin
   let register = exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
         emitterRegistryCid = emReg
         replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
         instrumentId = inst
         instrumentNonce = 0
         tokenConfig = M.BurnMint
@@ -272,7 +274,7 @@ registerBurnMint gg admin inst factoryCid csId = do
         emitterFeeAllocation = None
         claimFeeAllocation = None
         feeAllocation = None
-  pure ([govDisc, emRegDisc, rrRegDisc, csDisc], (\(_, mgrCid, emitterCid, _, _) -> (mgrCid, emitterCid)) <$> register)
+  pure ([govDisc, emRegDisc, rrRegDisc, csDisc, claimedRootsNodeDisc], (\(_, mgrCid, emitterCid, _, _) -> (mgrCid, emitterCid)) <$> register)
 
 -- | Through the real registration: an attacker cannot permissionlessly stand
 -- up a burn/mint deployment, because 'RegisterManager' requires gg to co-sign

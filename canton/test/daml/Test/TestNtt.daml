@@ -29,6 +29,7 @@ module Test.TestNtt where
 import Daml.Script hiding (AnyContractId)
 import DA.Assert ((===))
 import DA.Date (Month (..), date)
+import DA.Action (foldlA)
 import DA.Foldable (forA_)
 import DA.List (sort)
 import DA.Map qualified as Map
@@ -52,8 +53,8 @@ import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.GuardianSet (GuardianSet(..))
-import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
-import Wormhole.Core.Setup (RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.Replay (ReplayNode (..), checkReplayNodeRecordsDigest, claimedRootDigest, claimedRootsNamespace, defaultSplitThreshold)
+import Wormhole.Core.Setup (RegistryParties (..), mkInitialClaimedRootsNode, mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 import Wormhole.Core.State
   ( Emitter(..), CoreState, EmitterRegistry, ReplayRootRegistry
   , WormholeMessage, emitterAddressTag, SubmitGovernanceVAA(..), VerifyAndConsumeVAA(..) )
@@ -70,7 +71,7 @@ import Wormhole.Ntt.Governance
 import Test.MockToken (mintAndAllocate, mockBalance)
 import Test.TestReplay (registerReplayRoot, coveringDisclosure, suffixAfter)
 import Test.TestCore
-  ( setup, setupWithInstrument
+  ( claimedRootsNodeCovering, setup, setupWithInstrument
   , govSetFeeVAA, devnetGenesisGuardianSet, devnetGuardianMember )
 
 ----------------------------------------------------------------------
@@ -461,6 +462,22 @@ coreRegistries gg = do
   rrRegDisc <- fromSome <$> queryDisclosure gg rrReg
   pure (emReg, emRegDisc, rrReg, rrRegDisc)
 
+-- | The gg claimed-roots node that covers the claim digest of the next
+-- registration on @govCid@, and its disclosure.
+claimedRootsNodeForRegistration : Party -> ContractId NttGovernance -> InstrumentId -> Party -> Script (ContractId ReplayNode, Disclosure)
+claimedRootsNodeForRegistration gg govCid instrumentId admin = do
+  Some root <- queryContractId gg govCid
+  claimedRootsNodeCovering gg gg (nttNamespaceFor instrumentId admin root.nextId)
+
+-- | The replay nodes of @gg@'s deployments, without the claimed-roots tree.
+deploymentReplayNodesOf : Party -> Script [(ContractId ReplayNode, ReplayNode)]
+deploymentReplayNodesOf gg =
+  filter (\(_, node) -> node.namespace /= claimedRootsNamespace) <$> query @ReplayNode gg
+
+-- | The bound burn/mint instrument of a 'RegisterManagerByVaa' registration.
+burnMintInstrumentOf : Party -> Party -> Int -> InstrumentId
+burnMintInstrumentOf gg admin instrumentNonce = InstrumentId with admin = gg, id = nttInstrumentIdFor admin instrumentNonce
+
 -- | Create the registry factory (a fresh canonical 'CoinFactory' for
 -- burn/mint, the gg-signed mock for lock/unlock) and register the manager
 -- through the shared 'NttGovernance' root — which atomically mints the
@@ -485,18 +502,20 @@ deploy gg admin config csId = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid instrumentId admin
   -- Burn/mint registration is co-signed by gg, the only minter; lock/unlock is
   -- admin-only.
   let ggActAs = case config of
         BurnMint -> actAs gg
         LockUnlock -> mempty
   (_, mgrCid, emitterCid, ledgerCid, initMsg) <-
-    submit (actAs admin <> ggActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+    submit (actAs admin <> ggActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc) do
       exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
         emitterRegistryCid = emReg
         replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
         instrumentId
         instrumentNonce = 0
         tokenConfig = config
@@ -583,15 +602,18 @@ testBurnMintRegistrationRequiresBoundInstrument = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  let unboundInstrument = InstrumentId with admin = gg, id = "NTT"
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid unboundInstrument admin
   -- gg (the instrument admin) co-signs; the id binding still rejects the
   -- unbound instrument id.
-  res <- trySubmit (actAs admin <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+  res <- trySubmit (actAs admin <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
       emitterRegistryCid = emReg
       replayRootRegistryCid = rrReg
-      instrumentId = InstrumentId with admin = gg, id = "NTT"
+      claimedRootsNodeCid
+      instrumentId = unboundInstrument
       instrumentNonce = 0
       tokenConfig = BurnMint
       tokenDecimals = 8
@@ -619,13 +641,15 @@ testBurnMintInstrumentIsExclusiveToItsAdmin = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid d.instrumentId mallory
   forA_ [0, 1, 7] \nonce -> do
-    res <- trySubmit (actAs mallory <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+    res <- trySubmit (actAs mallory <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc) do
       exerciseCmd govCid RegisterManager with
         admin = mallory
         chainId = cantonChainId
         emitterRegistryCid = emReg
         replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
         instrumentId = d.instrumentId
         instrumentNonce = nonce
         tokenConfig = BurnMint
@@ -650,7 +674,8 @@ testRegistrationBounds = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
-  let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid (bridgedInstrument gg) admin
+  let discs = disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc
 
   -- Burn/mint registration requires gg's co-signature, which @admin@ alone
   -- cannot supply.
@@ -660,6 +685,7 @@ testRegistrationBounds = do
       chainId = cantonChainId
       emitterRegistryCid = emReg
       replayRootRegistryCid = rrReg
+      claimedRootsNodeCid
       instrumentId = InstrumentId with admin = outsider, id = nttInstrumentIdFor admin 0
       instrumentNonce = 0
       tokenConfig = BurnMint
@@ -677,6 +703,7 @@ testRegistrationBounds = do
       chainId = cantonChainId
       emitterRegistryCid = emReg
       replayRootRegistryCid = rrReg
+      claimedRootsNodeCid
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
       tokenConfig = LockUnlock
@@ -697,6 +724,7 @@ testRegistrationBounds = do
       chainId = cantonChainId
       emitterRegistryCid = emReg
       replayRootRegistryCid = rrReg
+      claimedRootsNodeCid
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
       tokenConfig = LockUnlock
@@ -716,6 +744,7 @@ testRegistrationBounds = do
       chainId = 0
       emitterRegistryCid = emReg
       replayRootRegistryCid = rrReg
+      claimedRootsNodeCid
       instrumentId = bridgedInstrument gg
       instrumentNonce = 0
       tokenConfig = LockUnlock
@@ -769,6 +798,130 @@ testSetPeerGuards = do
   _ <- submitWithDiscs admin discs do setPeerCmd 2 goodPeer
   pure ()
 
+-- | The claimed-roots node that one registration row passes.
+data ClaimedRootsNodeOfRow
+  = CoveringNodeOfTheGuardianGovernanceTree
+  | ClaimedRootsTreeOfARogueGuardianGovernance
+  | GuardianGovernanceNodeUnderARogueAnchor
+  | NodeOfAnotherConsumerInTheReservedNamespace
+  | ReplayRootOfAnEarlierDeployment
+  deriving (Eq, Show)
+
+data RegisteringNttGovernanceRoot = FirstNttGovernanceRoot | SecondNttGovernanceRoot
+  deriving (Eq, Show)
+
+data RegistrationClaimCase = RegistrationClaimCase with
+    caseName        : Text
+    registeringRoot : RegisteringNttGovernanceRoot
+    admin           : Party
+    nodeOfRow       : ClaimedRootsNodeOfRow
+    expectedFailure : Optional Text
+
+-- | A lock/unlock registration claims the (gg, namespace) pair in the gg
+-- claimed-roots tree. A second root of one gg at a used nextId gets the same
+-- namespace, so its registration fails. Each wrong claimed-roots node fails with
+-- the core text.
+testRegistrationClaimsTheDeploymentPairOnce : Script ()
+testRegistrationClaimsTheDeploymentPairOnce = do
+  (gg, csId) <- nttSetup
+  firstAdmin <- allocateParty "PairFirstAdmin"
+  secondAdmin <- allocateParty "PairSecondAdmin"
+  rogueGuardianGovernance <- allocateParty "PairRogueGuardianGovernance"
+  nttCustody <- nttCustodyOf gg
+  [(firstRootCid, _)] <- query @NttGovernance gg
+  secondRootCid <- submit (actAs gg <> actAs nttCustody) do
+    createCmd NttGovernance with
+      guardianGovernance = gg, nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity
+      consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
+  _ <- submit rogueGuardianGovernance do createCmd (mkInitialClaimedRootsNode rogueGuardianGovernance)
+  _ <- submit (actAs gg <> actAs rogueGuardianGovernance) do
+    createCmd (mkInitialClaimedRootsNode gg) with guardianGovernance = rogueGuardianGovernance
+  _ <- submit (actAs secondAdmin <> actAs gg) do
+    createCmd (mkInitialClaimedRootsNode gg) with consumer = secondAdmin
+  fc <- submit (actAs gg <> actAs nttCustody) do
+    createCmd MockTransferFactory with admin = gg, pending = False, skim = 0.0, preapprovedReceivers = [nttCustody]
+  csDisc <- fromSome <$> queryDisclosure gg csId
+  let instrumentId = bridgedInstrument gg
+      factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
+      nodeOf reader predicate = do
+        nodes <- query @ReplayNode reader
+        case filter (predicate . snd) nodes of
+          [(nodeCid, _)] -> (,) nodeCid . fromSome <$> queryDisclosure reader nodeCid
+          matches -> abort ("expected one claimed-roots node for the row, found " <> show (length matches))
+      claimedRootsNodeOfRow rootCid admin = \case
+        CoveringNodeOfTheGuardianGovernanceTree -> claimedRootsNodeForRegistration gg rootCid instrumentId admin
+        ClaimedRootsTreeOfARogueGuardianGovernance -> nodeOf rogueGuardianGovernance \node ->
+          node.consumer == rogueGuardianGovernance && node.guardianGovernance == rogueGuardianGovernance
+        GuardianGovernanceNodeUnderARogueAnchor -> nodeOf gg \node ->
+          node.consumer == gg && node.guardianGovernance == rogueGuardianGovernance
+        NodeOfAnotherConsumerInTheReservedNamespace -> nodeOf gg \node ->
+          node.consumer == secondAdmin && node.namespace == claimedRootsNamespace
+        ReplayRootOfAnEarlierDeployment -> nodeOf gg \node ->
+          node.consumer == gg && node.guardianGovernance == gg && node.namespace == nttNamespaceFor instrumentId firstAdmin 0
+      cases =
+        [ RegistrationClaimCase "first root, covering node" FirstNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree None
+        , RegistrationClaimCase "second root, same pair, covering node" SecondNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree
+            (Some "digest already consumed")
+        , RegistrationClaimCase "claimed-roots tree of a rogue gg" SecondNttGovernanceRoot secondAdmin ClaimedRootsTreeOfARogueGuardianGovernance
+            (Some "requires one of the stakeholders")
+        , RegistrationClaimCase "node of consumer gg under a rogue anchor" SecondNttGovernanceRoot secondAdmin GuardianGovernanceNodeUnderARogueAnchor
+            (Some "claimed roots node guardianGovernance mismatch")
+        , RegistrationClaimCase "node of another consumer in the reserved namespace" SecondNttGovernanceRoot secondAdmin NodeOfAnotherConsumerInTheReservedNamespace
+            (Some "claimed roots node consumer mismatch")
+        , RegistrationClaimCase "replay root of an earlier deployment" SecondNttGovernanceRoot secondAdmin ReplayRootOfAnEarlierDeployment
+            (Some "claimed roots node namespace mismatch")
+        , RegistrationClaimCase "second root, new pair, covering node" SecondNttGovernanceRoot secondAdmin CoveringNodeOfTheGuardianGovernanceTree None
+        ]
+  _ <- foldlA (\(liveFirstRootCid, liveSecondRootCid) registrationCase -> do
+    let rootCid = case registrationCase.registeringRoot of
+          FirstNttGovernanceRoot -> liveFirstRootCid
+          SecondNttGovernanceRoot -> liveSecondRootCid
+    Some root <- queryContractId gg rootCid
+    rootDisc <- fromSome <$> queryDisclosure gg rootCid
+    (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
+    (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeOfRow rootCid registrationCase.admin registrationCase.nodeOfRow
+    result <- trySubmit (actAs registrationCase.admin <> disclose rootDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc) do
+      exerciseCmd rootCid RegisterManager with
+        admin = registrationCase.admin
+        chainId = cantonChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
+        instrumentId
+        instrumentNonce = 0
+        tokenConfig = LockUnlock
+        tokenDecimals = 8
+        factory
+        coreStateCid = csId
+        consistencyLevel = 0
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+        feeAllocation = None
+    let namespace = nttNamespaceFor instrumentId registrationCase.admin root.nextId
+    case (registrationCase.expectedFailure, result) of
+      (Some failureText, Left (FailureStatusError failure)) -> do
+        assertMsg (registrationCase.caseName <> ": expected '" <> failureText <> "', got: " <> failure.message)
+          (failureText `isInfixOf` failure.message)
+        pure (liveFirstRootCid, liveSecondRootCid)
+      (Some failureText, Left submitError) -> do
+        assertMsg (registrationCase.caseName <> ": expected '" <> failureText <> "', got: " <> show submitError)
+          (failureText `isInfixOf` show submitError)
+        pure (liveFirstRootCid, liveSecondRootCid)
+      (Some _, Right _) -> abort (registrationCase.caseName <> ": registration committed")
+      (None, Left submitError) -> abort (registrationCase.caseName <> ": registration failed: " <> show submitError)
+      (None, Right (successorRootCid, managerCid, _, _, _)) -> do
+        Some manager <- queryContractId gg managerCid
+        manager.namespace === namespace
+        (coveringNodeCid, _) <- claimedRootsNodeCovering gg gg namespace
+        Some coveringNode <- queryContractId gg coveringNodeCid
+        checkReplayNodeRecordsDigest coveringNode (claimedRootDigest gg namespace) === True
+        pure case registrationCase.registeringRoot of
+          FirstNttGovernanceRoot -> (successorRootCid, liveSecondRootCid)
+          SecondNttGovernanceRoot -> (liveFirstRootCid, successorRootCid)
+    ) (firstRootCid, secondRootCid) cases
+  managers <- query @NttManager gg
+  sort [ manager.admin | (_, manager) <- managers ] === sort [firstAdmin, secondAdmin]
+
 -- | Registration pins the caller-supplied registries to this bridge instance:
 -- a real-template registry signed by a rogue guardianGovernance is rejected at
 -- registration time, for either registry. A registry that names the real gg
@@ -783,17 +936,19 @@ testRegistrationRejectsForeignRegistries = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid (bridgedInstrument gg) admin
   let factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
       realRegistryParties = RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = rogueGuardianGovernance
       rogueRegistryParties = RegistryParties with
         guardianGovernance = rogueGuardianGovernance, onboardingFeeAdmin = rogueGuardianGovernance
       registerWith emitterRegistryCid replayRootRegistryCid registryDisclosures =
-        trySubmit (actAs admin <> disclose govDisc <> disclose csDisc <> mconcat (map disclose registryDisclosures)) do
+        trySubmit (actAs admin <> disclose govDisc <> disclose csDisc <> disclose claimedRootsNodeDisc <> mconcat (map disclose registryDisclosures)) do
           exerciseCmd govCid RegisterManager with
             admin
             chainId = cantonChainId
             emitterRegistryCid
             replayRootRegistryCid
+            claimedRootsNodeCid
             instrumentId = bridgedInstrument gg
             instrumentNonce = 0
             tokenConfig = LockUnlock
@@ -1083,13 +1238,15 @@ testRegisterManagerReturnsActiveEmitter = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid (bridgedInstrument gg) admin
   (_, _, emitterCid, _, _) <-
-    submit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc) do
+    submit (actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc) do
       exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
         emitterRegistryCid = emReg
         replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
         instrumentId = bridgedInstrument gg
         instrumentNonce = 0
         tokenConfig = LockUnlock
@@ -1118,11 +1275,13 @@ testRegisterManagerRejectsOutOfRangeConsistencyLevel = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid (bridgedInstrument gg) admin
   let register cl = exerciseCmd govCid RegisterManager with
         admin
         chainId = cantonChainId
         emitterRegistryCid = emReg
         replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
         instrumentId = bridgedInstrument gg
         instrumentNonce = 0
         tokenConfig = LockUnlock
@@ -1133,7 +1292,7 @@ testRegisterManagerRejectsOutOfRangeConsistencyLevel = do
         emitterFeeAllocation = None
         claimFeeAllocation = None
         feeAllocation = None
-      discs = actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc
+      discs = actAs admin <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc <> disclose csDisc <> disclose claimedRootsNodeDisc
 
   res <- trySubmit discs do register 256
   expectAbort "consistency level must be a uint8" res
@@ -2697,7 +2856,7 @@ integrationNttReceiveMatchSetup = do
   -- offline.
   depositPreapprovalCid <- submit recipient do
     createCmd DepositPreapproval with owner = recipient, instrumentId = bridgedInstrument gg
-  [(nodeCid, _)] <- query @ReplayNode gg
+  [(nodeCid, _)] <- deploymentReplayNodesOf gg
   pure NttReceiveMatchSetup with
     mgrId
     gg
@@ -3497,7 +3656,7 @@ integrationAcceptAdminSetup = do
   propCid <- submit admin do
     createCmd AdminTransferProposal with
       admin, newAdmin = gg, managerAddress = mgr.managerAddress
-  [(nodeCid, _)] <- query @ReplayNode gg
+  [(nodeCid, _)] <- deploymentReplayNodesOf gg
   pure AcceptAdminSetup with
     mgrId = d.mgrCid
     admin
@@ -3663,18 +3822,22 @@ testAcceptAdminByVaaRejectsRegisterAndRotateActions = do
 -- (unlike the fee-0 plain 'RegisterManager' path) 'CoreState' itself, since
 -- VAA verification here is mandatory regardless of fees.
 data RegisterByVaaFixture = RegisterByVaaFixture with
-    govCid : ContractId NttGovernance
-    emReg  : ContractId EmitterRegistry
-    rrReg  : ContractId ReplayRootRegistry
-    discs  : [Disclosure]
+    govCid              : ContractId NttGovernance
+    emReg               : ContractId EmitterRegistry
+    rrReg               : ContractId ReplayRootRegistry
+    claimedRootsNodeCid : ContractId ReplayNode  -- covers the claim digest of @admin@'s nonce-0 registration
+    discs               : [Disclosure]
 
-registerByVaaFixture : Party -> ContractId CoreState -> Script RegisterByVaaFixture
-registerByVaaFixture gg csId = do
+registerByVaaFixture : Party -> Party -> ContractId CoreState -> Script RegisterByVaaFixture
+registerByVaaFixture gg admin csId = do
   [(govCid, _)] <- query @NttGovernance gg
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
-  pure RegisterByVaaFixture with govCid, emReg, rrReg, discs = [govDisc, emRegDisc, rrRegDisc, csDisc]
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid (burnMintInstrumentOf gg admin 0) admin
+  pure RegisterByVaaFixture with
+    govCid, emReg, rrReg, claimedRootsNodeCid
+    discs = [govDisc, emRegDisc, rrRegDisc, csDisc, claimedRootsNodeDisc]
 
 registerManagerByVaaCmd
   : Party -> RegisterByVaaFixture -> ContractId CoreState -> Int -> NttFactory -> EncodedVaa
@@ -3684,6 +3847,7 @@ registerManagerByVaaCmd admin fx csId nonce factory vaaBytes =
     admin
     emitterRegistryCid = fx.emReg
     replayRootRegistryCid = fx.rrReg
+    claimedRootsNodeCid = fx.claimedRootsNodeCid
     instrumentNonce = nonce
     factory
     coreStateCid = csId
@@ -3701,7 +3865,7 @@ testRegisterManagerByVaaRejectsWrongEmitter : Script ()
 testRegisterManagerByVaaRejectsWrongEmitter = do
   (gg, csId) <- nttSetup
   admin <- allocateParty "RegisterWrongEmitterAdmin"
-  fx <- registerByVaaFixture gg csId
+  fx <- registerByVaaFixture gg admin csId
   let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unused; fails first
 
   res <- trySubmitWithDiscs admin fx.discs do
@@ -3726,7 +3890,7 @@ testRegisterManagerByVaaRequiresCurrentGuardianSet = do
         [ (0, GuardianSet with members = [devnetGuardianMember], expirationTime = Some staleGuardianSetExpiry)
         , (1, GuardianSet with members = [devnetGuardianMember], expirationTime = None)
         ]
-  fx <- registerByVaaFixture gg staleCsId
+  fx <- registerByVaaFixture gg admin staleCsId
   let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unused; fails first
   res <- trySubmitWithDiscs admin fx.discs do
     registerManagerByVaaCmd admin fx staleCsId 0 dummyFactory registerHappyVAA
@@ -3739,7 +3903,7 @@ testRegisterManagerByVaaRejectsWrongModuleAndAction : Script ()
 testRegisterManagerByVaaRejectsWrongModuleAndAction = do
   (gg, csId) <- nttSetup
   admin <- allocateParty "RegisterWrongCtorAdmin"
-  fx <- registerByVaaFixture gg csId
+  fx <- registerByVaaFixture gg admin csId
   let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unused; fails first
 
   res <- trySubmitWithDiscs admin fx.discs do
@@ -3766,13 +3930,15 @@ testRegisterManagerByVaaReplayRejected = do
   govDisc <- fromSome <$> queryDisclosure gg govCid
   (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
   csDisc <- fromSome <$> queryDisclosure gg csId
-  let discs = [govDisc, emRegDisc, rrRegDisc, csDisc]
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid (burnMintInstrumentOf gg admin 0) admin
+  let discs = [govDisc, emRegDisc, rrRegDisc, csDisc, claimedRootsNodeDisc]
       dummyFactory = BurnMintFactoryCid (coerceContractId emReg)   -- unused; fails first
   res <- trySubmitWithDiscs admin discs do
     exerciseCmd govCid RegisterManagerByVaa with
       admin
       emitterRegistryCid = emReg
       replayRootRegistryCid = rrReg
+      claimedRootsNodeCid
       instrumentNonce = 0
       factory = dummyFactory
       coreStateCid = csId
@@ -3790,7 +3956,7 @@ testRegisterManagerByVaaBounds : Script ()
 testRegisterManagerByVaaBounds = do
   (gg, csId) <- nttSetup
   admin <- allocateParty "RegisterBoundsAdmin"
-  fx <- registerByVaaFixture gg csId
+  fx <- registerByVaaFixture gg admin csId
   let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unused; fails first
 
   res <- trySubmitWithDiscs admin fx.discs do
@@ -3810,7 +3976,7 @@ testRegisterManagerByVaaBindingMismatch : Script ()
 testRegisterManagerByVaaBindingMismatch = do
   (gg, csId) <- nttSetup
   admin <- allocateParty "RegisterBindingAdmin"
-  fx <- registerByVaaFixture gg csId
+  fx <- registerByVaaFixture gg admin csId
   let dummyFactory = BurnMintFactoryCid (coerceContractId fx.emReg)   -- unreached
   res <- trySubmitWithDiscs admin fx.discs do
     registerManagerByVaaCmd admin fx csId 0 dummyFactory registerHappyVAA
@@ -3847,7 +4013,7 @@ testVaaPathsRejectRogueCoreState = do
   admin <- allocateParty "RogueCoreStateAdmin"
   recipient <- allocateParty "RogueCoreStateRecipient"
   setPeerFixture <- setPeerByVaaFixture gg csId
-  registerFixture <- registerByVaaFixture gg csId
+  registerFixture <- registerByVaaFixture gg admin csId
   (rotateManagerCid, _, _) <- setupFixedManager gg admin BurnMint csId
   Some rotateManager <- queryContractId gg rotateManagerCid
   realFactoryCid <- nttCoinFactorySetup gg
@@ -4062,11 +4228,14 @@ integrationRegisterByVaa : RegisterByVaaInput -> Script RegisterByVaaResult
 integrationRegisterByVaa input = do
   let factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory input.factoryCid)
       actors = actAs input.admin <> readAs input.gg
+      instrumentId = burnMintInstrumentOf input.gg input.admin input.nonce
+  (claimedRootsNodeCid, _) <- claimedRootsNodeForRegistration input.gg input.govCid instrumentId input.admin
   (govCid', mgrCid, _emitterCid, ledgerCid, _msg) <- submit actors do
     exerciseCmd input.govCid RegisterManagerByVaa with
       admin = input.admin
       emitterRegistryCid = input.emReg
       replayRootRegistryCid = input.rrReg
+      claimedRootsNodeCid
       instrumentNonce = input.nonce
       factory
       coreStateCid = input.coreStateCid
@@ -4090,11 +4259,13 @@ integrationRegisterByVaa input = do
 
   -- Replay: the identical VAA relayed against the recreated root is
   -- rejected purely on digest membership.
+  (replayClaimedRootsNodeCid, _) <- claimedRootsNodeForRegistration input.gg govCid' instrumentId input.admin
   res <- trySubmit actors do
     exerciseCmd govCid' RegisterManagerByVaa with
       admin = input.admin
       emitterRegistryCid = input.emReg
       replayRootRegistryCid = input.rrReg
+      claimedRootsNodeCid = replayClaimedRootsNodeCid
       instrumentNonce = input.nonce
       factory
       coreStateCid = input.coreStateCid

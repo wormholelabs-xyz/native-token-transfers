@@ -20,7 +20,7 @@ import Wormhole.Core.VAA (parseVAA)
 import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload
-import Test.TestNtt (cantonChainId, coreRegistries, testNttGovernanceRootIdentity)
+import Test.TestNtt (burnMintInstrumentOf, cantonChainId, claimedRootsNodeForRegistration, coreRegistries, testNttGovernanceRootIdentity)
 import Test.TestRedTeam (RedTeamEnv (..), VaaSpec (..), redTeamSetupWithPartyHintPrefix, rejectionText, signVaaAt)
 
 -- | A digest label and its VAA body timestamp, for a hand-built record.
@@ -55,11 +55,13 @@ registerByVaaAttempt : RedTeamEnv -> ContractId NttGovernance -> Party -> Int ->
 registerByVaaAttempt env rootCid admin instrumentNonce vaaBytes = do
   (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
   [(coinFactoryCid, _)] <- query @CoinFactory env.gg
+  (claimedRootsNodeCid, _) <- claimedRootsNodeForRegistration env.gg rootCid (burnMintInstrumentOf env.gg admin instrumentNonce) admin
   fmap (\(successorCid, _, _, _, _) -> successorCid) <$> trySubmit (actAs admin <> readAs env.gg) do
     exerciseCmd rootCid RegisterManagerByVaa with
       admin
       emitterRegistryCid
       replayRootRegistryCid
+      claimedRootsNodeCid
       instrumentNonce
       factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid)
       coreStateCid = env.coreStateCid

@@ -18,12 +18,14 @@ developed in `wormholelabs-xyz/wormhole` under `canton/core` and is not built
 in this repo; it is consumed as a pinned artifact, exactly as the Splice
 interfaces below are.
 
-Provenance: built from wormhole integration/canton b4a1c7928 (PR #102 squash),
-commit `b4a1c79289573a21a73195d4d74afaf5546e5e35`, version 0.12.2, SDK 3.7.3,
+Provenance: built from wormhole integration/canton 0f31a2bf6 (PR #103),
+commit `0f31a2bf6bb118c47578aa381aeffbffbfa155cf`, version 0.12.3, SDK 3.7.3,
 LF target 2.3. The main package id is
-`e162e0c0d15b9e884378ee346a2d57f07e0680ac58f9c2c4bf82a86a25fb5ccd`.
+`32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371`.
+The sha256 of the DAR is
+`d5e456447f8b47c4414a1949bf12ef7956c0fba3c82a1824fff6861fa06322dc`.
 
-Version 0.12.2 has no `upgrades:` baseline. Version 0.12.0 is not
+Version 0.12.3 has no `upgrades:` baseline. Version 0.12.0 is not
 upgrade-compatible with 0.11.1: the `GuardianSet` type and the VAA choice
 signatures changed. A contract of an earlier version cannot run under 0.12.x,
 so 0.12.x starts from a fresh genesis. Versions 0.8.0 to 0.8.3 are withdrawn.
@@ -43,6 +45,13 @@ Version 0.12.1 accepts a `TransferFees` VAA for chain 0 or for the Canton
 chain. Version 0.12.2 adds `tryGovernanceReplayRecordForRegenesisFromRecords`.
 It merges replay records, so `wormhole-genesis` uses it for the NTT replay
 record too.
+
+Version 0.12.3 permits one replay root for each (consumer, namespace) pair.
+`ClaimReplayRoot` takes `claimedRootsNodeCid`, the node of the `gg`
+claimed-roots tree that covers `claimedRootDigest consumer namespace`. The
+choice consumes that digest in the tree. A first genesis creates the tree
+with `mkInitialClaimedRootsNode gg`. A re-genesis with the same `gg` keeps
+the tree.
 
 `guardianGovernance` (`gg`) is the only core anchor. It signs `CoreState`,
 `EmitterRegistry`, `ReplayRootRegistry`, each `Emitter` and each
@@ -91,7 +100,7 @@ https://github.com/digital-asset/decentralized-canton-sync/releases/tag/v0.6.14
 immutable and distributed identically across releases (verified byte-for-byte
 by sha256 against the copies shipped in cn-quickstart). Built `--target=2.1`;
 our packages target LF 2.3, which may data-depend on lower LF 2.x versions.
-The wormhole repository at `b4a1c7928` vendors the same three core interface
+The wormhole repository at `0f31a2bf6` vendors the same three core interface
 DARs with the same sha256 (from the 0.6.12 bundle).
 
 ## `token-cip0056` (the CIP-0056 coin template and factory)
@@ -124,7 +133,7 @@ host vets the package id.
 
 | DAR                                                    | consumed by  | sha256                                                             |
 | ------------------------------------------------------ | ------------ | ------------------------------------------------------------------ |
-| `wormhole-core-0.12.2.dar`                             | each package | `40ce09f5962bf5781837093fc0a6fe26e3e03e8dcdd76bf1ae8bc6764db8ebdf` |
+| `wormhole-core-0.12.3.dar`                             | each package | `d5e456447f8b47c4414a1949bf12ef7956c0fba3c82a1824fff6861fa06322dc` |
 | `token-cip0056-0.2.0.dar`                              | each package | `fd193587c74f590bd6a1c782e56a351301e596f57ca3c4cb3dd180cfd3a19e02` |
 | `splice-api-token-metadata-v1-1.0.0.dar`               | each package | `455eb160cb5abd4ae9918a6fbb9dad471f721adda39f0e5c76feef08d05637fc` |
 | `splice-api-token-holding-v1-1.0.0.dar`                | each package | `ef75f8eb41a65810221784fdb78bb9dfac7cb22245aba14fa7cb7f69c34e0175` |

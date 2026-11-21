@@ -9,6 +9,7 @@ import DA.Foldable (forA_)
 import DA.List (dedup, sort)
 import DA.Map qualified as Map
 import DA.Optional (fromSome, isNone, isSome)
+import DA.Set qualified as Set
 import DA.Text qualified as T
 import DA.Time (seconds)
 
@@ -19,8 +20,10 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Governance (coreModule)
 import Wormhole.Core.GuardianSet (GuardianSetMember (..), guardianAddressFromPublicKey)
+import Wormhole.Core.Replay (ReplayNode (..), checkReplayNodeRecordsDigest, claimedRootDigest, claimedRootsNamespace, defaultSplitThreshold)
 import Wormhole.Core.Setup
-  ( GenesisGuardian (..), GenesisGuardianSet (..), defaultGovernanceContract, mkInitialCoreState, solanaGovernanceChainId )
+  ( GenesisGuardian (..), GenesisGuardianSet (..), defaultGovernanceContract, mkInitialClaimedRootsNode, mkInitialCoreState
+  , solanaGovernanceChainId )
 import Wormhole.Core.State
 import Wormhole.Core.VAA (parseVAA, spkiPrefixSecp256k1)
 import Wormhole.Genesis
@@ -245,12 +248,17 @@ testAcceptGenesisCreatesEveryRoot = do
   Some replayRootRegistry <- queryContractId gg roots.replayRootRegistryCid
   Some nttGovernance <- queryContractId gg roots.nttGovernanceCid
   Some coinFactory <- queryContractId gg roots.coinFactoryCid
+  claimedRootsNodes <- claimedRootsNodesOf gg
+  claimedRootsNode <- case (claimedRootsNodes, roots.claimedRootsNodeCid) of
+    ([(nodeCid, node)], Some rootsNodeCid) | nodeCid == rootsNodeCid -> pure node
+    _ -> abort ("expected one claimed-roots node, the one in GenesisRoots, found " <> show (length claimedRootsNodes))
   let cases =
         [ StakeholderCase "CoreState" (signatory coreState) (observer coreState) [gg, parties.feeCustody]
         , StakeholderCase "EmitterRegistry" (signatory emitterRegistry) (observer emitterRegistry) [gg]
         , StakeholderCase "ReplayRootRegistry" (signatory replayRootRegistry) (observer replayRootRegistry) [gg]
         , StakeholderCase "NttGovernance" (signatory nttGovernance) (observer nttGovernance) [gg, parties.nttCustody]
         , StakeholderCase "CoinFactory" (signatory coinFactory) (observer coinFactory) [gg]
+        , StakeholderCase "claimed-roots ReplayNode" (signatory claimedRootsNode) (observer claimedRootsNode) [gg]
         ]
   forA_ cases \stakeholderCase -> do
     assertMsg (stakeholderCase.templateName <> ": signatories " <> show stakeholderCase.actualSignatories)
@@ -280,6 +288,15 @@ testAcceptGenesisCreatesEveryRoot = do
   nttGovernance.consumedGovernance === Map.empty
   nttGovernance.evictedGovernanceMaxTimestampSeconds === None
   coinFactory.admin === gg
+  claimedRootsNode === mkInitialClaimedRootsNode gg
+  claimedRootsNode.consumer === gg
+  claimedRootsNode.guardianGovernance === gg
+  claimedRootsNode.namespace === claimedRootsNamespace
+  hexTextOf claimedRootsNode.prefix === ""
+  claimedRootsNode.splitThreshold === defaultSplitThreshold
+  claimedRootsNode.consumed === Set.empty
+  operatorReplayNodes <- query @ReplayNode parties.operator
+  operatorReplayNodes === []
 
   offerAfterAccept <- queryContractId parties.operator offerCid
   assertMsg "the offer is active after AcceptGenesis" (isNone offerAfterAccept)
@@ -514,13 +531,78 @@ relayCoreGovernance reader coreStateCid relayer encodedVAA =
   trySubmit (actAs relayer <> readAs reader) do
     exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA
 
+-- | The claimed-roots nodes of @gg@: consumer and guardianGovernance @gg@, in
+-- 'claimedRootsNamespace'.
+claimedRootsNodesOf : Party -> Script [(ContractId ReplayNode, ReplayNode)]
+claimedRootsNodesOf gg = filter (isClaimedRootsNodeOf gg . snd) <$> query @ReplayNode gg
+
+isClaimedRootsNodeOf : Party -> ReplayNode -> Bool
+isClaimedRootsNodeOf gg node =
+  node.consumer == gg && node.guardianGovernance == gg && node.namespace == claimedRootsNamespace
+
+-- | The replay namespace of the next 'RegisterManagerByVaa' on @nttGovernanceCid@.
+registrationNamespaceOf : Party -> ContractId NttGovernance -> Party -> Int -> Script Text
+registrationNamespaceOf gg nttGovernanceCid admin instrumentNonce = do
+  Some nttGovernance <- queryContractId gg nttGovernanceCid
+  let instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor admin instrumentNonce
+  pure (nttNamespaceFor instrumentId admin nttGovernance.nextId)
+
+-- | The claimed-roots nodes of @gg@ that cover the claim digest of @(gg, namespace)@.
+claimedRootsNodesCoveringPair : Party -> Text -> Script [(ContractId ReplayNode, ReplayNode)]
+claimedRootsNodesCoveringPair gg namespace = do
+  let digestHex = hexTextOf (claimedRootDigest gg namespace)
+  filter (\(_, node) -> hexTextOf node.prefix `T.isPrefixOf` digestHex) <$> claimedRootsNodesOf gg
+
+-- | The one claimed-roots node of @gg@ that covers the next registration on
+-- @roots@. For an archived root, any claimed-roots node of @gg@: the
+-- submission fails on the root first.
+claimedRootsNodeForRegistration : Party -> GenesisRoots -> Party -> Int -> Script (ContractId ReplayNode)
+claimedRootsNodeForRegistration gg roots admin instrumentNonce =
+  queryContractId gg roots.nttGovernanceCid >>= \case
+    None -> claimedRootsNodesOf gg >>= \case
+      (nodeCid, _) :: _ -> pure nodeCid
+      [] -> abort "gg has no claimed-roots node"
+    Some _ -> do
+      namespace <- registrationNamespaceOf gg roots.nttGovernanceCid admin instrumentNonce
+      claimedRootsNodesCoveringPair gg namespace >>= \case
+        [(nodeCid, _)] -> pure nodeCid
+        coveringNodes -> abort ("expected one covering claimed-roots node, found " <> show (length coveringNodes))
+
+claimedRootsNodeOfFirstGenesis : GenesisRoots -> Script (ContractId ReplayNode)
+claimedRootsNodeOfFirstGenesis roots = case roots.claimedRootsNodeCid of
+  Some claimedRootsNodeCid -> pure claimedRootsNodeCid
+  None -> abort "a first genesis returned no claimed-roots node"
+
+-- | 'ClaimReplayRoot' of @(gg, namespace)@ by @gg@, with the covering claimed-roots node.
+claimEarlierPairAsGuardianGovernance : Party -> GenesisRoots -> Text -> Script (Either SubmitError ())
+claimEarlierPairAsGuardianGovernance gg roots namespace =
+  claimedRootsNodesCoveringPair gg namespace >>= \case
+    [(claimedRootsNodeCid, _)] -> discardResult $ trySubmit (actAs gg) do
+      exerciseCmd roots.replayRootRegistryCid ClaimReplayRoot with
+        consumer = gg
+        namespace
+        splitThreshold = defaultSplitThreshold
+        payer = gg
+        coreStateCid = Some roots.coreStateCid
+        feeAllocation = None
+        expectedGuardianGovernance = gg
+        claimedRootsNodeCid
+    coveringNodes -> abort ("expected one covering claimed-roots node, found " <> show (length coveringNodes))
+
 registerManagerByVaaAttempt : Party -> GenesisRoots -> Party -> Int -> EncodedVaa -> Script (Either SubmitError (ContractId NttManager))
-registerManagerByVaaAttempt gg roots admin instrumentNonce vaaBytes =
+registerManagerByVaaAttempt gg roots admin instrumentNonce vaaBytes = do
+  claimedRootsNodeCid <- claimedRootsNodeForRegistration gg roots admin instrumentNonce
+  registerManagerByVaaWithClaimedRootsNodeAttempt gg roots admin instrumentNonce claimedRootsNodeCid vaaBytes
+
+registerManagerByVaaWithClaimedRootsNodeAttempt
+  : Party -> GenesisRoots -> Party -> Int -> ContractId ReplayNode -> EncodedVaa -> Script (Either SubmitError (ContractId NttManager))
+registerManagerByVaaWithClaimedRootsNodeAttempt gg roots admin instrumentNonce claimedRootsNodeCid vaaBytes =
   fmap (\(_, managerCid, _, _, _) -> managerCid) <$> trySubmit (actAs admin <> readAs gg) do
     exerciseCmd roots.nttGovernanceCid RegisterManagerByVaa with
       admin
       emitterRegistryCid = roots.emitterRegistryCid
       replayRootRegistryCid = roots.replayRootRegistryCid
+      claimedRootsNodeCid
       instrumentNonce
       factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory roots.coinFactoryCid)
       coreStateCid = roots.coreStateCid
@@ -611,16 +693,67 @@ testRegistrationVaaIsBoundToItsNttGovernanceRoot = do
   secondRootIdentity <- rootIdentityOf gg secondRoots
   assertMsg "two first geneses share a root identity" (firstRootIdentity /= secondRootIdentity)
   registerVaa <- registerVaaFor key gg admin firstRootIdentity 1
+  firstTreeNodeCid <- claimedRootsNodeOfFirstGenesis firstRoots
+  secondTreeNodeCid <- claimedRootsNodeOfFirstGenesis secondRoots
   checkGovernanceCasesRejected
     [ GovernanceRejectionCase "registration VAA of the first root on the second root"
         (RejectedWithMessage "ntt governance: registration binding does not match") $
-          discardResult (registerManagerByVaaAttempt gg secondRoots admin 0 registerVaa)
+          discardResult (registerManagerByVaaWithClaimedRootsNodeAttempt gg secondRoots admin 0 secondTreeNodeCid registerVaa)
     ]
-  firstManagerCid <- registerManagerByVaaAttempt gg firstRoots admin 0 registerVaa >>= expectSuccess "first root registration"
+  firstManagerCid <- registerManagerByVaaWithClaimedRootsNodeAttempt gg firstRoots admin 0 firstTreeNodeCid registerVaa
+    >>= expectSuccess "first root registration"
   Some firstManager <- queryContractId gg firstManagerCid
   firstManager.managerId === 0
   secondManagers <- query @NttManager gg
   length secondManagers === 1
+
+-- | Two first geneses in one transaction make two roots with one identity and
+-- two claimed-roots trees of one gg. One registration VAA registers on the first
+-- root. On the second root, the claimed-roots node of the first tree fails, and
+-- the node of the second tree commits: the second tree has no record of the
+-- pair. The covering lookup finds two nodes, which shows the fork.
+testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees : Script ()
+testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees = do
+  key <- generateGuardianKey
+  parties <- allocateGenesisParties "SameTransactionRoots"
+  admin <- allocateParty "SameTransactionRootsAdmin"
+  let gg = parties.guardianGovernance
+      parameters = parametersFor parties [guardianOf key]
+  firstOfferCid <- offerGenesis parties parameters
+  secondOfferCid <- offerGenesis parties parameters
+  (firstRoots, secondRoots) <- submit (actAs gg <> actAs parameters.feeCustody <> actAs parameters.nttCustody) do
+    (,) <$> exerciseCmd firstOfferCid AcceptGenesis with agreedParameters = parameters
+        <*> exerciseCmd secondOfferCid AcceptGenesis with agreedParameters = parameters
+  firstRootIdentity <- rootIdentityOf gg firstRoots
+  secondRootIdentity <- rootIdentityOf gg secondRoots
+  firstRootIdentity === secondRootIdentity
+  firstTreeNodeCid <- claimedRootsNodeOfFirstGenesis firstRoots
+  secondTreeNodeCid <- claimedRootsNodeOfFirstGenesis secondRoots
+  claimedRootsNodesAtGenesis <- claimedRootsNodesOf gg
+  sort (map fst claimedRootsNodesAtGenesis) === sort [firstTreeNodeCid, secondTreeNodeCid]
+
+  registerVaa <- registerVaaFor key gg admin firstRootIdentity 1
+  firstNamespace <- registrationNamespaceOf gg firstRoots.nttGovernanceCid admin 0
+  secondNamespace <- registrationNamespaceOf gg secondRoots.nttGovernanceCid admin 0
+  secondNamespace === firstNamespace
+  firstManagerCid <- registerManagerByVaaWithClaimedRootsNodeAttempt gg firstRoots admin 0 firstTreeNodeCid registerVaa
+    >>= expectSuccess "first root registration"
+  coveringNodes <- claimedRootsNodesCoveringPair gg firstNamespace
+  length coveringNodes === 2
+  firstTreeCoveringNodeCid <- case filter (\(_, node) -> checkReplayNodeRecordsDigest node (claimedRootDigest gg firstNamespace)) coveringNodes of
+    [(nodeCid, _)] -> pure nodeCid
+    recordingNodes -> abort ("expected one node that records the pair, found " <> show (length recordingNodes))
+  checkGovernanceCasesRejected
+    [ GovernanceRejectionCase "second root registration with the claimed-roots node of the first tree"
+        (RejectedWithMessage "digest already consumed") $
+          discardResult (registerManagerByVaaWithClaimedRootsNodeAttempt gg secondRoots admin 0 firstTreeCoveringNodeCid registerVaa)
+    ]
+  secondManagerCid <- registerManagerByVaaWithClaimedRootsNodeAttempt gg secondRoots admin 0 secondTreeNodeCid registerVaa
+    >>= expectSuccess "second root registration with the claimed-roots node of the second tree"
+  Some firstManager <- queryContractId gg firstManagerCid
+  Some secondManager <- queryContractId gg secondManagerCid
+  secondManager.managerAddress === firstManager.managerAddress
+  secondManager.namespace === firstManager.namespace
 
 ----------------------------------------------------------------------
 -- A re-genesis replaces the earlier roots
@@ -737,8 +870,18 @@ testReGenesisReplacesEarlierRoots = do
   sort (Map.toList reGenesisParameters.coreGovernanceReplayRecord.consumedGovernance)
     === sort [((parseVAA history.setFeeVaa).hash, 2), ((parseVAA history.transferFeesVaa).hash, 3)]
   reGenesisParameters.nttGovernanceReplayRecord === replayRecordOf (Map.fromList [((parseVAA history.registerVaa).hash, 1)]) None
+  claimedRootsNodesBefore <- claimedRootsNodesOf gg
   newRoots <- offerGenesis history.parties reGenesisParameters >>= acceptGenesisRoots reGenesisParameters
   checkEarlierRootsActivity "after the re-genesis" False history
+  newRoots.claimedRootsNodeCid === None
+  claimedRootsNodesAfter <- claimedRootsNodesOf gg
+  claimedRootsNodesAfter === claimedRootsNodesBefore
+  length claimedRootsNodesAfter === 1
+  [(_, keptClaimedRootsNode)] <- claimedRootsNodesCoveringPair gg history.earlierManager.namespace
+  checkReplayNodeRecordsDigest keptClaimedRootsNode (claimedRootDigest gg history.earlierManager.namespace) === True
+  earlierPairClaim <- claimEarlierPairAsGuardianGovernance gg newRoots history.earlierManager.namespace
+  checkRejection "claim of the earlier deployment pair after the re-genesis"
+    (RejectedWithMessage "digest already consumed") earlierPairClaim
   newRoots.coinFactoryCid === history.earlierRoots.coinFactoryCid
   coinFactories <- query @CoinFactory gg
   [ coinFactoryCid | (coinFactoryCid, coinFactory) <- coinFactories, coinFactory.admin == gg ] === [history.earlierRoots.coinFactoryCid]

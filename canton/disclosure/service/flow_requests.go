@@ -18,7 +18,7 @@ var flowParamNames = map[string][]string{
 	"set-peer":     {"manager", "digest"},
 	"accept-admin": {"manager", "digest"},
 	"transfer":     {"manager"},
-	"register":     {"gg", "by-vaa"},
+	"register":     {"gg", "by-vaa", "namespace"},
 	"consolidate":  {"manager"},
 }
 
@@ -132,6 +132,7 @@ type transferRequest struct {
 type registerRequest struct {
 	guardianGovernance partyID // optional
 	byVAA              bool
+	claimNamespace     replayNamespace // optional; the replay namespace that the registration claims
 }
 
 type consolidateRequest struct {
@@ -214,7 +215,14 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if byVAA && guardianGovernance == "" {
 			return nil, newFlowError(http.StatusBadRequest, "gg is required when by-vaa=true")
 		}
-		return registerRequest{guardianGovernance: guardianGovernance, byVAA: byVAA}, nil
+		var claimNamespace replayNamespace
+		if rawNamespace, present := params["namespace"]; present {
+			claimNamespace, err = parseReplayNamespace(rawNamespace)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return registerRequest{guardianGovernance: guardianGovernance, byVAA: byVAA, claimNamespace: claimNamespace}, nil
 	default:
 		panic("disclosure-service: flowParamNames and parseFlowRequest disagree on flow " + flowName)
 	}

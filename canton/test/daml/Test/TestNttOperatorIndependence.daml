@@ -23,7 +23,8 @@ import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload (NttGovernanceAction (..))
-import Test.TestNtt (b32, cantonChainId, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
+import Test.TestCore (claimedRootsNodeCovering)
+import Test.TestNtt (b32, burnMintInstrumentOf, cantonChainId, claimedRootsNodeForRegistration, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
 import Test.TestRedTeam
 import Test.TestReplay (coveringNode)
 
@@ -50,11 +51,13 @@ registerManagerByVaaAttempt env admin vaaSequence = do
     chain = cantonChainId
     registrationBinding = nttRegistrationBindingFor testNttGovernanceRootIdentity env.gg admin 0
     tokenDecimals = 8
+  (claimedRootsNodeCid, _) <- claimedRootsNodeForRegistration env.gg governanceCid (burnMintInstrumentOf env.gg admin 0) admin
   fmap (\(_, managerCid, _, _, _) -> managerCid) <$> trySubmit (withReads env [admin] []) do
     exerciseCmd governanceCid RegisterManagerByVaa with
       admin
       emitterRegistryCid
       replayRootRegistryCid
+      claimedRootsNodeCid
       instrumentNonce = 0
       factory = BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid)
       coreStateCid = env.coreStateCid
@@ -255,6 +258,7 @@ mintWithReplayNode env managerCid relayer recipient replayNodeCid vaaBytes = do
 claimReplayRootAttempt : RedTeamEnv -> Party -> Party -> Text -> Script (Either SubmitError (ContractId ReplayNode))
 claimReplayRootAttempt env claimant consumer namespace = do
   (_, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  (claimedRootsNodeCid, _) <- claimedRootsNodeCovering env.gg consumer namespace
   trySubmit (withReads env [claimant] []) do
     exerciseCmd replayRootRegistryCid ClaimReplayRoot with
       consumer
@@ -264,6 +268,7 @@ claimReplayRootAttempt env claimant consumer namespace = do
       coreStateCid = None
       feeAllocation = None
       expectedGuardianGovernance = env.gg
+      claimedRootsNodeCid
 
 -- | The inbound paths consume in gg's trie under the manager's stored
 -- namespace ('nttNamespaceFor' at registration, from the root's fresh

@@ -19,7 +19,7 @@ import DA.Text qualified as T
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
 import Wormhole.Core.State
-import Test.TestCore (setup, govSetFeeVAA)
+import Test.TestCore (claimedRootsNodeCovering, setup, govSetFeeVAA)
 
 -- | Right-pad a hex fragment with zeros to a full 64-nibble digest.
 pad64 : Text -> VaaDigest
@@ -46,7 +46,8 @@ registerReplayRoot : Party -> Party -> Text -> Int -> Script (ContractId ReplayN
 registerReplayRoot guardianGovernance consumer namespace threshold = do
   [(regCid, _)] <- query @ReplayRootRegistry guardianGovernance
   regDisc <- fromSome <$> queryDisclosure guardianGovernance regCid
-  submit (actAs consumer <> disclose regDisc) do
+  (claimedRootsNodeCid, claimedRootsNodeDisclosure) <- claimedRootsNodeCovering guardianGovernance consumer namespace
+  submit (actAs consumer <> disclose regDisc <> disclose claimedRootsNodeDisclosure) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       namespace
@@ -55,6 +56,7 @@ registerReplayRoot guardianGovernance consumer namespace threshold = do
       coreStateCid = None    -- claimFee is 0 in the fixture
       feeAllocation = None
       expectedGuardianGovernance = guardianGovernance
+      claimedRootsNodeCid
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s
 -- @namespace@ trie covering @digest@. Aborts unless coverage is exactly one —
@@ -270,9 +272,9 @@ testNodeArchiveNeedsBoth = do
 
 -- | Root claims are free and self-serve; the registry pins WHOSE scope a claim
 -- touches. Claiming for a consumer needs that consumer's authority — nobody can
--- fork someone else's scope. A consumer duplicating its own root is allowed
--- (self-harm, detected off-ledger by 'coveringNode'). Roots can't be minted
--- outside the registry — the consumer alone lacks the guardianGovernance signature.
+-- fork someone else's scope. A second claim of one (consumer, namespace) fails
+-- with "digest already consumed". Roots can't be minted outside the registry —
+-- the consumer alone lacks the guardianGovernance signature.
 testRootClaims : Script ()
 testRootClaims = do
   (gg, consumer, rootCid) <- setupTrie 4
@@ -284,7 +286,20 @@ testRootClaims = do
   regDisc <- fromSome <$> queryDisclosure gg regCid
   -- A third party cannot claim a root for someone else's scope.
   mallory <- allocateParty "TrieMallory"
-  submitMustFail (actAs mallory <> disclose regDisc) do
+  (malloryNodeCid, malloryNodeDisc) <- claimedRootsNodeCovering gg consumer "mallory-scope"
+  submitMustFail (actAs mallory <> disclose regDisc <> disclose malloryNodeDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      namespace = "mallory-scope"
+      splitThreshold = 4
+      payer = consumer
+      coreStateCid = None
+      feeAllocation = None
+      expectedGuardianGovernance = gg
+      claimedRootsNodeCid = malloryNodeCid
+  -- The consumer cannot duplicate its own root.
+  (duplicateNodeCid, duplicateNodeDisc) <- claimedRootsNodeCovering gg consumer ns
+  duplicateResult <- trySubmit (actAs consumer <> disclose regDisc <> disclose duplicateNodeDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       namespace = ns
@@ -293,18 +308,13 @@ testRootClaims = do
       coreStateCid = None
       feeAllocation = None
       expectedGuardianGovernance = gg
-  -- The consumer CAN duplicate its own root — by design, self-harm only.
-  _ <- submit (actAs consumer <> disclose regDisc) do
-    exerciseCmd regCid ClaimReplayRoot with
-      consumer
-      namespace = ns
-      splitThreshold = 4
-      payer = consumer
-      coreStateCid = None
-      feeAllocation = None
-      expectedGuardianGovernance = gg
+      claimedRootsNodeCid = duplicateNodeCid
+  case duplicateResult of
+    Left (FailureStatusError failure) -> assertMsg ("duplicate root: " <> failure.message) ("digest already consumed" `T.isInfixOf` failure.message)
+    Left submitError -> abort ("duplicate root: unexpected rejection " <> show submitError)
+    Right _ -> abort "duplicate root committed"
   roots <- query @ReplayNode consumer
-  length roots === 2
+  length roots === 1
   -- The consumer cannot create a co-signed node alone.
   submitMustFail consumer do
     createCmd ReplayNode with

@@ -58,6 +58,7 @@ const (
 	roleEmitterRegistry                 = "EmitterRegistry"
 	roleReplayRootRegistry              = "ReplayRootRegistry"
 	roleCanonicalCoinFactory            = "canonical CoinFactory"
+	roleCoveringClaimedRootsNode        = "covering claimed-roots ReplayNode"
 )
 
 // NttTokenConfig's two constructors, decoded as plain strings.
@@ -75,6 +76,10 @@ const (
 // reasonNotVisible is every "missing" entry's reason: no reader party is a stakeholder of that
 // contract, so the client must supply it.
 const reasonNotVisible = "no matching contract visible to the reader parties"
+
+// reasonNamespaceNotGiven is the reason of the claimed-roots node of a register request without
+// a namespace parameter.
+const reasonNamespaceNotGiven = "the request has no namespace parameter"
 
 // --- Decode shapes: the prefix "da" marks a template's Daml-JSON createArgument payload ---
 
@@ -113,9 +118,10 @@ type daLockedLedger struct {
 }
 
 type daReplayNode struct {
-	Consumer  partyID                 `json:"consumer"`
-	Namespace string                  `json:"namespace"`
-	Prefix    digestNibblePrefixValue `json:"prefix"`
+	Consumer           partyID                 `json:"consumer"`
+	GuardianGovernance partyID                 `json:"guardianGovernance"`
+	Namespace          string                  `json:"namespace"`
+	Prefix             digestNibblePrefixValue `json:"prefix"`
 }
 
 // daGuardianAnchor decodes the guardianGovernance field shared by CoreState, NttGovernance,
@@ -410,6 +416,18 @@ func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer partyID, 
 	})
 }
 
+// coveringClaimedRootsNode finds the one node of the gg claimed-roots tree that covers digest:
+// consumer and guardianGovernance gg, namespace claimedRootsNamespace. Two trees of one gg give
+// two covering nodes.
+func coveringClaimedRootsNode(entries []decodedEntry[daReplayNode], gg partyID, digest vaaDigestHex) (decodedEntry[daReplayNode], error) {
+	return exactlyOne(entries, roleCoveringClaimedRootsNode, func(entry decodedEntry[daReplayNode]) bool {
+		return entry.value.Consumer == gg &&
+			entry.value.GuardianGovernance == gg &&
+			entry.value.Namespace == claimedRootsNamespace &&
+			strings.HasPrefix(digest.hex, entry.value.Prefix.hex)
+	})
+}
+
 func findLockedLedger(entries []decodedEntry[daLockedLedger], manager managerAddressHex) (decodedEntry[daLockedLedger], error) {
 	return exactlyOne(entries, roleLockedLedger, func(entry decodedEntry[daLockedLedger]) bool {
 		return entry.value.ManagerAddress.hex == manager.hex
@@ -542,6 +560,19 @@ func (s *server) fetchCoveringNode(ctx context.Context, consumer partyID, namesp
 		return decodedEntry[daReplayNode]{}, err
 	}
 	return coveringReplayNode(entries, consumer, namespace, digest)
+}
+
+func (s *server) fetchCoveringClaimedRootsNode(ctx context.Context, gg partyID, claimNamespace replayNamespace, offset int64) (decodedEntry[daReplayNode], error) {
+	pairDigest := claimedRootDigest(gg, claimNamespace)
+	entries, err := fetchDecoded[daReplayNode](ctx, s, tailReplayNode, offset,
+		partyFieldMatch(gg, "consumer"),
+		partyFieldMatch(gg, "guardianGovernance"),
+		exactFieldMatch(claimedRootsNamespace, "namespace"),
+		createArgumentFieldMatch{fieldPath: []string{"prefix", "value"}, wantValues: digestPrefixes(pairDigest), compareHex: true})
+	if err != nil {
+		return decodedEntry[daReplayNode]{}, err
+	}
+	return coveringClaimedRootsNode(entries, gg, pairDigest)
 }
 
 func (s *server) fetchLedger(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daLockedLedger], error) {
@@ -1002,7 +1033,18 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 		disclosures = append(disclosures, discloseAs(roleCanonicalCoinFactory, factory.entry))
 	}
 
-	return &flowResponse{Flow: "register", Disclosures: disclosures, Missing: make([]flowMissingEntry, 0)}, nil
+	missing := make([]flowMissingEntry, 0, 1)
+	if request.claimNamespace.isPresent() {
+		claimedRootsNode, err := s.fetchCoveringClaimedRootsNode(ctx, nttGovernance.value.GuardianGovernance, request.claimNamespace, offset)
+		if err != nil {
+			return nil, err
+		}
+		disclosures = append(disclosures, discloseAs(roleCoveringClaimedRootsNode, claimedRootsNode.entry))
+	} else {
+		missing = append(missing, flowMissingEntry{Role: roleCoveringClaimedRootsNode, Reason: reasonNamespaceNotGiven})
+	}
+
+	return &flowResponse{Flow: "register", Disclosures: disclosures, Missing: missing}, nil
 }
 
 // assembleConsolidate mirrors consolidateDisclosures. The caller supplies the reserve custodian's
