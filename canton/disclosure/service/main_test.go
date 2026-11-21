@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1492,6 +1493,128 @@ func TestHandleFlows_Register_ByVaa(t *testing.T) {
 	assert.Equal(t,
 		[]string{roleNttGovernance, roleEmitterRegistry, roleReplayRootRegistry, roleCoreState, roleCanonicalCoinFactory},
 		rolesOf(resp.Disclosures))
+}
+
+func claimedRootsNodeArg(consumer, guardianGovernance, namespace, prefix string) string {
+	return fmt.Sprintf(`{"consumer":%q,"guardianGovernance":%q,"namespace":%q,"prefix":{"tag":"DigestNibblePrefix","value":%q}}`,
+		consumer, guardianGovernance, namespace, prefix)
+}
+
+// claimedRootsNodeJSON is a ReplayNode with contract id "claimed-" + contractIDSuffix.
+func claimedRootsNodeJSON(contractIDSuffix, consumer, guardianGovernance, namespace, prefix string) string {
+	return acsContractJSONWithArg("pkg:"+tailReplayNode, "claimed-"+contractIDSuffix, "Y2xhaW1lZA==", "sync1",
+		claimedRootsNodeArg(consumer, guardianGovernance, namespace, prefix))
+}
+
+func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
+	const gg = testGuardianGovernanceParty
+	const rogueGuardianGovernance = "rogue" + testPartyFingerprintSuffix
+	const deploymentNamespace = "ntt:6e0a3c51f1c0b3cb5f0f5f4c7a3c0a36b6f0ba0ef8b25f4ab2b2d1c6e0e8f4a1"
+	namespace, err := parseReplayNamespace(deploymentNamespace)
+	require.NoError(t, err)
+	pairDigest := claimedRootDigest(gg, namespace)
+	coveringNibble := pairDigest.hex[:1]
+	splitChildren := make([]string, 0, 16)
+	for _, nibble := range "0123456789abcdef" {
+		splitChildren = append(splitChildren, claimedRootsNodeJSON("child-"+string(nibble), gg, gg, claimedRootsNamespace, string(nibble)))
+	}
+	registerAnchors := func(replayNodes ...string) flowFixtures {
+		return flowFixtures{
+			tailNttGovernance:      jsonArray(acsContractJSONWithArg("pkg:"+tailNttGovernance, "gov-cid-9", "Z292", "sync1", guardianAnchorArg(gg))),
+			tailEmitterRegistry:    jsonArray(acsContractJSONWithArg("pkg:"+tailEmitterRegistry, "emreg-cid-9", "ZW1yZWc=", "sync1", guardianAnchorArg(gg))),
+			tailReplayRootRegistry: jsonArray(acsContractJSONWithArg("pkg:"+tailReplayRootRegistry, "rrreg-cid-9", "cnJyZWc=", "sync1", guardianAnchorArg(gg))),
+			tailCoreState:          jsonArray(acsContractJSONWithArg("pkg:"+tailCoreState, "cs-cid-9", "Y3M=", "sync1", guardianAnchorArg(gg))),
+			tailReplayNode:         jsonArray(replayNodes...),
+		}
+	}
+	anchorRoles := []string{roleNttGovernance, roleEmitterRegistry, roleReplayRootRegistry, roleCoreState}
+	cases := []struct {
+		name                  string
+		query                 string
+		fixtures              flowFixtures
+		wantStatus            int
+		wantClaimedRootsNode  string // contract id; "" when the node is missing
+		wantMissingRoles      []string
+		wantErrorBodyContains string
+	}{
+		{
+			name:                 "root of the tree, gg given",
+			query:                "gg=" + gg + "&namespace=" + url.QueryEscape(deploymentNamespace),
+			fixtures:             registerAnchors(claimedRootsNodeJSON("root", gg, gg, claimedRootsNamespace, "")),
+			wantStatus:           http.StatusOK,
+			wantClaimedRootsNode: "claimed-root",
+			wantMissingRoles:     []string{},
+		},
+		{
+			name:                 "root of the tree, gg of the NttGovernance",
+			query:                "namespace=" + url.QueryEscape(deploymentNamespace),
+			fixtures:             registerAnchors(claimedRootsNodeJSON("root", gg, gg, claimedRootsNamespace, "")),
+			wantStatus:           http.StatusOK,
+			wantClaimedRootsNode: "claimed-root",
+			wantMissingRoles:     []string{},
+		},
+		{
+			name:                 "split tree serves the child that covers the pair digest",
+			query:                "gg=" + gg + "&namespace=" + url.QueryEscape(deploymentNamespace),
+			fixtures:             registerAnchors(splitChildren...),
+			wantStatus:           http.StatusOK,
+			wantClaimedRootsNode: "claimed-child-" + coveringNibble,
+			wantMissingRoles:     []string{},
+		},
+		{
+			name:  "nodes outside the tree are ignored",
+			query: "gg=" + gg + "&namespace=" + url.QueryEscape(deploymentNamespace),
+			fixtures: registerAnchors(
+				claimedRootsNodeJSON("root", gg, gg, claimedRootsNamespace, ""),
+				claimedRootsNodeJSON("deployment-trie", gg, gg, deploymentNamespace, ""),
+				claimedRootsNodeJSON("rogue-anchor", gg, rogueGuardianGovernance, claimedRootsNamespace, ""),
+				claimedRootsNodeJSON("other-consumer", "other"+testPartyFingerprintSuffix, gg, claimedRootsNamespace, ""),
+			),
+			wantStatus:           http.StatusOK,
+			wantClaimedRootsNode: "claimed-root",
+			wantMissingRoles:     []string{},
+		},
+		{
+			name:             "no namespace: the node is missing",
+			query:            "gg=" + gg,
+			fixtures:         registerAnchors(claimedRootsNodeJSON("root", gg, gg, claimedRootsNamespace, "")),
+			wantStatus:       http.StatusOK,
+			wantMissingRoles: []string{roleCoveringClaimedRootsNode},
+		},
+		{
+			name:  "two trees of one gg are a fork",
+			query: "gg=" + gg + "&namespace=" + url.QueryEscape(deploymentNamespace),
+			fixtures: registerAnchors(
+				claimedRootsNodeJSON("first-tree", gg, gg, claimedRootsNamespace, ""),
+				claimedRootsNodeJSON("second-tree", gg, gg, claimedRootsNamespace, ""),
+			),
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "no tree",
+			query:      "gg=" + gg + "&namespace=" + url.QueryEscape(deploymentNamespace),
+			fixtures:   registerAnchors(),
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFlowTestServer(t, tc.fixtures)
+			rr := requestFlow(t, srv, "register", tc.query)
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+			if tc.wantStatus != http.StatusOK {
+				return
+			}
+			resp := decodeFlowResponse(t, rr)
+			wantRoles := anchorRoles
+			if tc.wantClaimedRootsNode != "" {
+				wantRoles = append(append([]string{}, anchorRoles...), roleCoveringClaimedRootsNode)
+				assert.Equal(t, tc.wantClaimedRootsNode, resp.Disclosures[len(resp.Disclosures)-1].ContractID)
+			}
+			assert.Equal(t, wantRoles, rolesOf(resp.Disclosures))
+			assert.Equal(t, tc.wantMissingRoles, missingRolesOf(resp.Missing))
+		})
+	}
 }
 
 func TestHandleFlows_Register_ByVaaWithoutGG_400(t *testing.T) {

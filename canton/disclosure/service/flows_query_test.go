@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -81,6 +82,10 @@ func TestParseFlowRequestRejectsBeforeUpstream(t *testing.T) {
 		{"by-vaa not a bool", "register", "by-vaa=yes", http.StatusBadRequest},
 		{"by-vaa true without gg", "register", "by-vaa=true", http.StatusBadRequest},
 		{"empty gg", "register", "gg=", http.StatusBadRequest},
+		{"empty namespace", "register", "namespace=", http.StatusBadRequest},
+		{"129-character namespace", "register", "namespace=" + strings.Repeat("a", 129), http.StatusBadRequest},
+		{"reserved namespace", "register", "namespace=" + url.QueryEscape(claimedRootsNamespace), http.StatusBadRequest},
+		{"namespace not UTF-8", "register", "namespace=ntt%3A%FF", http.StatusBadRequest},
 		{"malformed query", "transfer", "manager=" + b.managerAddr + "&%zz", http.StatusBadRequest},
 		{"semicolon separator", "transfer", "manager=" + b.managerAddr + ";digest=" + b.digest, http.StatusBadRequest},
 	}
@@ -160,6 +165,8 @@ func TestParseFlowRequestTypes(t *testing.T) {
 		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{hex: managerHex}}},
 		{"register defaults", "register", "", registerRequest{}},
 		{"register by vaa", "register", "gg=" + testGuardianGovernanceParty + "&by-vaa=true", registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true}},
+		{"register with namespace", "register", "gg=" + testGuardianGovernanceParty + "&namespace=ntt%3Aab",
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, claimNamespace: replayNamespace{text: "ntt:ab"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
