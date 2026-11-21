@@ -25,7 +25,7 @@ import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1 (InstrumentId (..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import Wormhole.Core.Bytes (EncodedVaa, VaaDigest, checkHexValueIsWellFormed)
-import Wormhole.Core.Replay (defaultSplitThreshold)
+import Wormhole.Core.Replay (ReplayNode, defaultSplitThreshold)
 import Wormhole.Core.State
   ( Emitter, CoreState, EmitterRegistry, ReplayRootRegistry, WormholeMessage
   , RegisterEmitter (..), ClaimReplayRoot (..), ParseAndVerifyVAA (..), PublishMessage (..)
@@ -108,6 +108,7 @@ template NttGovernance
         chainId               : Int   -- this deployment's own Wormhole chain id (uint16)
         emitterRegistryCid    : ContractId EmitterRegistry
         replayRootRegistryCid : ContractId ReplayRootRegistry
+        claimedRootsNodeCid   : ContractId ReplayNode  -- gg claimed-roots node covering the deployment's claim digest
         instrumentId          : InstrumentId
         instrumentNonce       : Int   -- the nonce in the burn/mint instrument-id binding
         tokenConfig           : NttTokenConfig
@@ -126,7 +127,7 @@ template NttGovernance
       do
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
           guardianGovernance nttCustody nextId admin chainId
-          emitterRegistryCid replayRootRegistryCid
+          emitterRegistryCid replayRootRegistryCid claimedRootsNodeCid
           instrumentId instrumentNonce tokenConfig tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
         reg' <- create this with nextId = nextId + 1
@@ -152,6 +153,7 @@ template NttGovernance
         admin                 : Party
         emitterRegistryCid    : ContractId EmitterRegistry
         replayRootRegistryCid : ContractId ReplayRootRegistry
+        claimedRootsNodeCid   : ContractId ReplayNode  -- gg claimed-roots node covering the deployment's claim digest
         instrumentNonce       : Int
         factory               : NttFactory
         coreStateCid          : ContractId CoreState  -- mandatory: needed for VAA verification even at zero fees
@@ -209,7 +211,7 @@ template NttGovernance
         -- 9. Run the shared registration body; recreate the root once.
         (mgr, emitterCid, ledger, msg) <- registerManagerBody
           guardianGovernance nttCustody nextId admin chainId
-          emitterRegistryCid replayRootRegistryCid
+          emitterRegistryCid replayRootRegistryCid claimedRootsNodeCid
           instrumentId instrumentNonce BurnMint tokenDecimals factory
           coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation
         let replayRecord = recordGovernanceDigest
@@ -245,6 +247,7 @@ registerManagerBody
   -> Int                            -- chainId
   -> ContractId EmitterRegistry
   -> ContractId ReplayRootRegistry
+  -> ContractId ReplayNode          -- claimedRootsNodeCid
   -> InstrumentId
   -> Int                            -- instrumentNonce
   -> NttTokenConfig
@@ -258,7 +261,7 @@ registerManagerBody
   -> Update (ContractId NttManager, ContractId Emitter, Optional (ContractId LockedLedger), WormholeMessage)
 registerManagerBody
   guardianGovernance nttCustody nextId admin chainId
-  emitterRegistryCid replayRootRegistryCid
+  emitterRegistryCid replayRootRegistryCid claimedRootsNodeCid
   instrumentId instrumentNonce tokenConfig tokenDecimals factory
   coreStateCid consistencyLevel emitterFeeAllocation claimFeeAllocation feeAllocation = do
     -- Decimal conversions ('untrimToDecimal') are exact only up to the 10
@@ -301,7 +304,8 @@ registerManagerBody
         namespace = nttNamespaceFor instrumentId admin nextId
 
     -- Claim the deployment's replay-trie root, sub-scoped under gg by the
-    -- derived namespace.
+    -- derived namespace. The core consumes the (gg, namespace) claim digest
+    -- in the gg claimed-roots tree, so a second root for it fails.
     rootCid <- exercise replayRootRegistryCid ClaimReplayRoot with
       consumer = guardianGovernance
       namespace
@@ -310,6 +314,7 @@ registerManagerBody
       coreStateCid = Some coreStateCid
       feeAllocation = claimFeeAllocation
       expectedGuardianGovernance = guardianGovernance
+      claimedRootsNodeCid
     root <- fetch rootCid
     -- guardianGovernance is a ReplayNode signatory, so this equality also
     -- proves gg co-signed the claimed root.

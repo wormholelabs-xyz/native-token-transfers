@@ -30,7 +30,7 @@ import Wormhole.Core.Fees (emptyExtraArgs)
 import Wormhole.Core.Replay (ReplayNode)
 import Wormhole.Core.GuardianSet (guardianAddressFromPublicKey)
 import Wormhole.Core.Setup
-  ( GenesisGuardianSet (..), GenesisGuardian (..), RegistryParties (..), mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
+  ( GenesisGuardianSet (..), GenesisGuardian (..), RegistryParties (..), mkInitialClaimedRootsNode, mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry
   , solanaGovernanceChainId, defaultGovernanceContract )
 import Wormhole.Core.State (CoreState, Emitter (..), PublishMessage (..))
 import Wormhole.Core.VAA (parseVAA, spkiPrefixSecp256k1)
@@ -40,7 +40,7 @@ import Wormhole.Ntt.Governance
 import Wormhole.Ntt.Ledger
 import Wormhole.Ntt.Manager
 import Wormhole.Ntt.Payload
-import Test.TestNtt (ForgedHolding (..), MockTransferFactory (..), b32, cantonChainId, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
+import Test.TestNtt (ForgedHolding (..), MockTransferFactory (..), b32, burnMintInstrumentOf, cantonChainId, claimedRootsNodeForRegistration, coreRegistries, resolveEmitter, testNttGovernanceRootIdentity)
 import Test.TestReplay (coveringNode)
 
 ----------------------------------------------------------------------
@@ -135,6 +135,7 @@ redTeamSetupWithPartyHintPrefix partyHintPrefix = do
                  (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
   _ <- submit gg do createCmd (mkInitialEmitterRegistry registryParties 0)
   _ <- submit gg do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialClaimedRootsNode gg)
   _ <- submit (actAs gg <> actAs nttCustody) do
     createCmd NttGovernance with guardianGovernance = gg, nttCustody, nextId = 0, rootIdentity = testNttGovernanceRootIdentity, consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = None
   issuerFactoryCid <- submit issuer do createCmd CoinFactory with admin = issuer
@@ -169,12 +170,14 @@ registerManagerAttempt
 registerManagerAttempt env admin coSigners instrumentId tokenConfig factory = do
   [(govCid, _)] <- query @NttGovernance env.gg
   (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  (claimedRootsNodeCid, _) <- claimedRootsNodeForRegistration env.gg govCid instrumentId admin
   fmap (\(_, mgrCid, _, _, _) -> mgrCid) <$> trySubmit (withReads env (admin :: coSigners) []) do
     exerciseCmd govCid RegisterManager with
       admin
       chainId = cantonChainId
       emitterRegistryCid
       replayRootRegistryCid
+      claimedRootsNodeCid
       instrumentId
       instrumentNonce = 0
       tokenConfig
@@ -785,11 +788,13 @@ testRedTeamGovernanceForgeriesRejected = do
           chain = cantonChainId
           registrationBinding = nttRegistrationBindingFor testNttGovernanceRootIdentity env.gg adminE 0
           tokenDecimals = 8
+        (claimedRootsNodeCid, _) <- claimedRootsNodeForRegistration env.gg govCid (burnMintInstrumentOf env.gg adminE 0) adminE
         fmap (const ()) <$> trySubmit (withReads env [adminE] []) do
           exerciseCmd govCid RegisterManagerByVaa with
             admin = adminE
             emitterRegistryCid
             replayRootRegistryCid
+            claimedRootsNodeCid
             instrumentNonce = 0
             factory
             coreStateCid = env.coreStateCid
@@ -1821,6 +1826,7 @@ testRedTeamLockUnlockAdminCannotUseGgAuthority = do
   (ledgerCid, ledger) <- ledgerOf env mgr.managerAddress
   [(govCid, _)] <- query @NttGovernance env.gg
   (emitterRegistryCid, _, replayRootRegistryCid, _) <- coreRegistries env.gg
+  (claimedRootsNodeCid, _) <- claimedRootsNodeForRegistration env.gg govCid (burnMintInstrumentOf env.gg admin 1) admin
   ledger.balance === 0.0
 
   checkAttacksRejected
@@ -1850,6 +1856,7 @@ testRedTeamLockUnlockAdminCannotUseGgAuthority = do
             chainId = cantonChainId
             emitterRegistryCid
             replayRootRegistryCid
+            claimedRootsNodeCid
             instrumentId = InstrumentId with admin = env.gg, id = nttInstrumentIdFor admin 1
             instrumentNonce = 1
             tokenConfig = BurnMint
