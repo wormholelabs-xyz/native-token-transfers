@@ -151,14 +151,15 @@ root. A first genesis sets it to
 `keccak256(tag ‖ lp(utf8(gg)) ‖ uint64(ledger time in microseconds))`. A
 re-genesis keeps the identity of the earlier root. A first genesis at another
 ledger time makes a root with another identity. That root rejects each
-registration VAA of the first root. Two first geneses at one ledger time, for
-example in one transaction, make two roots with one identity. They also make
-two claimed-roots trees for one `gg`. A registration claims its (`gg`,
-namespace) pair in the tree of the node that the caller gives. Thus one
-registration VAA registers one time in each tree. The two managers have one
-manager address. This is a residual risk. The disclosure service then finds
-two covering nodes and returns 500. One root for each `gg` is a guardian
-rule. Before the guardians sign a registration VAA, they read the
+registration VAA of the first root. Each first genesis creates a
+claimed-roots tree, so two first geneses of one `gg` make two trees. A
+registration claims its (`gg`, namespace) pair in the tree of the node that
+the caller gives. Thus a lock/unlock `RegisterManager` registers one time in
+each tree. Two first geneses at one ledger time, for example in one
+transaction, also make two roots with one identity. Then one registration VAA
+also registers one time in each tree. The two managers have one manager
+address. This is a residual risk. The disclosure service then finds two
+covering nodes and returns 500. One root for each `gg` is a guardian rule. Before the guardians sign a registration VAA, they read the
 `rootIdentity` of their root.
 
 NTT must be final at genesis. An upgrade-compatible NTT version needs only
@@ -168,17 +169,18 @@ transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Both
 roots compute one namespace. The core rejects the second claim of that pair
 in the one claimed-roots tree of the `gg`, with "digest already consumed".
-For roots of `ntt` 0.6.1 and core 0.12.2, a re-genesis (`ReGenesisReplacing`,
+For roots of `ntt` 0.6.2 and core 0.12.3, a re-genesis (`ReGenesisReplacing`,
 see "Genesis") is this transaction. It replaces the core roots and the NTT
 root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
 `wormhole-genesis` version that depends on both package versions.
 
-Vet no package with code that runs with `gg` authority and can claim a `gg`
-replay root (`ClaimReplayRoot` with `consumer = gg`). The core claims each
-(consumer, namespace) pair one time in the claimed-roots tree of the `gg`.
-Thus such code cannot open a second trie in the namespace of a deployment.
-But it can claim the pair of a future deployment first. Then that
+Vet no package whose code runs with `gg` authority and can create a
+`ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The
+claimed-roots tree binds only `ClaimReplayRoot`. Such code can create a
+`ReplayNode` with `consumer = gg` in the namespace of a live deployment. That
+opens a second trie, so one inbound VAA can mint or release two times. Such
+code can also claim the pair of a future deployment first. Then that
 registration fails. NTT reserves the replay namespace prefix `ntt:`.
 
 ### Governance VAA replay

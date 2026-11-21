@@ -923,9 +923,10 @@ Each guardian operator must do these steps:
 2. Vet a new version of such a package only after a review of its code.
 3. Find out if the Splice validator automation vets new Amulet packages
    automatically. Check this on your validator.
-4. Vet no package with code that runs with `gg` authority and can claim a
-   `gg` replay root. Such code can claim the pair of a future deployment
-   first. NTT reserves the replay namespace prefix `ntt:`.
+4. Vet no package whose code runs with `gg` authority and can create a
+   `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. Such code
+   can open a second trie in the namespace of a live deployment. NTT reserves
+   the replay namespace prefix `ntt:`.
 
 ### The gateway user must not act as a quorum party
 

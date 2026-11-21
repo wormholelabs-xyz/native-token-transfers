@@ -40,7 +40,7 @@ The `NttGovernance` root has a separate custody party, `nttCustody`.
 | N5  | The DSO expires an idle custody pot of Canton Coin as dust                                                                                                      | Splice 0.10.2 source                                                 | Open (F4)            |
 | N6  | A lock/unlock admin alone publishes on its gg-owned `Emitter`, sets a burn/mint factory, hands the admin role to gg, or registers a burn/mint deployment        | `testRedTeamLockUnlockAdminCannotUseGgAuthority`                     | Held                 |
 | N7  | Claim one (`gg`, namespace) pair two times, or claim with a wrong claimed-roots node                                                                            | `testRegistrationClaimsTheDeploymentPairOnce`                        | Held                 |
-| N7a | Two first geneses of one `gg` in one transaction register one VAA two times                                                                                     | `testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees`        | Open (guardian rule) |
+| N7a | Two first geneses of one `gg` make two trees; one registration registers two times                                                                              | `testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees`        | Open (guardian rule) |
 
 A4 note: the harness cannot make a `CoinFactory` from a different package version.
 The test package can depend on one `token-cip0056` DAR only.
@@ -167,17 +167,23 @@ A second claim of the pair fails with "digest already consumed". A second
 Thus its registration fails, also for a lock/unlock `RegisterManager`
 (`testRegistrationClaimsTheDeploymentPairOnce`). A re-genesis keeps the tree.
 
-A second trie is possible only with a second claimed-roots tree of one `gg`:
+The claimed-roots tree binds only `ClaimReplayRoot`. A second trie is
+possible in these cases:
 
 - Each first genesis creates a tree. Two first geneses of one `gg` make two
-  trees. The caller of a registration selects the tree. Two first geneses at
+  trees. A lock/unlock `RegisterManager` then registers one time in each
+  tree. The caller of a registration selects the tree. Two first geneses at
   one ledger time, for example in one transaction, also make two roots with
   one `rootIdentity`. Then one registration VAA registers on each root, one
   time in each tree
   (`testTwoFirstGenesesInOneTransactionMakeTwoClaimedRootsTrees`). The
   guardians must sign one first genesis for each `gg`.
-- Code outside `ntt` that runs with `gg` authority creates a claimed-roots
-  node. The canonical `CoinFactory` package does not depend on
+- Code outside `ntt` that runs with `gg` authority creates a `ReplayNode`
+  with `consumer = gg` in the namespace of a live deployment. One inbound VAA
+  can then mint or release two times. Such code can also create a second
+  claimed-roots node. The guardians vet no package whose `gg`-authorized code
+  can create a `ReplayNode` or exercise `ClaimReplayRoot` with
+  `consumer = gg`. The canonical `CoinFactory` package does not depend on
   `wormhole-core`. Each `gg` host vets each new `token-cip0056` version.
 
 ## F2: a third-party relayer cannot deliver a release
