@@ -166,6 +166,19 @@ A second claim of the pair fails with "digest already consumed". A second
 `NttGovernance` root of one `gg` at a used `nextId` computes a used namespace.
 Thus its registration fails, also for a lock/unlock `RegisterManager`
 (`testRegistrationClaimsTheDeploymentPairOnce`). A re-genesis keeps the tree.
+The same test passes an archived node of the `gg` tree. The ledger rejects
+it as an inactive contract. After a split, the test passes a child that does
+not cover the pair digest. The core rejects it with "replay node does not
+cover digest".
+
+This guarantee holds only in one core version. The claimed-roots tree is a
+template of the core package. A breaking core version cannot fetch a
+`ReplayNode` of core 0.12.3. If a re-genesis to such a version creates no
+tree, no registration is possible. If it creates a new tree, that tree has
+no record of the earlier pairs. Then a second claim of each earlier pair is
+possible. The `wormhole-genesis` version for that core version must copy the
+consumed pair digests into the new tree. The `wormhole-genesis` package
+copies the governance replay records in the same way.
 
 The claimed-roots tree binds only `ClaimReplayRoot`. A second trie is
 possible in these cases:
