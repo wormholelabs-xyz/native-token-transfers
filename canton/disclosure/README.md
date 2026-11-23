@@ -67,15 +67,15 @@ fill the cap.
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
-  | Flow           | Parameters                                                                                    |
-  | -------------- | --------------------------------------------------------------------------------------------- |
-  | `release`      | `manager`, `digest`, `recipient` (optional)                                                   |
-  | `mint`         | `manager`, `digest`, `recipient`                                                              |
-  | `set-peer`     | `manager`, `digest`                                                                           |
-  | `accept-admin` | `manager`, `digest`                                                                           |
-  | `transfer`     | `manager`                                                                                     |
-  | `register`     | `admin`, `instrument-admin`, `instrument-id`, `gg` (optional), `by-vaa` (bool, optional)      |
-  | `consolidate`  | `manager`                                                                                     |
+  | Flow           | Parameters                                                                               |
+  | -------------- | ---------------------------------------------------------------------------------------- |
+  | `release`      | `manager`, `digest`, `recipient` (optional)                                              |
+  | `mint`         | `manager`, `digest`, `recipient`                                                         |
+  | `set-peer`     | `manager`, `digest`                                                                      |
+  | `accept-admin` | `manager`, `digest`                                                                      |
+  | `transfer`     | `manager`                                                                                |
+  | `register`     | `admin`, `instrument-admin`, `instrument-id`, `gg` (optional), `by-vaa` (bool, optional) |
+  | `consolidate`  | `manager`                                                                                |
 
 `manager` is the manager address and `digest` is the VAA hash. Each is a hex
 string of 64 characters. `recipient`, `gg`, `admin` and `instrument-admin` are
