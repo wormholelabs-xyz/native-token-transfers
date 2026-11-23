@@ -32,13 +32,8 @@ func TestReaderPartiesPerTemplate(t *testing.T) {
 		tailCoinFactory:        jsonArray(burnMint.factoryJSON()),
 		tailDepositPreapproval: jsonArray(acsContractJSONWithArg("pkg:"+tailDepositPreapproval, "dep-1", "ZGVw", "sync1", preapprovalArg(testRecipient, burnMint.instrumentAdmin, burnMint.instrumentID))),
 	}
-	registerFixtures := flowFixtures{
-		tailNttGovernance:      jsonArray(acsContractJSONWithArg("pkg:"+tailNttGovernance, "gov-1", "Z292", "sync1", guardianAnchorArg(testGuardianGovernanceParty))),
-		tailEmitterRegistry:    jsonArray(acsContractJSONWithArg("pkg:"+tailEmitterRegistry, "emreg-1", "ZW1yZWc=", "sync1", guardianAnchorArg(testGuardianGovernanceParty))),
-		tailReplayRootRegistry: jsonArray(acsContractJSONWithArg("pkg:"+tailReplayRootRegistry, "rrreg-1", "cnJyZWc=", "sync1", guardianAnchorArg(testGuardianGovernanceParty))),
-		tailCoreState:          jsonArray(acsContractJSONWithArg("pkg:"+tailCoreState, "cs-1", "Y3M=", "sync1", guardianAnchorArg(testGuardianGovernanceParty))),
-		tailCoinFactory:        jsonArray(acsContractJSONWithArg("pkg:"+tailCoinFactory, "canon-1", "ZmFjdA==", "sync1", coinFactoryArg(testGuardianGovernanceParty))),
-	}
+	registerFixtures := registerFlowFixtures(testGuardianGovernanceParty, testRegisterNextID, claimedRootsTreeRootJSON(testGuardianGovernanceParty))
+	registerFixtures[tailCoinFactory] = jsonArray(acsContractJSONWithArg("pkg:"+tailCoinFactory, "canon-1", "ZmFjdA==", "sync1", coinFactoryArg(testGuardianGovernanceParty)))
 	flowRuns := []struct {
 		fixtures    flowFixtures
 		flow, query string
@@ -49,7 +44,7 @@ func TestReaderPartiesPerTemplate(t *testing.T) {
 		{lockUnlockFixtures, "set-peer", "manager=" + lockUnlock.managerAddr + "&digest=" + lockUnlock.digest},
 		{lockUnlockFixtures, "consolidate", "manager=" + lockUnlock.managerAddr},
 		{burnMintFixtures, "mint", "manager=" + burnMint.managerAddr + "&digest=" + burnMint.digest + "&recipient=" + testRecipient},
-		{registerFixtures, "register", "gg=" + testGuardianGovernanceParty + "&by-vaa=true"},
+		{registerFixtures, "register", testRegisterClaimQuery() + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true"},
 	}
 
 	readersByTail := map[string]map[partyID]bool{}
@@ -110,21 +105,16 @@ func sortedPartySet(partySet map[partyID]bool) []partyID {
 
 func TestRegisterFlowChecksGuardianGovernanceParam(t *testing.T) {
 	const gg = testGuardianGovernanceParty
-	registerFixtures := flowFixtures{
-		tailNttGovernance:      jsonArray(acsContractJSONWithArg("pkg:"+tailNttGovernance, "gov-cid-1", "Z292", "sync1", guardianAnchorArg(gg))),
-		tailEmitterRegistry:    jsonArray(acsContractJSONWithArg("pkg:"+tailEmitterRegistry, "emreg-cid-1", "ZW1yZWc=", "sync1", guardianAnchorArg(gg))),
-		tailReplayRootRegistry: jsonArray(acsContractJSONWithArg("pkg:"+tailReplayRootRegistry, "rrreg-cid-1", "cnJyZWc=", "sync1", guardianAnchorArg(gg))),
-		tailCoreState:          jsonArray(acsContractJSONWithArg("pkg:"+tailCoreState, "cs-cid-1", "Y3M=", "sync1", guardianAnchorArg(gg))),
-	}
+	registerFixtures := registerFlowFixtures(gg, testRegisterNextID, claimedRootsTreeRootJSON(gg))
 	cases := []struct {
 		name               string
 		query              string
 		wantStatusCode     int
 		wantUpstreamCalled bool
 	}{
-		{"gg param differs from the configured gg", "gg=other-gg" + testPartyFingerprintSuffix, http.StatusBadRequest, false},
-		{"no gg param", "", http.StatusOK, true},
-		{"gg param equals the configured gg", "gg=" + gg, http.StatusOK, true},
+		{"gg param differs from the configured gg", testRegisterClaimQuery() + "&gg=other-gg" + testPartyFingerprintSuffix, http.StatusBadRequest, false},
+		{"no gg param", testRegisterClaimQuery(), http.StatusOK, true},
+		{"gg param equals the configured gg", testRegisterClaimQuery() + "&gg=" + gg, http.StatusOK, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
