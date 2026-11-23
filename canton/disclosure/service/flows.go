@@ -255,14 +255,23 @@ func hexFieldMatch(wantHex string, fieldPath ...string) createArgumentFieldMatch
 	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantHex}, compareHex: true}
 }
 
-// digestPrefixes returns the 65 prefixes of digest, from "" to the whole digest.
-func digestPrefixes(digest vaaDigestHex) []string {
-	if len(digest.hex) != 64 {
-		panic(fmt.Sprintf("disclosure-service: digest has %d characters, expected 64", len(digest.hex)))
+// replayTrieKey is a 64-hex-character key of a replay trie: a VAA digest or a claimed-root digest.
+type replayTrieKey interface {
+	replayTrieKeyHex() string
+}
+
+func (digest vaaDigestHex) replayTrieKeyHex() string         { return digest.hex }
+func (digest claimedRootDigestHex) replayTrieKeyHex() string { return digest.hex }
+
+// digestPrefixes returns the 65 prefixes of key, from "" to the whole key.
+func digestPrefixes(key replayTrieKey) []string {
+	keyHex := key.replayTrieKeyHex()
+	if len(keyHex) != 64 {
+		panic(fmt.Sprintf("disclosure-service: replay trie key has %d characters, expected 64", len(keyHex)))
 	}
-	prefixes := make([]string, 0, len(digest.hex)+1)
-	for prefixLength := 0; prefixLength <= len(digest.hex); prefixLength++ {
-		prefixes = append(prefixes, digest.hex[:prefixLength])
+	prefixes := make([]string, 0, len(keyHex)+1)
+	for prefixLength := 0; prefixLength <= len(keyHex); prefixLength++ {
+		prefixes = append(prefixes, keyHex[:prefixLength])
 	}
 	return prefixes
 }
@@ -419,7 +428,7 @@ func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer partyID, 
 // coveringClaimedRootsNode finds the one node of the gg claimed-roots tree that covers digest:
 // consumer and guardianGovernance gg, namespace claimedRootsNamespace. Two trees of one gg give
 // two covering nodes.
-func coveringClaimedRootsNode(entries []decodedEntry[daReplayNode], gg partyID, digest vaaDigestHex) (decodedEntry[daReplayNode], error) {
+func coveringClaimedRootsNode(entries []decodedEntry[daReplayNode], gg partyID, digest claimedRootDigestHex) (decodedEntry[daReplayNode], error) {
 	return exactlyOne(entries, roleCoveringClaimedRootsNode, func(entry decodedEntry[daReplayNode]) bool {
 		return entry.value.Consumer == gg &&
 			entry.value.GuardianGovernance == gg &&
