@@ -77,10 +77,6 @@ const (
 // contract, so the client must supply it.
 const reasonNotVisible = "no matching contract visible to the reader parties"
 
-// reasonNamespaceNotGiven is the reason of the claimed-roots node of a register request without
-// a namespace parameter.
-const reasonNamespaceNotGiven = "the request has no namespace parameter"
-
 // --- Decode shapes: the prefix "da" marks a template's Daml-JSON createArgument payload ---
 
 // daInstrumentId decodes Splice.Api.Token.HoldingV1.InstrumentId.
@@ -130,6 +126,22 @@ type daGuardianAnchor struct {
 	GuardianGovernance partyID `json:"guardianGovernance"`
 }
 
+// daNttGovernance decodes the NttGovernance fields the register flow reads.
+type daNttGovernance struct {
+	GuardianGovernance partyID     `json:"guardianGovernance"`
+	NextID             json.Number `json:"nextId"`
+}
+
+// guardianAnchored is a decode shape with a guardianGovernance field.
+type guardianAnchored interface {
+	guardianGovernanceParty() partyID
+}
+
+func (anchor daGuardianAnchor) guardianGovernanceParty() partyID { return anchor.GuardianGovernance }
+func (governance daNttGovernance) guardianGovernanceParty() partyID {
+	return governance.GuardianGovernance
+}
+
 type daEmitter struct {
 	Owner     partyID     `json:"owner"`
 	EmitterId json.Number `json:"emitterId"`
@@ -172,6 +184,9 @@ type flowResponse struct {
 	Flow        string                `json:"flow"`
 	Disclosures []flowDisclosureEntry `json:"disclosures"`
 	Missing     []flowMissingEntry    `json:"missing"`
+	// Register only: the replay namespace and managerId the registration claims at this offset.
+	ClaimNamespace string       `json:"claimNamespace,omitempty"`
+	ManagerID      *json.Number `json:"managerId,omitempty"`
 }
 
 func discloseAs(role string, entry acsEntry) flowDisclosureEntry {
@@ -255,14 +270,23 @@ func hexFieldMatch(wantHex string, fieldPath ...string) createArgumentFieldMatch
 	return createArgumentFieldMatch{fieldPath: fieldPath, wantValues: []string{wantHex}, compareHex: true}
 }
 
-// digestPrefixes returns the 65 prefixes of digest, from "" to the whole digest.
-func digestPrefixes(digest vaaDigestHex) []string {
-	if len(digest.hex) != 64 {
-		panic(fmt.Sprintf("disclosure-service: digest has %d characters, expected 64", len(digest.hex)))
+// replayTrieKey is a 64-hex-character key of a replay trie: a VAA digest or a claimed-root digest.
+type replayTrieKey interface {
+	replayTrieKeyHex() string
+}
+
+func (digest vaaDigestHex) replayTrieKeyHex() string         { return digest.hex }
+func (digest claimedRootDigestHex) replayTrieKeyHex() string { return digest.hex }
+
+// digestPrefixes returns the 65 prefixes of key, from "" to the whole key.
+func digestPrefixes(key replayTrieKey) []string {
+	keyHex := key.replayTrieKeyHex()
+	if len(keyHex) != 64 {
+		panic(fmt.Sprintf("disclosure-service: replay trie key has %d characters, expected 64", len(keyHex)))
 	}
-	prefixes := make([]string, 0, len(digest.hex)+1)
-	for prefixLength := 0; prefixLength <= len(digest.hex); prefixLength++ {
-		prefixes = append(prefixes, digest.hex[:prefixLength])
+	prefixes := make([]string, 0, len(keyHex)+1)
+	for prefixLength := 0; prefixLength <= len(keyHex); prefixLength++ {
+		prefixes = append(prefixes, keyHex[:prefixLength])
 	}
 	return prefixes
 }
@@ -380,28 +404,28 @@ func findManager(entries []decodedEntry[daNttManager], manager managerAddressHex
 // (the register flow's optional param), it instead requires the fetched set to hold exactly one
 // entry; an ambiguous set without gg is a 409, because the client resolves it by supplying gg.
 // Serves CoreState, NttGovernance, EmitterRegistry, and ReplayRootRegistry.
-func findGuardianAnchor(entries []decodedEntry[daGuardianAnchor], gg partyID, label string) (decodedEntry[daGuardianAnchor], error) {
+func findGuardianAnchor[T guardianAnchored](entries []decodedEntry[T], gg partyID, label string) (decodedEntry[T], error) {
 	if gg != "" {
-		match, matchCount := matchOne(entries, func(entry decodedEntry[daGuardianAnchor]) bool {
-			return partyID(entry.value.GuardianGovernance) == gg
+		match, matchCount := matchOne(entries, func(entry decodedEntry[T]) bool {
+			return entry.value.guardianGovernanceParty() == gg
 		})
 		switch {
 		case matchCount == 1:
 			return match, nil
 		case matchCount == 0:
-			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusNotFound, "no %s for gg %s", label, gg)
+			return decodedEntry[T]{}, newFlowError(http.StatusNotFound, "no %s for gg %s", label, gg)
 		default:
-			return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusInternalServerError, "found %d %s for gg %s, expected exactly 1", matchCount, label, gg)
+			return decodedEntry[T]{}, newFlowError(http.StatusInternalServerError, "found %d %s for gg %s, expected exactly 1", matchCount, label, gg)
 		}
 	}
-	match, matchCount := matchOne(entries, func(decodedEntry[daGuardianAnchor]) bool { return true })
+	match, matchCount := matchOne(entries, func(decodedEntry[T]) bool { return true })
 	switch {
 	case matchCount == 1:
 		return match, nil
 	case matchCount == 0:
-		return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusInternalServerError, "found 0 %s, expected exactly 1", label)
+		return decodedEntry[T]{}, newFlowError(http.StatusInternalServerError, "found 0 %s, expected exactly 1", label)
 	default:
-		return decodedEntry[daGuardianAnchor]{}, newFlowError(http.StatusConflict, "found %d %s and no gg param to disambiguate", matchCount, label)
+		return decodedEntry[T]{}, newFlowError(http.StatusConflict, "found %d %s and no gg param to disambiguate", matchCount, label)
 	}
 }
 
@@ -419,7 +443,7 @@ func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer partyID, 
 // coveringClaimedRootsNode finds the one node of the gg claimed-roots tree that covers digest:
 // consumer and guardianGovernance gg, namespace claimedRootsNamespace. Two trees of one gg give
 // two covering nodes.
-func coveringClaimedRootsNode(entries []decodedEntry[daReplayNode], gg partyID, digest vaaDigestHex) (decodedEntry[daReplayNode], error) {
+func coveringClaimedRootsNode(entries []decodedEntry[daReplayNode], gg partyID, digest claimedRootDigestHex) (decodedEntry[daReplayNode], error) {
 	return exactlyOne(entries, roleCoveringClaimedRootsNode, func(entry decodedEntry[daReplayNode]) bool {
 		return entry.value.Consumer == gg &&
 			entry.value.GuardianGovernance == gg &&
@@ -538,15 +562,19 @@ func (s *server) fetchCoreState(ctx context.Context, gg partyID, offset int64) (
 	return s.fetchGuardianAnchor(ctx, tailCoreState, gg, roleCoreState, offset)
 }
 
-// fetchGuardianAnchor filters on guardianGovernance when gg is set.
 func (s *server) fetchGuardianAnchor(ctx context.Context, tail string, gg partyID, label string, offset int64) (decodedEntry[daGuardianAnchor], error) {
+	return fetchGuardianAnchored[daGuardianAnchor](ctx, s, tail, gg, label, offset)
+}
+
+// fetchGuardianAnchored filters on guardianGovernance when gg is set.
+func fetchGuardianAnchored[T guardianAnchored](ctx context.Context, s *server, tail string, gg partyID, label string, offset int64) (decodedEntry[T], error) {
 	var fieldMatches []createArgumentFieldMatch
 	if gg != "" {
 		fieldMatches = append(fieldMatches, partyFieldMatch(gg, "guardianGovernance"))
 	}
-	entries, err := fetchDecoded[daGuardianAnchor](ctx, s, tail, offset, fieldMatches...)
+	entries, err := fetchDecoded[T](ctx, s, tail, offset, fieldMatches...)
 	if err != nil {
-		return decodedEntry[daGuardianAnchor]{}, err
+		return decodedEntry[T]{}, err
 	}
 	return findGuardianAnchor(entries, gg, label)
 }
@@ -997,7 +1025,11 @@ func (s *server) assembleTransfer(ctx context.Context, request transferRequest, 
 func (s *server) assembleRegister(ctx context.Context, request registerRequest, offset int64) (*flowResponse, error) {
 	gg, byVaa := request.guardianGovernance, request.byVAA
 
-	nttGovernance, err := s.fetchGuardianAnchor(ctx, tailNttGovernance, gg, roleNttGovernance, offset)
+	nttGovernance, err := fetchGuardianAnchored[daNttGovernance](ctx, s, tailNttGovernance, gg, roleNttGovernance, offset)
+	if err != nil {
+		return nil, err
+	}
+	managerID, err := parseNttManagerID(nttGovernance.value.NextID)
 	if err != nil {
 		return nil, err
 	}
@@ -1033,18 +1065,23 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 		disclosures = append(disclosures, discloseAs(roleCanonicalCoinFactory, factory.entry))
 	}
 
-	missing := make([]flowMissingEntry, 0, 1)
-	if request.claimNamespace.isPresent() {
-		claimedRootsNode, err := s.fetchCoveringClaimedRootsNode(ctx, nttGovernance.value.GuardianGovernance, request.claimNamespace, offset)
-		if err != nil {
-			return nil, err
-		}
-		disclosures = append(disclosures, discloseAs(roleCoveringClaimedRootsNode, claimedRootsNode.entry))
-	} else {
-		missing = append(missing, flowMissingEntry{Role: roleCoveringClaimedRootsNode, Reason: reasonNamespaceNotGiven})
+	// SECURITY: nextId and the claimed-roots node are read at one offset. A registration that
+	// lands first archives this NttGovernance, so the ledger rejects a submission built from it.
+	claimNamespace := nttNamespace(request.instrumentAdmin, request.instrumentID, request.admin, managerID)
+	claimedRootsNode, err := s.fetchCoveringClaimedRootsNode(ctx, nttGovernance.value.GuardianGovernance, claimNamespace, offset)
+	if err != nil {
+		return nil, err
 	}
+	disclosures = append(disclosures, discloseAs(roleCoveringClaimedRootsNode, claimedRootsNode.entry))
 
-	return &flowResponse{Flow: "register", Disclosures: disclosures, Missing: missing}, nil
+	managerIDNumber := json.Number(managerID.String())
+	return &flowResponse{
+		Flow:           "register",
+		Disclosures:    disclosures,
+		Missing:        make([]flowMissingEntry, 0),
+		ClaimNamespace: claimNamespace.text,
+		ManagerID:      &managerIDNumber,
+	}, nil
 }
 
 // assembleConsolidate mirrors consolidateDisclosures. The caller supplies the reserve custodian's

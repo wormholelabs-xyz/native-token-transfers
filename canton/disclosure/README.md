@@ -67,18 +67,19 @@ fill the cap.
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
-  | Flow           | Parameters                                                         |
-  | -------------- | ------------------------------------------------------------------ |
-  | `release`      | `manager`, `digest`, `recipient` (optional)                        |
-  | `mint`         | `manager`, `digest`, `recipient`                                   |
-  | `set-peer`     | `manager`, `digest`                                                |
-  | `accept-admin` | `manager`, `digest`                                                |
-  | `transfer`     | `manager`                                                          |
-  | `register`     | `gg` (optional), `by-vaa` (bool, optional), `namespace` (optional) |
-  | `consolidate`  | `manager`                                                          |
+  | Flow           | Parameters                                                                               |
+  | -------------- | ---------------------------------------------------------------------------------------- |
+  | `release`      | `manager`, `digest`, `recipient` (optional)                                              |
+  | `mint`         | `manager`, `digest`, `recipient`                                                         |
+  | `set-peer`     | `manager`, `digest`                                                                      |
+  | `accept-admin` | `manager`, `digest`                                                                      |
+  | `transfer`     | `manager`                                                                                |
+  | `register`     | `admin`, `instrument-admin`, `instrument-id`, `gg` (optional), `by-vaa` (bool, optional) |
+  | `consolidate`  | `manager`                                                                                |
 
 `manager` is the manager address and `digest` is the VAA hash. Each is a hex
-string of 64 characters. `recipient` and `gg` are party ids with the format
+string of 64 characters. `recipient`, `gg`, `admin` and `instrument-admin` are
+party ids with the format
 `<hint>::1220<fingerprint>`. The hint has 1 to 185 characters from
 `[A-Za-z0-9 :_-]`. This is the Canton party character set. The service
 splits the value at the first `::`, as Canton does. The fingerprint has 64
@@ -100,15 +101,27 @@ A flow response has a `disclosures` array and a `missing` array. Each
 synchronizer. The `missing` array names the set members that no reader party
 can see, for example a proposal or a preapproval. The client supplies them.
 
-The `namespace` of `register` is the replay namespace that the registration
-claims: `nttNamespaceFor instrumentId admin nextId`, with the `nextId` of the
-`NttGovernance` root. It has 1 to 128 characters of valid UTF-8, and it is not
-`wormhole-core:replay-roots`. The service calculates
-`claimedRootDigest gg namespace` as the core does. It serves the node of the
-`gg` claimed-roots tree that covers this digest, with the role
+`admin` is the registering admin. `instrument-admin` and `instrument-id` are
+the `admin` and `id` of the `InstrumentId` that the registration bridges.
+`instrument-id` has 1 to 512 bytes of valid UTF-8. A `register` request
+without one of these three parameters gives 400.
+
+The service reads `nextId` from the `NttGovernance` root at the offset of the
+response. A `nextId` that is not an integer from 0 to 2^63-1 gives 500. The
+service calculates the replay namespace that the registration claims, as
+`nttNamespaceFor` does: `nttNamespaceFor instrumentId admin nextId`. Then it
+calculates `claimedRootDigest gg namespace` as the core does. It serves the
+node of the `gg` claimed-roots tree that covers this digest, with the role
 `covering claimed-roots ReplayNode`. Give this node as `claimedRootsNodeCid`.
-Without `namespace`, the `missing` array names this role. Two covering nodes
-give 500: the `gg` has two claimed-roots trees.
+Two covering nodes give 500: the `gg` has two claimed-roots trees. The
+`missing` array of `register` is always empty.
+
+The `register` response also has `claimNamespace` and `managerId`: the
+namespace and the `nextId` that the service used. Other flows do not have these
+fields. Compare them with the registration that you submit. If a different
+registration lands first, it archives the `NttGovernance` root of the response
+and changes `nextId`. The ledger then rejects your submission. Send the
+`register` request again and use the new response.
 
 The service does not serve a template outside a flow set. The service serves
 a `Coin` or an `Amulet` only as the custody pot that a `LockedLedger` names.

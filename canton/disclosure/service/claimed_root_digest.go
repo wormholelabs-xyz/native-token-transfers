@@ -49,9 +49,14 @@ func coreLengthPrefixed(payload []byte) []byte {
 	return append(prefixed, payload...)
 }
 
+// claimedRootDigestHex is 64 lowercase hex characters. Only claimedRootDigest builds one.
+type claimedRootDigestHex struct{ hex string }
+
+func (digest claimedRootDigestHex) String() string { return digest.hex }
+
 // claimedRootDigest is core claimedRootDigest:
 // keccak256(utf8(tag) ‖ lp(utf8(consumer)) ‖ lp(utf8(namespace))).
-func claimedRootDigest(consumer partyID, namespace replayNamespace) vaaDigestHex {
+func claimedRootDigest(consumer partyID, namespace replayNamespace) claimedRootDigestHex {
 	if !namespace.isPresent() {
 		panic("disclosure-service: claimedRootDigest of an absent namespace")
 	}
@@ -63,5 +68,5 @@ func claimedRootDigest(consumer partyID, namespace replayNamespace) vaaDigestHex
 	if len(digestHex) != 64 {
 		panic("disclosure-service: claimedRootDigest is not 64 hex characters")
 	}
-	return vaaDigestHex{hex: digestHex}
+	return claimedRootDigestHex{hex: digestHex}
 }

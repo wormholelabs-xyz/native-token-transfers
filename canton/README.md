@@ -555,11 +555,13 @@ be bound to the registering admin (see "Instrument binding" below).
 The deployer also gives `claimedRootsNodeCid` and its disclosure. To find the
 node, do these steps:
 
-1. Read the `nextId` of the `NttGovernance` root.
-2. Calculate the namespace: `nttNamespaceFor instrumentId admin nextId`.
-3. Get the `register` flow with the `namespace` parameter from the disclosure
-   service.
-4. Give the `covering claimed-roots ReplayNode` as `claimedRootsNodeCid`.
+1. Get the `register` flow from the disclosure service with the `admin`,
+   `instrument-admin` and `instrument-id` parameters.
+2. Give the `covering claimed-roots ReplayNode` as `claimedRootsNodeCid`.
+
+The service reads the `nextId` of the `NttGovernance` root. It calculates
+`nttNamespaceFor instrumentId admin nextId` and gives it as `claimNamespace`,
+with `nextId` as `managerId`.
 
 The node covers `claimedRootDigest gg namespace` in the `gg` claimed-roots
 tree. `ClaimReplayRoot` records this digest. A second registration of one

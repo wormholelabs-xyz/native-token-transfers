@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -64,6 +65,24 @@ func TestCheckFlowResponseInvariants(t *testing.T) {
 		{"empty blob", func(response *flowResponse) { response.Disclosures[0].CreatedEventBlob = "" }, "no createdEventBlob"},
 		{"empty flow name", func(response *flowResponse) { response.Flow = "" }, "no flow name"},
 		{"nil missing list", func(response *flowResponse) { response.Missing = nil }, "missing list is nil"},
+		{"valid register", makeValidRegisterResponse, ""},
+		{"register with a missing entry", func(response *flowResponse) {
+			makeValidRegisterResponse(response)
+			response.Missing = []flowMissingEntry{missingEntry(roleCoveringClaimedRootsNode)}
+		}, "register response has 1 missing entries"},
+		{"register without claimNamespace", func(response *flowResponse) {
+			makeValidRegisterResponse(response)
+			response.ClaimNamespace = ""
+		}, "register response has no claimNamespace"},
+		{"register without managerId", func(response *flowResponse) {
+			makeValidRegisterResponse(response)
+			response.ManagerID = nil
+		}, "register response has no managerId"},
+		{"transfer with claimNamespace", func(response *flowResponse) { response.ClaimNamespace = "ntt:ab" }, "transfer response has a claimNamespace"},
+		{"transfer with managerId", func(response *flowResponse) {
+			managerID := json.Number("0")
+			response.ManagerID = &managerID
+		}, "transfer response has a managerId"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,6 +98,14 @@ func TestCheckFlowResponseInvariants(t *testing.T) {
 			}
 		})
 	}
+}
+
+func makeValidRegisterResponse(response *flowResponse) {
+	managerID := json.Number("0")
+	response.Flow = "register"
+	response.Missing = []flowMissingEntry{}
+	response.ClaimNamespace = "ntt:ab"
+	response.ManagerID = &managerID
 }
 
 func TestHandleFlows_TwoSynchronizers_500(t *testing.T) {

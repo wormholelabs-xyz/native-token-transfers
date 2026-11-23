@@ -57,6 +57,7 @@ func newCountedFlowTestServer(t *testing.T, fixtures flowFixtures) (*server, *ca
 func TestParseFlowRequestRejectsBeforeUpstream(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
 	validManagerDigest := "manager=" + b.managerAddr + "&digest=" + b.digest
+	validRegisterClaim := testRegisterClaimQuery()
 	cases := []struct {
 		name       string
 		flow       string
@@ -78,14 +79,22 @@ func TestParseFlowRequestRejectsBeforeUpstream(t *testing.T) {
 		{"recipient without a fingerprint on mint", "mint", validManagerDigest + "&recipient=alice::1", http.StatusBadRequest},
 		{"recipient with a line feed on mint", "mint", validManagerDigest + "&recipient=" + testRecipient + "%0A", http.StatusBadRequest},
 		{"recipient with an uppercase fingerprint on release", "release", validManagerDigest + "&recipient=" + strings.ToUpper(testRecipient), http.StatusBadRequest},
-		{"gg without a fingerprint", "register", "gg=gg::1", http.StatusBadRequest},
-		{"by-vaa not a bool", "register", "by-vaa=yes", http.StatusBadRequest},
-		{"by-vaa true without gg", "register", "by-vaa=true", http.StatusBadRequest},
-		{"empty gg", "register", "gg=", http.StatusBadRequest},
-		{"empty namespace", "register", "namespace=", http.StatusBadRequest},
-		{"129-character namespace", "register", "namespace=" + strings.Repeat("a", 129), http.StatusBadRequest},
-		{"reserved namespace", "register", "namespace=" + url.QueryEscape(claimedRootsNamespace), http.StatusBadRequest},
-		{"namespace not UTF-8", "register", "namespace=ntt%3A%FF", http.StatusBadRequest},
+		{"gg without a fingerprint", "register", validRegisterClaim + "&gg=gg::1", http.StatusBadRequest},
+		{"by-vaa not a bool", "register", validRegisterClaim + "&by-vaa=yes", http.StatusBadRequest},
+		{"by-vaa true without gg", "register", validRegisterClaim + "&by-vaa=true", http.StatusBadRequest},
+		{"empty gg", "register", validRegisterClaim + "&gg=", http.StatusBadRequest},
+		{"register without parameters", "register", "", http.StatusBadRequest},
+		{"register without admin", "register", "instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + testRegisterInstrumentID, http.StatusBadRequest},
+		{"register without instrument-admin", "register", "admin=" + testRecipient + "&instrument-id=" + testRegisterInstrumentID, http.StatusBadRequest},
+		{"register without instrument-id", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty, http.StatusBadRequest},
+		{"empty admin", "register", "admin=&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + testRegisterInstrumentID, http.StatusBadRequest},
+		{"empty instrument-admin", "register", "admin=" + testRecipient + "&instrument-admin=&instrument-id=" + testRegisterInstrumentID, http.StatusBadRequest},
+		{"empty instrument-id", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=", http.StatusBadRequest},
+		{"admin without a fingerprint", "register", "admin=admin::1&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + testRegisterInstrumentID, http.StatusBadRequest},
+		{"instrument-admin with an uppercase fingerprint", "register", "admin=" + testRecipient + "&instrument-admin=" + strings.ToUpper(testGuardianGovernanceParty) + "&instrument-id=" + testRegisterInstrumentID, http.StatusBadRequest},
+		{"instrument-id not UTF-8", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=id%FF", http.StatusBadRequest},
+		{"instrument-id over the byte limit", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + strings.Repeat("i", instrumentIDMaxBytes+1), http.StatusBadRequest},
+		{"namespace parameter removed", "register", validRegisterClaim + "&namespace=" + url.QueryEscape("ntt:ab"), http.StatusBadRequest},
 		{"malformed query", "transfer", "manager=" + b.managerAddr + "&%zz", http.StatusBadRequest},
 		{"semicolon separator", "transfer", "manager=" + b.managerAddr + ";digest=" + b.digest, http.StatusBadRequest},
 	}
@@ -122,7 +131,7 @@ func TestCheckFlowQuery(t *testing.T) {
 		wantStatus int
 	}{
 		{"single values", "release", "manager=a&digest=b", map[string]string{"manager": "a", "digest": "b"}, 0},
-		{"empty query", "register", "", map[string]string{}, 0},
+		{"empty query", "transfer", "", map[string]string{}, 0},
 		{"repeated name", "release", "manager=a&manager=a", nil, http.StatusBadRequest},
 		{"unknown name", "transfer", "manager=a&template=x", nil, http.StatusBadRequest},
 		{"unknown flow", "nope", "", nil, http.StatusNotFound},
@@ -163,10 +172,11 @@ func TestParseFlowRequestTypes(t *testing.T) {
 			acceptAdminRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
 		{"transfer", "transfer", "manager=" + managerHex, transferRequest{manager: managerAddressHex{hex: managerHex}}},
 		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{hex: managerHex}}},
-		{"register defaults", "register", "", registerRequest{}},
-		{"register by vaa", "register", "gg=" + testGuardianGovernanceParty + "&by-vaa=true", registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true}},
-		{"register with namespace", "register", "gg=" + testGuardianGovernanceParty + "&namespace=ntt%3Aab",
-			registerRequest{guardianGovernance: testGuardianGovernanceParty, claimNamespace: replayNamespace{text: "ntt:ab"}}},
+		{"register defaults", "register", testRegisterClaimQuery(), testRegisterRequest()},
+		{"register by vaa", "register", testRegisterClaimQuery() + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true",
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}},
+		{"register with a multi-byte instrument id", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + url.QueryEscape("é€😀"),
+			registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: "é€😀"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,4 +186,15 @@ func TestParseFlowRequestTypes(t *testing.T) {
 			assert.Equal(t, tc.flow, got.flowName())
 		})
 	}
+}
+
+const testRegisterInstrumentID = "wormhole-ntt:instrument-1"
+
+// testRegisterClaimQuery is the three required register parameters.
+func testRegisterClaimQuery() string {
+	return "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + url.QueryEscape(testRegisterInstrumentID)
+}
+
+func testRegisterRequest() registerRequest {
+	return registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}
 }
