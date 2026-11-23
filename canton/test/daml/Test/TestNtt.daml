@@ -53,7 +53,7 @@ import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.GuardianSet (GuardianSet(..))
-import Wormhole.Core.Replay (ReplayNode (..), checkReplayNodeRecordsDigest, claimedRootDigest, claimedRootsNamespace, defaultSplitThreshold)
+import Wormhole.Core.Replay (ConsumeDigest (..), ReplayNode (..), checkReplayNodeRecordsDigest, claimedRootDigest, claimedRootsNamespace, defaultSplitThreshold)
 import Wormhole.Core.Setup (RegistryParties (..), mkInitialClaimedRootsNode, mkInitialCoreState, mkInitialEmitterRegistry, mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 import Wormhole.Core.State
   ( Emitter(..), CoreState, EmitterRegistry, ReplayRootRegistry
@@ -805,6 +805,8 @@ data ClaimedRootsNodeOfRow
   | GuardianGovernanceNodeUnderARogueAnchor
   | NodeOfAnotherConsumerInTheReservedNamespace
   | ReplayRootOfAnEarlierDeployment
+  | StaleNodeOfTheGuardianGovernanceTree
+  | NonCoveringChildOfTheGuardianGovernanceTreeAfterASplit
   deriving (Eq, Show)
 
 data RegisteringNttGovernanceRoot = FirstNttGovernanceRoot | SecondNttGovernanceRoot
@@ -820,7 +822,8 @@ data RegistrationClaimCase = RegistrationClaimCase with
 -- | A lock/unlock registration claims the (gg, namespace) pair in the gg
 -- claimed-roots tree. A second root of one gg at a used nextId gets the same
 -- namespace, so its registration fails. Each wrong claimed-roots node fails with
--- the core text.
+-- the core text. The gg tree is filled to 'defaultSplitThreshold' first, so the
+-- first registration splits its root node and archives it.
 testRegistrationClaimsTheDeploymentPairOnce : Script ()
 testRegistrationClaimsTheDeploymentPairOnce = do
   (gg, csId) <- nttSetup
@@ -843,6 +846,16 @@ testRegistrationClaimsTheDeploymentPairOnce = do
   csDisc <- fromSome <$> queryDisclosure gg csId
   let instrumentId = bridgedInstrument gg
       factory = TransferFactoryCid (toInterfaceContractId @TransferFactory fc)
+  forA_ [1 .. defaultSplitThreshold] \fillIndex -> do
+    let fillNamespace = "split-fill:" <> show fillIndex
+    (rootNodeCid, _) <- claimedRootsNodeCovering gg gg fillNamespace
+    submit gg do exerciseCmd rootNodeCid ConsumeDigest with digest = claimedRootDigest gg fillNamespace
+  (fullRootNodeCid, fullRootNodeDisc) <- claimedRootsNodeForRegistration gg firstRootCid instrumentId firstAdmin
+  Some fullRootNode <- queryContractId gg fullRootNodeCid
+  hexTextOf fullRootNode.prefix === ""
+  Set.size fullRootNode.consumed === defaultSplitThreshold
+  let claimedRootsTreeNodesOfGuardianGovernance = filter (\(_, node) ->
+        node.consumer == gg && node.guardianGovernance == gg && node.namespace == claimedRootsNamespace) <$> query @ReplayNode gg
       nodeOf reader predicate = do
         nodes <- query @ReplayNode reader
         case filter (predicate . snd) nodes of
@@ -858,11 +871,26 @@ testRegistrationClaimsTheDeploymentPairOnce = do
           node.consumer == secondAdmin && node.namespace == claimedRootsNamespace
         ReplayRootOfAnEarlierDeployment -> nodeOf gg \node ->
           node.consumer == gg && node.guardianGovernance == gg && node.namespace == nttNamespaceFor instrumentId firstAdmin 0
+        StaleNodeOfTheGuardianGovernanceTree -> do
+          None <- queryContractId gg fullRootNodeCid
+          pure (fullRootNodeCid, fullRootNodeDisc)
+        NonCoveringChildOfTheGuardianGovernanceTreeAfterASplit -> do
+          Some root <- queryContractId gg rootCid
+          treeNodes <- claimedRootsTreeNodesOfGuardianGovernance
+          length treeNodes === 16
+          let digestHex = hexTextOf (claimedRootDigest gg (nttNamespaceFor instrumentId admin root.nextId))
+          case [ nodeCid | (nodeCid, node) <- treeNodes, not (hexTextOf node.prefix `T.isPrefixOf` digestHex) ] of
+            nodeCid :: _ -> (,) nodeCid . fromSome <$> queryDisclosure gg nodeCid
+            [] -> abort "expected a non-covering child of the gg claimed-roots tree"
       cases =
         [ RegistrationClaimCase "first root, covering node" FirstNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree None
         , RegistrationClaimCase "second root, same pair, covering node" SecondNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree
             (Some "digest already consumed")
-        , RegistrationClaimCase "claimed-roots tree of a rogue gg" SecondNttGovernanceRoot secondAdmin ClaimedRootsTreeOfARogueGuardianGovernance
+        , RegistrationClaimCase "stale node of the gg tree" SecondNttGovernanceRoot secondAdmin StaleNodeOfTheGuardianGovernanceTree
+            (Some "Additional debugging info: NotActive")
+        , RegistrationClaimCase "non-covering child of the gg tree after a split" SecondNttGovernanceRoot secondAdmin NonCoveringChildOfTheGuardianGovernanceTreeAfterASplit
+            (Some "replay node does not cover digest")
+        , RegistrationClaimCase "claimed-roots tree of a rogue gg (fails on authorization)" SecondNttGovernanceRoot secondAdmin ClaimedRootsTreeOfARogueGuardianGovernance
             (Some "requires one of the stakeholders")
         , RegistrationClaimCase "node of consumer gg under a rogue anchor" SecondNttGovernanceRoot secondAdmin GuardianGovernanceNodeUnderARogueAnchor
             (Some "claimed roots node guardianGovernance mismatch")
