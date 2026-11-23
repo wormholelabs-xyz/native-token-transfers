@@ -18,7 +18,7 @@ var flowParamNames = map[string][]string{
 	"set-peer":     {"manager", "digest"},
 	"accept-admin": {"manager", "digest"},
 	"transfer":     {"manager"},
-	"register":     {"gg", "by-vaa", "namespace"},
+	"register":     {"gg", "by-vaa", "admin", "instrument-admin", "instrument-id"},
 	"consolidate":  {"manager"},
 }
 
@@ -132,7 +132,9 @@ type transferRequest struct {
 type registerRequest struct {
 	guardianGovernance partyID // optional
 	byVAA              bool
-	claimNamespace     replayNamespace // optional; the replay namespace that the registration claims
+	admin              partyID // the registering admin
+	instrumentAdmin    partyID
+	instrumentID       instrumentIDText
 }
 
 type consolidateRequest struct {
@@ -215,14 +217,23 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		if byVAA && guardianGovernance == "" {
 			return nil, newFlowError(http.StatusBadRequest, "gg is required when by-vaa=true")
 		}
-		var claimNamespace replayNamespace
-		if rawNamespace, present := params["namespace"]; present {
-			claimNamespace, err = parseReplayNamespace(rawNamespace)
-			if err != nil {
-				return nil, err
-			}
+		admin, err := requiredPartyParam(params, "admin")
+		if err != nil {
+			return nil, err
 		}
-		return registerRequest{guardianGovernance: guardianGovernance, byVAA: byVAA, claimNamespace: claimNamespace}, nil
+		instrumentAdmin, err := requiredPartyParam(params, "instrument-admin")
+		if err != nil {
+			return nil, err
+		}
+		rawInstrumentID, err := requiredParam(params, "instrument-id")
+		if err != nil {
+			return nil, err
+		}
+		instrumentID, err := parseInstrumentIDText(rawInstrumentID)
+		if err != nil {
+			return nil, err
+		}
+		return registerRequest{guardianGovernance: guardianGovernance, byVAA: byVAA, admin: admin, instrumentAdmin: instrumentAdmin, instrumentID: instrumentID}, nil
 	default:
 		panic("disclosure-service: flowParamNames and parseFlowRequest disagree on flow " + flowName)
 	}
@@ -234,6 +245,14 @@ func requiredParam(params map[string]string, name string) (string, error) {
 		return "", newFlowError(http.StatusBadRequest, "%s is required", name)
 	}
 	return paramValue, nil
+}
+
+func requiredPartyParam(params map[string]string, name string) (partyID, error) {
+	rawParty, err := requiredParam(params, name)
+	if err != nil {
+		return "", err
+	}
+	return parseRequestPartyID(rawParty, name)
 }
 
 // optionalParam returns an absent parameter as "", false. A present, empty parameter is a 400.

@@ -35,6 +35,9 @@ func checkFlowResponseInvariants(response *flowResponse) error {
 	if response.Missing == nil {
 		return errors.New("flow response missing list is nil")
 	}
+	if err := checkRegisterClaimFieldsMatchFlow(response); err != nil {
+		return err
+	}
 	seenContractIDs := make(map[string]bool, len(response.Disclosures))
 	disclosedRoles := make(map[string]bool, len(response.Disclosures))
 	for _, disclosure := range response.Disclosures {
@@ -65,6 +68,31 @@ func checkFlowResponseInvariants(response *flowResponse) error {
 			return fmt.Errorf("flow response holds missing role %s twice", missing.Role)
 		}
 		missingRoles[missing.Role] = true
+	}
+	return nil
+}
+
+// checkRegisterClaimFieldsMatchFlow requires claimNamespace and managerId on register, and only
+// there. A register response has no missing entries: the ledger rejects a registration without the
+// claimed-roots node.
+func checkRegisterClaimFieldsMatchFlow(response *flowResponse) error {
+	if response.Flow != "register" {
+		if response.ClaimNamespace != "" {
+			return fmt.Errorf("%s response has a claimNamespace", response.Flow)
+		}
+		if response.ManagerID != nil {
+			return fmt.Errorf("%s response has a managerId", response.Flow)
+		}
+		return nil
+	}
+	if len(response.Missing) != 0 {
+		return fmt.Errorf("register response has %d missing entries, expected 0", len(response.Missing))
+	}
+	if response.ClaimNamespace == "" {
+		return errors.New("register response has no claimNamespace")
+	}
+	if response.ManagerID == nil {
+		return errors.New("register response has no managerId")
 	}
 	return nil
 }
