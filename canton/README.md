@@ -175,6 +175,16 @@ root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
 `wormhole-genesis` version that depends on both package versions.
 
+The claimed-roots tree is a template of the core package. Thus the tree
+rejects a second claim of a pair only in one core version. A breaking core
+version cannot fetch a `ReplayNode` of core 0.12.3. A re-genesis to such a
+version has two possible results. If it creates no tree, no registration is
+possible. If it creates a new tree, that tree has no record of the earlier
+pairs. Thus the `wormhole-genesis` version for that core version must copy
+the consumed pair digests into the new tree. The `wormhole-genesis` package
+copies the governance replay records in the same way. Until that version exists, a breaking core version
+is a guardian decision that needs a migration plan.
+
 Vet no package whose code runs with `gg` authority and can create a
 `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The
 claimed-roots tree binds only `ClaimReplayRoot`. Such code can create a
