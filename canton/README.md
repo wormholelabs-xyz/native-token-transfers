@@ -193,6 +193,8 @@ move to the new versions. A re-genesis does not carry this state:
   `paused`.
 - NTT `LockedLedger`. Its balance is the release limit of a lock/unlock
   deployment.
+- Core `FeeWithdrawalAuthorization`. Each active authorization stays a
+  contract of the old core version.
 
 If the new contracts start without the earlier records, these failures are
 possible:
@@ -208,7 +210,7 @@ possible:
   governance VAA succeed. That VAA was never submitted, so the carried trie
   has no record of it. For example, it can set a replaced peer again.
 - A paused manager that moves with `paused` false starts transfers, releases
-  and mints again. No governance decision starts them.
+  and mints again. Its admin did not exercise `SetPaused` to start them.
 - A lower `LockedLedger` balance stops releases. A higher balance lets one
   deployment release the reserves of other deployments.
 - Another namespace, manager address or transceiver emitter id breaks the
@@ -227,12 +229,21 @@ these records into the new contracts:
 
 A re-genesis already does this for the governance replay records. It takes
 them as parameters and checks them against the earlier roots.
-`AcceptGenesis` has the authority of `gg`, `feeCustody` and `nttCustody`.
+The body of `AcceptGenesis` has the authority of its controllers `gg`,
+`feeCustody` and `nttCustody`. It also has the authority of the operator, the
+signatory of the `WormholeGenesisOffer`.
 Each `NttManager` also has its `admin` as a signatory. Thus the move of a
 manager whose admin is not `gg` also needs the signature of that admin. Other
 integrators move their own tries and emitters. Until that `wormhole-genesis`
 version exists, do not vet a breaking core version on a `gg` host. Do not
 sign a re-genesis to it.
+
+Before you unvet the old core version for a breaking core version, do the fee
+withdrawal procedure for each active `FeeWithdrawalAuthorization`. As a
+minimum, archive each one. After the unvet, a `gg` host cannot archive a
+contract of the old core version. If a transfer does not commit, the
+guardians sign a new `TransferFees` VAA. The carried governance replay record
+rejects the earlier VAA.
 
 Vet no package whose code runs with `gg` authority and can create a
 `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The

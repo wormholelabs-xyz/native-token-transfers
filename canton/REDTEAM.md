@@ -183,11 +183,18 @@ contracts, these attacks become possible:
   tree has no record of it.
 - An emitter with the earlier emitter address and sequence 0 publishes a
   second message with an earlier message ID.
-- A withheld `SetPeerByVaa` or `AcceptAdminTransferByVaa` VAA succeeds when
-  `peerEpoch` or `factoryEpoch` starts at 0 again. For example, it sets a
-  replaced peer again.
+- A withheld `SetPeerByVaa` VAA succeeds when `peerEpoch` starts at 0 again.
+  For example, it sets a replaced peer again.
+- A withheld `AcceptAdminTransferByVaa` or `SetFactoryByVaa` VAA succeeds
+  when `factoryEpoch` starts at 0 again.
+- A paused manager that moves with `paused` false starts transfers, releases
+  and mints again. Its admin did not exercise `SetPaused` to start them.
 - A higher `LockedLedger` balance releases the reserves of other
   deployments.
+
+A `FeeWithdrawalAuthorization` that is active at the unvet stays active. If a
+host vets the old core version again, `gg` can archive it. Then it and a new
+`TransferFees` VAA authorize two transfers for one decision.
 
 The README lists the records that the `wormhole-genesis` version for a
 breaking core version must carry. It also states the guardian rule: do not
