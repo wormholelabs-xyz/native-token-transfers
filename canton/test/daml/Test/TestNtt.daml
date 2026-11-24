@@ -27,6 +27,7 @@
 module Test.TestNtt where
 
 import Daml.Script hiding (AnyContractId)
+import Daml.Script.Internal (isNotActive)
 import DA.Assert ((===))
 import DA.Date (Month (..), date)
 import DA.Action (foldlA)
@@ -362,19 +363,42 @@ testNttInstrumentIdBinding = do
   assert (a0 /= a1)
   assert (a0 /= b0)
 
+data NamespaceVector = NamespaceVector with
+    instrumentAdmin   : Text
+    instrumentIdText  : Text
+    admin             : Text
+    managerId         : Int
+    expectedNamespace : Text
+
 -- | The derived replay-namespace formula (gg's replacement for the retired
 -- @namespace : Party@): pin the encoding against fixed text (68 chars —
--- @"ntt:"@ plus a 64-char digest, under the core's 128-char bound), distinct
--- per @managerId@, and confirm a real registration's manager carries exactly
--- what 'nttNamespaceFor' predicts from its own committed inputs.
+-- @"ntt:"@ plus a 64-char digest, under the core's 128-char bound), and
+-- confirm a real registration's manager carries exactly what
+-- 'nttNamespaceFor' predicts from its own committed inputs. The vectors are
+-- the rows of the Go test @TestNttNamespaceVectors@
+-- (canton/disclosure/service/ntt_namespace_test.go).
 testNamespaceVector : Script ()
 testNamespaceVector = do
-  let n0 = nttNamespaceFromText "vector-instrument-admin::1220deadbeef" "VECTOR" "vector-admin::1220cafebabe" 0
-      n1 = nttNamespaceFromText "vector-instrument-admin::1220deadbeef" "VECTOR" "vector-admin::1220cafebabe" 1
-  n0 === "ntt:ab792801446bfcbef62e6559bd83cae570df69488931273fd99820325a7b8af0"
-  T.length n0 === 68
-  assert ("ntt:" `isPrefixOf` n0)
-  assert (n0 /= n1)
+  let vectorInstrumentAdmin = "vector-instrument-admin::1220deadbeef"
+      vectorAdmin = "vector-admin::1220cafebabe"
+      issuerParty = "Issuer::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      adminParty = "Admin::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      namespaceVectors =
+        [ NamespaceVector vectorInstrumentAdmin "VECTOR" vectorAdmin 0
+            "ntt:ab792801446bfcbef62e6559bd83cae570df69488931273fd99820325a7b8af0"
+        , NamespaceVector vectorInstrumentAdmin "VECTOR" vectorAdmin 1
+            "ntt:a44d5b55fdec9b03b477c21b889233da8c500f8f04cf614dcbeeaf93192d4731"
+        , NamespaceVector vectorInstrumentAdmin "VECTOR" vectorAdmin 9223372036854775807
+            "ntt:937f5dafd928db0ec0c7f10242629b30f8780dc6890444093111a125dfcb9f80"
+        , NamespaceVector issuerParty "é€😀" adminParty 256
+            "ntt:0c47bf36a16b89849a9e423a11675fe9ca416e0ffb7c6584abb25807759ff3cd"
+        ]
+  T.length issuerParty === 76
+  T.length adminParty === 75
+  forA_ namespaceVectors \vector -> do
+    let namespace = nttNamespaceFromText vector.instrumentAdmin vector.instrumentIdText vector.admin vector.managerId
+    namespace === vector.expectedNamespace
+    T.length namespace === 68
 
   (gg, csId) <- nttSetup
   admin <- allocateParty "NamespaceVectorAdmin"
@@ -817,7 +841,12 @@ data RegistrationClaimCase = RegistrationClaimCase with
     registeringRoot : RegisteringNttGovernanceRoot
     admin           : Party
     nodeOfRow       : ClaimedRootsNodeOfRow
-    expectedFailure : Optional Text
+    expectedOutcome : ExpectedRegistrationOutcome
+
+data ExpectedRegistrationOutcome
+  = RegistrationCommits
+  | RegistrationFailsWithText Text
+  | RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow
 
 -- | A lock/unlock registration claims the (gg, namespace) pair in the gg
 -- claimed-roots tree. A second root of one gg at a used nextId gets the same
@@ -883,22 +912,22 @@ testRegistrationClaimsTheDeploymentPairOnce = do
             nodeCid :: _ -> (,) nodeCid . fromSome <$> queryDisclosure gg nodeCid
             [] -> abort "expected a non-covering child of the gg claimed-roots tree"
       cases =
-        [ RegistrationClaimCase "first root, covering node" FirstNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree None
+        [ RegistrationClaimCase "first root, covering node" FirstNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree RegistrationCommits
         , RegistrationClaimCase "second root, same pair, covering node" SecondNttGovernanceRoot firstAdmin CoveringNodeOfTheGuardianGovernanceTree
-            (Some "digest already consumed")
+            (RegistrationFailsWithText "digest already consumed")
         , RegistrationClaimCase "stale node of the gg tree" SecondNttGovernanceRoot secondAdmin StaleNodeOfTheGuardianGovernanceTree
-            (Some "Additional debugging info: NotActive")
+            RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow
         , RegistrationClaimCase "non-covering child of the gg tree after a split" SecondNttGovernanceRoot secondAdmin NonCoveringChildOfTheGuardianGovernanceTreeAfterASplit
-            (Some "replay node does not cover digest")
+            (RegistrationFailsWithText "replay node does not cover digest")
         , RegistrationClaimCase "claimed-roots tree of a rogue gg (fails on authorization)" SecondNttGovernanceRoot secondAdmin ClaimedRootsTreeOfARogueGuardianGovernance
-            (Some "requires one of the stakeholders")
+            (RegistrationFailsWithText "requires one of the stakeholders")
         , RegistrationClaimCase "node of consumer gg under a rogue anchor" SecondNttGovernanceRoot secondAdmin GuardianGovernanceNodeUnderARogueAnchor
-            (Some "claimed roots node guardianGovernance mismatch")
+            (RegistrationFailsWithText "claimed roots node guardianGovernance mismatch")
         , RegistrationClaimCase "node of another consumer in the reserved namespace" SecondNttGovernanceRoot secondAdmin NodeOfAnotherConsumerInTheReservedNamespace
-            (Some "claimed roots node consumer mismatch")
+            (RegistrationFailsWithText "claimed roots node consumer mismatch")
         , RegistrationClaimCase "replay root of an earlier deployment" SecondNttGovernanceRoot secondAdmin ReplayRootOfAnEarlierDeployment
-            (Some "claimed roots node namespace mismatch")
-        , RegistrationClaimCase "second root, new pair, covering node" SecondNttGovernanceRoot secondAdmin CoveringNodeOfTheGuardianGovernanceTree None
+            (RegistrationFailsWithText "claimed roots node namespace mismatch")
+        , RegistrationClaimCase "second root, new pair, covering node" SecondNttGovernanceRoot secondAdmin CoveringNodeOfTheGuardianGovernanceTree RegistrationCommits
         ]
   _ <- foldlA (\(liveFirstRootCid, liveSecondRootCid) registrationCase -> do
     let rootCid = case registrationCase.registeringRoot of
@@ -926,18 +955,24 @@ testRegistrationClaimsTheDeploymentPairOnce = do
         claimFeeAllocation = None
         feeAllocation = None
     let namespace = nttNamespaceFor instrumentId registrationCase.admin root.nextId
-    case (registrationCase.expectedFailure, result) of
-      (Some failureText, Left (FailureStatusError failure)) -> do
+    case (registrationCase.expectedOutcome, result) of
+      (RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow, Left (ContractNotFound {additionalDebuggingInfo})) -> do
+        (additionalDebuggingInfo >>= isNotActive >>= fromAnyContractId @ReplayNode) === Some claimedRootsNodeCid
+        pure (liveFirstRootCid, liveSecondRootCid)
+      (RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow, Left submitError) ->
+        abort (registrationCase.caseName <> ": expected ContractNotFound, got: " <> show submitError)
+      (RegistrationFailsWithText failureText, Left (FailureStatusError failure)) -> do
         assertMsg (registrationCase.caseName <> ": expected '" <> failureText <> "', got: " <> failure.message)
           (failureText `isInfixOf` failure.message)
         pure (liveFirstRootCid, liveSecondRootCid)
-      (Some failureText, Left submitError) -> do
+      (RegistrationFailsWithText failureText, Left submitError) -> do
         assertMsg (registrationCase.caseName <> ": expected '" <> failureText <> "', got: " <> show submitError)
           (failureText `isInfixOf` show submitError)
         pure (liveFirstRootCid, liveSecondRootCid)
-      (Some _, Right _) -> abort (registrationCase.caseName <> ": registration committed")
-      (None, Left submitError) -> abort (registrationCase.caseName <> ": registration failed: " <> show submitError)
-      (None, Right (successorRootCid, managerCid, _, _, _)) -> do
+      (RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow, Right _) -> abort (registrationCase.caseName <> ": registration committed")
+      (RegistrationFailsWithText _, Right _) -> abort (registrationCase.caseName <> ": registration committed")
+      (RegistrationCommits, Left submitError) -> abort (registrationCase.caseName <> ": registration failed: " <> show submitError)
+      (RegistrationCommits, Right (successorRootCid, managerCid, _, _, _)) -> do
         Some manager <- queryContractId gg managerCid
         manager.namespace === namespace
         (coveringNodeCid, _) <- claimedRootsNodeCovering gg gg namespace
