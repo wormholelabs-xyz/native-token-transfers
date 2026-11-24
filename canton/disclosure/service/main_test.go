@@ -853,7 +853,7 @@ func TestParseHex64(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, manager.hex)
+			assert.Equal(t, tc.want, manager.managerAddressHexText)
 		})
 	}
 }
@@ -887,22 +887,22 @@ func TestParseByVAA(t *testing.T) {
 
 func TestFindManager(t *testing.T) {
 	managerAt := func(addr string) decodedEntry[daNttManager] {
-		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: nttManagerAddressValue{hex: addr}}}
+		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: nttManagerAddressValue{nttManagerAddressHexText: addr}}}
 	}
 	addrA := strings.Repeat("aa", 32)
 	addrB := strings.Repeat("bb", 32)
 
 	t.Run("found", func(t *testing.T) {
-		match, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrB)}, managerAddressHex{hex: addrA})
+		match, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrB)}, managerAddressHex{managerAddressHexText: addrA})
 		require.NoError(t, err)
 		assert.Equal(t, "cid-"+addrA, match.entry.ContractID)
 	})
 	t.Run("not found is 404", func(t *testing.T) {
-		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA)}, managerAddressHex{hex: addrB})
+		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA)}, managerAddressHex{managerAddressHexText: addrB})
 		requireFlowErrorStatus(t, err, http.StatusNotFound)
 	})
 	t.Run("duplicate is 500", func(t *testing.T) {
-		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrA)}, managerAddressHex{hex: addrA})
+		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrA)}, managerAddressHex{managerAddressHexText: addrA})
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }
@@ -937,9 +937,9 @@ func TestFindGuardianAnchor(t *testing.T) {
 
 func TestCoveringReplayNode(t *testing.T) {
 	replayNode := func(consumer, namespace, prefix string) decodedEntry[daReplayNode] {
-		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: digestNibblePrefixValue{hex: prefix}}}
+		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: digestNibblePrefixValue{digestNibblePrefixHexText: prefix}}}
 	}
-	digest := vaaDigestHex{hex: strings.Repeat("cd", 32)}
+	digest := vaaDigestHex{vaaDigestHexText: strings.Repeat("cd", 32)}
 
 	t.Run("found by prefix", func(t *testing.T) {
 		match, err := coveringReplayNode([]decodedEntry[daReplayNode]{replayNode("gg1", "ns1", "cd")}, "gg1", "ns1", digest)
@@ -959,9 +959,9 @@ func TestCoveringReplayNode(t *testing.T) {
 
 func TestFindLockedLedger(t *testing.T) {
 	addr := strings.Repeat("aa", 32)
-	manager := managerAddressHex{hex: addr}
+	manager := managerAddressHex{managerAddressHexText: addr}
 	ledgerOfManager := func() decodedEntry[daLockedLedger] {
-		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: nttManagerAddressValue{hex: addr}}}
+		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: nttManagerAddressValue{nttManagerAddressHexText: addr}}}
 	}
 	t.Run("found", func(t *testing.T) {
 		match, err := findLockedLedger([]decodedEntry[daLockedLedger]{ledgerOfManager()}, manager)
@@ -1052,7 +1052,7 @@ func TestFindPreapproval(t *testing.T) {
 }
 
 func TestFindAdminTransferProposal(t *testing.T) {
-	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: nttManagerAddressValue{hex: strings.Repeat("aa", 32)}}
+	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: nttManagerAddressValue{nttManagerAddressHexText: strings.Repeat("aa", 32)}}
 	proposal := func(contractID string, admin, newAdmin partyID, managerAddress nttManagerAddressValue) decodedEntry[daAdminTransferProposal] {
 		return decodedEntry[daAdminTransferProposal]{
 			entry: acsEntry{ContractID: contractID},
@@ -1070,7 +1070,7 @@ func TestFindAdminTransferProposal(t *testing.T) {
 		{"exact", []decodedEntry[daAdminTransferProposal]{exact}, true, "prop-exact", 0},
 		{"admin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress)}, false, "", 0},
 		{"newAdmin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, "stranger::1", manager.ManagerAddress)}, false, "", 0},
-		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, nttManagerAddressValue{hex: strings.Repeat("bb", 32)})}, false, "", 0},
+		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, nttManagerAddressValue{nttManagerAddressHexText: strings.Repeat("bb", 32)})}, false, "", 0},
 		{"stranger plus real", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress), exact}, true, "prop-exact", 0},
 		{"none", nil, false, "", 0},
 		{"two exact is 500", []decodedEntry[daAdminTransferProposal]{exact, exact}, false, "", http.StatusInternalServerError},
@@ -1502,8 +1502,8 @@ func claimedRootsTreeRootJSON(gg string) string {
 
 // registerClaimResponse decodes the register-only fields of a flow response.
 type registerClaimResponse struct {
-	ClaimNamespace *string      `json:"claimNamespace"`
-	ManagerID      *json.Number `json:"managerId"`
+	ClaimNamespace *string `json:"claimNamespace"`
+	ManagerID      *string `json:"managerId"`
 }
 
 func decodeRegisterClaimResponse(t *testing.T, rr *httptest.ResponseRecorder) registerClaimResponse {
@@ -1527,7 +1527,7 @@ func TestHandleFlows_Register_Basic(t *testing.T) {
 	require.NotNil(t, claim.ClaimNamespace)
 	require.NotNil(t, claim.ManagerID)
 	assert.Equal(t, testRegisterClaimNamespace, *claim.ClaimNamespace)
-	assert.Equal(t, json.Number(testRegisterNextID), *claim.ManagerID)
+	assert.Equal(t, testRegisterNextID, *claim.ManagerID)
 	assert.Equal(t, testRegisterNextID, decodeManagerIDJSONValue(t, rr.Body.Bytes()))
 }
 
@@ -1561,16 +1561,16 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 	derivedNamespace, err := parseReplayNamespace(testRegisterClaimNamespace)
 	require.NoError(t, err)
 	pairDigest := claimedRootDigest(gg, derivedNamespace)
-	coveringNibble := pairDigest.hex[:1]
+	coveringNibble := pairDigest.claimedRootDigestHexText[:1]
 	splitChildren := make([]string, 0, 16)
 	for _, nibble := range "0123456789abcdef" {
 		splitChildren = append(splitChildren, claimedRootsNodeJSON("child-"+string(nibble), gg, gg, claimedRootsNamespace, string(nibble)))
 	}
-	nextIDFour, err := parseNttManagerID("4")
+	nextIDFour, err := parseNttManagerID("4", "NttGovernance nextId")
 	require.NoError(t, err)
 	namespaceOfNextIDFour := nttNamespace(gg, testRegisterRequest().instrumentID, testRecipient, nextIDFour)
 	require.NotEqual(t, derivedNamespace, namespaceOfNextIDFour)
-	nibbleOfNextIDFour := claimedRootDigest(gg, namespaceOfNextIDFour).hex[:1]
+	nibbleOfNextIDFour := claimedRootDigest(gg, namespaceOfNextIDFour).claimedRootDigestHexText[:1]
 	anchorRoles := []string{roleNttGovernance, roleEmitterRegistry, roleReplayRootRegistry, roleCoreState}
 	cases := []struct {
 		name                 string
@@ -1578,7 +1578,7 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 		fixtures             flowFixtures
 		wantStatus           int
 		wantClaimedRootsNode string
-		wantManagerID        json.Number
+		wantManagerID        string
 	}{
 		{
 			name:                 "root of the tree, gg given",
@@ -1674,7 +1674,7 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 			claim := decodeRegisterClaimResponse(t, rr)
 			require.NotNil(t, claim.ManagerID)
 			assert.Equal(t, tc.wantManagerID, *claim.ManagerID)
-			assert.Equal(t, string(tc.wantManagerID), decodeManagerIDJSONValue(t, rr.Body.Bytes()))
+			assert.Equal(t, tc.wantManagerID, decodeManagerIDJSONValue(t, rr.Body.Bytes()))
 		})
 	}
 }

@@ -8,8 +8,39 @@ import (
 	"strings"
 )
 
-// maxFlowQueryBytes bounds the raw query string of a flow request.
+// maxFlowQueryBytes bounds the raw query string of each flow request other than register, and of
+// each registry route.
 const maxFlowQueryBytes = 1024
+
+// maxPercentEncodedBytesPerByte is the length of one byte as %XX.
+const maxPercentEncodedBytesPerByte = 3
+
+// maxRegisterQueryBytes fits each register parameter at its maximum length, fully
+// percent-encoded. Parameter names count unencoded. "false" is the longest by-vaa value.
+const maxRegisterQueryBytes = len("gg=") + maxPercentEncodedBytesPerByte*maxPartyIDBytes +
+	len("&by-vaa=") + maxPercentEncodedBytesPerByte*len("false") +
+	len("&admin=") + maxPercentEncodedBytesPerByte*maxPartyIDBytes +
+	len("&instrument-admin=") + maxPercentEncodedBytesPerByte*maxPartyIDBytes +
+	len("&instrument-id=") + maxPercentEncodedBytesPerByte*instrumentIDMaxBytes
+
+// Compile-time: maxRegisterQueryBytes == 3897.
+const (
+	_ = uint(maxRegisterQueryBytes - 3897)
+	_ = uint(3897 - maxRegisterQueryBytes)
+)
+
+// Compile-time: the longest register request line fits maxInboundHeaderBytes.
+const _ = uint(maxInboundHeaderBytes - len("GET /v1/flows/register?") - maxRegisterQueryBytes - len(" HTTP/1.1\r\n"))
+
+// maxQueryBytesOfFlow is the raw query cap of flowName. An unknown flow gets maxFlowQueryBytes.
+func maxQueryBytesOfFlow(flowName string) int {
+	switch flowName {
+	case "register":
+		return maxRegisterQueryBytes
+	default:
+		return maxFlowQueryBytes
+	}
+}
 
 // flowParamNames lists the only query parameters each flow accepts.
 var flowParamNames = map[string][]string{
@@ -24,8 +55,12 @@ var flowParamNames = map[string][]string{
 
 // checkFlowQuery returns each parameter's single value. A repeated or unknown parameter is a 400.
 func checkFlowQuery(flowName, rawQuery string) (map[string]string, error) {
-	if len(rawQuery) > maxFlowQueryBytes {
-		return nil, newFlowError(http.StatusRequestURITooLong, "query is %d bytes, the limit is %d", len(rawQuery), maxFlowQueryBytes)
+	maxQueryBytes := maxQueryBytesOfFlow(flowName)
+	if maxQueryBytes != maxFlowQueryBytes && maxQueryBytes != maxRegisterQueryBytes {
+		panic("disclosure-service: maxQueryBytesOfFlow returned an unknown cap")
+	}
+	if len(rawQuery) > maxQueryBytes {
+		return nil, newFlowError(http.StatusRequestURITooLong, "query is %d bytes, the limit is %d", len(rawQuery), maxQueryBytes)
 	}
 	allowedNames, known := flowParamNames[flowName]
 	if !known {
@@ -52,22 +87,22 @@ func checkFlowQuery(flowName, rawQuery string) (map[string]string, error) {
 }
 
 // managerAddressHex is 64 lowercase hex characters. Only parseManagerAddressHex builds one.
-type managerAddressHex struct{ hex string }
+type managerAddressHex struct{ managerAddressHexText string }
 
 // vaaDigestHex is 64 lowercase hex characters. Only parseVAADigestHex builds one.
-type vaaDigestHex struct{ hex string }
+type vaaDigestHex struct{ vaaDigestHexText string }
 
-func (address managerAddressHex) String() string { return address.hex }
-func (digest vaaDigestHex) String() string       { return digest.hex }
+func (address managerAddressHex) String() string { return address.managerAddressHexText }
+func (digest vaaDigestHex) String() string       { return digest.vaaDigestHexText }
 
 func parseManagerAddressHex(raw string) (managerAddressHex, error) {
 	lowercaseHex, err := parseHex64(raw, "manager")
-	return managerAddressHex{hex: lowercaseHex}, err
+	return managerAddressHex{managerAddressHexText: lowercaseHex}, err
 }
 
 func parseVAADigestHex(raw string) (vaaDigestHex, error) {
 	lowercaseHex, err := parseHex64(raw, "digest")
-	return vaaDigestHex{hex: lowercaseHex}, err
+	return vaaDigestHex{vaaDigestHexText: lowercaseHex}, err
 }
 
 // parseHex64 lowercases raw and requires exactly 64 hex characters (32 bytes): the lowercase
@@ -224,6 +259,10 @@ func parseFlowRequest(flowName, rawQuery string) (flowRequest, error) {
 		instrumentAdmin, err := requiredPartyParam(params, "instrument-admin")
 		if err != nil {
 			return nil, err
+		}
+		// RegisterManagerByVaa builds the InstrumentId with admin = guardianGovernance.
+		if byVAA && instrumentAdmin != guardianGovernance {
+			return nil, newFlowError(http.StatusBadRequest, "instrument-admin must be gg when by-vaa=true")
 		}
 		rawInstrumentID, err := requiredParam(params, "instrument-id")
 		if err != nil {

@@ -99,7 +99,7 @@ type daNttManager struct {
 	Namespace            string                 `json:"namespace"`
 	ManagerAddress       nttManagerAddressValue `json:"managerAddress"`
 	ChainId              json.Number            `json:"chainId"`
-	ManagerId            json.Number            `json:"managerId"`
+	ManagerID            json.Number            `json:"managerId"`
 	TransceiverEmitterId json.Number            `json:"transceiverEmitterId"`
 	InstrumentId         daInstrumentId         `json:"instrumentId"`
 	TokenConfig          string                 `json:"tokenConfig"`
@@ -185,8 +185,9 @@ type flowResponse struct {
 	Disclosures []flowDisclosureEntry `json:"disclosures"`
 	Missing     []flowMissingEntry    `json:"missing"`
 	// Register only: the replay namespace and managerId the registration claims at this offset.
-	ClaimNamespace string       `json:"claimNamespace,omitempty"`
-	ManagerID      *json.Number `json:"managerId,omitempty"`
+	// managerId is the canonical decimal as a JSON string, as the JSON Ledger API writes a Daml Int.
+	ClaimNamespace string  `json:"claimNamespace,omitempty"`
+	ManagerID      *string `json:"managerId,omitempty"`
 }
 
 func discloseAs(role string, entry acsEntry) flowDisclosureEntry {
@@ -275,8 +276,8 @@ type replayTrieKey interface {
 	replayTrieKeyHex() string
 }
 
-func (digest vaaDigestHex) replayTrieKeyHex() string         { return digest.hex }
-func (digest claimedRootDigestHex) replayTrieKeyHex() string { return digest.hex }
+func (digest vaaDigestHex) replayTrieKeyHex() string         { return digest.vaaDigestHexText }
+func (digest claimedRootDigestHex) replayTrieKeyHex() string { return digest.claimedRootDigestHexText }
 
 // digestPrefixes returns the 65 prefixes of key, from "" to the whole key.
 func digestPrefixes(key replayTrieKey) []string {
@@ -388,7 +389,7 @@ func checkReserveCustodianFollowsAdmin(mgr daNttManager) error {
 // or more is a 500: managerAddress is meant to be unique per deployment.
 func findManager(entries []decodedEntry[daNttManager], manager managerAddressHex) (decodedEntry[daNttManager], error) {
 	match, matchCount := matchOne(entries, func(entry decodedEntry[daNttManager]) bool {
-		return entry.value.ManagerAddress.hex == manager.hex
+		return entry.value.ManagerAddress.nttManagerAddressHexText == manager.managerAddressHexText
 	})
 	switch {
 	case matchCount == 0:
@@ -436,7 +437,7 @@ func coveringReplayNode(entries []decodedEntry[daReplayNode], consumer partyID, 
 	return exactlyOne(entries, roleCoveringReplayNode, func(entry decodedEntry[daReplayNode]) bool {
 		return entry.value.Consumer == consumer &&
 			entry.value.Namespace == namespace &&
-			strings.HasPrefix(digest.hex, entry.value.Prefix.hex)
+			strings.HasPrefix(digest.vaaDigestHexText, entry.value.Prefix.digestNibblePrefixHexText)
 	})
 }
 
@@ -448,13 +449,13 @@ func coveringClaimedRootsNode(entries []decodedEntry[daReplayNode], gg partyID, 
 		return entry.value.Consumer == gg &&
 			entry.value.GuardianGovernance == gg &&
 			entry.value.Namespace == claimedRootsNamespace &&
-			strings.HasPrefix(digest.hex, entry.value.Prefix.hex)
+			strings.HasPrefix(digest.claimedRootDigestHexText, entry.value.Prefix.digestNibblePrefixHexText)
 	})
 }
 
 func findLockedLedger(entries []decodedEntry[daLockedLedger], manager managerAddressHex) (decodedEntry[daLockedLedger], error) {
 	return exactlyOne(entries, roleLockedLedger, func(entry decodedEntry[daLockedLedger]) bool {
-		return entry.value.ManagerAddress.hex == manager.hex
+		return entry.value.ManagerAddress.nttManagerAddressHexText == manager.managerAddressHexText
 	})
 }
 
@@ -544,7 +545,7 @@ func findAdminTransferProposal(entries []decodedEntry[daAdminTransferProposal], 
 // --- Fetch wrappers: one upstream query plus the matching selector ---
 
 func (s *server) fetchManager(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daNttManager], error) {
-	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(manager.hex, "managerAddress", "value"))
+	entries, err := fetchDecoded[daNttManager](ctx, s, tailNttManager, offset, hexFieldMatch(manager.managerAddressHexText, "managerAddress", "value"))
 	if err != nil {
 		return decodedEntry[daNttManager]{}, err
 	}
@@ -604,7 +605,7 @@ func (s *server) fetchCoveringClaimedRootsNode(ctx context.Context, gg partyID, 
 }
 
 func (s *server) fetchLedger(ctx context.Context, manager managerAddressHex, offset int64) (decodedEntry[daLockedLedger], error) {
-	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(manager.hex, "managerAddress", "value"))
+	entries, err := fetchDecoded[daLockedLedger](ctx, s, tailLockedLedger, offset, hexFieldMatch(manager.managerAddressHexText, "managerAddress", "value"))
 	if err != nil {
 		return decodedEntry[daLockedLedger]{}, err
 	}
@@ -900,7 +901,7 @@ func (s *server) assembleAcceptAdmin(ctx context.Context, request acceptAdminReq
 	proposals, err := fetchDecoded[daAdminTransferProposal](ctx, s, tailAdminTransferProposal, offset,
 		partyFieldMatch(mgr.value.Admin, "admin"),
 		partyFieldMatch(mgr.value.GuardianGovernance, "newAdmin"),
-		hexFieldMatch(mgr.value.ManagerAddress.hex, "managerAddress", "value"))
+		hexFieldMatch(mgr.value.ManagerAddress.nttManagerAddressHexText, "managerAddress", "value"))
 	if err != nil {
 		return nil, err
 	}
@@ -1029,7 +1030,7 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 	if err != nil {
 		return nil, err
 	}
-	managerID, err := parseNttManagerID(nttGovernance.value.NextID)
+	managerID, err := parseNttManagerID(nttGovernance.value.NextID, "NttGovernance nextId")
 	if err != nil {
 		return nil, err
 	}
@@ -1074,13 +1075,13 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 	}
 	disclosures = append(disclosures, discloseAs(roleCoveringClaimedRootsNode, claimedRootsNode.entry))
 
-	managerIDNumber := json.Number(managerID.String())
+	managerIDDecimal := managerID.String()
 	return &flowResponse{
 		Flow:           "register",
 		Disclosures:    disclosures,
 		Missing:        make([]flowMissingEntry, 0),
-		ClaimNamespace: claimNamespace.text,
-		ManagerID:      &managerIDNumber,
+		ClaimNamespace: claimNamespace.replayNamespaceText,
+		ManagerID:      &managerIDDecimal,
 	}, nil
 }
 
@@ -1181,12 +1182,13 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 // ---------------------------------------------------------------------------
 
-// managerEntry is one visible NTT deployment, over the wire.
+// managerEntry is one visible NTT deployment, over the wire. managerId is the canonical decimal
+// as a JSON string, as the JSON Ledger API writes a Daml Int.
 type managerEntry struct {
 	ManagerAddress   string         `json:"managerAddress"`
 	ContractID       string         `json:"contractId"`
 	ChainId          json.Number    `json:"chainId"`
-	ManagerId        json.Number    `json:"managerId"`
+	ManagerID        string         `json:"managerId"`
 	TokenConfig      string         `json:"tokenConfig"`
 	InstrumentId     daInstrumentId `json:"instrumentId"`
 	ReserveCustodian partyID        `json:"reserveCustodian"`
@@ -1218,11 +1220,16 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]managerEntry, 0, len(managers))
 	for _, manager := range managers {
+		managerID, err := parseNttManagerID(manager.value.ManagerID, "NttManager managerId")
+		if err != nil {
+			s.writeFlowError(w, r, err)
+			return
+		}
 		out = append(out, managerEntry{
-			ManagerAddress:   manager.value.ManagerAddress.hex,
+			ManagerAddress:   manager.value.ManagerAddress.nttManagerAddressHexText,
 			ContractID:       manager.entry.ContractID,
 			ChainId:          manager.value.ChainId,
-			ManagerId:        manager.value.ManagerId,
+			ManagerID:        managerID.String(),
 			TokenConfig:      manager.value.TokenConfig,
 			InstrumentId:     manager.value.InstrumentId,
 			ReserveCustodian: manager.value.ReserveCustodian,

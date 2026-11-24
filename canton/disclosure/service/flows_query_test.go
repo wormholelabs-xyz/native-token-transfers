@@ -169,26 +169,26 @@ func TestParseFlowRequestTypes(t *testing.T) {
 		want     flowRequest
 	}{
 		{"release without recipient", "release", "manager=" + strings.ToUpper(managerHex) + "&digest=" + digestHex,
-			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
+			releaseRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}}},
 		{"release with recipient", "release", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=" + testRecipient,
-			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: testRecipient}},
+			releaseRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}, recipient: testRecipient}},
 		{"mint", "mint", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=" + testRecipient,
-			mintRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: testRecipient}},
+			mintRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}, recipient: testRecipient}},
 		{"set-peer", "set-peer", "manager=" + managerHex + "&digest=" + digestHex,
-			setPeerRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
+			setPeerRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}}},
 		{"accept-admin", "accept-admin", "manager=" + managerHex + "&digest=" + digestHex,
-			acceptAdminRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
-		{"transfer", "transfer", "manager=" + managerHex, transferRequest{manager: managerAddressHex{hex: managerHex}}},
-		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{hex: managerHex}}},
+			acceptAdminRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}}},
+		{"transfer", "transfer", "manager=" + managerHex, transferRequest{manager: managerAddressHex{managerAddressHexText: managerHex}}},
+		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{managerAddressHexText: managerHex}}},
 		{"register defaults", "register", testRegisterClaimQuery(), testRegisterRequest()},
 		{"register by vaa", "register", testRegisterClaimQuery() + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true",
-			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}},
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}},
 		{"register by vaa with gg as instrument-admin", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + testRegisterInstrumentID + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true",
-			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}},
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}},
 		{"register not by vaa with an instrument-admin other than gg", "register", "admin=" + testRecipient + "&instrument-admin=" + testRecipient + "&instrument-id=" + testRegisterInstrumentID + "&gg=" + testGuardianGovernanceParty + "&by-vaa=false",
-			registerRequest{guardianGovernance: testGuardianGovernanceParty, admin: testRecipient, instrumentAdmin: testRecipient, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}},
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, admin: testRecipient, instrumentAdmin: testRecipient, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}},
 		{"register with a multi-byte instrument id", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + url.QueryEscape("é€😀"),
-			registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: "é€😀"}}},
+			registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: "é€😀"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,7 +208,7 @@ func testRegisterClaimQuery() string {
 }
 
 func testRegisterRequest() registerRequest {
-	return registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}
+	return registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}
 }
 
 // testRegisterQueryCapBytes is the register query with every parameter at its maximum length,
@@ -250,7 +250,7 @@ func maximalRegisterQuery(t *testing.T) (string, registerRequest) {
 		guardianGovernance: partyID(guardianGovernance),
 		admin:              partyID(admin),
 		instrumentAdmin:    partyID(instrumentAdmin),
-		instrumentID:       instrumentIDText{text: instrumentID},
+		instrumentID:       instrumentIDText{instrumentIDUTF8Text: instrumentID},
 	}
 	return query, want
 }
