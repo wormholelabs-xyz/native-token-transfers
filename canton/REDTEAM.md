@@ -172,8 +172,9 @@ not cover the pair digest. The core rejects it with "replay node does not
 cover digest".
 
 This guarantee holds only in one core version. A breaking core version
-cannot fetch a `ReplayNode` or an `Emitter` of core 0.12.3, and a re-genesis
-does not carry them. If a migration to such a version starts from empty
+cannot fetch a `ReplayNode` or an `Emitter` of core 0.12.3. It also forces a
+breaking `ntt` version, so each `NttManager` and `LockedLedger` must move. A
+re-genesis carries none of these contracts. If a migration starts from empty
 contracts, these attacks become possible:
 
 - Each earlier inbound VAA mints or releases a second time, because the new
@@ -182,13 +183,16 @@ contracts, these attacks become possible:
   tree has no record of it.
 - An emitter with the earlier emitter address and sequence 0 publishes a
   second message with an earlier message ID.
+- A withheld `SetPeerByVaa` or `AcceptAdminTransferByVaa` VAA succeeds when
+  `peerEpoch` or `factoryEpoch` starts at 0 again. For example, it sets a
+  replaced peer again.
+- A higher `LockedLedger` balance releases the reserves of other
+  deployments.
 
-The `wormhole-genesis` version for a breaking core version must carry the
-consumed digests of each trie, the consumed pair digests, and each emitter
-id, emitter address and sequence. A re-genesis already takes the governance
-replay records as parameters and checks them against the earlier roots. The
-README states the guardian rule: no breaking core version before that
-`wormhole-genesis` version exists.
+The README lists the records that the `wormhole-genesis` version for a
+breaking core version must carry. It also states the guardian rule: do not
+vet a breaking core version on a `gg` host, and do not sign a re-genesis to
+it, before that `wormhole-genesis` version exists.
 
 The claimed-roots tree binds only `ClaimReplayRoot`. A second trie is
 possible in these cases:
