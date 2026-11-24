@@ -171,14 +171,28 @@ it as an inactive contract. After a split, the test passes a child that does
 not cover the pair digest. The core rejects it with "replay node does not
 cover digest".
 
-This guarantee holds only in one core version. The claimed-roots tree is a
-template of the core package. A breaking core version cannot fetch a
-`ReplayNode` of core 0.12.3. If a re-genesis to such a version creates no
-tree, no registration is possible. If it creates a new tree, that tree has
-no record of the earlier pairs. Then a second claim of each earlier pair is
-possible. The `wormhole-genesis` version for that core version must copy the
-consumed pair digests into the new tree. The `wormhole-genesis` package
-copies the governance replay records in the same way.
+This guarantee holds only in one core version. A breaking core version
+cannot fetch a `ReplayNode` or an `Emitter` of core 0.12.3. It also forces a
+breaking `ntt` version, so each `NttManager` and `LockedLedger` must move. A
+re-genesis carries none of these contracts. If a migration starts from empty
+contracts, these attacks become possible:
+
+- Each earlier inbound VAA mints or releases a second time, because the new
+  trie of the deployment has no record of it.
+- A second claim of each earlier pair succeeds, because the new claimed-roots
+  tree has no record of it.
+- An emitter with the earlier emitter address and sequence 0 publishes a
+  second message with an earlier message ID.
+- A withheld `SetPeerByVaa` or `AcceptAdminTransferByVaa` VAA succeeds when
+  `peerEpoch` or `factoryEpoch` starts at 0 again. For example, it sets a
+  replaced peer again.
+- A higher `LockedLedger` balance releases the reserves of other
+  deployments.
+
+The README lists the records that the `wormhole-genesis` version for a
+breaking core version must carry. It also states the guardian rule: do not
+vet a breaking core version on a `gg` host, and do not sign a re-genesis to
+it, before that `wormhole-genesis` version exists.
 
 The claimed-roots tree binds only `ClaimReplayRoot`. A second trie is
 possible in these cases:

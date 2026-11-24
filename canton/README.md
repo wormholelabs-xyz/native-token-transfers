@@ -175,15 +175,58 @@ root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
 `wormhole-genesis` version that depends on both package versions.
 
-The claimed-roots tree is a template of the core package. Thus the tree
-rejects a second claim of a pair only in one core version. A breaking core
-version cannot fetch a `ReplayNode` of core 0.12.3. A re-genesis to such a
-version has two possible results. If it creates no tree, no registration is
-possible. If it creates a new tree, that tree has no record of the earlier
-pairs. Thus the `wormhole-genesis` version for that core version must copy
-the consumed pair digests into the new tree. The `wormhole-genesis` package
-copies the governance replay records in the same way. Until that version exists, a breaking core version
-is a guardian decision that needs a migration plan.
+A breaking core version needs a migration, not only a re-genesis. The
+`NttManager` choices take contract ids of core 0.12.3 templates. Thus a
+breaking core version also forces a breaking `ntt` version. A re-genesis
+archives the earlier `CoreState`. Then the managers of the earlier `ntt`
+version cannot check a VAA or publish a message. Thus each deployment must
+move to the new versions. A re-genesis does not carry this state:
+
+- Core `ReplayNode`. The claimed-roots tree records each (`gg`, namespace)
+  pair. The trie of each deployment records each inbound VAA that the
+  deployment consumed.
+- Core `Emitter`. Each emitter holds its owner, its emitter id and its next
+  sequence. The watcher derives the emitter address from the registrar, the
+  owner and the emitter id.
+- NTT `NttManager`. Each manager holds its namespace, manager id, manager
+  address, transceiver emitter id, peers, `peerEpoch` and `factoryEpoch`.
+- NTT `LockedLedger`. Its balance is the release limit of a lock/unlock
+  deployment.
+
+If the new contracts start without the earlier records, these failures are
+possible:
+
+- A new trie has no record of the consumed VAAs. Then each earlier inbound
+  VAA can mint or release a second time.
+- A new claimed-roots tree has no record of the earlier pairs. Then a second
+  claim of each earlier pair is possible.
+- A new emitter with the earlier emitter address and sequence 0 publishes a
+  second message with an earlier message ID. A new emitter with another
+  emitter address loses its peers on the other chains.
+- A `peerEpoch` or `factoryEpoch` that starts at 0 accepts a withheld
+  governance VAA again. That VAA was never submitted, so the carried trie has
+  no record of it. For example, it can set a replaced peer again.
+- A lower `LockedLedger` balance stops releases. A higher balance lets one
+  deployment release the reserves of other deployments.
+- Another namespace, manager address or transceiver emitter id breaks the
+  link to the carried trie and to the peers.
+
+Thus the `wormhole-genesis` version for a breaking core version must carry
+these records into the new contracts:
+
+- the consumed digests of each trie;
+- the consumed pair digests;
+- the owner, the emitter id and the sequence of each emitter, with the same
+  emitter address formula and tag in the new core version;
+- the identity fields, the peers and the two epochs of each manager;
+- the balance of each `LockedLedger`.
+
+A re-genesis already does this for the governance replay records. It takes
+them as parameters and checks them against the earlier roots. The
+`wormhole-genesis` package has only `gg` authority. Thus it can move only the
+tries and emitters that `gg` owns. Other integrators move their own
+contracts. Until that `wormhole-genesis` version exists, do not vet a
+breaking core version on a `gg` host. Do not sign a re-genesis to it.
 
 Vet no package whose code runs with `gg` authority and can create a
 `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The
