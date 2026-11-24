@@ -523,9 +523,12 @@ func jsonArray(items ...string) string {
 	return "[" + strings.Join(items, ",") + "]"
 }
 
+// testNttManagerID is the NttManager fixture managerId, as the JSON Ledger API writes a Daml Int.
+const testNttManagerID = "5"
+
 func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAddress string, transceiverEmitterID int, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"managerId":"`+testNttManagerID+`","transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
 		admin, gg, nttCustody, reserveCustodian, namespace, managerAddress, transceiverEmitterID, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid,
 	)
 }
@@ -533,7 +536,7 @@ func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAd
 // nttManagerArgBeforeNtt040 is an ntt 0.3.x payload: no nttCustody and no reserveCustodian.
 func nttManagerArgBeforeNtt040(admin, gg, managerAddress, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":{"tag":"NttManagerAddress","value":%q},"transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":{"tag":"NttManagerAddress","value":%q},"managerId":"`+testNttManagerID+`","transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
 		admin, gg, managerAddress, gg, tokenConfig, factoryTag, factoryCid,
 	)
 }
@@ -1525,6 +1528,17 @@ func TestHandleFlows_Register_Basic(t *testing.T) {
 	require.NotNil(t, claim.ManagerID)
 	assert.Equal(t, testRegisterClaimNamespace, *claim.ClaimNamespace)
 	assert.Equal(t, json.Number(testRegisterNextID), *claim.ManagerID)
+	assert.Equal(t, testRegisterNextID, decodeManagerIDJSONValue(t, rr.Body.Bytes()))
+}
+
+// decodeManagerIDJSONValue is the managerId of a JSON object, decoded without a target type.
+func decodeManagerIDJSONValue(t *testing.T, body []byte) any {
+	t.Helper()
+	var object map[string]any
+	require.NoError(t, json.Unmarshal(body, &object))
+	managerIDValue, present := object["managerId"]
+	require.True(t, present, string(body))
+	return managerIDValue
 }
 
 func TestHandleFlows_Register_ByVaa(t *testing.T) {
@@ -1660,6 +1674,7 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 			claim := decodeRegisterClaimResponse(t, rr)
 			require.NotNil(t, claim.ManagerID)
 			assert.Equal(t, tc.wantManagerID, *claim.ManagerID)
+			assert.Equal(t, string(tc.wantManagerID), decodeManagerIDJSONValue(t, rr.Body.Bytes()))
 		})
 	}
 }
@@ -1876,6 +1891,54 @@ func TestHandleManagers(t *testing.T) {
 	assert.Equal(t, "otherCoin", got.Managers[1].InstrumentId.Id)
 	assert.Equal(t, partyID(b.admin), got.Managers[0].ReserveCustodian)
 	assert.Equal(t, partyID(b.nttCustody), got.Managers[1].ReserveCustodian)
+	var gotJSONValues struct {
+		Managers []json.RawMessage `json:"managers"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &gotJSONValues))
+	require.Len(t, gotJSONValues.Managers, 2)
+	for _, managerJSON := range gotJSONValues.Managers {
+		assert.Equal(t, testNttManagerID, decodeManagerIDJSONValue(t, managerJSON))
+	}
+}
+
+func TestHandleManagers_ManagerIDEncoding(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	const fixtureManagerIDField = `"managerId":"` + testNttManagerID + `"`
+	require.Contains(t, b.managerJSON(), fixtureManagerIDField)
+	cases := []struct {
+		name                string
+		managerIDField      string
+		wantStatus          int
+		wantManagerIDString string
+	}{
+		{"canonical string", `"managerId":"7"`, http.StatusOK, "7"},
+		{"canonical number", `"managerId":7`, http.StatusOK, "7"},
+		{"2^63-1", `"managerId":"9223372036854775807"`, http.StatusOK, "9223372036854775807"},
+		{"leading zero", `"managerId":"07"`, http.StatusInternalServerError, ""},
+		{"negative", `"managerId":"-1"`, http.StatusInternalServerError, ""},
+		{"2^63", `"managerId":"9223372036854775808"`, http.StatusInternalServerError, ""},
+		{"fractional", `"managerId":"1.5"`, http.StatusInternalServerError, ""},
+		{"absent", `"managerIdAbsent":"7"`, http.StatusInternalServerError, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			managerJSON := strings.Replace(b.managerJSON(), fixtureManagerIDField, tc.managerIDField, 1)
+			srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(managerJSON)})
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+			if tc.wantStatus != http.StatusOK {
+				assert.NotContains(t, rr.Body.String(), "managers")
+				return
+			}
+			var got struct {
+				Managers []json.RawMessage `json:"managers"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+			require.Len(t, got.Managers, 1)
+			assert.Equal(t, tc.wantManagerIDString, decodeManagerIDJSONValue(t, got.Managers[0]))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

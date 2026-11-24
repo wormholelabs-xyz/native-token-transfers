@@ -74,7 +74,7 @@ func registryTestPackageNameOf(tail string) string {
 
 func registryManagerArg(instrumentAdmin, instrumentID, tokenConfig string, tokenDecimals int, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"tokenDecimals":"%d","factory":{"tag":%q,"value":%q},"paused":false}`,
+		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"managerId":"`+testNttManagerID+`","instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"tokenDecimals":"%d","factory":{"tag":%q,"value":%q},"paused":false}`,
 		registryTestGG, registryTestGG, registryTestNttCustody, registryTestNttCustody,
 		fmt.Sprintf("%x", sha256.Sum256([]byte(instrumentID))), instrumentAdmin, instrumentID, tokenConfig, tokenDecimals, factoryTag, factoryCid,
 	)
