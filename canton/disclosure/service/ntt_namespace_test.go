@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Expected values from Daml Wormhole.Ntt.Manager.nttNamespaceFromText (ntt 0.6.2). The first row
-// is Test.TestNtt.testNamespaceVector.
+// Expected values from Daml Wormhole.Ntt.Manager.nttNamespaceFromText (ntt 0.6.2). All four rows
+// are pinned in Test.TestNtt.testNamespaceVector.
 func TestNttNamespaceVectors(t *testing.T) {
 	const (
 		vectorInstrumentAdmin = "vector-instrument-admin::1220deadbeef"
