@@ -89,7 +89,10 @@ http.host eq "canton-disclosure.example.com" && starts_with(http.request.uri.pat
 http.host eq "canton-disclosure.example.com" && !starts_with(http.request.uri.path, "/v1") && !starts_with(http.request.uri.path, "/registry/")
 
 # Long query strings
-http.host eq "canton-disclosure.example.com" && len(http.request.uri.query) gt 1024
+http.host eq "canton-disclosure.example.com" && http.request.uri.path ne "/v1/flows/register" && len(http.request.uri.query) gt 1024
+
+# Long register query strings
+http.host eq "canton-disclosure.example.com" && http.request.uri.path eq "/v1/flows/register" && len(http.request.uri.query) gt 3897
 
 # Large request bodies
 http.host eq "canton-disclosure.example.com" && http.request.body.size gt 65536
@@ -99,6 +102,7 @@ The service accepts GET on `/v1`. It accepts GET on the registry metadata
 routes and POST on the other registry routes. It returns 404 for a registry
 route with the other method. It serves paths under `/v1` and
 `/registry/` only. It rejects a query string that is longer than 1024 bytes.
+For `/v1/flows/register`, the limit is 3897 bytes.
 It rejects a registry request body that is larger than 64 KiB.
 
 NOTE: The "Large request bodies" rule uses the field
