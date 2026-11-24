@@ -189,7 +189,8 @@ move to the new versions. A re-genesis does not carry this state:
   sequence. The watcher derives the emitter address from the registrar, the
   owner and the emitter id.
 - NTT `NttManager`. Each manager holds its namespace, manager id, manager
-  address, transceiver emitter id, peers, `peerEpoch` and `factoryEpoch`.
+  address, transceiver emitter id, peers, `peerEpoch`, `factoryEpoch` and
+  `paused`.
 - NTT `LockedLedger`. Its balance is the release limit of a lock/unlock
   deployment.
 
@@ -203,9 +204,11 @@ possible:
 - A new emitter with the earlier emitter address and sequence 0 publishes a
   second message with an earlier message ID. A new emitter with another
   emitter address loses its peers on the other chains.
-- A `peerEpoch` or `factoryEpoch` that starts at 0 accepts a withheld
-  governance VAA again. That VAA was never submitted, so the carried trie has
-  no record of it. For example, it can set a replaced peer again.
+- A `peerEpoch` or `factoryEpoch` that starts at 0 lets a withheld
+  governance VAA succeed. That VAA was never submitted, so the carried trie
+  has no record of it. For example, it can set a replaced peer again.
+- A paused manager that moves with `paused` false starts transfers, releases
+  and mints again. No governance decision starts them.
 - A lower `LockedLedger` balance stops releases. A higher balance lets one
   deployment release the reserves of other deployments.
 - Another namespace, manager address or transceiver emitter id breaks the
@@ -218,15 +221,18 @@ these records into the new contracts:
 - the consumed pair digests;
 - the owner, the emitter id and the sequence of each emitter, with the same
   emitter address formula and tag in the new core version;
-- the identity fields, the peers and the two epochs of each manager;
+- the identity fields, the peers, the two epochs and `paused` of each
+  manager;
 - the balance of each `LockedLedger`.
 
 A re-genesis already does this for the governance replay records. It takes
-them as parameters and checks them against the earlier roots. The
-`wormhole-genesis` package has only `gg` authority. Thus it can move only the
-tries and emitters that `gg` owns. Other integrators move their own
-contracts. Until that `wormhole-genesis` version exists, do not vet a
-breaking core version on a `gg` host. Do not sign a re-genesis to it.
+them as parameters and checks them against the earlier roots.
+`AcceptGenesis` has the authority of `gg`, `feeCustody` and `nttCustody`.
+Each `NttManager` also has its `admin` as a signatory. Thus the move of a
+manager whose admin is not `gg` also needs the signature of that admin. Other
+integrators move their own tries and emitters. Until that `wormhole-genesis`
+version exists, do not vet a breaking core version on a `gg` host. Do not
+sign a re-genesis to it.
 
 Vet no package whose code runs with `gg` authority and can create a
 `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The
