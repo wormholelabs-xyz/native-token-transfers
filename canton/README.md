@@ -175,15 +175,39 @@ root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
 `wormhole-genesis` version that depends on both package versions.
 
-The claimed-roots tree is a template of the core package. Thus the tree
-rejects a second claim of a pair only in one core version. A breaking core
-version cannot fetch a `ReplayNode` of core 0.12.3. A re-genesis to such a
-version has two possible results. If it creates no tree, no registration is
-possible. If it creates a new tree, that tree has no record of the earlier
-pairs. Thus the `wormhole-genesis` version for that core version must copy
-the consumed pair digests into the new tree. The `wormhole-genesis` package
-copies the governance replay records in the same way. Until that version exists, a breaking core version
-is a guardian decision that needs a migration plan.
+A breaking core version needs a migration, not only a re-genesis. These
+templates of the core package hold state that a re-genesis does not carry:
+
+- `ReplayNode`. The claimed-roots tree records each (`gg`, namespace) pair.
+  The trie of each deployment records each inbound VAA that the deployment
+  consumed.
+- `Emitter`. Each emitter holds its emitter id, its emitter address and its
+  next sequence.
+
+A breaking core version cannot fetch these contracts of core 0.12.3. A
+re-genesis archives the earlier `CoreState`. Then the managers of the earlier
+`ntt` version cannot check a VAA or publish a message. Thus each deployment
+must move to the new versions. If the new contracts have no earlier records,
+these failures are possible:
+
+- A new trie has no record of the consumed VAAs. Then each earlier inbound
+  VAA can mint or release a second time.
+- A new claimed-roots tree has no record of the earlier pairs. Then a second
+  claim of each earlier pair is possible.
+- A new emitter with the earlier emitter address and sequence 0 publishes a
+  second message with an earlier message ID. A new emitter with another
+  emitter address loses its peers on the other chains.
+
+Thus the `wormhole-genesis` version for a breaking core version must carry
+these records into the new contracts:
+
+- the consumed digests of each trie;
+- the consumed pair digests;
+- the emitter id, the emitter address and the sequence of each emitter.
+
+A re-genesis already does this for the governance replay records. It takes
+them as parameters and checks them against the earlier roots. Until that
+version exists, the guardians do not adopt a breaking core version.
 
 Vet no package whose code runs with `gg` authority and can create a
 `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The
