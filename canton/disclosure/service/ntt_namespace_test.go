@@ -36,11 +36,11 @@ func TestNttNamespaceVectors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			instrumentID, err := parseInstrumentIDText(tc.instrumentID)
 			require.NoError(t, err)
-			managerID, err := parseNttManagerID(tc.managerID)
+			managerID, err := parseNttManagerID(tc.managerID, "NttGovernance nextId")
 			require.NoError(t, err)
 			namespace := nttNamespace(tc.instrumentAdmin, instrumentID, tc.admin, managerID)
-			assert.Equal(t, tc.expectedNamespace, namespace.text)
-			reparsed, err := parseReplayNamespace(namespace.text)
+			assert.Equal(t, tc.expectedNamespace, namespace.replayNamespaceText)
+			reparsed, err := parseReplayNamespace(namespace.replayNamespaceText)
 			require.NoError(t, err)
 			assert.Equal(t, namespace, reparsed)
 		})
@@ -50,7 +50,7 @@ func TestNttNamespaceVectors(t *testing.T) {
 func TestNttNamespaceSeparatesInputs(t *testing.T) {
 	instrumentID, err := parseInstrumentIDText("VECTOR")
 	require.NoError(t, err)
-	managerID, err := parseNttManagerID("0")
+	managerID, err := parseNttManagerID("0", "NttGovernance nextId")
 	require.NoError(t, err)
 	baseline := nttNamespace("a::1220", instrumentID, "b::1220", managerID)
 	swappedParties := nttNamespace("b::1220", instrumentID, "a::1220", managerID)
@@ -77,7 +77,7 @@ func TestParseInstrumentIDText(t *testing.T) {
 			instrumentID, err := parseInstrumentIDText(tc.rawID)
 			if tc.expectedError == "" {
 				require.NoError(t, err)
-				assert.Equal(t, tc.rawID, instrumentID.text)
+				assert.Equal(t, tc.rawID, instrumentID.instrumentIDUTF8Text)
 				return
 			}
 			requireFlowErrorStatus(t, err, http.StatusBadRequest)
@@ -107,14 +107,17 @@ func TestParseNttManagerID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			managerID, err := parseNttManagerID(tc.rawNextID)
-			if tc.expectedErrorMsg == "" {
-				require.NoError(t, err)
-				assert.Equal(t, tc.expectedDecimal, managerID.String())
-				return
+			for _, fieldLabel := range []string{"NttGovernance nextId", "NttManager managerId"} {
+				managerID, err := parseNttManagerID(tc.rawNextID, fieldLabel)
+				if tc.expectedErrorMsg == "" {
+					require.NoError(t, err)
+					assert.Equal(t, tc.expectedDecimal, managerID.String())
+					continue
+				}
+				requireFlowErrorStatus(t, err, http.StatusInternalServerError)
+				assert.Contains(t, err.Error(), fieldLabel+" ")
+				assert.Contains(t, err.Error(), tc.expectedErrorMsg)
 			}
-			requireFlowErrorStatus(t, err, http.StatusInternalServerError)
-			assert.Contains(t, err.Error(), tc.expectedErrorMsg)
 		})
 	}
 }

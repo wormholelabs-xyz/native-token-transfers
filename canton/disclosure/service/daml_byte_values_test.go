@@ -38,7 +38,7 @@ func TestNttManagerAddressValueDecodesTheVariantOnly(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantHex, decoded.hex)
+			assert.Equal(t, tc.wantHex, decoded.nttManagerAddressHexText)
 		})
 	}
 }
@@ -68,7 +68,7 @@ func TestDigestNibblePrefixValueDecodesZeroToSixtyThreeNibbles(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantHex, decoded.hex)
+			assert.Equal(t, tc.wantHex, decoded.digestNibblePrefixHexText)
 		})
 	}
 }

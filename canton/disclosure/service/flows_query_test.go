@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -95,6 +98,7 @@ func TestParseFlowRequestRejectsBeforeUpstream(t *testing.T) {
 		{"instrument-id not UTF-8", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=id%FF", http.StatusBadRequest},
 		{"instrument-id over the byte limit", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + strings.Repeat("i", instrumentIDMaxBytes+1), http.StatusBadRequest},
 		{"namespace parameter removed", "register", validRegisterClaim + "&namespace=" + url.QueryEscape("ntt:ab"), http.StatusBadRequest},
+		{"by-vaa true with an instrument-admin other than gg", "register", "admin=" + testRecipient + "&instrument-admin=" + testRecipient + "&instrument-id=" + testRegisterInstrumentID + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true", http.StatusBadRequest},
 		{"malformed query", "transfer", "manager=" + b.managerAddr + "&%zz", http.StatusBadRequest},
 		{"semicolon separator", "transfer", "manager=" + b.managerAddr + ";digest=" + b.digest, http.StatusBadRequest},
 	}
@@ -137,6 +141,10 @@ func TestCheckFlowQuery(t *testing.T) {
 		{"unknown flow", "nope", "", nil, http.StatusNotFound},
 		{"exactly the byte limit", "transfer", "manager=" + strings.Repeat("a", maxFlowQueryBytes-len("manager=")), map[string]string{"manager": strings.Repeat("a", maxFlowQueryBytes-len("manager="))}, 0},
 		{"one byte over the limit", "transfer", "manager=" + strings.Repeat("a", maxFlowQueryBytes-len("manager=")+1), nil, http.StatusRequestURITooLong},
+		{"register one byte over the default limit", "register", "admin=" + strings.Repeat("a", maxFlowQueryBytes-len("admin=")+1), map[string]string{"admin": strings.Repeat("a", maxFlowQueryBytes-len("admin=")+1)}, 0},
+		{"register at its limit", "register", "admin=" + strings.Repeat("a", testRegisterQueryCapBytes-len("admin=")), map[string]string{"admin": strings.Repeat("a", testRegisterQueryCapBytes-len("admin="))}, 0},
+		{"register one byte over its limit", "register", "admin=" + strings.Repeat("a", testRegisterQueryCapBytes-len("admin=")+1), nil, http.StatusRequestURITooLong},
+		{"unknown flow over the default limit", "nope", strings.Repeat("a", maxFlowQueryBytes+1), nil, http.StatusRequestURITooLong},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,22 +169,26 @@ func TestParseFlowRequestTypes(t *testing.T) {
 		want     flowRequest
 	}{
 		{"release without recipient", "release", "manager=" + strings.ToUpper(managerHex) + "&digest=" + digestHex,
-			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
+			releaseRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}}},
 		{"release with recipient", "release", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=" + testRecipient,
-			releaseRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: testRecipient}},
+			releaseRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}, recipient: testRecipient}},
 		{"mint", "mint", "manager=" + managerHex + "&digest=" + digestHex + "&recipient=" + testRecipient,
-			mintRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}, recipient: testRecipient}},
+			mintRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}, recipient: testRecipient}},
 		{"set-peer", "set-peer", "manager=" + managerHex + "&digest=" + digestHex,
-			setPeerRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
+			setPeerRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}}},
 		{"accept-admin", "accept-admin", "manager=" + managerHex + "&digest=" + digestHex,
-			acceptAdminRequest{manager: managerAddressHex{hex: managerHex}, digest: vaaDigestHex{hex: digestHex}}},
-		{"transfer", "transfer", "manager=" + managerHex, transferRequest{manager: managerAddressHex{hex: managerHex}}},
-		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{hex: managerHex}}},
+			acceptAdminRequest{manager: managerAddressHex{managerAddressHexText: managerHex}, digest: vaaDigestHex{vaaDigestHexText: digestHex}}},
+		{"transfer", "transfer", "manager=" + managerHex, transferRequest{manager: managerAddressHex{managerAddressHexText: managerHex}}},
+		{"consolidate", "consolidate", "manager=" + managerHex, consolidateRequest{manager: managerAddressHex{managerAddressHexText: managerHex}}},
 		{"register defaults", "register", testRegisterClaimQuery(), testRegisterRequest()},
 		{"register by vaa", "register", testRegisterClaimQuery() + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true",
-			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}},
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}},
+		{"register by vaa with gg as instrument-admin", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + testRegisterInstrumentID + "&gg=" + testGuardianGovernanceParty + "&by-vaa=true",
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, byVAA: true, admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}},
+		{"register not by vaa with an instrument-admin other than gg", "register", "admin=" + testRecipient + "&instrument-admin=" + testRecipient + "&instrument-id=" + testRegisterInstrumentID + "&gg=" + testGuardianGovernanceParty + "&by-vaa=false",
+			registerRequest{guardianGovernance: testGuardianGovernanceParty, admin: testRecipient, instrumentAdmin: testRecipient, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}},
 		{"register with a multi-byte instrument id", "register", "admin=" + testRecipient + "&instrument-admin=" + testGuardianGovernanceParty + "&instrument-id=" + url.QueryEscape("é€😀"),
-			registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: "é€😀"}}},
+			registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: "é€😀"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,5 +208,103 @@ func testRegisterClaimQuery() string {
 }
 
 func testRegisterRequest() registerRequest {
-	return registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{text: testRegisterInstrumentID}}
+	return registerRequest{admin: testRecipient, instrumentAdmin: testGuardianGovernanceParty, instrumentID: instrumentIDText{instrumentIDUTF8Text: testRegisterInstrumentID}}
+}
+
+// testRegisterQueryCapBytes is the register query with every parameter at its maximum length,
+// fully percent-encoded.
+const testRegisterQueryCapBytes = 3897
+
+// percentEncodeEveryByte writes each byte of raw as %XX.
+func percentEncodeEveryByte(raw string) string {
+	var encoded strings.Builder
+	for index := 0; index < len(raw); index++ {
+		fmt.Fprintf(&encoded, "%%%02X", raw[index])
+	}
+	return encoded.String()
+}
+
+// maximalTestParty is a party id of exactly maxPartyIDBytes bytes with a hint of hintLetter.
+func maximalTestParty(hintLetter string) string {
+	party := strings.Repeat(hintLetter, maxPartyIDBytes-len(testPartyFingerprintSuffix)) + testPartyFingerprintSuffix
+	if len(party) != maxPartyIDBytes {
+		panic("maximalTestParty is not maxPartyIDBytes bytes")
+	}
+	return party
+}
+
+// maximalRegisterQuery is a valid register query of exactly testRegisterQueryCapBytes bytes.
+func maximalRegisterQuery(t *testing.T) (string, registerRequest) {
+	t.Helper()
+	guardianGovernance := maximalTestParty("g")
+	admin := maximalTestParty("a")
+	instrumentAdmin := maximalTestParty("i")
+	instrumentID := strings.Repeat("n", instrumentIDMaxBytes)
+	query := "gg=" + percentEncodeEveryByte(guardianGovernance) +
+		"&by-vaa=" + percentEncodeEveryByte("false") +
+		"&admin=" + percentEncodeEveryByte(admin) +
+		"&instrument-admin=" + percentEncodeEveryByte(instrumentAdmin) +
+		"&instrument-id=" + percentEncodeEveryByte(instrumentID)
+	require.Len(t, query, testRegisterQueryCapBytes)
+	want := registerRequest{
+		guardianGovernance: partyID(guardianGovernance),
+		admin:              partyID(admin),
+		instrumentAdmin:    partyID(instrumentAdmin),
+		instrumentID:       instrumentIDText{instrumentIDUTF8Text: instrumentID},
+	}
+	return query, want
+}
+
+func TestParseFlowRequest_RegisterQueryCap(t *testing.T) {
+	maximalQuery, maximalRequest := maximalRegisterQuery(t)
+	cases := []struct {
+		name       string
+		flow       string
+		rawQuery   string
+		wantStatus int
+	}{
+		{"register at its limit", "register", maximalQuery, 0},
+		{"register one byte over its limit", "register", maximalQuery + "&", http.StatusRequestURITooLong},
+		{"transfer one byte over the default limit", "transfer", "manager=" + strings.Repeat("a", maxFlowQueryBytes-len("manager=")+1), http.StatusRequestURITooLong},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseFlowRequest(tc.flow, tc.rawQuery)
+			if tc.wantStatus != 0 {
+				requireFlowErrorStatus(t, err, tc.wantStatus)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, maximalRequest, got)
+		})
+	}
+}
+
+func TestHandleFlows_RegisterQueryCapOverHTTP(t *testing.T) {
+	maximalQuery, maximalRequest := maximalRegisterQuery(t)
+	guardianGovernance := string(maximalRequest.guardianGovernance)
+	flowServer := newFlowTestServer(t, registerFlowFixtures(guardianGovernance, testRegisterNextID, claimedRootsTreeRootJSON(guardianGovernance)))
+	flowServer.opts.readerParties.guardianGovernance = maximalRequest.guardianGovernance
+	listener := httptest.NewUnstartedServer(flowServer)
+	listener.Config = newHTTPServer(flowServer)
+	listener.Start()
+	t.Cleanup(listener.Close)
+	cases := []struct {
+		name       string
+		rawQuery   string
+		wantStatus int
+	}{
+		{"at the register limit", maximalQuery, http.StatusOK},
+		{"one byte over the register limit", maximalQuery + "&", http.StatusRequestURITooLong},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := listener.Client().Get(listener.URL + "/v1/flows/register?" + tc.rawQuery)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStatus, response.StatusCode, string(body))
+		})
+	}
 }

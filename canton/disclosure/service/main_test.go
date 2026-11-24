@@ -523,9 +523,12 @@ func jsonArray(items ...string) string {
 	return "[" + strings.Join(items, ",") + "]"
 }
 
+// testNttManagerID is the NttManager fixture managerId, as the JSON Ledger API writes a Daml Int.
+const testNttManagerID = "5"
+
 func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAddress string, transceiverEmitterID int, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		`{"admin":%q,"guardianGovernance":%q,"nttCustody":%q,"reserveCustodian":%q,"namespace":%q,"managerAddress":{"tag":"NttManagerAddress","value":%q},"managerId":"`+testNttManagerID+`","transceiverEmitterId":%d,"instrumentId":{"admin":%q,"id":%q},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
 		admin, gg, nttCustody, reserveCustodian, namespace, managerAddress, transceiverEmitterID, instrumentAdmin, instrumentID, tokenConfig, factoryTag, factoryCid,
 	)
 }
@@ -533,7 +536,7 @@ func nttManagerArg(admin, gg, nttCustody, reserveCustodian, namespace, managerAd
 // nttManagerArgBeforeNtt040 is an ntt 0.3.x payload: no nttCustody and no reserveCustodian.
 func nttManagerArgBeforeNtt040(admin, gg, managerAddress, tokenConfig, factoryTag, factoryCid string) string {
 	return fmt.Sprintf(
-		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":{"tag":"NttManagerAddress","value":%q},"transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
+		`{"admin":%q,"guardianGovernance":%q,"namespace":"ns","managerAddress":{"tag":"NttManagerAddress","value":%q},"managerId":"`+testNttManagerID+`","transceiverEmitterId":7,"instrumentId":{"admin":%q,"id":"instrument-1"},"tokenConfig":%q,"factory":{"tag":%q,"value":%q}}`,
 		admin, gg, managerAddress, gg, tokenConfig, factoryTag, factoryCid,
 	)
 }
@@ -850,7 +853,7 @@ func TestParseHex64(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, manager.hex)
+			assert.Equal(t, tc.want, manager.managerAddressHexText)
 		})
 	}
 }
@@ -884,22 +887,22 @@ func TestParseByVAA(t *testing.T) {
 
 func TestFindManager(t *testing.T) {
 	managerAt := func(addr string) decodedEntry[daNttManager] {
-		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: nttManagerAddressValue{hex: addr}}}
+		return decodedEntry[daNttManager]{entry: acsEntry{ContractID: "cid-" + addr}, value: daNttManager{ManagerAddress: nttManagerAddressValue{nttManagerAddressHexText: addr}}}
 	}
 	addrA := strings.Repeat("aa", 32)
 	addrB := strings.Repeat("bb", 32)
 
 	t.Run("found", func(t *testing.T) {
-		match, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrB)}, managerAddressHex{hex: addrA})
+		match, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrB)}, managerAddressHex{managerAddressHexText: addrA})
 		require.NoError(t, err)
 		assert.Equal(t, "cid-"+addrA, match.entry.ContractID)
 	})
 	t.Run("not found is 404", func(t *testing.T) {
-		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA)}, managerAddressHex{hex: addrB})
+		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA)}, managerAddressHex{managerAddressHexText: addrB})
 		requireFlowErrorStatus(t, err, http.StatusNotFound)
 	})
 	t.Run("duplicate is 500", func(t *testing.T) {
-		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrA)}, managerAddressHex{hex: addrA})
+		_, err := findManager([]decodedEntry[daNttManager]{managerAt(addrA), managerAt(addrA)}, managerAddressHex{managerAddressHexText: addrA})
 		requireFlowErrorStatus(t, err, http.StatusInternalServerError)
 	})
 }
@@ -934,9 +937,9 @@ func TestFindGuardianAnchor(t *testing.T) {
 
 func TestCoveringReplayNode(t *testing.T) {
 	replayNode := func(consumer, namespace, prefix string) decodedEntry[daReplayNode] {
-		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: digestNibblePrefixValue{hex: prefix}}}
+		return decodedEntry[daReplayNode]{entry: acsEntry{ContractID: "cid-" + prefix}, value: daReplayNode{Consumer: partyID(consumer), Namespace: namespace, Prefix: digestNibblePrefixValue{digestNibblePrefixHexText: prefix}}}
 	}
-	digest := vaaDigestHex{hex: strings.Repeat("cd", 32)}
+	digest := vaaDigestHex{vaaDigestHexText: strings.Repeat("cd", 32)}
 
 	t.Run("found by prefix", func(t *testing.T) {
 		match, err := coveringReplayNode([]decodedEntry[daReplayNode]{replayNode("gg1", "ns1", "cd")}, "gg1", "ns1", digest)
@@ -956,9 +959,9 @@ func TestCoveringReplayNode(t *testing.T) {
 
 func TestFindLockedLedger(t *testing.T) {
 	addr := strings.Repeat("aa", 32)
-	manager := managerAddressHex{hex: addr}
+	manager := managerAddressHex{managerAddressHexText: addr}
 	ledgerOfManager := func() decodedEntry[daLockedLedger] {
-		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: nttManagerAddressValue{hex: addr}}}
+		return decodedEntry[daLockedLedger]{entry: acsEntry{ContractID: "cid-" + addr}, value: daLockedLedger{ManagerAddress: nttManagerAddressValue{nttManagerAddressHexText: addr}}}
 	}
 	t.Run("found", func(t *testing.T) {
 		match, err := findLockedLedger([]decodedEntry[daLockedLedger]{ledgerOfManager()}, manager)
@@ -1049,7 +1052,7 @@ func TestFindPreapproval(t *testing.T) {
 }
 
 func TestFindAdminTransferProposal(t *testing.T) {
-	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: nttManagerAddressValue{hex: strings.Repeat("aa", 32)}}
+	manager := daNttManager{Admin: "admin::1", GuardianGovernance: "gg::1", ManagerAddress: nttManagerAddressValue{nttManagerAddressHexText: strings.Repeat("aa", 32)}}
 	proposal := func(contractID string, admin, newAdmin partyID, managerAddress nttManagerAddressValue) decodedEntry[daAdminTransferProposal] {
 		return decodedEntry[daAdminTransferProposal]{
 			entry: acsEntry{ContractID: contractID},
@@ -1067,7 +1070,7 @@ func TestFindAdminTransferProposal(t *testing.T) {
 		{"exact", []decodedEntry[daAdminTransferProposal]{exact}, true, "prop-exact", 0},
 		{"admin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress)}, false, "", 0},
 		{"newAdmin wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, "stranger::1", manager.ManagerAddress)}, false, "", 0},
-		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, nttManagerAddressValue{hex: strings.Repeat("bb", 32)})}, false, "", 0},
+		{"managerAddress wrong", []decodedEntry[daAdminTransferProposal]{proposal("p", manager.Admin, manager.GuardianGovernance, nttManagerAddressValue{nttManagerAddressHexText: strings.Repeat("bb", 32)})}, false, "", 0},
 		{"stranger plus real", []decodedEntry[daAdminTransferProposal]{proposal("p", "stranger::1", manager.GuardianGovernance, manager.ManagerAddress), exact}, true, "prop-exact", 0},
 		{"none", nil, false, "", 0},
 		{"two exact is 500", []decodedEntry[daAdminTransferProposal]{exact, exact}, false, "", http.StatusInternalServerError},
@@ -1499,8 +1502,8 @@ func claimedRootsTreeRootJSON(gg string) string {
 
 // registerClaimResponse decodes the register-only fields of a flow response.
 type registerClaimResponse struct {
-	ClaimNamespace *string      `json:"claimNamespace"`
-	ManagerID      *json.Number `json:"managerId"`
+	ClaimNamespace *string `json:"claimNamespace"`
+	ManagerID      *string `json:"managerId"`
 }
 
 func decodeRegisterClaimResponse(t *testing.T, rr *httptest.ResponseRecorder) registerClaimResponse {
@@ -1524,7 +1527,18 @@ func TestHandleFlows_Register_Basic(t *testing.T) {
 	require.NotNil(t, claim.ClaimNamespace)
 	require.NotNil(t, claim.ManagerID)
 	assert.Equal(t, testRegisterClaimNamespace, *claim.ClaimNamespace)
-	assert.Equal(t, json.Number(testRegisterNextID), *claim.ManagerID)
+	assert.Equal(t, testRegisterNextID, *claim.ManagerID)
+	assert.Equal(t, testRegisterNextID, decodeManagerIDJSONValue(t, rr.Body.Bytes()))
+}
+
+// decodeManagerIDJSONValue is the managerId of a JSON object, decoded without a target type.
+func decodeManagerIDJSONValue(t *testing.T, body []byte) any {
+	t.Helper()
+	var object map[string]any
+	require.NoError(t, json.Unmarshal(body, &object))
+	managerIDValue, present := object["managerId"]
+	require.True(t, present, string(body))
+	return managerIDValue
 }
 
 func TestHandleFlows_Register_ByVaa(t *testing.T) {
@@ -1547,16 +1561,16 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 	derivedNamespace, err := parseReplayNamespace(testRegisterClaimNamespace)
 	require.NoError(t, err)
 	pairDigest := claimedRootDigest(gg, derivedNamespace)
-	coveringNibble := pairDigest.hex[:1]
+	coveringNibble := pairDigest.claimedRootDigestHexText[:1]
 	splitChildren := make([]string, 0, 16)
 	for _, nibble := range "0123456789abcdef" {
 		splitChildren = append(splitChildren, claimedRootsNodeJSON("child-"+string(nibble), gg, gg, claimedRootsNamespace, string(nibble)))
 	}
-	nextIDFour, err := parseNttManagerID("4")
+	nextIDFour, err := parseNttManagerID("4", "NttGovernance nextId")
 	require.NoError(t, err)
 	namespaceOfNextIDFour := nttNamespace(gg, testRegisterRequest().instrumentID, testRecipient, nextIDFour)
 	require.NotEqual(t, derivedNamespace, namespaceOfNextIDFour)
-	nibbleOfNextIDFour := claimedRootDigest(gg, namespaceOfNextIDFour).hex[:1]
+	nibbleOfNextIDFour := claimedRootDigest(gg, namespaceOfNextIDFour).claimedRootDigestHexText[:1]
 	anchorRoles := []string{roleNttGovernance, roleEmitterRegistry, roleReplayRootRegistry, roleCoreState}
 	cases := []struct {
 		name                 string
@@ -1564,7 +1578,7 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 		fixtures             flowFixtures
 		wantStatus           int
 		wantClaimedRootsNode string
-		wantManagerID        json.Number
+		wantManagerID        string
 	}{
 		{
 			name:                 "root of the tree, gg given",
@@ -1660,6 +1674,7 @@ func TestHandleFlows_Register_ClaimedRootsNode(t *testing.T) {
 			claim := decodeRegisterClaimResponse(t, rr)
 			require.NotNil(t, claim.ManagerID)
 			assert.Equal(t, tc.wantManagerID, *claim.ManagerID)
+			assert.Equal(t, tc.wantManagerID, decodeManagerIDJSONValue(t, rr.Body.Bytes()))
 		})
 	}
 }
@@ -1876,6 +1891,54 @@ func TestHandleManagers(t *testing.T) {
 	assert.Equal(t, "otherCoin", got.Managers[1].InstrumentId.Id)
 	assert.Equal(t, partyID(b.admin), got.Managers[0].ReserveCustodian)
 	assert.Equal(t, partyID(b.nttCustody), got.Managers[1].ReserveCustodian)
+	var gotJSONValues struct {
+		Managers []json.RawMessage `json:"managers"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &gotJSONValues))
+	require.Len(t, gotJSONValues.Managers, 2)
+	for _, managerJSON := range gotJSONValues.Managers {
+		assert.Equal(t, testNttManagerID, decodeManagerIDJSONValue(t, managerJSON))
+	}
+}
+
+func TestHandleManagers_ManagerIDEncoding(t *testing.T) {
+	b := newBaseFixtures(tokenConfigLockUnlock)
+	const fixtureManagerIDField = `"managerId":"` + testNttManagerID + `"`
+	require.Contains(t, b.managerJSON(), fixtureManagerIDField)
+	cases := []struct {
+		name                string
+		managerIDField      string
+		wantStatus          int
+		wantManagerIDString string
+	}{
+		{"canonical string", `"managerId":"7"`, http.StatusOK, "7"},
+		{"canonical number", `"managerId":7`, http.StatusOK, "7"},
+		{"2^63-1", `"managerId":"9223372036854775807"`, http.StatusOK, "9223372036854775807"},
+		{"leading zero", `"managerId":"07"`, http.StatusInternalServerError, ""},
+		{"negative", `"managerId":"-1"`, http.StatusInternalServerError, ""},
+		{"2^63", `"managerId":"9223372036854775808"`, http.StatusInternalServerError, ""},
+		{"fractional", `"managerId":"1.5"`, http.StatusInternalServerError, ""},
+		{"absent", `"managerIdAbsent":"7"`, http.StatusInternalServerError, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			managerJSON := strings.Replace(b.managerJSON(), fixtureManagerIDField, tc.managerIDField, 1)
+			srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(managerJSON)})
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+			if tc.wantStatus != http.StatusOK {
+				assert.NotContains(t, rr.Body.String(), "managers")
+				return
+			}
+			var got struct {
+				Managers []json.RawMessage `json:"managers"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+			require.Len(t, got.Managers, 1)
+			assert.Equal(t, tc.wantManagerIDString, decodeManagerIDJSONValue(t, got.Managers[0]))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

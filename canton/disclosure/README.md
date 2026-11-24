@@ -63,7 +63,9 @@ fill the cap.
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
   `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
   parameter of a flow. The response gives `managerAddress` as 64 lowercase
-  hex characters.
+  hex characters. It gives `managerId` as a JSON string of the decimal
+  value, as the JSON Ledger API gives a Daml `Int`. A `managerId` that is
+  not an integer from 0 to 2^63-1 gives 500 for the full list.
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
@@ -86,7 +88,10 @@ splits the value at the first `::`, as Canton does. The fingerprint has 64
 lowercase hex characters. The
 service rejects a different value with 400 before it reads the ledger. Give each parameter one time only. The service
 rejects a repeated parameter and a parameter that the flow does not use. The
-query string is 1024 bytes or less.
+query string of `register` is 3897 bytes or less. The query string of each
+other flow is 1024 bytes or less. The `register` limit holds each parameter
+value at its maximum length with each byte percent-encoded. The parameter
+names count without encoding.
 
 On the Ledger API, `ntt` 0.6.x and core 0.12.x encode each byte value as a
 variant: `{"tag": "<type>", "value": "<lowercase hex>"}`. The service reads
@@ -103,8 +108,17 @@ can see, for example a proposal or a preapproval. The client supplies them.
 
 `admin` is the registering admin. `instrument-admin` and `instrument-id` are
 the `admin` and `id` of the `InstrumentId` that the registration bridges.
-`instrument-id` has 1 to 512 bytes of valid UTF-8. A `register` request
-without one of these three parameters gives 400.
+`instrument-id` has 1 to 512 bytes of valid UTF-8. The service sets this
+limit. It is not a CIP-56 limit. A `register` request without one of these three
+parameters gives 400.
+
+With `by-vaa=true`, `instrument-admin` must be `gg`, because
+`RegisterManagerByVaa` sets the `InstrumentId` admin to `gg`. A different
+`instrument-admin` gives 400. `RegisterManagerByVaa` also sets
+`instrumentId.id` from the VAA nonce. The service does not check
+`instrument-id` against the VAA. A burn/mint registration with
+`RegisterManager` must also give `instrument-admin=gg`. The request does not
+have the token configuration, so the service does not check this case.
 
 The service reads `nextId` from the `NttGovernance` root at the offset of the
 response. A `nextId` that is not an integer from 0 to 2^63-1 gives 500. The
@@ -117,7 +131,8 @@ Two covering nodes give 500: the `gg` has two claimed-roots trees. The
 `missing` array of `register` is always empty.
 
 The `register` response also has `claimNamespace` and `managerId`: the
-namespace and the `nextId` that the service used. Other flows do not have these
+namespace and the `nextId` that the service used. `managerId` is a JSON
+string of the decimal value, as the JSON Ledger API gives a Daml `Int`. Other flows do not have these
 fields. Compare them with the registration that you submit. If a different
 registration lands first, it archives the `NttGovernance` root of the response
 and changes `nextId`. The ledger then rejects your submission. Send the
@@ -249,7 +264,7 @@ contract in `missing`.
 | Upstream readiness calls                                      | 1 in 2 s, with a 3 s timeout                                                                                                                                                                                                                                                                                       |
 | Time for one request                                          | 60 s                                                                                                                                                                                                                                                                                                               |
 | Bytes of blobs and ids in one flow response or choice context | 4 MiB                                                                                                                                                                                                                                                                                                              |
-| Query string of a flow or a registry route                    | 1024 bytes                                                                                                                                                                                                                                                                                                         |
+| Query string of a flow or a registry route                    | 1024 bytes; 3897 bytes for `register`                                                                                                                                                                                                                                                                              |
 | Request body of a registry route                              | 64 KiB                                                                                                                                                                                                                                                                                                             |
 | Matching contracts for one selector                           | 8                                                                                                                                                                                                                                                                                                                  |
 | Instruments in one registry page                              | 100                                                                                                                                                                                                                                                                                                                |

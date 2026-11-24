@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -80,7 +79,7 @@ func TestCheckFlowResponseInvariants(t *testing.T) {
 		}, "register response has no managerId"},
 		{"transfer with claimNamespace", func(response *flowResponse) { response.ClaimNamespace = "ntt:ab" }, "transfer response has a claimNamespace"},
 		{"transfer with managerId", func(response *flowResponse) {
-			managerID := json.Number("0")
+			managerID := "0"
 			response.ManagerID = &managerID
 		}, "transfer response has a managerId"},
 	}
@@ -101,7 +100,7 @@ func TestCheckFlowResponseInvariants(t *testing.T) {
 }
 
 func makeValidRegisterResponse(response *flowResponse) {
-	managerID := json.Number("0")
+	managerID := "0"
 	response.Flow = "register"
 	response.Missing = []flowMissingEntry{}
 	response.ClaimNamespace = "ntt:ab"

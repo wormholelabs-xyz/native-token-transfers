@@ -19,9 +19,9 @@ const (
 // replayNamespace is a replay namespace that ClaimReplayRoot accepts: valid UTF-8 of 1 to 128
 // characters, other than claimedRootsNamespace. Only parseReplayNamespace builds one. The zero
 // value is an absent namespace.
-type replayNamespace struct{ text string }
+type replayNamespace struct{ replayNamespaceText string }
 
-func (namespace replayNamespace) isPresent() bool { return namespace.text != "" }
+func (namespace replayNamespace) isPresent() bool { return namespace.replayNamespaceText != "" }
 
 // parseReplayNamespace counts characters as Daml T.length does: Unicode code points.
 func parseReplayNamespace(raw string) (replayNamespace, error) {
@@ -36,7 +36,7 @@ func parseReplayNamespace(raw string) (replayNamespace, error) {
 	if raw == claimedRootsNamespace {
 		return replayNamespace{}, newFlowError(http.StatusBadRequest, "namespace is reserved for the core")
 	}
-	return replayNamespace{text: raw}, nil
+	return replayNamespace{replayNamespaceText: raw}, nil
 }
 
 // coreLengthPrefixed is Daml lenPrefixed: a 4-byte big-endian byte count, then the bytes.
@@ -50,9 +50,9 @@ func coreLengthPrefixed(payload []byte) []byte {
 }
 
 // claimedRootDigestHex is 64 lowercase hex characters. Only claimedRootDigest builds one.
-type claimedRootDigestHex struct{ hex string }
+type claimedRootDigestHex struct{ claimedRootDigestHexText string }
 
-func (digest claimedRootDigestHex) String() string { return digest.hex }
+func (digest claimedRootDigestHex) String() string { return digest.claimedRootDigestHexText }
 
 // claimedRootDigest is core claimedRootDigest:
 // keccak256(utf8(tag) ‖ lp(utf8(consumer)) ‖ lp(utf8(namespace))).
@@ -62,11 +62,11 @@ func claimedRootDigest(consumer partyID, namespace replayNamespace) claimedRootD
 	}
 	preimage := []byte(claimedRootDomainTag)
 	preimage = append(preimage, coreLengthPrefixed([]byte(consumer))...)
-	preimage = append(preimage, coreLengthPrefixed([]byte(namespace.text))...)
+	preimage = append(preimage, coreLengthPrefixed([]byte(namespace.replayNamespaceText))...)
 	digest := keccak256Digest(preimage)
 	digestHex := hex.EncodeToString(digest[:])
 	if len(digestHex) != 64 {
 		panic("disclosure-service: claimedRootDigest is not 64 hex characters")
 	}
-	return claimedRootDigestHex{hex: digestHex}
+	return claimedRootDigestHex{claimedRootDigestHexText: digestHex}
 }

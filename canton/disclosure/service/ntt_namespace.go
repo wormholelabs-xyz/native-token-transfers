@@ -25,9 +25,10 @@ const (
 	_ = uint(nttNamespaceCharacters - replayNamespaceMinLength)
 )
 
-// instrumentIDText is a CIP-56 InstrumentId.id: valid UTF-8 of 1 to instrumentIDMaxBytes bytes.
+// instrumentIDText is the id of a CIP-56 InstrumentId, valid UTF-8 of 1 to instrumentIDMaxBytes
+// bytes (the service bound maxRegistryIdentifierLength).
 // Only parseInstrumentIDText builds one.
-type instrumentIDText struct{ text string }
+type instrumentIDText struct{ instrumentIDUTF8Text string }
 
 func parseInstrumentIDText(raw string) (instrumentIDText, error) {
 	if !utf8.ValidString(raw) {
@@ -37,7 +38,7 @@ func parseInstrumentIDText(raw string) (instrumentIDText, error) {
 		return instrumentIDText{}, newFlowError(http.StatusBadRequest, "instrument-id has %d bytes, expected %d to %d",
 			len(raw), instrumentIDMinBytes, instrumentIDMaxBytes)
 	}
-	return instrumentIDText{text: raw}, nil
+	return instrumentIDText{instrumentIDUTF8Text: raw}, nil
 }
 
 // nttManagerID is a Daml Int managerId: 0 to 2^63-1. Only parseNttManagerID builds one.
@@ -45,15 +46,22 @@ type nttManagerID struct{ idNumber uint64 }
 
 func (managerID nttManagerID) String() string { return strconv.FormatUint(managerID.idNumber, 10) }
 
-// parseNttManagerID reads NttGovernance.nextId. It accepts only the canonical decimal form. A
-// ledger value outside 0 to 2^63-1 is a 500.
-func parseNttManagerID(rawNextID json.Number) (nttManagerID, error) {
-	parsed, err := strconv.ParseInt(string(rawNextID), 10, 64)
-	if err != nil || parsed < 0 || strconv.FormatInt(parsed, 10) != string(rawNextID) {
-		return nttManagerID{}, newFlowError(http.StatusInternalServerError,
-			"NttGovernance nextId %q is not a decimal integer from 0 to %s", truncateForError(string(rawNextID)), nttManagerIDMaxDecimal)
+// parseNttManagerID reads a ledger managerId, for example NttGovernance.nextId. It accepts only
+// the canonical decimal form. A ledger value outside 0 to 2^63-1 is a 500 that names fieldLabel.
+func parseNttManagerID(rawManagerID json.Number, fieldLabel string) (nttManagerID, error) {
+	if fieldLabel == "" {
+		panic("disclosure-service: parseNttManagerID without a field label")
 	}
-	return nttManagerID{idNumber: uint64(parsed)}, nil
+	parsed, err := strconv.ParseInt(string(rawManagerID), 10, 64)
+	if err != nil || parsed < 0 || strconv.FormatInt(parsed, 10) != string(rawManagerID) {
+		return nttManagerID{}, newFlowError(http.StatusInternalServerError,
+			"%s %q is not a decimal integer from 0 to %s", fieldLabel, truncateForError(string(rawManagerID)), nttManagerIDMaxDecimal)
+	}
+	managerID := nttManagerID{idNumber: uint64(parsed)}
+	if managerID.String() != string(rawManagerID) {
+		panic("disclosure-service: parseNttManagerID does not round-trip")
+	}
+	return managerID, nil
 }
 
 // nttNamespace is Wormhole.Ntt.Manager.nttNamespaceFromText:
@@ -63,12 +71,12 @@ func nttNamespace(instrumentAdmin partyID, instrumentID instrumentIDText, admin 
 	if managerID.idNumber > uint64(1<<63-1) {
 		panic("disclosure-service: nttNamespace managerId exceeds 2^63-1")
 	}
-	if instrumentID.text == "" {
+	if instrumentID.instrumentIDUTF8Text == "" {
 		panic("disclosure-service: nttNamespace of an unparsed instrument id")
 	}
 	preimage := []byte(nttNamespaceDomainTag)
 	preimage = append(preimage, coreLengthPrefixed([]byte(instrumentAdmin))...)
-	preimage = append(preimage, coreLengthPrefixed([]byte(instrumentID.text))...)
+	preimage = append(preimage, coreLengthPrefixed([]byte(instrumentID.instrumentIDUTF8Text))...)
 	preimage = append(preimage, coreLengthPrefixed([]byte(admin))...)
 	preimage = binary.BigEndian.AppendUint64(preimage, managerID.idNumber)
 	digest := keccak256Digest(preimage)

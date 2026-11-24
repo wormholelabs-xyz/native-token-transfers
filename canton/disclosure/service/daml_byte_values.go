@@ -48,27 +48,27 @@ func isLowercaseHex(text string) bool {
 }
 
 // nttManagerAddressValue is an NttManagerAddress: 64 lowercase hex characters.
-type nttManagerAddressValue struct{ hex string }
+type nttManagerAddressValue struct{ nttManagerAddressHexText string }
 
 func (address *nttManagerAddressValue) UnmarshalJSON(data []byte) error {
 	hexText, err := decodeDamlByteValue(data, "NttManagerAddress", 64, 64)
 	if err != nil {
 		return err
 	}
-	address.hex = hexText
+	address.nttManagerAddressHexText = hexText
 	return nil
 }
 
-func (address nttManagerAddressValue) String() string { return address.hex }
+func (address nttManagerAddressValue) String() string { return address.nttManagerAddressHexText }
 
 // digestNibblePrefixValue is a DigestNibblePrefix: 0 to 63 lowercase hex characters.
-type digestNibblePrefixValue struct{ hex string }
+type digestNibblePrefixValue struct{ digestNibblePrefixHexText string }
 
 func (prefix *digestNibblePrefixValue) UnmarshalJSON(data []byte) error {
 	hexText, err := decodeDamlByteValue(data, "DigestNibblePrefix", 0, 63)
 	if err != nil {
 		return err
 	}
-	prefix.hex = hexText
+	prefix.digestNibblePrefixHexText = hexText
 	return nil
 }

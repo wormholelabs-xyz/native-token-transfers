@@ -63,7 +63,7 @@ func TestClaimedRootDigestVectors(t *testing.T) {
 		t.Run(tc.namespace, func(t *testing.T) {
 			namespace, err := parseReplayNamespace(tc.namespace)
 			require.NoError(t, err)
-			assert.Equal(t, tc.expectedDigest, claimedRootDigest(tc.consumer, namespace).hex)
+			assert.Equal(t, tc.expectedDigest, claimedRootDigest(tc.consumer, namespace).claimedRootDigestHexText)
 		})
 	}
 }
@@ -89,7 +89,7 @@ func TestParseReplayNamespace(t *testing.T) {
 			namespace, err := parseReplayNamespace(tc.rawNamespace)
 			if tc.expectedError == "" {
 				require.NoError(t, err)
-				assert.Equal(t, tc.rawNamespace, namespace.text)
+				assert.Equal(t, tc.rawNamespace, namespace.replayNamespaceText)
 				return
 			}
 			require.Error(t, err)
