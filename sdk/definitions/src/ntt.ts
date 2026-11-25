@@ -90,6 +90,15 @@ export namespace Ntt {
     wrapNative?: boolean;
   };
 
+  export type RedeemOptions = {
+    /**
+     * The recipient as a native address, for a platform whose attestation holds only a hash of it
+     * (Canton: the recipient party). Platforms that read the recipient from the attestation
+     * ignore it.
+     */
+    recipient?: string;
+  };
+
   // TODO: what are the set of attestation types for Ntt?
   // can we know this ahead of time or does it need to be
   // flexible enough for folks to add their own somehow?
@@ -267,12 +276,14 @@ export interface Ntt<N extends Network, C extends Chain> {
   /**
    * redeem redeems a set of Attestations to the corresponding transceivers on the destination chain
    * @param attestations The attestations to redeem, the length should be equal to the number of transceivers
+   * @param options Options of a platform that needs more than the attestation (Canton: the recipient)
    *
    * TODO: replace with Map<transceiver type, Attestation>
    */
   redeem(
     attestations: Ntt.Attestation[],
-    payer?: AccountAddress<C>
+    payer?: AccountAddress<C>,
+    options?: Ntt.RedeemOptions
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
 
   /** Get the address for the account that custodies locked tokens  */

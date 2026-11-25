@@ -166,8 +166,11 @@ export class NttExecutorRoute<N extends Network>
     return NttRoute.resolveSupportedNetworks(this.config.ntt);
   }
 
+  /** The configured chains, without Canton: no executor relays to or from Canton */
   static supportedChains(network: Network): Chain[] {
-    return NttRoute.resolveSupportedChains(this.config.ntt, network);
+    return NttRoute.resolveSupportedChains(this.config.ntt, network).filter(
+      (chain) => !NttRoute.isCanton(chain)
+    );
   }
 
   static async supportedSourceTokens(
@@ -206,6 +209,19 @@ export class NttExecutorRoute<N extends Network>
     params: Tp
   ): Promise<Vr> {
     const options = params.options ?? this.getDefaultOptions();
+
+    const cantonChain = [request.fromChain.chain, request.toChain.chain].find(
+      (chain) => NttRoute.isCanton(chain)
+    );
+    if (cantonChain) {
+      return {
+        valid: false,
+        error: new Error(
+          `The NTT executor route does not serve ${cantonChain}: no executor relays to or from Canton. Use the manual route (nttManualRoute)`
+        ),
+        params,
+      };
+    }
 
     if (
       options.nativeGas !== undefined &&
