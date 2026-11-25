@@ -65,3 +65,36 @@ Use the frozen lockfile only:
 4. Update the override and the `devDependencies` entry in the root `package.json`.
 5. Update the `bun.lock` entries for the override and for `sdk-base`.
 6. Update the values in this file and in the `Vendor provenance` workflow.
+
+## wormhole-foundation-sdk-canton-6.1.6.tgz and wormhole-foundation-sdk-canton-core-6.1.6.tgz
+
+These tarballs are `@wormhole-foundation/sdk-canton` (the Canton platform) and `@wormhole-foundation/sdk-canton-core` (the core protocol for Canton), packed as version 6.1.6.
+The upstream SDK does not include them.
+The root `package.json` has an `overrides` entry and a `devDependencies` entry for each tarball, as for `sdk-base`.
+
+### Provenance
+
+| Item                   | `sdk-canton`                                                                               | `sdk-canton-core`                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| Source repository      | `wormholelabs-xyz/wormhole-sdk-ts`, branch `canton/sdk` (based on tag `6.1.6`)             | The same                                                                                   |
+| Source commit          | `4714c9ac8f2155953897ca585a2035625771c627`                                                 | The same                                                                                   |
+| Source directory       | `platforms/canton`                                                                         | `platforms/canton/protocols/core`                                                          |
+| Packed version         | `6.1.6`                                                                                    | `6.1.6`                                                                                    |
+| Committed file         | tarball sha256: `463d97336531eb8e2ea67f0abf3e4fd13e3abc44af57c25df6a9602c28124305`         | tarball sha256: `28d9ee7faf7ce680dc23e33f03771f8c4b92e74340d52be4ae9fefb3b6134962`         |
+| Content after `gunzip` | tar sha256: `e0cbd434c362fb2799356ce115bfbcec83a202bdb5de9f4d80e0142d88d9041a`             | tar sha256: `37cbcbfe0f0d601bcd51d4fd69a2451118686fef4710fabb9392039411adb2be`             |
+| SHA-512 (base64)       | `13qdAv0KcWC57eUuElPIZlbQ3PCj1/WMls/Uvurc/coB2y1fFNkIzLgZnplcV5Qhf+VNVa7lEKKlOQCBVHio9A==` | `SoEP8viR+lgMOBomjIYSI71sN51i4hCuyD3xVFIpU/3C3YDYe//Bf6EtPovQlWFh/c/5loNgxBtQJafY7STYjw==` |
+| Build tools            | Node.js 26.13.1, npm 12.2.3                                                                | The same                                                                                   |
+
+Each package has no `install`, `preinstall`, `postinstall` or `prepare` script.
+The source commit is on a branch that is not merged. The `Vendor provenance` workflow does not build these two tarballs.
+
+### Rebuild procedure
+
+Do these steps in a temporary directory outside this repository.
+
+1. Clone the source repository and check out the source commit. Run `npm ci`.
+2. Run `npm run build` at the repository root.
+3. For each package, copy `package.json` and `dist` from its source directory to an empty directory.
+4. In each copied `package.json`, replace each `"1.20.0"` with `"6.1.6"`. This sets the package version and the versions of the SDK dependencies.
+5. Run `npm pack` in each directory.
+6. Compare the sha256 of each tarball with the table.

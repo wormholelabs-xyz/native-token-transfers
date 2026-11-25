@@ -1,0 +1,4 @@
+# Its own multi-package root, so dpm does not resolve this test project through
+# canton/multi-package.yaml. The DARs it data-depends on are built there first.
+packages:
+  - .

@@ -1,0 +1,26 @@
+# Setup script of the SDK integration test (../sandbox.test.ts): one core, one NTT governance
+# root, and a burn/mint and a lock/unlock deployment under fresh parties on a live ledger, with
+# the holdings and preapprovals the test's transfers and redeems need. Test-only; never uploaded
+# outside a development sandbox.
+sdk-version: 3.7.3
+name: ntt-sdk-integration-setup
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+build-options:
+  - --target=2.3
+  - -Wno-template-interface-depends-on-daml-script
+data-dependencies:
+  - ../../../../dars/wormhole-core-0.12.3.dar
+  - ../../../../dars/token-cip0056-0.2.0.dar
+  - ../../../../ntt/.daml/dist/ntt-0.7.0.dar
+  - ../../../../test/.daml/dist/ntt-test-0.1.0.dar
+  - ../../../../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../../../../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../../../../dars/splice-api-token-allocation-v1-1.0.0.dar
+  - ../../../../dars/splice-api-token-allocation-instruction-v1-1.0.0.dar
+  - ../../../../dars/splice-api-token-burn-mint-v1-1.0.0.dar
+  - ../../../../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
