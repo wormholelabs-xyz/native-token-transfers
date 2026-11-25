@@ -2,6 +2,10 @@
 import { randomInt } from "node:crypto";
 import * as readline from "node:readline/promises";
 import type { Argv } from "yargs";
+import {
+  CantonLedgerClient,
+  oauthClientCredentialsTokenProvider,
+} from "@wormhole-foundation/sdk-canton";
 
 import { colors } from "../colors.js";
 import {
@@ -9,10 +13,7 @@ import {
   formatRawAmount,
   parseHumanAmount,
 } from "./amounts.js";
-import { recipientBinding } from "./binding.js";
-import { cantonRedeem, cantonSend } from "./canton-ops.js";
-import { HttpDisclosureServiceClient } from "./canton/disclosure-client.js";
-import { CantonLedgerClient } from "./canton/ledger-client.js";
+import { cantonRedeem, cantonSend, type CantonClients } from "./canton-ops.js";
 import {
   CHAIN_NAMES,
   loadRegistry,
@@ -28,7 +29,11 @@ import {
 } from "./confirmation.js";
 import { buildEthersSigner, deriveEthereumAddress } from "./evm.js";
 import { evmRedeemWithSigner, evmSendWithSigner } from "./evm-send.js";
-import { resolveSendRecipient, type RecipientDefaults } from "./recipient.js";
+import {
+  partyAddressFor,
+  resolveSendRecipient,
+  type RecipientDefaults,
+} from "./recipient.js";
 import {
   chainLegIdentity,
   checkTransferVaaMatchesDeployment,
@@ -80,8 +85,8 @@ function loadAndPrintRegistry(explicitPath: string | undefined): {
 
 function buildCantonClients(
   registry: PrivateRegistry,
-  userPartyId?: CantonPartyId
-) {
+  partyId?: CantonPartyId
+): CantonClients {
   const participant = registry.canton.participant;
   if (!participant)
     throw new Error(
@@ -90,15 +95,17 @@ function buildCantonClients(
   const oauthClientSecret = process.env.CANTON_OAUTH_CLIENT_SECRET;
   if (!oauthClientSecret)
     throw new Error("CANTON_OAUTH_CLIENT_SECRET env var not set");
+  // The token acts as the user only. The flow service URL travels in the SDK config.
   return {
     ledger: new CantonLedgerClient({
-      ...participant,
-      userPartyId: userPartyId ?? participant.userPartyId,
-      oauthClientSecret,
+      baseUrl: participant.jsonApiUrl,
+      tokenProvider: oauthClientCredentialsTokenProvider({
+        tokenUrl: participant.oauthTokenUrl,
+        clientId: participant.oauthClientId,
+        clientSecret: oauthClientSecret,
+      }),
     }),
-    disclosure: new HttpDisclosureServiceClient(
-      registry.canton.disclosureServiceUrl
-    ),
+    partyId: partyId ?? participant.userPartyId,
   };
 }
 
@@ -217,16 +224,14 @@ async function runSend(sendArguments: SendArguments): Promise<void> {
     console.log(
       `  transfer nonce: ${transferNonce} (pass --transfer-nonce ${transferNonce} to retry this exact transfer)`
     );
-    const { ledger, disclosure } = buildCantonClients(registry);
     const result = await cantonSend(
-      ledger,
-      disclosure,
+      buildCantonClients(registry),
       { ...sendParameters, transferNonce },
       options
     );
     if (result)
       console.log(
-        `sent: command ${result.commandId}, sequence ${result.sequence ?? "(not readable; find it from the command id)"}`
+        `sent: command ${result.commandId}, update ${result.updateId}, sequence ${result.sequence ?? "(not readable; find it from the command id)"}`
       );
     sequence = result?.sequence;
   } else if (sourceChain === "Ethereum") {
@@ -290,7 +295,7 @@ async function runRedeem(redeemArguments: RedeemArguments): Promise<void> {
       );
     cantonRecipientPartyId = parseCantonPartyId(partyText);
     if (
-      recipientBinding(cantonRecipientPartyId) !== parsedVaa.recipientAddress
+      partyAddressFor(cantonRecipientPartyId) !== parsedVaa.recipientAddress
     ) {
       throw new Error(
         `the VAA recipient 0x${parsedVaa.recipientAddress} is not the binding of ${cantonRecipientPartyId}; pass the correct --recipient`
@@ -321,19 +326,18 @@ async function runRedeem(redeemArguments: RedeemArguments): Promise<void> {
   );
 
   if (destinationChain === "Canton") {
-    const { ledger, disclosure } = buildCantonClients(
-      registry,
-      cantonRecipientPartyId
-    );
+    // The recipient executes its own redeem, as before: the token must act as it.
     const result = await cantonRedeem(
-      ledger,
-      disclosure,
+      buildCantonClients(registry, cantonRecipientPartyId),
       { registry, deployment, parsedVaa, recipient: cantonRecipientPartyId! },
       options
     );
     if (result)
       console.log(
-        `redeemed: command ${result.commandId}, ${result.transaction.events.length} events`
+        `redeemed: command ${result.commandId}, update ${result.updateId}` +
+          (result.eventCount !== undefined
+            ? `, ${result.eventCount} events`
+            : "")
       );
   } else if (destinationChain === "Ethereum") {
     const transceiver = deployment.chains.Ethereum!.transceiver;

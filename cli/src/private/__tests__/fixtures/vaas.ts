@@ -10,7 +10,9 @@ export const ETH_VAA =
 // Real transfers on canburn (both 1.0 token, trimmed to 8 decimals).
 // CANTON_TRANSFER_VAA: Canton -> Ethereum, sequence 3.
 // ETH_TRANSFER_VAA: Ethereum -> Canton, sequence 3; its recipientAddress is
-// recipientBinding(alice) — the same golden vector binding.test.ts asserts.
+// alice's party address under the ntt 0.6.x tag "wormhole:ntt-recipient:v1"
+// (b57bfe41...), which CANTON_TRANSFER_VAA also carries as its sender. Both
+// predate the ntt 0.7.0 tag "wormhole:v1" (see binding.test.ts).
 export const CANTON_TRANSFER_VAA =
   "01000000000100234abb0f8c759d7d4a42457cf998f0c31119f436a4c019d67e04066d007c15f437dc33ac17e84d772ac25671851579a79d1fc799f04c7c5e55b667b89843b7c4016a7a4f9d00000001004bb35f6b925a765a5ea9db67f640352c7fed7a8fda0ccd5f21ec53d984281755af0000000000000003009945ff10d03c78c99b240126e5e18bf07bae40847bb41b345b1850c71afb75e809f24d08000000000000000000000000fd2322c8b9d79c605a4263f1bacec9a0b4ff6d4200910000000000000000000000000000000000000000000000000000000000000003b57bfe41337237d696834be81e491c78099971fc2bc1ad6eedd032583350a516004f994e5454080000000005f5e100f638884dddb09ee865f728655759268d7f5bbec365f464750271df0eec8900d3000000000000000000000000d10d649a5beb2cf5bf0c086c82ed1b1bbdf43bb000020000";
 

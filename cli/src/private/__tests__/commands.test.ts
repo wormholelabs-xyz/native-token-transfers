@@ -15,7 +15,7 @@ import {
 const registry = validateRegistry(retiredCanburnRegistryJson());
 const ALICE = `alice::${RETIRED_CANTON_NAMESPACE}`;
 const ALICE_BINDING =
-  "b57bfe41337237d696834be81e491c78099971fc2bc1ad6eedd032583350a516";
+  "642e20b7253475adf8c136f61e1258a70c3809ec07256f5adef300f181923413";
 
 describe("resolveSendRecipient", () => {
   test("Canton default: the registry user party, bound", () => {

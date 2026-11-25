@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { keccak256 } from "ethers";
 
-import { recipientBinding } from "../binding.js";
+import { partyAddressFor } from "../recipient.js";
 import { requireDeployment, validateRegistry } from "../config.js";
 import { checkTransferVaaMatchesDeployment } from "../transfer-route.js";
 import { parseCantonPartyId } from "../types.js";
@@ -40,10 +40,16 @@ describe("parseTransferVaa", () => {
     expect(parsed.bytes.length * 2).toBe(CANTON_TRANSFER_VAA.length);
   });
 
-  test("Ethereum -> Canton transfer targets recipientBinding(alice)", () => {
+  test("Ethereum -> Canton transfer targets alice by the ntt 0.6.x party address", () => {
+    // The fixture predates ntt 0.7.0: its recipient is alice's address under
+    // the old tag "wormhole:ntt-recipient:v1", so it does not match
+    // partyAddressFor(alice) and does not redeem under 0.7.0.
     const parsed = parseTransferVaa(ETH_TRANSFER_VAA);
     const alice = parseCantonPartyId(`alice::${RETIRED_CANTON_NAMESPACE}`);
-    expect(parsed.recipientAddress).toBe(recipientBinding(alice));
+    expect(parsed.recipientAddress as string).toBe(
+      "b57bfe41337237d696834be81e491c78099971fc2bc1ad6eedd032583350a516"
+    );
+    expect(parsed.recipientAddress).not.toBe(partyAddressFor(alice));
   });
 
   test("digest is keccak256(keccak256(body))", () => {

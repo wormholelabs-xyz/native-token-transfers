@@ -1,8 +1,10 @@
 // Send recipient resolution: every destination parses to a Hex32 through one typed parser.
-import { recipientBinding } from "./binding.js";
+import { partyAddress } from "@wormhole-foundation/sdk-canton";
+
 import type { ChainName, PrivateRegistry } from "./config.js";
 import {
   evmAddressToHex32,
+  hex32FromBytes,
   parseCantonPartyId,
   parseEvmAddress,
   parseHex32,
@@ -10,6 +12,15 @@ import {
   type CantonPartyId,
   type Hex32,
 } from "./types.js";
+
+/**
+ * The bytes32 of a Canton party on the wire (Manager.daml partyAddressFromText, ntt 0.7.0):
+ * keccak256("wormhole:v1" ‖ u32be(len(party)) ‖ party), from the Canton SDK. A transfer to Canton
+ * carries it as the recipient, and a wrong value strands the funds.
+ */
+export function partyAddressFor(party: CantonPartyId): Hex32 {
+  return hex32FromBytes(partyAddress(party));
+}
 
 export interface RecipientOptions {
   recipient?: string;
@@ -58,7 +69,7 @@ export function resolveSendRecipient(
         "no Canton recipient: pass --recipient <hint>::1220<64 hex>"
       );
     const cantonPartyId = parseCantonPartyId(partyText);
-    const recipient = recipientBinding(cantonPartyId);
+    const recipient = partyAddressFor(cantonPartyId);
     return {
       recipient,
       description: `Canton party ${cantonPartyId} (binding 0x${recipient})`,

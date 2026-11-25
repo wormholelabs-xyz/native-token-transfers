@@ -3,7 +3,7 @@
 // wormhole sdk/vaa/structs.go and evm/src/libraries/TransceiverStructs.sol.
 import { keccak256 } from "ethers";
 
-import { bytesToHex, hexToBytes } from "./binding.js";
+import { bytesToHex, hexToBytes } from "./hex.js";
 import {
   hex32FromBytes,
   parseVaaDigestHex32,
