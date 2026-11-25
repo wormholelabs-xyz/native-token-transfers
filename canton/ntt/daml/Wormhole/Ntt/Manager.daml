@@ -246,23 +246,25 @@ nttManagerAddressFor : Party -> Party -> Int -> NttManagerAddress
 nttManagerAddressFor guardianGovernance admin managerId =
   parseHexBytesAsOrAbort (derivedAddress (DomainTag nttManagerAddressTag) guardianGovernance admin (RegistryId managerId))
 
--- | Domain-separation tag for NTT recipient-address bindings.
-recipientAddressTag : Text
-recipientAddressTag = "wormhole:ntt-recipient:v1"
+-- | Domain-separation tag for the 32-byte address of a Canton party. One tag
+-- for every role the party plays on the wire (recipient and sender).
+partyAddressTag : Text
+partyAddressTag = "wormhole:v1"
 
--- | @keccak256(tag ‖ lp(utf8(recipientText)))@. Split from
--- 'recipientAddressFor' so tests can pin the encoding against a fixed string.
-recipientAddressFromText : Text -> UniversalAddress
-recipientAddressFromText recipientText =
-  parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes recipientAddressTag
-    <> unLenPrefixed (lenPrefixed (utf8Bytes recipientText))))
+-- | @keccak256(tag ‖ lp(utf8(partyText)))@. Split from 'partyAddressFor' so
+-- tests can pin the encoding against a fixed string.
+partyAddressFromText : Text -> UniversalAddress
+partyAddressFromText partyText =
+  parseHexBytesAsOrAbort (keccak256Bytes (utf8Bytes partyAddressTag
+    <> unLenPrefixed (lenPrefixed (utf8Bytes partyText))))
 
--- | The 32-byte binding a sender computes off-chain for an outbound transfer's
--- @recipientAddress@ to reach @recipient@ on Canton. The inbound path
--- recomputes it from the caller-supplied @recipient@ and checks it against the
--- VAA.
-recipientAddressFor : Party -> UniversalAddress
-recipientAddressFor recipient = recipientAddressFromText (partyToText recipient)
+-- | The 32-byte address of a Canton party on the wire. As a recipient: the
+-- value a sender computes off-chain for an outbound transfer's
+-- @recipientAddress@ to reach @party@ on Canton; the inbound path recomputes
+-- it from the caller-supplied recipient and checks it against the VAA. As a
+-- sender: the @sender@ of the 'NttManagerMessage' that 'Transfer' publishes.
+partyAddressFor : Party -> UniversalAddress
+partyAddressFor party = partyAddressFromText (partyToText party)
 
 -- | Domain-separation tag for burn/mint instrument-id bindings.
 nttInstrumentIdTag : Text
@@ -347,7 +349,7 @@ nttNamespaceTag = "wormhole:ntt-namespace:v1"
 
 -- | Text form of 'nttNamespaceFor'. Split out so tests can pin the encoding
 -- against fixed strings — the existing vector-pinning convention
--- ('nttInstrumentIdFromText', 'recipientAddressFromText').
+-- ('nttInstrumentIdFromText', 'partyAddressFromText').
 nttNamespaceFromText : Text -> Text -> Text -> Int -> Text
 nttNamespaceFromText instrumentAdminText instrumentIdText adminText managerId =
   "ntt:" <> hexTextOf (keccak256Bytes (utf8Bytes nttNamespaceTag
@@ -483,7 +485,7 @@ verifyInboundTransfer mgr executor coreStateCid replayNodeCid vaaBytes recipient
   assertMsg "ntt: transfer is not destined for this chain"
     (ntt.recipientChain == mgr.chainId)
   assertMsg "ntt: recipient does not match VAA recipientAddress"
-    (recipientAddressFor recipient == ntt.recipientAddress)
+    (partyAddressFor recipient == ntt.recipientAddress)
   pure ntt
 
 template NttManager
@@ -865,6 +867,17 @@ template NttManager
     -- The message id is the transceiver's next sequence number, read from the
     -- fetched 'Emitter' in the same transaction that publishes, so it equals
     -- the resulting VAA's sequence and is unique per transceiver.
+    --
+    -- @expectedManagerAddress@ pins the deployment the user means to send
+    -- through, as 'RegisterEmitter' pins its registry with
+    -- @expectedGuardianGovernance@. The user's participant typically cannot
+    -- read this contract: an off-ledger service names the manager cid and
+    -- discloses it. Registration is permissionless and gg signs every
+    -- manager, so a look-alike deployment registered by someone else is
+    -- just as genuine, with its own admin as reserve custodian. The user
+    -- passes the manager address it trusts (its deployment config), and the
+    -- choice aborts before any token moves or anything is published unless
+    -- this manager has that address.
     nonconsuming choice Transfer : WormholeMessage
       with
         user                  : Party
@@ -879,9 +892,14 @@ template NttManager
         inputHoldingCids      : [ContractId Holding]
         feeAllocation         : Optional (ContractId Allocation, ExtraArgs)  -- message fee; None at fee 0
         extraArgs             : ExtraArgs
+        -- The transfer aborts unless this manager's managerAddress is this
+        -- value (see above).
+        expectedManagerAddress : NttManagerAddress
       controller user
       do
         assertMsg "ntt: deployment is paused" (not paused)
+        assertMsg "ntt: manager address does not match the caller's expected manager"
+          (expectedManagerAddress == managerAddress)
         -- Uint8 and uint32 on the wire; the watcher drops out-of-range messages.
         assertMsg "ntt: consistency level must be a uint8" (isUint8 consistencyLevel)
         assertMsg "ntt: nonce must be a uint32" (isUint32 nonce)
@@ -984,7 +1002,7 @@ template NttManager
               additionalPayload = mempty
             mm = NttManagerMessage with
               id = parseHexBytesAsOrAbort (intToBytesN transceiver.sequence 32)
-              sender = recipientAddressFor user
+              sender = partyAddressFor user
               payload = encodeNativeTokenTransfer ntt
             wm = WormholeTransceiverMessage with
               sourceManager = managerAddress

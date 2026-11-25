@@ -72,6 +72,32 @@ One version number identifies one build. Do not use a version number again
 for a different build. Participants use the package name and version to put
 the upgrades of a package in order.
 
+### Version 0.7.x is not upgrade-compatible
+
+Version 0.7.0 builds against core 0.12.3 (`32abbcd2...`, SDK 3.7.3) and has
+the package id
+`43e1b2060c420d9bbd78ebeaeca1c30b58ee967fd40b5aacd58088d6f239a63d`.
+`wormhole-genesis` 0.3.0 builds against `ntt` 0.7.0 and core 0.12.3. It has
+the package id
+`2c056df06c37ead3c59984c9d90e286b8d2535b8c45328ea01f4a0cf00c0c8f0`.
+`ntt/daml.yaml` has no
+`upgrades:` field. Use participants that have no earlier `ntt` package.
+
+Version 0.7.0 changes these values:
+
+- The 32-byte address of a Canton party is
+  `keccak256("wormhole:v1" ‖ lp(partyToText party))`. The tag was
+  `wormhole:ntt-recipient:v1`. The address is the `recipientAddress` of a
+  transfer into Canton and the `sender` of a transfer out of Canton (see
+  "Party address"). Thus each party has a new address. A VAA that names a
+  recipient by the old address does not redeem under 0.7.0. The functions
+  are renamed: `partyAddressTag`, `partyAddressFromText` and
+  `partyAddressFor` (were `recipientAddressTag`, `recipientAddressFromText`
+  and `recipientAddressFor`).
+- `Transfer` has the argument `expectedManagerAddress : NttManagerAddress`.
+  The choice aborts unless it equals the `managerAddress` of the manager (see
+  "Send").
+
 ### Version 0.6.x is not upgrade-compatible
 
 Version 0.6.2 builds against core 0.12.3 (`32abbcd2...`, SDK 3.7.3) and has
@@ -169,7 +195,7 @@ transaction must archive the earlier root and create the new root. If the
 earlier root stays active, both roots accept one registration VAA. Both
 roots compute one namespace. The core rejects the second claim of that pair
 in the one claimed-roots tree of the `gg`, with "digest already consumed".
-For roots of `ntt` 0.6.2 and core 0.12.3, a re-genesis (`ReGenesisReplacing`,
+For roots of `ntt` 0.7.0 and core 0.12.3, a re-genesis (`ReGenesisReplacing`,
 see "Genesis") is this transaction. It replaces the core roots and the NTT
 root together. `EarlierGenesisRoots` names the templates of these package
 versions. Thus a breaking `ntt` or core version also needs a new
@@ -752,6 +778,26 @@ The user is not a stakeholder of the manager, the transceiver, the
 factory, so a submission attaches them as explicit disclosures. This is a
 visibility requirement, not an authorization one.
 
+The user names the deployment with the argument `expectedManagerAddress`.
+Right after the pause check, `Transfer` aborts with "ntt: manager address does
+not match the caller's expected manager" unless the manager's `managerAddress`
+is this value. No token moves and nothing is published before this check.
+The user's participant usually cannot read the manager, so an off-ledger
+service names the manager contract and discloses it. Registration is
+permissionless and `gg` signs every manager. Thus a manager that another
+admin registered is also genuine, with that admin as reserve custodian. A
+client passes the manager address of its configuration, so a wrong or
+hostile service cannot send the user's tokens to another deployment. The core
+`RegisterEmitter` pins its registry in the same way, with
+`expectedGuardianGovernance` (`TestNtt:testTransferRejectsUnexpectedManager`,
+`TestRedTeam:testRedTeamTransferWireFieldBounds`).
+
+`Transfer` takes these arguments: `user`, `transceiverEmitterCid`,
+`coreStateCid`, `ledgerCid` (lock/unlock only), `recipientChain`,
+`recipientAddress`, `rawAmount`, `nonce`, `consistencyLevel`,
+`inputHoldingCids`, `feeAllocation`, `extraArgs` and
+`expectedManagerAddress`.
+
 ## Accountant broadcasts (bundled into `SetPeer` / `RegisterManager`)
 
 `TransceiverRegistration` and `TransceiverInit` are no longer published by
@@ -901,19 +947,26 @@ before the VAA digest is consumed, so the same VAA is deliverable once the
 recipient opts in. `Deposit` is nonconsuming (one approval, unlimited
 deliveries) and only the owner can `Revoke`.
 
-**Recipient binding.** A Canton `Party` id has no fixed-size form to put in
-the VAA's 32-byte `recipientAddress`, so the sender hashes it:
-`recipientAddressFor recipient =
-keccak256("wormhole:ntt-recipient:v1" ‖ lp(partyToText recipient))`. The
+**Party address.** A Canton `Party` id has no fixed-size form to put in
+a 32-byte wire field, so it is hashed:
+`partyAddressFor party =
+keccak256("wormhole:v1" ‖ lp(partyToText party))` (before 0.7.0 the tag was
+`wormhole:ntt-recipient:v1`). The same address is the `recipientAddress` of
+a transfer into Canton and the `sender` of the `NttManagerMessage` that
+`Transfer` publishes.
+
+**Recipient binding.** The sender of a transfer into Canton puts
+`partyAddressFor recipient` in the VAA's `recipientAddress`. The
 inbound path recomputes the hash from the caller-supplied `recipient` and
 checks it against the VAA. The binding lives inside the guardian-signed VAA,
 so no relayer can redirect it. The deliberate tradeoff: a Party id is
 permanent, so a VAA is bound to the recipient party as it existed when the
 sender hashed it, and a recipient who needs a different party (lost key,
 custodial migration) needs a re-send. The encoding is pinned by
-`testRecipientAddressForVector`; the matching-recipient path is covered by the
-live harness in `testing/go/` (a static fixture cannot name a freshly
-allocated Party).
+`testPartyAddressForVector` (`vector-recipient::1220deadbeef` gives
+`4c3feac3d35c3b4bcd02a9b3faa309c8ed0b33163e2161908f691980319f7947`); the
+matching-recipient path is covered by the live harness in `testing/go/` (a
+static fixture cannot name a freshly allocated Party).
 
 ## Token integration and custody
 
