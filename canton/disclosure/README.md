@@ -61,11 +61,12 @@ fill the cap.
 
 - `GET /v1/managers` — the visible NTT deployments: `managerAddress`,
   `contractId`, `chainId`, `managerId`, `tokenConfig`, `instrumentId`,
-  `reserveCustodian`, `paused`. Use `managerAddress` as the `manager`
-  parameter of a flow. The response gives `managerAddress` as 64 lowercase
-  hex characters. It gives `managerId` as a JSON string of the decimal
-  value, as the JSON Ledger API gives a Daml `Int`. A `managerId` that is
-  not an integer from 0 to 2^63-1 gives 500 for the full list.
+  `reserveCustodian`, `paused`, `tokenDecimals`, `admin`, `peers`. Use
+  `managerAddress` as the `manager` parameter of a flow. The response gives
+  `managerAddress` as 64 lowercase hex characters. It gives `managerId` as
+  a JSON string of the decimal value, as the JSON Ledger API gives a Daml
+  `Int`. A `managerId` that is not an integer from 0 to 2^63-1 gives 500
+  for the full list. See "Manager summary".
 - `GET /v1/flows/{flow}` — the disclosure set of one flow. A role labels each
   contract. The parameters of each flow are:
 
@@ -98,13 +99,43 @@ variant: `{"tag": "<type>", "value": "<lowercase hex>"}`. The service reads
 the `NttManagerAddress` of `NttManager`, `LockedLedger` and
 `AdminTransferProposal`, and the `DigestNibblePrefix` of `ReplayNode`, from
 these variants. A value with another tag, another width or uppercase hex
-gives 500.
+gives 500. `/v1/managers` also reads the `NttManagerAddress` and the
+`EmitterAddress` of each `NttManager` peer.
 
 A flow response has a `disclosures` array and a `missing` array. Each
-`disclosures` entry has a role, `templateId`, `contractId`,
-`createdEventBlob`, and `synchronizerId`. All entries have the same
-synchronizer. The `missing` array names the set members that no reader party
-can see, for example a proposal or a preapproval. The client supplies them.
+`disclosures` entry has these fields:
+
+```json
+{
+  "role": "CoreState",
+  "templateId": "<package id>:Wormhole.Core.State:CoreState",
+  "contractId": "<contract id>",
+  "createdEventBlob": "<base64>",
+  "synchronizerId": "<synchronizer id>",
+  "createArgument": { "guardianGovernance": "<party>", "...": "..." }
+}
+```
+
+All entries have the same synchronizer. The `missing` array names the set
+members that no reader party can see, for example a proposal or a
+preapproval. The client supplies them.
+
+`createArgument` is the create argument of the contract. It is the
+`createArgument` of the created event that the participant JSON Ledger API
+returned, with field labels (`verbose: true`). The service does not change
+it. Only white space between JSON tokens can be different. The service does
+not escape `<`, `>` or `&` in a flow response. An entry has no
+`createArgument` when the upstream read gave none. A contract that the
+service reads by its contract ID, for example the custody pot, can be such
+an entry. The service does not compare `createArgument` with
+`createdEventBlob`. Do not use `createArgument` as proof. The ledger checks
+the blob, not this field.
+
+This service has no flow for the core contracts alone. A client without an
+NTT deployment gets them from the core disclosure service of the guardian
+node (`guardiand canton-disclosure-service`): `/v1/core-state`,
+`/v1/emitter-registry`, `/v1/replay-root-registry`, `/v1/replay-node` and
+`/v1/claimed-roots-node`.
 
 `admin` is the registering admin. `instrument-admin` and `instrument-id` are
 the `admin` and `id` of the `InstrumentId` that the registration bridges.
@@ -149,6 +180,43 @@ lock/unlock flows name `committed TransferFactory` in `missing`. Get the
 factory and its choice context from the transfer-factory API of the
 registry. The custody pot of such a deployment is a `Splice.Amulet:Amulet`.
 
+### Manager summary
+
+Each `/v1/managers` item has this shape:
+
+```json
+{
+  "managerAddress": "<64 lowercase hex>",
+  "contractId": "<contract id>",
+  "chainId": 72,
+  "managerId": 3,
+  "tokenConfig": "LockUnlock",
+  "instrumentId": { "admin": "<party>", "id": "<instrument id>" },
+  "reserveCustodian": "<party>",
+  "paused": false,
+  "tokenDecimals": 6,
+  "admin": "<party>",
+  "peers": {
+    "2": {
+      "managerAddress": "<64 lowercase hex>",
+      "transceiverAddress": "<64 lowercase hex>",
+      "decimals": 18
+    }
+  }
+}
+```
+
+`tokenDecimals`, `admin` and `peers` come from the `NttManager` payload.
+`peers` is the Daml `Map Int Peer`, with the chain ID in decimal as the key.
+The JSON Ledger API encodes a Daml `Map` as an array of `[key, value]`
+pairs. The service also accepts an object. `managerAddress` and
+`transceiverAddress` of a peer are 64 lowercase hex characters. When the
+payload has no `tokenDecimals` or no `peers` field, the item does not have
+it. A `peers` value that the service cannot read gives 500 on
+`/v1/managers`. The flows do not read `peers`.
+
+These fields are for display. Do not use them for a safety check.
+
 ## Client checks
 
 Do these checks before you submit a command with a disclosure set:
@@ -192,6 +260,26 @@ start of the participant response body.
 Each response has `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`.
 
+## CORS
+
+A browser application can call the public GET routes directly. These routes
+are the `/v1` routes and the three GET routes of the registry metadata API.
+On these routes, each response has `Access-Control-Allow-Origin: *` and
+`Access-Control-Expose-Headers: X-Request-Id`. This includes an error
+response. The service does not send `Access-Control-Allow-Credentials`. The
+routes take no credentials.
+
+An `OPTIONS` request to one of these routes is a preflight. The service
+returns 204 with `Access-Control-Allow-Methods: GET`,
+`Access-Control-Allow-Headers: Accept, Content-Type` and
+`Access-Control-Max-Age: 600`. A preflight does not call the upstream. Like
+the probes, it is outside the inbound cap of 64 requests. The other methods
+still get 405. The registry POST routes do not have CORS headers.
+
+The edge proxy must let `OPTIONS` through to these routes. It must not add a
+second `Access-Control-Allow-Origin` header. `CLOUDFLARE.md` shows the WAF
+rules.
+
 ## Cache
 
 The service keeps each upstream answer for `--cache-ttl`. This includes a
@@ -223,8 +311,11 @@ The routes are public. The owner accepts this exposure by design:
   deployment. The service returns 404 when it has none. A `release` request
   with `recipient` tells the same for a `TransferPreapproval`. The caller
   must know the party id.
-- `/v1/managers` gives the `instrumentId.admin` and `reserveCustodian` party
-  ids of each deployment. The probes do not give party ids.
+- `/v1/managers` gives the `instrumentId.admin`, `reserveCustodian` and
+  `admin` party ids and the peers of each deployment. The probes do not give
+  party ids.
+- Each flow entry gives the `createArgument` of its contract. The blob of
+  the entry holds the same data.
 - Each `NttManager` blob gives the admin, `gg`, `nttCustody`, the peers, the
   limits, and the pause state.
 - Each `ReplayNode` of a namespace gives the consumed VAA digests.
@@ -264,6 +355,7 @@ contract in `missing`.
 | Time for one request                                          | 60 s                                                                                                                                                                                                                                                                                                               |
 | Bytes of blobs and ids in one flow response or choice context | 4 MiB                                                                                                                                                                                                                                                                                                              |
 | Query string of a flow or a registry route                    | 1024 bytes; 3897 bytes for `register`                                                                                                                                                                                                                                                                              |
+| Bytes of createArgument payloads in one flow response         | 4 MiB, a budget of its own next to the 4 MiB of blobs and ids. Above it, the flow returns 502.                                                                                                                                                                                                                     |
 | Request body of a registry route                              | 64 KiB                                                                                                                                                                                                                                                                                                             |
 | Matching contracts for one selector                           | 8                                                                                                                                                                                                                                                                                                                  |
 | Instruments in one registry page                              | 100                                                                                                                                                                                                                                                                                                                |
@@ -716,6 +808,11 @@ participant of the wallet runs only the packages that it vetted.
 source is `https://docs.canton.network/openapi/splice/token-standard/`,
 downloaded on 2026-11-18.
 
+`service/openapi/disclosure-v1.yaml` is not in the table. It is the
+specification of the `/v1` routes of this service, and this repository owns
+it. The Go tests validate each `/v1` response against it, as they do for the
+registry routes. Change it together with a `/v1` response shape.
+
 | File                             | Spec version | SHA-256                                                            |
 | -------------------------------- | ------------ | ------------------------------------------------------------------ |
 | `token-metadata-v1.yaml`         | 1.2.0        | `43ca08f0706b433ca20cee1a355da6d4ad00ea8c089b8982fb446627b7a2e135` |
@@ -980,3 +1077,8 @@ change the module and the checksum in the workflow together.
   - `synchronizerId` after a reassignment. The service reads the
     synchronizer of the create. After a reassignment, a correct set can
     have two synchronizers, and the flow returns 500.
+  - The `NttManager.peers` encoding on a live participant. The service
+    expects `[key, value]` pairs, as the LocalNet scripts read
+    `CoreState.guardianSets`, and also accepts an object.
+  - The `createArgument` of a read by contract ID on a live participant.
+    The service sends `verbose: true` on that read too.

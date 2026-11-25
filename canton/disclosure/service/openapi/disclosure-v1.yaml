@@ -1,0 +1,338 @@
+openapi: 3.0.0
+info:
+  title: canton NTT disclosure service
+  description: |
+    The /v1 routes of the disclosure service. This file belongs to this
+    repository. It is not a vendored CIP-0056 specification. The Go tests
+    validate each /v1 response against it (openapi_v1_test.go).
+    Each /v1 response, success or error, has the header
+    Access-Control-Allow-Origin with the value *. OPTIONS on a /v1 route is a
+    CORS preflight and returns 204 with no body.
+  version: 1.1.0
+paths:
+  /v1:
+    get:
+      summary: "GET /v1"
+      operationId: getIndex
+      description: The endpoints that the service serves.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexResponse'
+  /v1/healthz:
+    get:
+      summary: "GET /v1/healthz"
+      operationId: getHealthz
+      description: Liveness. It does not call the upstream.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResponse'
+  /v1/readyz:
+    get:
+      summary: "GET /v1/readyz"
+      operationId: getReadyz
+      description: Readiness. 200 when the last upstream ledger-end call succeeded.
+      responses:
+        '200':
+          description: ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResponse'
+        '503':
+          $ref: '#/components/responses/ServerError'
+  /v1/managers:
+    get:
+      summary: "GET /v1/managers"
+      operationId: listManagers
+      description: The visible NTT deployments, sorted by managerAddress.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagersResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '502':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServerError'
+        '504':
+          $ref: '#/components/responses/ServerError'
+  /v1/flows/{flow}:
+    get:
+      summary: "GET /v1/flows/:flow"
+      operationId: getFlow
+      description: |
+        The disclosure set of one flow. The query parameters of each flow are
+        in README.md and in the /v1 index. A repeated or unknown parameter is
+        a 400.
+      parameters:
+        - name: flow
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - release
+              - mint
+              - set-peer
+              - accept-admin
+              - transfer
+              - register
+              - consolidate
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlowResponse'
+        '400':
+          $ref: '#/components/responses/ClientError'
+        '404':
+          $ref: '#/components/responses/ClientError'
+        '409':
+          $ref: '#/components/responses/ClientError'
+        '414':
+          $ref: '#/components/responses/ClientError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '502':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServerError'
+        '504':
+          $ref: '#/components/responses/ServerError'
+components:
+  responses:
+    ClientError:
+      description: The request is not valid, or names no contract.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServerError:
+      description: A fixed message. The service log has the detail for requestId.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - requestId
+      properties:
+        error:
+          type: string
+        requestId:
+          type: string
+    ProbeResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - ready
+    IndexResponse:
+      type: object
+      required:
+        - service
+        - endpoints
+      properties:
+        service:
+          type: string
+        endpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/IndexEndpoint'
+    IndexEndpoint:
+      type: object
+      required:
+        - method
+        - path
+        - about
+      properties:
+        method:
+          type: string
+        path:
+          type: string
+        about:
+          type: string
+        params:
+          type: array
+          items:
+            type: string
+        flows:
+          type: object
+          description: The query parameters of each flow, by flow name.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+    ManagersResponse:
+      type: object
+      required:
+        - managers
+      properties:
+        managers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ManagerSummary'
+    ManagerSummary:
+      type: object
+      required:
+        - managerAddress
+        - contractId
+        - chainId
+        - managerId
+        - tokenConfig
+        - instrumentId
+        - reserveCustodian
+        - paused
+        - admin
+      properties:
+        managerAddress:
+          type: string
+          description: 64 lowercase hex characters. The manager parameter of a flow.
+        contractId:
+          type: string
+        chainId:
+          type: integer
+          format: int64
+        managerId:
+          type: string
+          description: Decimal value of a Daml Int, as a string.
+        tokenConfig:
+          type: string
+          enum:
+            - LockUnlock
+            - BurnMint
+        instrumentId:
+          $ref: '#/components/schemas/InstrumentId'
+        reserveCustodian:
+          type: string
+        paused:
+          type: boolean
+        tokenDecimals:
+          type: integer
+          format: int64
+          description: NttManager.tokenDecimals. Absent when the payload has no such field.
+        admin:
+          type: string
+          description: NttManager.admin, a party id.
+        peers:
+          type: object
+          description: |
+            NttManager.peers, keyed by the Wormhole chain id in decimal. Absent
+            when the payload has no such field.
+          additionalProperties:
+            $ref: '#/components/schemas/ManagerPeer'
+    ManagerPeer:
+      type: object
+      required:
+        - managerAddress
+        - transceiverAddress
+        - decimals
+      properties:
+        managerAddress:
+          type: string
+          description: 64 lowercase hex characters.
+        transceiverAddress:
+          type: string
+          description: 64 lowercase hex characters.
+        decimals:
+          type: integer
+          format: int64
+    InstrumentId:
+      type: object
+      required:
+        - admin
+        - id
+      properties:
+        admin:
+          type: string
+        id:
+          type: string
+    FlowResponse:
+      type: object
+      required:
+        - flow
+        - disclosures
+        - missing
+      properties:
+        flow:
+          type: string
+          enum:
+            - release
+            - mint
+            - set-peer
+            - accept-admin
+            - transfer
+            - register
+            - consolidate
+        disclosures:
+          type: array
+          items:
+            $ref: '#/components/schemas/DisclosureEntry'
+        missing:
+          type: array
+          items:
+            $ref: '#/components/schemas/MissingEntry'
+        claimNamespace:
+          type: string
+          description: The register flow only.
+        managerId:
+          type: string
+          description: The register flow only. Decimal value of a Daml Int, as a string.
+    DisclosureEntry:
+      type: object
+      required:
+        - role
+        - templateId
+        - contractId
+        - createdEventBlob
+        - synchronizerId
+      properties:
+        role:
+          type: string
+        templateId:
+          type: string
+        contractId:
+          type: string
+        createdEventBlob:
+          type: string
+          description: Base64, as the JSON Ledger API returned it.
+        synchronizerId:
+          type: string
+        createArgument:
+          type: object
+          description: |
+            The createArgument of the contract, as the JSON Ledger API returned
+            it with verbose field labels. The service does not change it. Absent
+            when the upstream read returned none.
+          additionalProperties: true
+    MissingEntry:
+      type: object
+      required:
+        - role
+        - reason
+      properties:
+        role:
+          type: string
+        reason:
+          type: string

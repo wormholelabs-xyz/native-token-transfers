@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -50,6 +52,9 @@ func checkFlowResponseInvariants(response *flowResponse) error {
 		if disclosure.CreatedEventBlob == "" {
 			return fmt.Errorf("disclosure %s has no createdEventBlob", disclosure.Role)
 		}
+		if err := checkServedCreateArgument(disclosure.CreateArgument); err != nil {
+			return fmt.Errorf("disclosure %s: %w", disclosure.Role, err)
+		}
 		if seenContractIDs[disclosure.ContractID] {
 			return fmt.Errorf("flow response holds contract %s twice", disclosure.ContractID)
 		}
@@ -68,6 +73,19 @@ func checkFlowResponseInvariants(response *flowResponse) error {
 			return fmt.Errorf("flow response holds missing role %s twice", missing.Role)
 		}
 		missingRoles[missing.Role] = true
+	}
+	return nil
+}
+
+// checkServedCreateArgument accepts an absent createArgument, or one JSON object: a Daml template
+// payload is a record.
+func checkServedCreateArgument(createArgument json.RawMessage) error {
+	if createArgument == nil {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(createArgument)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return errors.New("createArgument is not a JSON object")
 	}
 	return nil
 }
@@ -97,7 +115,7 @@ func checkRegisterClaimFieldsMatchFlow(response *flowResponse) error {
 	return nil
 }
 
-// checkAssembledFlowResponse runs the set postconditions (500) and the size bound (502).
+// checkAssembledFlowResponse runs the set postconditions (500) and the size bounds (502).
 func checkAssembledFlowResponse(response *flowResponse) error {
 	if err := checkFlowResponseInvariants(response); err != nil {
 		return newFlowError(http.StatusInternalServerError, "flow %s: %v", response.Flow, err)
@@ -111,6 +129,11 @@ func checkAssembledFlowResponse(response *flowResponse) error {
 // maxFlowResponseBytes bounds the blob, contract id, and template id bytes of one flow response.
 const maxFlowResponseBytes = 4 << 20
 
+// maxFlowResponsePayloadBytes bounds the createArgument bytes of one flow response. It is a
+// budget of its own, next to maxFlowResponseBytes, so the counted bytes of one response are at
+// most 8 MiB.
+const maxFlowResponsePayloadBytes = 4 << 20
+
 // countFlowResponseBytes sums the blob, contract id, and template id bytes of each disclosure.
 func countFlowResponseBytes(response *flowResponse) int {
 	totalBytes := 0
@@ -120,11 +143,24 @@ func countFlowResponseBytes(response *flowResponse) int {
 	return totalBytes
 }
 
+// countFlowResponsePayloadBytes sums the createArgument bytes of each disclosure, as received.
+func countFlowResponsePayloadBytes(response *flowResponse) int {
+	totalBytes := 0
+	for _, disclosure := range response.Disclosures {
+		totalBytes += len(disclosure.CreateArgument)
+	}
+	return totalBytes
+}
+
 // checkFlowResponseSize runs before the status line is sent. A larger set is a 502.
 func checkFlowResponseSize(response *flowResponse) error {
 	totalBytes := countFlowResponseBytes(response)
 	if totalBytes > maxFlowResponseBytes {
 		return newFlowError(http.StatusBadGateway, "flow %s: response of %d bytes exceeds %d", response.Flow, totalBytes, maxFlowResponseBytes)
+	}
+	payloadBytes := countFlowResponsePayloadBytes(response)
+	if payloadBytes > maxFlowResponsePayloadBytes {
+		return newFlowError(http.StatusBadGateway, "flow %s: createArgument payloads of %d bytes exceed %d", response.Flow, payloadBytes, maxFlowResponsePayloadBytes)
 	}
 	return nil
 }
