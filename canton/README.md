@@ -180,11 +180,11 @@ A breaking core version needs a migration, not only a re-genesis. The
 breaking core version also forces a breaking `ntt` version.
 
 A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` uses a new
-package name. Canton does not reject each breaking change under the same
-package name. Core 0.8.3 changed signatories and kept the name. `damlc` gave
+package name. Canton rejects some breaking changes under the same package
+name, but not all. Core 0.8.3 changed signatories and kept the name. `damlc` gave
 only a warning. The re-genesis needs the old and the new core versions vetted
 on each `gg` host at the same time. Do not vet a breaking version with a force
-flag. The Canton watcher reads only the package name `wormhole-core`.
+flag. The Canton watcher accepts only the package name `wormhole-core`.
 Thus a breaking core version also needs a `guardiand` release.
 
 A re-genesis archives the earlier `CoreState`. Then the managers of the
@@ -260,7 +260,9 @@ For a breaking core version, do the fee withdrawal steps in this order:
    core version.
 2. For each active `FeeWithdrawalAuthorization` of the old core version, do
    the [fee withdrawal procedure](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/docs/canton_guardian_operations.md#76-fee-withdrawal).
-   As a minimum, archive each one.
+   As a minimum, archive each one. The guardian steps are in
+   [section 6.8](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/docs/canton_guardian_operations.md#68-breaking-core-version-fee-withdrawals-before-the-unvet)
+   of the guardian operations doc.
 3. Before the unvet, read the active contracts of `gg` on each `gg` host.
    Make sure that no `FeeWithdrawalAuthorization` of the old core version is
    active. If one is active, do step 2 again.
