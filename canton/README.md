@@ -179,13 +179,15 @@ A breaking core version needs a migration, not only a re-genesis. The
 `NttManager` choices take contract ids of core 0.12.3 templates. Thus a
 breaking core version also forces a breaking `ntt` version.
 
-A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` uses a new
-package name. Canton rejects some breaking changes under the same package
-name, but not all. Core 0.8.3 changed signatories and kept the name. `damlc` gave
-only a warning. The re-genesis needs the old and the new core versions vetted
-on each `gg` host at the same time. Do not vet a breaking version with a force
-flag. The Canton watcher accepts only the package name `wormhole-core`.
-Thus a breaking core version also needs a `guardiand` release.
+A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` for a
+re-genesis uses a new package name. The re-genesis needs the old and the new
+versions vetted on each `gg` host at the same time. Canton rejects some
+breaking changes under the same package name, but not all. Core 0.8.3 changed
+signatories and kept the name. `damlc` gave only a warning. Core 0.9.0, 0.10.0
+and 0.11.0 kept the name. Each started from a first genesis, so the old
+version did not stay vetted. Do not vet a breaking version with a force flag.
+The Canton watcher accepts only the package name `wormhole-core`. Thus a new
+core package name also needs a `guardiand` release.
 
 A re-genesis archives the earlier `CoreState`. Then the managers of the
 earlier `ntt` version cannot check a VAA or publish a message. Thus each
