@@ -109,8 +109,7 @@ can see, for example a proposal or a preapproval. The client supplies them.
 `admin` is the registering admin. `instrument-admin` and `instrument-id` are
 the `admin` and `id` of the `InstrumentId` that the registration bridges.
 `instrument-id` has 1 to 512 bytes of valid UTF-8. The service sets this
-limit. It is not a CIP-56 limit. A `register` request without one of these three
-parameters gives 400.
+limit. A `register` request without one of these three parameters gives 400.
 
 With `by-vaa=true`, `instrument-admin` must be `gg`, because
 `RegisterManagerByVaa` sets the `InstrumentId` admin to `gg`. A different

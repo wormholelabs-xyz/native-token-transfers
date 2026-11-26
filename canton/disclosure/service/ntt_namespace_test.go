@@ -121,3 +121,53 @@ func TestParseNttManagerID(t *testing.T) {
 		})
 	}
 }
+
+func TestNttManagerIDMarshalsAsDecimalString(t *testing.T) {
+	cases := []struct {
+		name                 string
+		rawManagerID         json.Number
+		wantManagerIDDecimal string
+	}{
+		{"zero", "0", "0"},
+		{"2^63-1", "9223372036854775807", "9223372036854775807"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			managerID, err := parseNttManagerID(tc.rawManagerID, "NttGovernance nextId")
+			require.NoError(t, err)
+			registerJSON, err := json.Marshal(flowResponse{
+				Flow:        "register",
+				Disclosures: []flowDisclosureEntry{},
+				Missing:     []flowMissingEntry{},
+				ManagerID:   &managerID,
+			})
+			require.NoError(t, err)
+			assert.Equal(t,
+				`{"flow":"register","disclosures":[],"missing":[],"managerId":"`+tc.wantManagerIDDecimal+`"}`,
+				string(registerJSON))
+			managerJSON, err := json.Marshal(managerEntry{ManagerID: managerID})
+			require.NoError(t, err)
+			assert.Equal(t,
+				`{"managerAddress":"","contractId":"","chainId":0,"managerId":"`+tc.wantManagerIDDecimal+
+					`","tokenConfig":"","instrumentId":{"admin":"","id":""},"reserveCustodian":"","paused":false}`,
+				string(managerJSON))
+		})
+	}
+}
+
+func TestNttManagerIDMarshalPanicsAbove2Pow63Minus1(t *testing.T) {
+	cases := []struct {
+		name     string
+		idNumber uint64
+	}{
+		{"2^63", 1 << 63},
+		{"2^64-1", 1<<64 - 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			managerID := nttManagerID{idNumber: tc.idNumber}
+			assert.Panics(t, func() { _, _ = managerID.MarshalText() })
+			assert.Panics(t, func() { _, _ = json.Marshal(managerEntry{ManagerID: managerID}) })
+		})
+	}
+}

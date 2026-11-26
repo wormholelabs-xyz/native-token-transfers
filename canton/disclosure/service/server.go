@@ -177,7 +177,7 @@ var flowIndexEndpoints = []map[string]any{
 		"set-peer":     {"manager", "digest"},
 		"accept-admin": {"manager", "digest"},
 		"transfer":     {"manager"},
-		"register":     {"gg (optional)", "by-vaa (optional bool)"},
+		"register":     {"admin", "instrument-admin", "instrument-id", "gg (optional)", "by-vaa (optional bool)"},
 		"consolidate":  {"manager"},
 	}},
 }

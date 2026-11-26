@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"unicode/utf8"
@@ -45,6 +47,19 @@ func parseInstrumentIDText(raw string) (instrumentIDText, error) {
 type nttManagerID struct{ idNumber uint64 }
 
 func (managerID nttManagerID) String() string { return strconv.FormatUint(managerID.idNumber, 10) }
+
+// MarshalText writes the canonical decimal, so JSON carries managerId as a string, as the JSON
+// Ledger API writes a Daml Int.
+func (managerID nttManagerID) MarshalText() ([]byte, error) {
+	if managerID.idNumber > math.MaxInt64 {
+		panic("disclosure-service: nttManagerID above 2^63-1")
+	}
+	managerIDDecimal := managerID.String()
+	if _, err := parseNttManagerID(json.Number(managerIDDecimal), "marshaled managerId"); err != nil {
+		panic(fmt.Sprintf("disclosure-service: nttManagerID marshals to a non-canonical decimal: %v", err))
+	}
+	return []byte(managerIDDecimal), nil
+}
 
 // parseNttManagerID reads a ledger managerId, for example NttGovernance.nextId. It accepts only
 // the canonical decimal form. A ledger value outside 0 to 2^63-1 is a 500 that names fieldLabel.

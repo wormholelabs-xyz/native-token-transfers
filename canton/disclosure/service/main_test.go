@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -797,9 +798,17 @@ func requestFlow(t *testing.T, srv *server, flow, query string) *httptest.Respon
 	return rr
 }
 
-func decodeFlowResponse(t *testing.T, rr *httptest.ResponseRecorder) flowResponse {
+// decodedFlowResponse is a flow response body. Register tests read managerId with decodeRegisterClaimResponse.
+type decodedFlowResponse struct {
+	Flow           string                `json:"flow"`
+	Disclosures    []flowDisclosureEntry `json:"disclosures"`
+	Missing        []flowMissingEntry    `json:"missing"`
+	ClaimNamespace string                `json:"claimNamespace"`
+}
+
+func decodeFlowResponse(t *testing.T, rr *httptest.ResponseRecorder) decodedFlowResponse {
 	t.Helper()
-	var resp flowResponse
+	var resp decodedFlowResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	return resp
 }
@@ -1869,6 +1878,62 @@ func TestHandleIndexListsRegistryRoutesOnlyWhenRegistryIsOn(t *testing.T) {
 	}
 }
 
+func TestHandleIndexFlowParamsMatchFlowParamNames(t *testing.T) {
+	wantFlowParams := map[string][]string{
+		"release":      {"manager", "digest", "recipient (optional)"},
+		"mint":         {"manager", "digest", "recipient"},
+		"set-peer":     {"manager", "digest"},
+		"accept-admin": {"manager", "digest"},
+		"transfer":     {"manager"},
+		"register":     {"admin", "instrument-admin", "instrument-id", "gg (optional)", "by-vaa (optional bool)"},
+		"consolidate":  {"manager"},
+	}
+	srv := newServer(&options{readerParties: testReaderParties(), maxContractsPerTemplate: 10}, nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var index struct {
+		Endpoints []struct {
+			Path  string              `json:"path"`
+			Flows map[string][]string `json:"flows"`
+		} `json:"endpoints"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &index))
+	var gotFlowParams map[string][]string
+	flowEndpointCount := 0
+	for _, endpoint := range index.Endpoints {
+		if endpoint.Path == "/v1/flows/{flow}" {
+			gotFlowParams = endpoint.Flows
+			flowEndpointCount++
+		}
+	}
+	require.Equal(t, 1, flowEndpointCount)
+	assert.Equal(t, wantFlowParams, gotFlowParams)
+
+	indexFlowNames := make([]string, 0, len(gotFlowParams))
+	for flowName := range gotFlowParams {
+		indexFlowNames = append(indexFlowNames, flowName)
+	}
+	parserFlowNames := make([]string, 0, len(flowParamNames))
+	for flowName := range flowParamNames {
+		parserFlowNames = append(parserFlowNames, flowName)
+	}
+	sort.Strings(indexFlowNames)
+	sort.Strings(parserFlowNames)
+	require.Equal(t, parserFlowNames, indexFlowNames)
+	for flowName, indexParams := range gotFlowParams {
+		indexParamNames := make([]string, 0, len(indexParams))
+		for _, indexParam := range indexParams {
+			paramName, _, _ := strings.Cut(indexParam, " (")
+			indexParamNames = append(indexParamNames, paramName)
+		}
+		parserParamNames := append([]string{}, flowParamNames[flowName]...)
+		sort.Strings(indexParamNames)
+		sort.Strings(parserParamNames)
+		assert.Equal(t, parserParamNames, indexParamNames, flowName)
+	}
+}
+
 func TestHandleManagers(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
 	second := acsContractJSONWithArg("pkg:"+tailNttManager, "mgr-cid-2", "bWdy", "sync1",
@@ -1881,7 +1946,12 @@ func TestHandleManagers(t *testing.T) {
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 	var got struct {
-		Managers []managerEntry `json:"managers"`
+		Managers []struct {
+			ManagerAddress   string         `json:"managerAddress"`
+			TokenConfig      string         `json:"tokenConfig"`
+			InstrumentId     daInstrumentId `json:"instrumentId"`
+			ReserveCustodian partyID        `json:"reserveCustodian"`
+		} `json:"managers"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
 	require.Len(t, got.Managers, 2)
@@ -1905,32 +1975,39 @@ func TestHandleManagers_ManagerIDEncoding(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
 	const fixtureManagerIDField = `"managerId":"` + testNttManagerID + `"`
 	require.Contains(t, b.managerJSON(), fixtureManagerIDField)
+	const decoderRejectionDetail = "createArgument"
+	const parserRejectionDetail = "NttManager managerId"
 	cases := []struct {
 		name                string
 		managerIDField      string
 		wantStatus          int
 		wantManagerIDString string
+		wantLoggedDetail    string
 	}{
-		{"canonical string", `"managerId":"7"`, http.StatusOK, "7"},
-		{"canonical number", `"managerId":7`, http.StatusOK, "7"},
-		{"2^63-1", `"managerId":"9223372036854775807"`, http.StatusOK, "9223372036854775807"},
-		{"leading zero", `"managerId":"07"`, http.StatusInternalServerError, ""},
-		{"negative", `"managerId":"-1"`, http.StatusInternalServerError, ""},
-		{"2^63", `"managerId":"9223372036854775808"`, http.StatusInternalServerError, ""},
-		{"fractional", `"managerId":"1.5"`, http.StatusInternalServerError, ""},
-		{"absent", `"managerIdAbsent":"7"`, http.StatusInternalServerError, ""},
+		{"canonical string", `"managerId":"7"`, http.StatusOK, "7", ""},
+		{"canonical number", `"managerId":7`, http.StatusOK, "7", ""},
+		{"2^63-1", `"managerId":"9223372036854775807"`, http.StatusOK, "9223372036854775807", ""},
+		{"leading zero rejected by the JSON decoder", `"managerId":"07"`, http.StatusInternalServerError, "", decoderRejectionDetail},
+		{"negative zero", `"managerId":"-0"`, http.StatusInternalServerError, "", parserRejectionDetail},
+		{"negative", `"managerId":"-1"`, http.StatusInternalServerError, "", parserRejectionDetail},
+		{"2^63", `"managerId":"9223372036854775808"`, http.StatusInternalServerError, "", parserRejectionDetail},
+		{"fractional", `"managerId":"1.5"`, http.StatusInternalServerError, "", parserRejectionDetail},
+		{"absent", `"managerIdAbsent":"7"`, http.StatusInternalServerError, "", parserRejectionDetail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			managerJSON := strings.Replace(b.managerJSON(), fixtureManagerIDField, tc.managerIDField, 1)
 			srv := newFlowTestServer(t, flowFixtures{tailNttManager: jsonArray(managerJSON)})
+			logged := captureServerLog(srv)
 			rr := httptest.NewRecorder()
 			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/managers", nil))
 			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
 			if tc.wantStatus != http.StatusOK {
+				requirePublicErrorWithLoggedDetail(t, rr, logged, tc.wantStatus, tc.wantLoggedDetail)
 				assert.NotContains(t, rr.Body.String(), "managers")
 				return
 			}
+			require.Empty(t, tc.wantLoggedDetail)
 			var got struct {
 				Managers []json.RawMessage `json:"managers"`
 			}

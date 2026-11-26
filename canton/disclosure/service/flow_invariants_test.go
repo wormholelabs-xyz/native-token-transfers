@@ -79,7 +79,7 @@ func TestCheckFlowResponseInvariants(t *testing.T) {
 		}, "register response has no managerId"},
 		{"transfer with claimNamespace", func(response *flowResponse) { response.ClaimNamespace = "ntt:ab" }, "transfer response has a claimNamespace"},
 		{"transfer with managerId", func(response *flowResponse) {
-			managerID := "0"
+			managerID := nttManagerID{}
 			response.ManagerID = &managerID
 		}, "transfer response has a managerId"},
 	}
@@ -100,7 +100,7 @@ func TestCheckFlowResponseInvariants(t *testing.T) {
 }
 
 func makeValidRegisterResponse(response *flowResponse) {
-	managerID := "0"
+	managerID := nttManagerID{}
 	response.Flow = "register"
 	response.Missing = []flowMissingEntry{}
 	response.ClaimNamespace = "ntt:ab"

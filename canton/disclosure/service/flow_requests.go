@@ -12,16 +12,16 @@ import (
 // each registry route.
 const maxFlowQueryBytes = 1024
 
-// maxPercentEncodedBytesPerByte is the length of one byte as %XX.
-const maxPercentEncodedBytesPerByte = 3
+// percentEncodedBytesPerByte is the length of one byte as %XX.
+const percentEncodedBytesPerByte = 3
 
 // maxRegisterQueryBytes fits each register parameter at its maximum length, fully
 // percent-encoded. Parameter names count unencoded. "false" is the longest by-vaa value.
-const maxRegisterQueryBytes = len("gg=") + maxPercentEncodedBytesPerByte*maxPartyIDBytes +
-	len("&by-vaa=") + maxPercentEncodedBytesPerByte*len("false") +
-	len("&admin=") + maxPercentEncodedBytesPerByte*maxPartyIDBytes +
-	len("&instrument-admin=") + maxPercentEncodedBytesPerByte*maxPartyIDBytes +
-	len("&instrument-id=") + maxPercentEncodedBytesPerByte*instrumentIDMaxBytes
+const maxRegisterQueryBytes = len("gg=") + percentEncodedBytesPerByte*maxPartyIDBytes +
+	len("&by-vaa=") + percentEncodedBytesPerByte*len("false") +
+	len("&admin=") + percentEncodedBytesPerByte*maxPartyIDBytes +
+	len("&instrument-admin=") + percentEncodedBytesPerByte*maxPartyIDBytes +
+	len("&instrument-id=") + percentEncodedBytesPerByte*instrumentIDMaxBytes
 
 // Compile-time: maxRegisterQueryBytes == 3897.
 const (

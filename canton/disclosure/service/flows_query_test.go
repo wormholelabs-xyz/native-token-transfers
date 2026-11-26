@@ -285,10 +285,10 @@ func TestHandleFlows_RegisterQueryCapOverHTTP(t *testing.T) {
 	guardianGovernance := string(maximalRequest.guardianGovernance)
 	flowServer := newFlowTestServer(t, registerFlowFixtures(guardianGovernance, testRegisterNextID, claimedRootsTreeRootJSON(guardianGovernance)))
 	flowServer.opts.readerParties.guardianGovernance = maximalRequest.guardianGovernance
-	listener := httptest.NewUnstartedServer(flowServer)
-	listener.Config = newHTTPServer(flowServer)
-	listener.Start()
-	t.Cleanup(listener.Close)
+	registerCapServer := httptest.NewUnstartedServer(flowServer)
+	registerCapServer.Config = newHTTPServer(flowServer)
+	registerCapServer.Start()
+	t.Cleanup(registerCapServer.Close)
 	cases := []struct {
 		name       string
 		rawQuery   string
@@ -299,7 +299,7 @@ func TestHandleFlows_RegisterQueryCapOverHTTP(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			response, err := listener.Client().Get(listener.URL + "/v1/flows/register?" + tc.rawQuery)
+			response, err := registerCapServer.Client().Get(registerCapServer.URL + "/v1/flows/register?" + tc.rawQuery)
 			require.NoError(t, err)
 			defer response.Body.Close()
 			body, err := io.ReadAll(response.Body)

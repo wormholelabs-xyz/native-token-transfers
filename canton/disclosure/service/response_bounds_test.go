@@ -91,7 +91,9 @@ func TestHandleManagersStreamsSortedEntries(t *testing.T) {
 			}
 			assert.True(t, json.Valid(recorder.Body.Bytes()), recorder.Body.String())
 			var got struct {
-				Managers []managerEntry `json:"managers"`
+				Managers []struct {
+					ManagerAddress string `json:"managerAddress"`
+				} `json:"managers"`
 			}
 			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &got))
 			gotAddresses := make([]string, 0, len(got.Managers))
