@@ -194,7 +194,8 @@ contracts, these attacks become possible:
 
 A `FeeWithdrawalAuthorization` that is active at the unvet stays active. If
 each `gg` host vets the old core version again, or if the new core version can
-use it, `gg` can archive it. Then it and a new `TransferFees` VAA authorize two transfers for one decision.
+use it, `gg` can archive it. Then it and a new `TransferFees` VAA authorize
+two transfers for one decision.
 
 The README lists the records that the `wormhole-genesis` version for a
 breaking core version must carry. It also states the guardian rule: do not

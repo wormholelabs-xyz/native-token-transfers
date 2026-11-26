@@ -183,9 +183,10 @@ A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` for a
 re-genesis uses a new package name. The re-genesis needs the old and the new
 versions vetted on each `gg` host at the same time. Canton rejects some
 breaking changes under the same package name, but not all. Core 0.8.3 changed
-signatories and kept the name. `damlc` gave only a warning. Core 0.9.0, 0.10.0
-and 0.11.0 kept the name. Each started from a first genesis, so the old
-version did not stay vetted. Do not vet a breaking version with a force flag.
+signatories and kept the name. `damlc` gave only a warning. Core 0.9.0, 0.10.0,
+0.11.0 and 0.12.0 also kept the name. No participant outside LocalNet vetted
+the earlier version, so each started from a first genesis. Do not vet a
+breaking version with a force flag.
 The Canton watcher accepts only the package name `wormhole-core`. Thus a new
 core package name also needs a `guardiand` release.
 
