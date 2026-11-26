@@ -4,6 +4,7 @@ import {
   toChainId,
   type Chain,
   type Network,
+  type PlatformToChains,
 } from "@wormhole-foundation/sdk-base";
 
 import {
@@ -17,6 +18,7 @@ import {
   keccak256,
 } from "@wormhole-foundation/sdk-definitions";
 
+import { PublicKey } from "@solana/web3.js";
 import {
   NttManagerMessage,
   nativeTokenTransferLayout,
@@ -25,7 +27,6 @@ import {
   transceiverInstructionLayout,
   transceiverRegistration,
 } from "./layouts/index.js";
-import { PublicKey } from "@solana/web3.js";
 
 /**
  * @namespace Ntt
@@ -37,11 +38,40 @@ export namespace Ntt {
   export type Mode = "locking" | "burning";
   export type Contracts = {
     token: string;
+    tokenDecimals?: number;
     manager: string;
     transceiver: {
       [type: string]: string;
     };
-    quoter?: string;
+    svmShims?: {
+      postMessageShimOverride?: string;
+      verifyVaaShimOverride?: string;
+    };
+    /** Estimated time of arrival in milliseconds */
+    eta?: number;
+    /** Peer NTT manager info by chain, for chains without on-chain peer state */
+    peers?: {
+      [chain: string]: {
+        manager: string;
+        tokenDecimals?: number;
+      };
+    };
+  };
+
+  export const DEFAULT_SVM_SHIM_ADDRESSES: {
+    [chain in PlatformToChains<"Solana">]?: {
+      postMessageShim: string;
+      verifyVaaShim: string;
+    };
+  } = {
+    Solana: {
+      postMessageShim: "EtZMZM22ViKMo4r5y4Anovs3wKQ2owUmDpjygnMMcdEX",
+      verifyVaaShim: "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at",
+    },
+    Fogo: {
+      postMessageShim: "EtZMZM22ViKMo4r5y4Anovs3wKQ2owUmDpjygnMMcdEX",
+      verifyVaaShim: "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at",
+    },
   };
 
   export type Message = NttManagerMessage<typeof nativeTokenTransferLayout>;
@@ -63,9 +93,7 @@ export namespace Ntt {
   // TODO: what are the set of attestation types for Ntt?
   // can we know this ahead of time or does it need to be
   // flexible enough for folks to add their own somehow?
-  export type Attestation =
-    | VAA<"Ntt:WormholeTransfer">
-    | VAA<"Ntt:WormholeTransferStandardRelayer">;
+  export type Attestation = VAA<"Ntt:WormholeTransfer">;
 
   /**
    * InboundQueuedTransfer is a queued transfer from another chain
@@ -86,6 +114,12 @@ export namespace Ntt {
   export type TransceiverInstruction = {
     index: number;
     payload: Uint8Array;
+  };
+
+  export type TransceiverMeta = {
+    address: string;
+    index: number;
+    type: string;
   };
 
   export type Peer<C extends Chain> = {
@@ -202,9 +236,6 @@ export interface Ntt<N extends Network, C extends Chain> {
     peer: ChainAddress,
     payer?: AccountAddress<C>
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
-
-  /** Check to see if relaying service is available for automatic transfers */
-  isRelayingAvailable(destination: Chain): Promise<boolean>;
 
   /**
    * quoteDeliveryPrice returns the price to deliver a message to a given chain
@@ -365,7 +396,7 @@ export interface Ntt<N extends Network, C extends Chain> {
 export interface NttTransceiver<
   N extends Network,
   C extends Chain,
-  A extends Ntt.Attestation
+  A extends Ntt.Attestation,
 > {
   getTransceiverType(payer?: AccountAddress<C>): Promise<string>;
 
@@ -404,10 +435,7 @@ export interface NttTransceiver<
 }
 
 export namespace WormholeNttTransceiver {
-  const _payloads = [
-    "WormholeTransfer",
-    "WormholeTransferStandardRelayer",
-  ] as const;
+  const _payloads = ["WormholeTransfer"] as const;
   export type PayloadNames = (typeof _payloads)[number];
   export type VAA<PayloadName extends PayloadNames = PayloadNames> =
     ProtocolVAA<Ntt.ProtocolName, PayloadName>;
@@ -427,7 +455,7 @@ export interface WormholeNttTransceiver<N extends Network, C extends Chain>
 export interface SolanaNttTransceiver<
   N extends Network,
   C extends Chain,
-  A extends Ntt.Attestation
+  A extends Ntt.Attestation,
 > extends NttTransceiver<N, C, A> {
   programId: PublicKey;
 }
@@ -435,7 +463,7 @@ export interface SolanaNttTransceiver<
 export interface EvmNttTransceiver<
   N extends Network,
   C extends Chain,
-  A extends Ntt.Attestation
+  A extends Ntt.Attestation,
 > extends NttTransceiver<N, C, A> {}
 
 declare module "@wormhole-foundation/sdk-definitions" {

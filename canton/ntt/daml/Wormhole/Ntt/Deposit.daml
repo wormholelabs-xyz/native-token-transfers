@@ -1,0 +1,67 @@
+-- | The recipient's standing consent to receive burn/mint deposits of one
+-- instrument. This is the NTT analog of Canton Coin's @TransferPreapproval@,
+-- and it exists so a recipient can receive transfers while offline.
+--
+-- Why it is needed: a CIP-56 holding is signed by its owner, and a Daml choice
+-- body only carries the authority of the exercised contract's signatories plus
+-- the choice's controllers. A relayer delivering an inbound transfer has
+-- neither the recipient's signature nor a way to conjure it. The recipient
+-- therefore signs once, up front, by creating this contract; every later mint
+-- runs inside its 'Deposit' choice, where the recipient's stored signature is
+-- in scope.
+--
+-- The contract is signed by the @owner@ alone, so opting in is a single
+-- self-signed create. 'Deposit' is controlled by the instrument admin (in
+-- burn/mint deployments: the guardian governance party), whose authority the
+-- 'Wormhole.Ntt.Manager.NttManager' supplies from its own signatory when it
+-- drives an inbound mint. Inside 'Deposit', both signatures are then available
+-- to 'BurnMintFactory_BurnMint'.
+module Wormhole.Ntt.Deposit where
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs (..))
+import Splice.Api.Token.BurnMintV1
+  (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
+
+template DepositPreapproval
+  with
+    owner        : Party
+    instrumentId : InstrumentId
+  where
+    signatory owner
+    -- The instrument admin controls 'Deposit'; making it an observer lets its
+    -- tooling (and any relayer it discloses to) resolve this contract.
+    observer instrumentId.admin
+
+    -- | Mint @amount@ to the pre-approving @owner@. The manager computes
+    -- @amount@ from the verified VAA and drives this choice with the
+    -- instrument admin's inherited authority; the recipient stays offline.
+    -- @factoryCid@ is the deployment's committed burn/mint factory, supplied by
+    -- 'Wormhole.Ntt.Manager.Mint'; the choice is admin-controlled, so a relayer
+    -- cannot reach it with a factory of its own.
+    nonconsuming choice Deposit : ()
+      with
+        amount      : Decimal
+        factoryCid  : ContractId BurnMintFactory
+        extraArgs   : ExtraArgs
+      controller instrumentId.admin
+      do
+        _ <- exercise factoryCid BurnMintFactory_BurnMint with
+          expectedAdmin = instrumentId.admin
+          instrumentId
+          inputHoldingCids = [] : [ContractId Holding]
+          outputs =
+            [ BurnMintOutput with
+                owner
+                amount
+                context = extraArgs.context
+            ]
+          extraActors = [owner]
+          extraArgs
+        pure ()
+
+    -- | The owner alone can tear down its standing consent. Delivery keeps
+    -- working until then; there is no expiry and no admin-side cancel.
+    choice Revoke : ()
+      controller owner
+      do pure ()

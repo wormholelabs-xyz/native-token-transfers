@@ -1,5 +1,5 @@
 import type { Chain, Network } from "@wormhole-foundation/sdk-base";
-import { chainToChainId } from "@wormhole-foundation/sdk-base";
+import { chainToChainId, chainToPlatform } from "@wormhole-foundation/sdk-base";
 import {
   Contracts,
   UnsignedTransaction,
@@ -17,7 +17,7 @@ import {
   SuiUnsignedTransaction,
 } from "@wormhole-foundation/sdk-sui";
 import { PublicKey } from "@solana/web3.js";
-import { SuiClient } from "@mysten/sui/client";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
 import {
   Transaction,
   TransactionObjectArgument,
@@ -30,6 +30,7 @@ import {
   getWormholePackageId,
   getPackageId,
   getTransceivers,
+  getCoinMetadataId,
 } from "./utils.js";
 
 export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
@@ -43,7 +44,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
   constructor(
     readonly network: N,
     readonly chain: C,
-    readonly provider: SuiClient,
+    readonly provider: SuiGrpcClient,
     readonly contracts: Contracts & { ntt?: Ntt.Contracts }
   ) {
     if (!SUI_ADDRESSES[network as keyof typeof SUI_ADDRESSES]) {
@@ -60,10 +61,10 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
   }
 
   static async fromRpc<N extends Network>(
-    provider: SuiClient,
+    provider: SuiGrpcClient,
     config: ChainsConfig<N, SuiPlatformType>
   ): Promise<SuiNttWithExecutor<N, SuiChains>> {
-    const [network, chain] = await SuiPlatform.chainFromRpc(provider as any);
+    const [network, chain] = await SuiPlatform.chainFromRpc(provider);
     const conf = config[chain]!;
     if (conf.network !== network)
       throw new Error(`Network mismatch: ${conf.network} != ${network}`);
@@ -90,8 +91,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
     }
 
     // Validate destination chain is supported (Solana and Evm only for executor)
-    const supportedDestChains = await this.getSupportedDestinationChains();
-    if (!supportedDestChains.includes(destination.chain)) {
+    if (!this.isSupportedDestinationChain(destination.chain)) {
       throw new Error(
         "Executor only supports Solana and EVM destination chains"
       );
@@ -107,7 +107,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
 
     // Create and return the complete transaction
     const executorTx = new SuiUnsignedTransaction(
-      tx as any,
+      tx,
       this.network,
       this.chain,
       "NTT Transfer with Executor"
@@ -143,7 +143,7 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
     // Get transceiver info
     const [transceiverStateId] = await getTransceivers(
       ntt.provider,
-      fields.transceivers.fields.id.id
+      fields.transceivers.id
     );
 
     if (!transceiverStateId) {
@@ -174,14 +174,10 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       );
     }
 
-    // Get coin metadata
-    const coinMetadata = await ntt.provider.getCoinMetadata({
-      coinType,
-    });
-    if (!coinMetadata?.id) {
-      throw new Error(`CoinMetadata not found for ${coinType}`);
-    }
-    const coinMetadataId = coinMetadata.id;
+    const coinMetadataId = await getCoinMetadataId(
+      this.network,
+      this.contracts.ntt!["token"]
+    );
 
     // For non-native tokens, we need to prepare coins once and split multiple times
     let primaryCoinInput: TransactionObjectArgument | undefined;
@@ -319,20 +315,31 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
       );
     }
 
-    // Handle referrer fee if present
-    if (quote.referrerFee > 0n) {
-      // Convert referrer address to Sui address format
+    // Transfer token fee to referrer
+    if (quote.transferTokenFee > 0n) {
       const referrerAddress = `0x${Buffer.from(
         quote.referrer.address.toUint8Array()
       ).toString("hex")}`;
 
-      // Split coins for referrer fee from the same source
       const [referrerCoin] = isNative
-        ? tx.splitCoins(tx.gas, [tx.pure.u64(quote.referrerFee)])
-        : tx.splitCoins(primaryCoinInput!, [tx.pure.u64(quote.referrerFee)]);
+        ? tx.splitCoins(tx.gas, [tx.pure.u64(quote.transferTokenFee)])
+        : tx.splitCoins(primaryCoinInput!, [
+            tx.pure.u64(quote.transferTokenFee),
+          ]);
 
-      // Transfer the referrer fee
       tx.transferObjects([referrerCoin], referrerAddress);
+    }
+
+    // Transfer native fee to referrer
+    if (quote.nativeTokenFee > 0n) {
+      const referrerAddress = `0x${Buffer.from(
+        quote.referrer.address.toUint8Array()
+      ).toString("hex")}`;
+
+      const [nativeFeeCoin] = tx.splitCoins(tx.gas, [
+        tx.pure.u64(quote.nativeTokenFee),
+      ]);
+      tx.transferObjects([nativeFeeCoin], referrerAddress);
     }
 
     // Convert manager state ID to bytes
@@ -416,18 +423,8 @@ export class SuiNttWithExecutor<N extends Network, C extends SuiChains>
     return { msgValue, gasLimit };
   }
 
-  // Helper function to get supported destination chains
-  getSupportedDestinationChains(): Chain[] {
-    // Sui executor supports Solana and EVM chains
-    return [
-      "Solana",
-      "Ethereum",
-      "Bsc",
-      "Polygon",
-      "Avalanche",
-      "Arbitrum",
-      "Optimism",
-      "Base",
-    ] as Chain[];
+  isSupportedDestinationChain(chain: Chain): boolean {
+    const platform = chainToPlatform(chain);
+    return platform === "Solana" || platform === "Evm";
   }
 }

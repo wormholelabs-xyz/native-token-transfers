@@ -1,0 +1,114 @@
+name: Canton CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: ./canton
+
+jobs:
+  daml:
+    name: dpm build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          # Temurin 21.0.13.1+2 (CVE-2026-114938 fix), in the Adoptium semver form that setup-java matches.
+          java-version: "21.0.13+100000002.0.LTS"
+
+      # dpm is Digital Asset's Daml package manager. The step installs the
+      # dpm SDK tarball of the SDK version in every daml.yaml (3.7.3), checked
+      # by SHA-256, as the wormhole repo's canton/Dockerfile does. The Daml
+      # source builds against the vendored wormhole-core DAR; this job never
+      # rebuilds core.
+      - name: Install dpm and the Daml SDK
+        env:
+          DAML_SDK_VERSION: "3.7.3"
+          DPM_SDK_TARBALL_SHA256: 73bd3d5e1ad656a2cd89b7c4e122495fd68acd5b84db4a91c5aefb9a2ddeb2e2
+        run: |
+          set -eu
+          tarball="dpm-${DAML_SDK_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL --max-time 1800 -o "$RUNNER_TEMP/$tarball" \
+            "https://artifactregistry.googleapis.com/download/v1/projects/da-images/locations/europe/repositories/public-generic/files/dpm-sdk:${DAML_SDK_VERSION}:${tarball}:download?alt=media"
+          echo "$DPM_SDK_TARBALL_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/dpm-sdk"
+          tar xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/dpm-sdk" --strip-components 1
+          "$RUNNER_TEMP/dpm-sdk/bin/dpm" bootstrap "$RUNNER_TEMP/dpm-sdk"
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+          test "$("$HOME/.dpm/bin/dpm" version --active)" = "$DAML_SDK_VERSION"
+          for daml_yaml in ntt/daml.yaml test/daml.yaml genesis/daml.yaml genesis-test/daml.yaml; do
+            test "$(sed -n 's/^sdk-version: //p' "$daml_yaml")" = "$DAML_SDK_VERSION"
+          done
+
+      - name: Build all Canton packages
+        run: dpm build --all
+
+      - name: Run Daml tests
+        working-directory: ./canton/test
+        run: dpm test
+
+      - name: Run wormhole-genesis Daml tests
+        working-directory: ./canton/genesis-test
+        run: dpm test
+
+  disclosure-service:
+    name: disclosure service (go)
+    runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -mod=readonly
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: ./canton/disclosure/service/go.mod
+          cache-dependency-path: |
+            ./canton/disclosure/service/go.sum
+            ./canton/testing/go/go.sum
+
+      - name: gofmt, vet, test (disclosure service)
+        working-directory: ./canton/disclosure/service
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+
+      # Unit tests only; the integration tests need the build tag "integration".
+      - name: vet, test (testing/go)
+        working-directory: ./canton/testing/go
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+      # Builds and scans with the go.mod toolchain (go1.26.11).
+      # Pin: the module checksum of golang.org/x/vuln v1.9.0 must equal GOVULNCHECK_MODULE_SUM.
+      # sum.golang.org also verifies the download; no variable may exempt the module from it.
+      # The go.mod of that module sets each dependency version; sum.golang.org verifies each download.
+      - name: govulncheck (disclosure service)
+        working-directory: ./canton/disclosure/service
+        env:
+          GOVULNCHECK_MODULE: golang.org/x/vuln@v1.9.0
+          GOVULNCHECK_MODULE_SUM: h1:12VaqnI9kJfqwRoPptxoqsUhQtdfrSbdksT7X/KY/sc=
+          GOSUMDB: sum.golang.org
+          GONOSUMDB: ""
+          GONOPROXY: ""
+          GOPRIVATE: ""
+          GOINSECURE: ""
+        run: |
+          downloaded_sum="$(cd "$RUNNER_TEMP" && go mod download -json "$GOVULNCHECK_MODULE" | jq -r .Sum)"
+          test "$downloaded_sum" = "$GOVULNCHECK_MODULE_SUM"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_MODULE#*@}"
+          "$(go env GOPATH)/bin/govulncheck" ./...

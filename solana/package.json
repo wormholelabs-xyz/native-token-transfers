@@ -13,13 +13,12 @@
     "test": "tests"
   },
   "license": "Apache-2.0",
-  "main": "./dist/cjs/ts/index.js",
-  "types": "./dist/cjs/ts/index.d.ts",
+  "main": "./dist/esm/ts/index.js",
+  "types": "./dist/esm/ts/index.d.ts",
   "module": "./dist/esm/ts/index.js",
   "description": "NTT SDK for Solana",
   "files": [
-    "dist/esm",
-    "dist/cjs"
+    "dist/esm"
   ],
   "keywords": [
     "wormhole",
@@ -33,13 +32,13 @@
   },
   "sideEffects": true,
   "scripts": {
-    "build:cjs": "tsc -p ./tsconfig.cjs.json  && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "build:esm": "tsc -p ./tsconfig.esm.json",
-    "build": "npm run build:esm && npm run build:cjs",
-    "rebuild": "npm run clean && npm run build",
+    "build": "bun run build:esm",
+    "rebuild": "bun run clean && bun run build",
     "clean": "rm -rf ./dist",
-    "test:ci": "jest --config ./jest.config.ts",
-    "build:contracts": "make build"
+    "test:ci": "NODE_OPTIONS=--experimental-vm-modules jest --config ./jest.config.ts",
+    "build:contracts": "make build",
+    "prettier": "prettier --write ./tests ./ts"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.5",
@@ -53,26 +52,21 @@
     "@coral-xyz/borsh": "0.29.0",
     "@solana/spl-token": "0.4.0",
     "@solana/web3.js": "^1.95.8",
-    "bn.js": "5.2.1",
-    "@wormhole-foundation/sdk-definitions-ntt": "1.0.0"
-  },
-  "peerDependencies": {
-    "@wormhole-foundation/sdk-base": "^3.5.0",
-    "@wormhole-foundation/sdk-definitions": "^3.5.0",
-    "@wormhole-foundation/sdk-solana": "^3.5.0",
-    "@wormhole-foundation/sdk-solana-core": "^3.5.0"
+    "@wormhole-foundation/sdk-definitions-ntt": "1.0.0",
+    "bn.js": "5.2.1"
   },
   "type": "module",
   "exports": {
     ".": {
-      "import": {
-        "types": "./dist/esm/ts/index.d.ts",
-        "default": "./dist/esm/ts/index.js"
-      },
-      "require": {
-        "types": "./dist/cjs/ts/index.d.ts",
-        "default": "./dist/cjs/ts/index.js"
-      }
+      "types": "./dist/esm/ts/index.d.ts",
+      "import": "./dist/esm/ts/index.js",
+      "default": "./dist/esm/ts/index.js"
     }
+  },
+  "peerDependencies": {
+    "@wormhole-foundation/sdk-base": "6.1.6",
+    "@wormhole-foundation/sdk-definitions": "6.1.6",
+    "@wormhole-foundation/sdk-solana": "6.1.6",
+    "@wormhole-foundation/sdk-solana-core": "6.1.6"
   }
 }

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "network": "Mainnet",
+  "chainIds": {
+    "Canton": 75,
+    "Ethereum": 2,
+    "Solana": 1
+  },
+  "canton": {
+    "disclosureServiceUrl": "https://canton-disclosure.labsapis.com"
+  },
+  "deployments": {}
+}

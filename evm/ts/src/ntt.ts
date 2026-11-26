@@ -30,9 +30,12 @@ import {
 import "@wormhole-foundation/sdk-evm-core";
 
 import {
+  decodeTrimmedAmount,
+  EncodedTrimmedAmount,
   EvmNttTransceiver,
   Ntt,
   NttTransceiver,
+  untrim,
   WormholeNttTransceiver,
 } from "@wormhole-foundation/sdk-definitions-ntt";
 import { Contract, type Provider, type TransactionRequest } from "ethers";
@@ -49,6 +52,8 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
     EvmNttTransceiver<N, C, WormholeNttTransceiver.VAA>
 {
   transceiver: NttTransceiverBindings.NttTransceiver;
+  /** The on-chain registered index for this transceiver in the NttManager's TransceiverRegistry. */
+  registeredIndex: number = 0;
   constructor(
     readonly manager: EvmNtt<N, C>,
     readonly address: string,
@@ -131,10 +136,16 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
   }
 
   async isEvmChain(chain: Chain): Promise<boolean> {
+    if (!("isWormholeEvmChain" in this.transceiver)) return false;
     return await this.transceiver.isWormholeEvmChain(toChainId(chain));
   }
 
   async *setIsEvmChain(chain: Chain, isEvm: boolean) {
+    if (!("setIsWormholeEvmChain" in this.transceiver)) {
+      throw new Error(
+        "setIsWormholeEvmChain is not supported by this ABI version"
+      );
+    }
     const tx = await this.transceiver.setIsWormholeEvmChain.populateTransaction(
       toChainId(chain),
       isEvm
@@ -154,42 +165,6 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
       "WormholeTransceiver.receiveMessage"
     );
   }
-
-  async isWormholeRelayingEnabled(destChain: Chain): Promise<boolean> {
-    return await this.transceiver.isWormholeRelayingEnabled(
-      toChainId(destChain)
-    );
-  }
-
-  async *setIsWormholeRelayingEnabled(destChain: Chain, enabled: boolean) {
-    const tx =
-      await this.transceiver.setIsWormholeRelayingEnabled.populateTransaction(
-        toChainId(destChain),
-        enabled
-      );
-    yield this.manager.createUnsignedTx(
-      tx,
-      "WormholeTransceiver.setWormholeRelayingEnabled"
-    );
-  }
-
-  async isSpecialRelayingEnabled(destChain: Chain): Promise<boolean> {
-    return await this.transceiver.isSpecialRelayingEnabled(
-      toChainId(destChain)
-    );
-  }
-
-  async *setIsSpecialRelayingEnabled(destChain: Chain, enabled: boolean) {
-    const tx =
-      await this.transceiver.setIsSpecialRelayingEnabled.populateTransaction(
-        toChainId(destChain),
-        enabled
-      );
-    yield this.manager.createUnsignedTx(
-      tx,
-      "WormholeTransceiver.setSpecialRelayingEnabled"
-    );
-  }
 }
 
 export class EvmNtt<N extends Network, C extends EvmChains>
@@ -200,6 +175,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
   manager: NttManagerBindings.NttManager;
   xcvrs: EvmNttWormholeTranceiver<N, C>[];
   managerAddress: string;
+  private _transceiverIndicesInitialized = false;
 
   constructor(
     readonly network: N,
@@ -226,15 +202,18 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     );
 
     this.xcvrs = [];
+    const configuredTransceivers = contracts.ntt.transceiver;
     if (
-      "wormhole" in contracts.ntt.transceiver &&
-      contracts.ntt.transceiver["wormhole"]
+      configuredTransceivers &&
+      typeof configuredTransceivers === "object" &&
+      "wormhole" in configuredTransceivers &&
+      configuredTransceivers["wormhole"]
     ) {
       const transceiverTypes = [
         "wormhole", // wormhole xcvr should be ix 0
-        ...Object.keys(contracts.ntt.transceiver).filter((transceiverType) => {
-          transceiverType !== "wormhole";
-        }),
+        ...Object.keys(configuredTransceivers).filter(
+          (transceiverType) => transceiverType !== "wormhole"
+        ),
       ];
       transceiverTypes.map((transceiverType) => {
         // we currently only support wormhole transceivers
@@ -246,11 +225,47 @@ export class EvmNtt<N extends Network, C extends EvmChains>
         this.xcvrs.push(
           new EvmNttWormholeTranceiver(
             this,
-            contracts.ntt!.transceiver[transceiverType]!,
+            configuredTransceivers[transceiverType]!,
             abiBindings!
           )
         );
       });
+    }
+  }
+
+  /**
+   * Fetches on-chain registered indices for each transceiver via getTransceiverInfo()
+   * and caches them on the xcvr objects. This is needed because the on-chain registered
+   * index may differ from the SDK array position (e.g. after removing and re-adding
+   * a transceiver, the new one gets a higher index since indices are monotonically
+   * increasing and never reused).
+   */
+  async initTransceiverIndices(): Promise<void> {
+    if (this._transceiverIndicesInitialized) return;
+
+    try {
+      if (!("getTransceiverInfo" in this.manager)) {
+        // getTransceiverInfo not available on ABI < 1.0.0, fall back to default (0)
+        this._transceiverIndicesInitialized = true;
+        return;
+      }
+
+      const transceiverInfos = await this.manager.getTransceiverInfo();
+      const transceiverAddresses = await this.manager.getTransceivers();
+
+      // Both arrays are ordered the same way (enabled transceivers list)
+      for (const xcvr of this.xcvrs) {
+        const addrIndex = transceiverAddresses.findIndex(
+          (addr: string) => addr.toLowerCase() === xcvr.address.toLowerCase()
+        );
+        if (addrIndex !== -1 && addrIndex < transceiverInfos.length) {
+          xcvr.registeredIndex = Number(transceiverInfos[addrIndex]!.index);
+        }
+      }
+      this._transceiverIndicesInitialized = true;
+    } catch {
+      // Do not mark initialized on failure: retry on next call so transient
+      // RPC/provider errors don't permanently pin indices to default 0.
     }
   }
 
@@ -288,17 +303,17 @@ export class EvmNtt<N extends Network, C extends EvmChains>
 
   async *setOwner(owner: AnyEvmAddress) {
     const canonicalOwner = new EvmAddress(owner).toString();
-    const tx = await this.manager.transferOwnership.populateTransaction(
-      canonicalOwner
-    );
+    const tx =
+      await this.manager.transferOwnership.populateTransaction(canonicalOwner);
     yield this.createUnsignedTx(tx, "Ntt.setOwner");
   }
 
   async *setPauser(pauser: AnyEvmAddress) {
     const canonicalPauser = new EvmAddress(pauser).toString();
-    const tx = await this.manager.transferPauserCapability.populateTransaction(
-      canonicalPauser
-    );
+    const tx =
+      await this.manager.transferPauserCapability.populateTransaction(
+        canonicalPauser
+      );
     yield this.createUnsignedTx(tx, "Ntt.setPauser");
   }
 
@@ -311,25 +326,8 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     yield this.createUnsignedTx(tx, "Ntt.setThreshold");
   }
 
-  async isRelayingAvailable(destination: Chain): Promise<boolean> {
-    const enabled = await Promise.all(
-      this.xcvrs.map(async (x) => {
-        const [wh, special] = await Promise.all([
-          x.isWormholeRelayingEnabled(destination),
-          x.isSpecialRelayingEnabled(destination),
-        ]);
-        return wh || special;
-      })
-    );
-
-    return enabled.filter((x) => x).length > 0;
-  }
-
   async getIsExecuted(attestation: Ntt.Attestation): Promise<boolean> {
-    const payload =
-      attestation.payloadName === "WormholeTransfer"
-        ? attestation.payload
-        : attestation.payload["payload"];
+    const payload = attestation.payload;
     const isExecuted = await this.manager.isMessageExecuted(
       Ntt.messageDigest(attestation.emitterChain, payload["nttManagerPayload"])
     );
@@ -341,10 +339,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
   async getIsTransferInboundQueued(
     attestation: Ntt.Attestation
   ): Promise<boolean> {
-    const payload =
-      attestation.payloadName === "WormholeTransfer"
-        ? attestation.payload
-        : attestation.payload["payload"];
+    const payload = attestation.payload;
     return (
       (await this.getInboundQueuedTransfer(
         attestation.emitterChain,
@@ -354,10 +349,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
   }
 
   getIsApproved(attestation: Ntt.Attestation): Promise<boolean> {
-    const payload =
-      attestation.payloadName === "WormholeTransfer"
-        ? attestation.payload
-        : attestation.payload["payload"];
+    const payload = attestation.payload;
     return this.manager.isMessageApproved(
       Ntt.messageDigest(attestation.emitterChain, payload["nttManagerPayload"])
     );
@@ -397,18 +389,31 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       throw new Error(`Network mismatch: ${conf.network} != ${network}`);
 
     const version = await EvmNtt.getVersion(provider, conf.contracts);
-    return new EvmNtt(network as N, chain, provider, conf.contracts, version);
+    const ntt = new EvmNtt(
+      network as N,
+      chain,
+      provider,
+      conf.contracts,
+      version
+    );
+    await ntt.initTransceiverIndices();
+    return ntt;
   }
 
   encodeOptions(options: Ntt.TransferOptions): Ntt.TransceiverInstruction[] {
     const ixs: Ntt.TransceiverInstruction[] = [];
 
-    ixs.push({
-      index: 0,
-      payload: this.xcvrs[0]!.encodeFlags({
-        skipRelay: !options.automatic,
-      }),
-    });
+    for (const xcvr of this.xcvrs) {
+      ixs.push({
+        index: xcvr.registeredIndex,
+        payload: xcvr.encodeFlags({
+          skipRelay: !options.automatic,
+        }),
+      });
+    }
+
+    // On-chain parseTransceiverInstructions requires strictly increasing indices
+    ixs.sort((a, b) => a.index - b.index);
 
     return ixs;
   }
@@ -432,7 +437,9 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       return abiVersion;
     } catch (e) {
       console.error(
-        `Failed to get NTT_MANAGER_VERSION from contract ${contracts.ntt?.manager} on ${(await provider.getNetwork()).name}`
+        `Failed to get NTT_MANAGER_VERSION from contract ${
+          contracts.ntt?.manager
+        } on ${(await provider.getNetwork()).name}`
       );
       throw e;
     }
@@ -446,10 +453,29 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     dstChain: Chain,
     options: Ntt.TransferOptions
   ): Promise<bigint> {
-    const [, totalPrice] = await this.manager.quoteDeliveryPrice(
-      toChainId(dstChain),
-      Ntt.encodeTransceiverInstructions(this.encodeOptions(options))
-    );
+    await this.initTransceiverIndices();
+
+    // Bypass the manager's quoteDeliveryPrice because it has a bug: it sizes the
+    // transceiver instructions array using enabledTransceivers.length instead of
+    // numRegisteredTransceivers, causing an out-of-bounds access when the active
+    // transceiver's registered index >= number of enabled transceivers.
+    // Instead, we call each transceiver's quoteDeliveryPrice directly.
+    const instructions = this.encodeOptions(options);
+    let totalPrice = 0n;
+
+    for (const xcvr of this.xcvrs) {
+      const ix = instructions.find((i) => i.index === xcvr.registeredIndex);
+      const instruction = ix ?? {
+        index: xcvr.registeredIndex,
+        payload: new Uint8Array(),
+      };
+      const price = await xcvr.transceiver.quoteDeliveryPrice(
+        toChainId(dstChain),
+        instruction
+      );
+      totalPrice += price;
+    }
+
     return totalPrice;
   }
 
@@ -584,7 +610,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     const encoded: EncodedTrimmedAmount = (
       await this.manager.getOutboundLimitParams()
     ).limit;
-    const trimmedAmount: TrimmedAmount = decodeTrimmedAmount(encoded);
+    const trimmedAmount = decodeTrimmedAmount(encoded);
     const tokenDecimals = await this.getTokenDecimals();
 
     return untrim(trimmedAmount, tokenDecimals);
@@ -603,7 +629,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
     const encoded: EncodedTrimmedAmount = (
       await this.manager.getInboundLimitParams(toChainId(fromChain))
     ).limit;
-    const trimmedAmount: TrimmedAmount = decodeTrimmedAmount(encoded);
+    const trimmedAmount = decodeTrimmedAmount(encoded);
     const tokenDecimals = await this.getTokenDecimals();
 
     return untrim(trimmedAmount, tokenDecimals);
@@ -662,11 +688,28 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       // TODO: what about the quoter?
     };
 
+    // Match the on-chain wormhole transceiver by address rather than assuming
+    // it is at array index 0, since enabled transceiver ordering can change
+    // after remove/re-add operations.
+    const enabledTransceivers = await this.manager.getTransceivers();
+    let wormholeTransceiverAddr: string | undefined;
+    for (const xcvr of this.xcvrs) {
+      wormholeTransceiverAddr = enabledTransceivers.find(
+        (addr: string) => addr.toLowerCase() === xcvr.address.toLowerCase()
+      );
+      if (wormholeTransceiverAddr) break;
+    }
+    // Backward-compatible fallback for manager-only discovery flows (e.g. CLI pull):
+    // if no local xcvr is configured, default to the first enabled transceiver.
+    if (!wormholeTransceiverAddr && enabledTransceivers.length > 0) {
+      wormholeTransceiverAddr = enabledTransceivers[0];
+    }
+
     const remote: Partial<Ntt.Contracts> = {
       manager: this.managerAddress,
       token: await this.manager.token(),
       transceiver: {
-        wormhole: (await this.manager.getTransceivers())[0]!, // TODO: make this more generic
+        ...(wormholeTransceiverAddr && { wormhole: wormholeTransceiverAddr }),
       },
     };
 
@@ -698,42 +741,5 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       description,
       parallelizable
     );
-  }
-}
-
-type EncodedTrimmedAmount = bigint; // uint72
-
-type TrimmedAmount = {
-  amount: bigint;
-  decimals: number;
-};
-
-function decodeTrimmedAmount(encoded: EncodedTrimmedAmount): TrimmedAmount {
-  const decimals = Number(encoded & 0xffn);
-  const amount = encoded >> 8n;
-  return {
-    amount,
-    decimals,
-  };
-}
-
-function untrim(trimmed: TrimmedAmount, toDecimals: number): bigint {
-  const { amount, decimals: fromDecimals } = trimmed;
-  return scale(amount, fromDecimals, toDecimals);
-}
-
-function scale(
-  amount: bigint,
-  fromDecimals: number,
-  toDecimals: number
-): bigint {
-  if (fromDecimals == toDecimals) {
-    return amount;
-  }
-
-  if (fromDecimals > toDecimals) {
-    return amount / 10n ** BigInt(fromDecimals - toDecimals);
-  } else {
-    return amount * 10n ** BigInt(toDecimals - fromDecimals);
   }
 }
