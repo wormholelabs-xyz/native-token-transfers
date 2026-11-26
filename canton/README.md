@@ -177,10 +177,23 @@ versions. Thus a breaking `ntt` or core version also needs a new
 
 A breaking core version needs a migration, not only a re-genesis. The
 `NttManager` choices take contract ids of core 0.12.3 templates. Thus a
-breaking core version also forces a breaking `ntt` version. A re-genesis
-archives the earlier `CoreState`. Then the managers of the earlier `ntt`
-version cannot check a VAA or publish a message. Thus each deployment must
-move to the new versions. A re-genesis does not carry this state:
+breaking core version also forces a breaking `ntt` version.
+
+A breaking version of `wormhole-core`, `ntt` or `wormhole-genesis` for a
+re-genesis uses a new package name. The re-genesis needs the old and the new
+versions vetted on each `gg` host at the same time. Canton rejects some
+breaking changes under the same package name, but not all. Core 0.8.3 changed
+signatories and kept the name. `damlc` gave only a warning. Core 0.9.0, 0.10.0,
+0.11.0 and 0.12.0 also kept the name. No participant outside LocalNet vetted
+the earlier version, so each started from a first genesis. Do not vet a
+breaking version with a force flag.
+The Canton watcher accepts only the package name `wormhole-core`. Thus a new
+core package name also needs a `guardiand` release.
+
+A re-genesis archives the earlier `CoreState`. Then the managers of the
+earlier `ntt` version cannot check a VAA or publish a message. Thus each
+deployment must move to the new versions. A re-genesis does not carry this
+state:
 
 - Core `ReplayNode`. The claimed-roots tree records each (`gg`, namespace)
   pair. The trie of each deployment records each inbound VAA that the
@@ -193,8 +206,9 @@ move to the new versions. A re-genesis does not carry this state:
   `paused`.
 - NTT `LockedLedger`. Its balance is the release limit of a lock/unlock
   deployment.
-- Core `FeeWithdrawalAuthorization`. Each active authorization stays a
-  contract of the old core version.
+- Core `FeeWithdrawalAuthorization`. An active authorization does not move
+  to the new core version. Archive it before the unvet. The fee withdrawal
+  steps below give the order.
 
 If the new contracts start without the earlier records, these failures are
 possible:
@@ -227,8 +241,12 @@ these records into the new contracts:
   manager;
 - the balance of each `LockedLedger`.
 
-A re-genesis already does this for the governance replay records. It takes
-them as parameters and checks them against the earlier roots.
+A re-genesis does not carry a `FeeWithdrawalAuthorization`. Do not carry it
+into the new contracts. The fee withdrawal steps below archive each active
+authorization before the unvet.
+
+A re-genesis already carries the governance replay records. It takes them as
+parameters and checks them against the earlier roots.
 The body of `AcceptGenesis` has the authority of its controllers `gg`,
 `feeCustody` and `nttCustody`. It also has the authority of the operator, the
 signatory of the `WormholeGenesisOffer`.
@@ -238,12 +256,30 @@ integrators move their own tries and emitters. Until that `wormhole-genesis`
 version exists, do not vet a breaking core version on a `gg` host. Do not
 sign a re-genesis to it.
 
-Before you unvet the old core version for a breaking core version, do the fee
-withdrawal procedure for each active `FeeWithdrawalAuthorization`. As a
-minimum, archive each one. After the unvet, a `gg` host cannot archive a
-contract of the old core version. If a transfer does not commit, the
-guardians sign a new `TransferFees` VAA. The carried governance replay record
-rejects the earlier VAA.
+For a breaking core version, do the fee withdrawal steps in this order:
+
+1. Commit the re-genesis. It archives the old `CoreState`. Then no
+   `TransferFees` VAA can create a `FeeWithdrawalAuthorization` of the old
+   core version.
+2. For each active `FeeWithdrawalAuthorization` of the old core version, do
+   the [fee withdrawal procedure](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/docs/canton_guardian_operations.md#76-fee-withdrawal).
+   As a minimum, archive each one. The guardian steps are in
+   [section 6.8](https://github.com/wormholelabs-xyz/wormhole/blob/integration/canton/docs/canton_guardian_operations.md#68-breaking-core-version-fee-withdrawals-before-the-unvet)
+   of the guardian operations doc.
+3. Before the unvet, read the active contracts of `gg` on each `gg` host.
+   Make sure that no `FeeWithdrawalAuthorization` of the old core version is
+   active. If one is active, do step 2 again.
+4. Unvet the old core version.
+
+Archive each `FeeWithdrawalAuthorization` of the old core version before the unvet.
+An authorization that stays active at the unvet can give a second transfer for one decision.
+`gg` can archive it later if each `gg` host vets the old core version again, or if the new core version can use it.
+If the guardians also made a new `TransferFees` VAA for that decision, one decision gives two transfers.
+
+The transfer from `feeCustody` does not use the core package. Thus, if the
+archive committed, the transfer can complete after the unvet. The guardians
+make a new `TransferFees` VAA only if they stop the transfer. The carried
+governance replay record rejects the earlier VAA.
 
 Vet no package whose code runs with `gg` authority and can create a
 `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`. The

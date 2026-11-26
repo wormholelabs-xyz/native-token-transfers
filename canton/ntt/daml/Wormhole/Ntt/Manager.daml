@@ -504,7 +504,7 @@ template NttManager
     peers                : Map Int Peer    -- chain id -> peer deployment
     factory              : NttFactory      -- the registry's committed factory, typed by mode
     paused               : Bool            -- emergency halt: blocks Transfer/Release/Mint
-    factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa': 'SetFactory' bumps this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
+    factoryEpoch         : Int             -- TOCTOU pin for 'AcceptAdminTransferByVaa' and 'SetFactoryByVaa': 'SetFactory' and 'SetFactoryByVaa' bump this on every rotation, so a guardian-vetted (managerAddress, factoryEpoch) pair can never be satisfied by a look-alike factory rotated in after the quorum signed
     peerEpoch            : Int             -- freshness pin for 'SetPeerByVaa': every 'SetPeer' bumps this deployment-wide counter, so a withheld/superseded peer VAA can never reinstate a since-replaced peer
   where
     -- See the module header for what each signature contributes. All three
