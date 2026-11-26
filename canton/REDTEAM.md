@@ -192,9 +192,9 @@ contracts, these attacks become possible:
 - A higher `LockedLedger` balance releases the reserves of other
   deployments.
 
-A `FeeWithdrawalAuthorization` that is active at the unvet stays active. If a
-host vets the old core version again, `gg` can archive it. Then it and a new
-`TransferFees` VAA authorize two transfers for one decision.
+A `FeeWithdrawalAuthorization` that is active at the unvet stays active. If
+each `gg` host vets the old core version again, `gg` can archive it. Then it
+and a new `TransferFees` VAA authorize two transfers for one decision.
 
 The README lists the records that the `wormhole-genesis` version for a
 breaking core version must carry. It also states the guardian rule: do not

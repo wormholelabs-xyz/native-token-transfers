@@ -957,6 +957,7 @@ testRegistrationClaimsTheDeploymentPairOnce = do
     let namespace = nttNamespaceFor instrumentId registrationCase.admin root.nextId
     case (registrationCase.expectedOutcome, result) of
       (RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow, Left (ContractNotFound {additionalDebuggingInfo})) -> do
+        -- additionalDebuggingInfo: Some only on the IDE ledger of `dpm test`; None on Canton.
         (additionalDebuggingInfo >>= isNotActive >>= fromAnyContractId @ReplayNode) === Some claimedRootsNodeCid
         pure (liveFirstRootCid, liveSecondRootCid)
       (RegistrationFailsOnTheArchivedClaimedRootsNodeOfTheRow, Left submitError) ->
