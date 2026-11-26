@@ -185,9 +185,8 @@ type flowResponse struct {
 	Disclosures []flowDisclosureEntry `json:"disclosures"`
 	Missing     []flowMissingEntry    `json:"missing"`
 	// Register only: the replay namespace and managerId the registration claims at this offset.
-	// managerId is the canonical decimal as a JSON string, as the JSON Ledger API writes a Daml Int.
-	ClaimNamespace string  `json:"claimNamespace,omitempty"`
-	ManagerID      *string `json:"managerId,omitempty"`
+	ClaimNamespace string        `json:"claimNamespace,omitempty"`
+	ManagerID      *nttManagerID `json:"managerId,omitempty"`
 }
 
 func discloseAs(role string, entry acsEntry) flowDisclosureEntry {
@@ -1075,13 +1074,12 @@ func (s *server) assembleRegister(ctx context.Context, request registerRequest, 
 	}
 	disclosures = append(disclosures, discloseAs(roleCoveringClaimedRootsNode, claimedRootsNode.entry))
 
-	managerIDDecimal := managerID.String()
 	return &flowResponse{
 		Flow:           "register",
 		Disclosures:    disclosures,
 		Missing:        make([]flowMissingEntry, 0),
 		ClaimNamespace: claimNamespace.replayNamespaceText,
-		ManagerID:      &managerIDDecimal,
+		ManagerID:      &managerID,
 	}, nil
 }
 
@@ -1182,13 +1180,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 // ---------------------------------------------------------------------------
 
-// managerEntry is one visible NTT deployment, over the wire. managerId is the canonical decimal
-// as a JSON string, as the JSON Ledger API writes a Daml Int.
+// managerEntry is one visible NTT deployment, over the wire.
 type managerEntry struct {
 	ManagerAddress   string         `json:"managerAddress"`
 	ContractID       string         `json:"contractId"`
 	ChainId          json.Number    `json:"chainId"`
-	ManagerID        string         `json:"managerId"`
+	ManagerID        nttManagerID   `json:"managerId"`
 	TokenConfig      string         `json:"tokenConfig"`
 	InstrumentId     daInstrumentId `json:"instrumentId"`
 	ReserveCustodian partyID        `json:"reserveCustodian"`
@@ -1229,7 +1226,7 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 			ManagerAddress:   manager.value.ManagerAddress.nttManagerAddressHexText,
 			ContractID:       manager.entry.ContractID,
 			ChainId:          manager.value.ChainId,
-			ManagerID:        managerID.String(),
+			ManagerID:        managerID,
 			TokenConfig:      manager.value.TokenConfig,
 			InstrumentId:     manager.value.InstrumentId,
 			ReserveCustodian: manager.value.ReserveCustodian,

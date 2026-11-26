@@ -798,9 +798,17 @@ func requestFlow(t *testing.T, srv *server, flow, query string) *httptest.Respon
 	return rr
 }
 
-func decodeFlowResponse(t *testing.T, rr *httptest.ResponseRecorder) flowResponse {
+// decodedFlowResponse is a flow response body. Register tests read managerId with decodeRegisterClaimResponse.
+type decodedFlowResponse struct {
+	Flow           string                `json:"flow"`
+	Disclosures    []flowDisclosureEntry `json:"disclosures"`
+	Missing        []flowMissingEntry    `json:"missing"`
+	ClaimNamespace string                `json:"claimNamespace"`
+}
+
+func decodeFlowResponse(t *testing.T, rr *httptest.ResponseRecorder) decodedFlowResponse {
 	t.Helper()
-	var resp flowResponse
+	var resp decodedFlowResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	return resp
 }
