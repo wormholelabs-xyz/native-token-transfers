@@ -1975,7 +1975,7 @@ func TestHandleManagers_ManagerIDEncoding(t *testing.T) {
 	b := newBaseFixtures(tokenConfigLockUnlock)
 	const fixtureManagerIDField = `"managerId":"` + testNttManagerID + `"`
 	require.Contains(t, b.managerJSON(), fixtureManagerIDField)
-	const decoderRejectionDetail = "into Go value of type json.Number"
+	const decoderRejectionDetail = "createArgument"
 	const parserRejectionDetail = "NttManager managerId"
 	cases := []struct {
 		name                string

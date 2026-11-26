@@ -124,23 +124,33 @@ func TestParseNttManagerID(t *testing.T) {
 
 func TestNttManagerIDMarshalsAsDecimalString(t *testing.T) {
 	cases := []struct {
-		name              string
-		rawManagerID      json.Number
-		wantManagerIDJSON string
+		name                 string
+		rawManagerID         json.Number
+		wantManagerIDDecimal string
 	}{
-		{"zero", "0", `"managerId":"0"`},
-		{"2^63-1", "9223372036854775807", `"managerId":"9223372036854775807"`},
+		{"zero", "0", "0"},
+		{"2^63-1", "9223372036854775807", "9223372036854775807"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			managerID, err := parseNttManagerID(tc.rawManagerID, "NttGovernance nextId")
 			require.NoError(t, err)
-			registerJSON, err := json.Marshal(flowResponse{Flow: "register", ManagerID: &managerID})
+			registerJSON, err := json.Marshal(flowResponse{
+				Flow:        "register",
+				Disclosures: []flowDisclosureEntry{},
+				Missing:     []flowMissingEntry{},
+				ManagerID:   &managerID,
+			})
 			require.NoError(t, err)
-			assert.Contains(t, string(registerJSON), tc.wantManagerIDJSON)
+			assert.Equal(t,
+				`{"flow":"register","disclosures":[],"missing":[],"managerId":"`+tc.wantManagerIDDecimal+`"}`,
+				string(registerJSON))
 			managerJSON, err := json.Marshal(managerEntry{ManagerID: managerID})
 			require.NoError(t, err)
-			assert.Contains(t, string(managerJSON), tc.wantManagerIDJSON)
+			assert.Equal(t,
+				`{"managerAddress":"","contractId":"","chainId":0,"managerId":"`+tc.wantManagerIDDecimal+
+					`","tokenConfig":"","instrumentId":{"admin":"","id":""},"reserveCustodian":"","paused":false}`,
+				string(managerJSON))
 		})
 	}
 }

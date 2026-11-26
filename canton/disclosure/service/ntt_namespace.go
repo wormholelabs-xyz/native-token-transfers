@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -55,7 +56,7 @@ func (managerID nttManagerID) MarshalText() ([]byte, error) {
 	}
 	managerIDDecimal := managerID.String()
 	if _, err := parseNttManagerID(json.Number(managerIDDecimal), "marshaled managerId"); err != nil {
-		panic("disclosure-service: nttManagerID marshals to a non-canonical decimal")
+		panic(fmt.Sprintf("disclosure-service: nttManagerID marshals to a non-canonical decimal: %v", err))
 	}
 	return []byte(managerIDDecimal), nil
 }
