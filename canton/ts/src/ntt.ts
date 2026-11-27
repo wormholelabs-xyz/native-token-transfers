@@ -77,6 +77,7 @@ import {
 import type { NttPackageIds } from "./constants.js";
 import {
   FLOW_REBUILD_DELAY_MS,
+  REDEEM_FLOW_READS,
   NTT_PACKAGE_NAME,
   TRANSFER_CONSISTENCY_LEVEL,
   nttFlowServiceUrls,
@@ -170,6 +171,13 @@ export interface OwnAdminTransferProposal {
 export interface CantonNttTransferOptions extends Ntt.TransferOptions {
   /** The transfer nonce (uint32); random when absent. Retrying with the same nonce is deduplicated. */
   nonce?: number;
+  /**
+   * The decimals the caller scaled the amount with (Ntt.TransferOptions). The transfer is refused
+   * when the NttManager it submits against has other decimals. Set it whenever the amount was
+   * scaled with decimals read apart from this transfer: getTokenDecimals answers from
+   * /v1/managers, which nothing authenticates.
+   */
+  tokenDecimals?: number;
 }
 
 /** Canton options of a redeem */
@@ -574,6 +582,9 @@ export class CantonNtt<N extends Network, C extends CantonChains>
     context: FlowContext = {},
     policy: NttAnchorPolicy = this.anchorPolicy()
   ): Promise<VerifiedNttFlow> {
+    // The manager is always this deployment's; a parameter cannot replace it.
+    if ("manager" in parameters)
+      throw new Error("A flow parameter cannot name the manager");
     const source = this.flowSource();
     const [served, managers] = await Promise.all([
       source.flow(flow, { manager: this.managerAddress, ...parameters }),
@@ -640,7 +651,13 @@ export class CantonNtt<N extends Network, C extends CantonChains>
     return reserveCustodian;
   }
 
-  /** The token decimals: the config's, else the manager summary's; both must agree when both exist */
+  /**
+   * The token decimals: the config's, else the manager summary's; both must agree when both exist.
+   * Without a configured value and without options.adminParty this is the flow service's word
+   * (/v1/managers). A caller that scales a transfer amount with it must pass the same value as
+   * the transfer's tokenDecimals option, which is compared with the NttManager the command
+   * submits against.
+   */
   async getTokenDecimals(): Promise<number> {
     const configured = this.contracts.ntt!.tokenDecimals;
     let served: number | undefined;
@@ -863,8 +880,14 @@ export class CantonNtt<N extends Network, C extends CantonChains>
    * for a consumed digest too (so a flow answer alone tells nothing), and the mint flow needs the
    * recipient party and its DepositPreapproval, which a VAA does not name. The set-peer flow
    * serves the covering node of any digest in either mode. The node passes the anchor checks and
-   * is decoded from its blob; any layout mismatch throws. True is final; false is as fresh as the
-   * service's view of the trie (anchor.ts flowReplayNodeRecordsDigest).
+   * is decoded from its blob; any layout mismatch throws.
+   *
+   * The answer is the flow service's word. Nothing here is submitted, so the ledger does not
+   * bind the node blob to a contract, and the checks only show that the blob is well formed: a
+   * hostile service can serve a forged node and report a digest as consumed (or not). With an
+   * honest service true is final and false is as fresh as its view of the trie (anchor.ts
+   * flowReplayNodeRecordsDigest). A false true costs no funds: the VAA stays redeemable, and
+   * Release and Mint check the replay state on the ledger.
    */
   async getIsExecuted(attestation: Ntt.Attestation): Promise<boolean> {
     this.checkInboundVaa(attestation);
@@ -1462,7 +1485,8 @@ export class CantonNtt<N extends Network, C extends CantonChains>
     user: string,
     rawAmount: bigint,
     destination: ChainAddress,
-    nonce: number
+    nonce: number,
+    callerDecimals: number | undefined
   ): Promise<CantonCommandEnvelope> {
     if (this.settings.reserveCustodian === undefined)
       throw new NttAnchorError(
@@ -1472,8 +1496,9 @@ export class CantonNtt<N extends Network, C extends CantonChains>
     const { manager } = flow;
     if (manager.paused) throw new NttAnchorError("the NttManager is paused");
     // The amount is in units of the manager's tokenDecimals. A caller that scaled it with other
-    // decimals (a config or a platform default that differs) would move a multiple of the amount
-    // it meant.
+    // decimals (a config, a platform default or a /v1/managers answer that differs) would move a
+    // multiple of the amount it meant. manager is read from the blob this command discloses, so
+    // these comparisons are against the contract the ledger runs the Transfer on.
     const configuredDecimals = this.contracts.ntt!.tokenDecimals;
     if (
       configuredDecimals !== undefined &&
@@ -1481,6 +1506,13 @@ export class CantonNtt<N extends Network, C extends CantonChains>
     )
       throw new NttAnchorError(
         `the NttManager has tokenDecimals ${manager.tokenDecimals}, the config ${configuredDecimals}`
+      );
+    if (
+      callerDecimals !== undefined &&
+      callerDecimals !== manager.tokenDecimals
+    )
+      throw new NttAnchorError(
+        `the NttManager has tokenDecimals ${manager.tokenDecimals}, the amount was scaled with ${callerDecimals}`
       );
     const fee = flowCoreState(flow).messageFee;
     if (fee !== 0n)
@@ -1551,8 +1583,9 @@ export class CantonNtt<N extends Network, C extends CantonChains>
   /**
    * One Transfer command: locks (locking mode) or burns (burning mode) `amount` units at the
    * manager's tokenDecimals from the sender's unlocked holdings, and publishes the NTT message.
-   * A configured tokenDecimals that differs from the manager's is refused, so an amount scaled
-   * with the wrong decimals never moves. An amount with dust the peer cannot represent is refused
+   * A configured tokenDecimals, or an options.tokenDecimals, that differs from the manager's is
+   * refused, so an amount scaled with the wrong decimals never moves. With neither, nothing
+   * checks the caller's scale. An amount with dust the peer cannot represent is refused
    * before anything is built (see
    * sendableAmount). The command id derives from the transfer and the nonce, so a retry with the
    * same nonce is deduplicated. Read the message id from the committed transaction with
@@ -1580,7 +1613,16 @@ export class CantonNtt<N extends Network, C extends CantonChains>
     const nonce = options.nonce ?? randomNonce();
     if (!Number.isInteger(nonce) || nonce < 0 || nonce > 0xffffffff)
       throw new Error(`The transfer nonce must be a uint32, got ${nonce}`);
-    const build = () => this.transferEnvelope(user, amount, destination, nonce);
+    const callerDecimals = options.tokenDecimals;
+    if (
+      callerDecimals !== undefined &&
+      (!Number.isInteger(callerDecimals) || callerDecimals < 0)
+    )
+      throw new Error(
+        `The transfer tokenDecimals must be a non-negative integer, got ${callerDecimals}`
+      );
+    const build = () =>
+      this.transferEnvelope(user, amount, destination, nonce, callerDecimals);
     const rebuild = async () => {
       await sleep(this.options.rebuildDelayMs ?? FLOW_REBUILD_DELAY_MS);
       return build();
@@ -1685,14 +1727,44 @@ export class CantonNtt<N extends Network, C extends CantonChains>
       );
   }
 
+  /**
+   * The redeem command. The flow is read at most REDEEM_FLOW_READS times: a second read follows
+   * when the first serves a LockedLedger that cannot cover the release (redeemEnvelopeFromFlow).
+   */
   private async redeemEnvelope(
     executor: string,
     recipient: string,
     vaaBytes: Uint8Array,
     digest: string,
-    wireAmount: CantonTrimmedAmount,
-    attempt = 1
+    wireAmount: CantonTrimmedAmount
   ): Promise<CantonCommandEnvelope> {
+    for (let read = 1; read <= REDEEM_FLOW_READS; read++) {
+      const envelope = await this.redeemEnvelopeFromFlow(
+        executor,
+        recipient,
+        vaaBytes,
+        digest,
+        wireAmount,
+        read === REDEEM_FLOW_READS
+      );
+      if (envelope !== undefined) return envelope;
+      await sleep(this.options.rebuildDelayMs ?? FLOW_REBUILD_DELAY_MS);
+    }
+    throw new Error("unreachable: the last flow read returns or throws");
+  }
+
+  /**
+   * One read of the redeem flow and the command built from it. Returns undefined when the served
+   * LockedLedger cannot cover the release and this is not the last read; the last read throws.
+   */
+  private async redeemEnvelopeFromFlow(
+    executor: string,
+    recipient: string,
+    vaaBytes: Uint8Array,
+    digest: string,
+    wireAmount: CantonTrimmedAmount,
+    lastRead: boolean
+  ): Promise<CantonCommandEnvelope | undefined> {
     // The service's mint flow answers 404 when the recipient has no DepositPreapproval, so the
     // flow name follows the summary's mode; the anchored manager must agree.
     const mode = (await this.managerSummary()).tokenConfig;
@@ -1742,17 +1814,7 @@ export class CantonNtt<N extends Network, C extends CantonChains>
           `the VAA amount is zero at this token's ${manager.tokenDecimals} decimals`
         );
       if (ledger.balance < release || ledger.custodyHoldingCid === undefined) {
-        if (attempt === 1) {
-          await sleep(this.options.rebuildDelayMs ?? FLOW_REBUILD_DELAY_MS);
-          return this.redeemEnvelope(
-            executor,
-            recipient,
-            vaaBytes,
-            digest,
-            wireAmount,
-            2
-          );
-        }
+        if (!lastRead) return undefined;
         throw new NttAnchorError(
           (ledger.custodyHoldingCid === undefined
             ? "the LockedLedger names no custody pot"

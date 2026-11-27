@@ -25,6 +25,8 @@ jobs:
         with:
           bun-version: "1.3.4"
       - run: bun ci
+      # The Canton tests of `ntt private` load @wormhole-foundation/sdk-canton-ntt from its dist.
+      - run: bun run build:canton
       - run: bun run --filter '@wormhole-foundation/ntt-cli' test
 
   # EVM tests - native runner with forge build cache from evm.yml

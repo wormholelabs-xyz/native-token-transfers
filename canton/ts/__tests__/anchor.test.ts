@@ -171,6 +171,44 @@ describe("layer 2: the /v1/managers cross-check", () => {
       )
     ).toThrow(/layer 2: \/v1\/managers has reserveCustodian/);
   });
+
+  it("refuses other token decimals or peers in the summary than in the manager blob", () => {
+    expect(() =>
+      verifyFlow(
+        flows.burnTransfer(),
+        managersWith((entry) => (entry["tokenDecimals"] = 10)),
+        policyOf("burning")
+      )
+    ).toThrow(/layer 2: \/v1\/managers has tokenDecimals 10, the NttManager 8/);
+    expect(() =>
+      verifyFlow(
+        flows.burnTransfer(),
+        managersWith((entry) => {
+          const peers = entry["peers"] as Record<string, { decimals: number }>;
+          Object.values(peers)[0]!.decimals += 1;
+        }),
+        policyOf("burning")
+      )
+    ).toThrow(/layer 2: the \/v1\/managers peer of chain \d+ differs/);
+    expect(() =>
+      verifyFlow(
+        flows.burnTransfer(),
+        managersWith((entry) => (entry["peers"] = {})),
+        policyOf("burning")
+      )
+    ).toThrow(/layer 2: the \/v1\/managers peer of chain \d+ differs/);
+  });
+
+  it("refuses two entries for one role from a source that does not parse responses", () => {
+    const flow = flows.burnTransfer();
+    const repeated = {
+      ...flow,
+      disclosures: [...flow.disclosures, flow.disclosures.at(-1)!],
+    };
+    expect(() => verifyFlow(repeated, MANAGERS, policyOf("burning"))).toThrow(
+      /the transfer flow has two entries for the role/
+    );
+  });
 });
 
 describe("layer 3: the NttManager blob", () => {

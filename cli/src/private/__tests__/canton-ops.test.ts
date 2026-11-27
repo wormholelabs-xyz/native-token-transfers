@@ -138,6 +138,7 @@ function sendInput(
     deployment: context.deployment,
     destinationChain: "Ethereum" as const,
     rawAmount: parseRawAmount(rawAmount),
+    tokenDecimals: context.deployment.chains.Canton!.decimals,
     recipient: ETH_RECIPIENT,
     transferNonce: parseTransferNonceU32(7),
   };
@@ -478,6 +479,48 @@ describe("cantonSend result handling", () => {
       /^Canton submit of command ntt-private-send-[0-9a-f]{64} was rejected \(.*DAML_FAILURE.*\)\. Run the same send with --transfer-nonce 7/
     );
     expect(context.submits()).toHaveLength(1);
+  });
+
+  test.each([
+    [504, { error: "upstream request timeout" }],
+    [503, { code: "SERVICE_NOT_RUNNING", cause: "participant is passive" }],
+    [500, { code: "LEDGER_API_INTERNAL_ERROR", cause: "internal" }],
+    [408, { code: "REQUEST_TIME_OUT", cause: "timeout" }],
+    [429, { code: "PARTICIPANT_BACKPRESSURE", cause: "overloaded" }],
+    [400, "bad gateway page with no ledger error code"],
+  ])(
+    "HTTP %i that is not a definite ledger refusal: result unknown, not rejected",
+    async (status, json) => {
+      // A 504 from submit-and-wait can arrive while the command commits. "Rejected" would invite
+      // a send with a new nonce, which is a second transfer.
+      const context = setup({
+        deployment: "sbxburn",
+        routes: { [SUBMIT]: [{ status, json }] },
+      });
+      const error = await cantonSend(context.clients, sendInput(context), {
+        dryRun: false,
+      }).catch((err: Error) => err);
+      const { message } = error as Error;
+      expect(message).toContain("result unknown");
+      expect(message).not.toContain("was rejected");
+      expect(message).toContain(`HTTP ${status}`);
+      expect(message).toContain("--transfer-nonce 7");
+      expect(message).toContain(context.submits()[0]!.body.commands.commandId);
+    }
+  );
+
+  test("amount in other decimals than the NttManager's: 0 submits", async () => {
+    const context = setup({ deployment: "sbxburn" });
+    await expect(
+      cantonSend(
+        context.clients,
+        { ...sendInput(context), tokenDecimals: 10 },
+        { dryRun: false }
+      )
+    ).rejects.toThrow(
+      /the NttManager has tokenDecimals 8, the amount was scaled with 10/
+    );
+    expect(context.submits()).toHaveLength(0);
   });
 
   test("committed with an unreadable result: returns the command id without a sequence", async () => {

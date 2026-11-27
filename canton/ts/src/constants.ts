@@ -62,3 +62,6 @@ export const TRANSFER_COMMAND_ID_PREFIX = "ntt-private-send-";
 export const REDEEM_COMMAND_ID_PREFIX = "ntt-private-redeem-";
 /** Command id prefix of an AdminTransferProposal create (setOwner) */
 export const PROPOSE_ADMIN_COMMAND_ID_PREFIX = "ntt-admin-propose-";
+
+/** Reads of the redeem flow for one command: the first, and one more after a stale LockedLedger */
+export const REDEEM_FLOW_READS = 2;

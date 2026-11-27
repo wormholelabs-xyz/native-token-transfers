@@ -3,16 +3,20 @@
 //
 //   Layer 1: every disclosed ntt and core contract carries a pinned package id.
 //   Layer 2: the flow's manager contract id equals the /v1/managers entry of the configured
-//            manager address, with the same mode, instrument and reserve custodian. Same service,
-//            so it catches mistakes, not a hostile service.
+//            manager address, with the same mode, instrument, reserve custodian, token decimals
+//            and peers. Same service, so it catches mistakes, not a hostile service.
 //   Layer 3: the blob envelope of the NttManager lists the configured guardianGovernance and the
 //            configured reserve custodian as signatories, and the create argument read from that
 //            blob (not the served payload) has the configured manager address, guardianGovernance
 //            and reserve custodian, with reserveCustodian = admin, or nttCustody when gg is admin.
-//            The ledger binds the blob to its contract id, so these fields are the ones the
-//            command runs against.
+//            The ledger binds the blob to its contract id when a command discloses it, so
+//            these fields are the ones a submitted command runs against.
 //   Layer 4: Transfer carries expectedManagerAddress (nttContracts.ts); the ledger aborts on a
 //            mismatch.
+//
+// Reads that submit nothing (getIsExecuted, verifyAddresses, the getters) pass the same checks,
+// but no ledger then binds a blob to a contract: the checks show that the blob is well formed and
+// agrees with the config, not that the contract exists. Such an answer is the flow service's word.
 //
 // nttCustody signs every manager (it is inherited from the NttGovernance root), so a signatory
 // check alone does not pin a custodian that is nttCustody: the decoded admin must then be gg.
@@ -278,6 +282,31 @@ export function checkManagerSummary(
     throw new NttAnchorError(
       `layer 2: /v1/managers has reserveCustodian ${summary.reserveCustodian}, the NttManager ${manager.reserveCustodian}`
     );
+  // The entry names the same contract id, so every field it serves must be the contract's.
+  if (
+    summary.tokenDecimals !== undefined &&
+    summary.tokenDecimals !== manager.tokenDecimals
+  )
+    throw new NttAnchorError(
+      `layer 2: /v1/managers has tokenDecimals ${summary.tokenDecimals}, the NttManager ${manager.tokenDecimals}`
+    );
+  if (summary.peers !== undefined) {
+    const chains = new Set([...summary.peers.keys(), ...manager.peers.keys()]);
+    for (const chainId of chains) {
+      const served = summary.peers.get(chainId);
+      const anchored = manager.peers.get(chainId);
+      if (
+        !served ||
+        !anchored ||
+        served.managerAddress !== anchored.managerAddress ||
+        served.transceiverAddress !== anchored.transceiverAddress ||
+        served.decimals !== anchored.decimals
+      )
+        throw new NttAnchorError(
+          `layer 2: the /v1/managers peer of chain ${chainId} differs from the NttManager's`
+        );
+    }
+  }
   return summary;
 }
 
@@ -481,6 +510,11 @@ export function verifyFlow(
       ignoredRoles.push(entry.role);
       continue;
     }
+    // parseFlowResponse refuses a repeated role; another NttFlowSource may not.
+    if (roles.has(entry.role))
+      throw new NttAnchorError(
+        `the ${flow.flow} flow has two entries for the role ${entry.role.slice(0, 64)}`
+      );
     spec.check(entry);
     roles.set(entry.role, entry);
     disclosures.push(entry);
@@ -591,8 +625,11 @@ export function flowDisclosures(
  * and guardianGovernance gg, namespace the anchored manager's, and a prefix that starts the digest.
  * Any layout difference throws (decodeReplayNode).
  *
- * A true answer is final: a digest never leaves the trie, and gg signs every node. A false answer
- * is only as fresh as the service's view: a stale or withheld node reads as not consumed.
+ * The answer is as trustworthy as the source of the flow. The blob is parsed, not authenticated:
+ * unless a command discloses it, no ledger binds it to a contract, so a hostile flow service can
+ * serve a forged node. From an honest service a true answer is final (a digest never leaves the
+ * trie) and a false answer is only as fresh as the service's view: a stale or withheld node reads
+ * as not consumed.
  */
 export function flowReplayNodeRecordsDigest(
   flow: VerifiedNttFlow,

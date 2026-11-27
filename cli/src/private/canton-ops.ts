@@ -186,11 +186,30 @@ async function submit(
   return { updateId: updateId!, committed };
 }
 
+/**
+ * True when the participant answered a submission with a definite refusal: a 4xx status with a
+ * ledger error code. Every other failed answer leaves the result unknown: a 5xx or 408 can come
+ * from the participant or a proxy while the command still commits, a 429 is a refusal to answer,
+ * and a body with no error code is not the participant's verdict.
+ */
+export function isDefiniteLedgerRejection(err: unknown): boolean {
+  return (
+    err instanceof CantonLedgerError &&
+    err.status >= 400 &&
+    err.status <= 499 &&
+    err.status !== 408 &&
+    err.status !== 429 &&
+    err.code !== undefined
+  );
+}
+
 export interface CantonSendInput {
   registry: PrivateRegistry;
   deployment: Deployment;
   destinationChain: ChainName;
   rawAmount: RawAmount;
+  /** The decimals rawAmount is in; the SDK refuses the transfer when the NttManager has others */
+  tokenDecimals: number;
   recipient: Hex32;
   transferNonce: TransferNonceU32;
 }
@@ -214,7 +233,7 @@ export async function cantonSend(
   const ntt = cantonNttFor(input.registry, input.deployment, clients);
   const transaction = await onlyTransaction(
     ntt.transfer(
-      new CantonAddress(clients.partyId) as never,
+      new CantonAddress(clients.partyId),
       input.rawAmount,
       {
         chain: sdkChainForRegistryChain(
@@ -223,7 +242,11 @@ export async function cantonSend(
         ),
         address: new UniversalAddress(hex32ToBytes(input.recipient)),
       },
-      { queue: false, nonce: input.transferNonce }
+      {
+        queue: false,
+        nonce: input.transferNonce,
+        tokenDecimals: input.tokenDecimals,
+      }
     )
   );
   const { commandId } = transaction.transaction;
@@ -236,11 +259,13 @@ export async function cantonSend(
     submitted = await submit(clients, transaction);
   } catch (err) {
     const retry = `Run the same send with --transfer-nonce ${input.transferNonce}: the command id is then the same, and the participant rejects a duplicate.`;
-    if (err instanceof CantonLedgerError)
+    if (isDefiniteLedgerRejection(err))
       throw new Error(
-        `Canton submit of command ${commandId} was rejected (${err.message}). ${retry}`
+        `Canton submit of command ${commandId} was rejected (${(err as Error).message}). ${retry}`
       );
-    // The signer reports an unknown result for anything but a ledger answer (a timeout, a reset).
+    // Anything else leaves the result unknown: no answer (the signer says so for a timeout or a
+    // reset), or an answer that is not a definite refusal (isDefiniteLedgerRejection). The
+    // command can still commit, so the only safe retry is the same command id.
     const message = (err as Error).message;
     throw new Error(
       /result unknown/.test(message)
@@ -304,7 +329,7 @@ export async function cantonRedeem(
   const transaction = await onlyTransaction(
     ntt.redeem(
       [attestationOf(input.parsedVaa)],
-      new CantonAddress(clients.partyId) as never,
+      new CantonAddress(clients.partyId),
       { recipient: input.recipient }
     )
   );

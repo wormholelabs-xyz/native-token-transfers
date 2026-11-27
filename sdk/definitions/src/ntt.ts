@@ -88,6 +88,12 @@ export namespace Ntt {
     automatic?: boolean;
     /** Whether or not the token needs to be wrapped, only relevant for gas token transfers */
     wrapNative?: boolean;
+    /**
+     * The token decimals the caller scaled the amount with. A platform whose manager is read from
+     * an untrusted source (Canton: the flow service) refuses the transfer when the manager it
+     * submits against has other decimals. Other platforms ignore it.
+     */
+    tokenDecimals?: number;
   };
 
   export type RedeemOptions = {

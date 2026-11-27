@@ -343,7 +343,7 @@ testNttCodec = do
   pure ()
 
 -- | Pins the party-address formula (recipient and sender) against fixed text.
--- The expected value was computed off-ledger; the CLI's binding.test.ts pins
+-- The expected value was computed off-ledger; the CLI's party-address.test.ts pins
 -- the same formula.
 testPartyAddressForVector : Script ()
 testPartyAddressForVector = do

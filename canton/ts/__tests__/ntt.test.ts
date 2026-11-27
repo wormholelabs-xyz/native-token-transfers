@@ -452,6 +452,73 @@ describe("transfer", () => {
     expect(requests).toHaveLength(0);
   });
 
+  it("refuses an amount scaled with other decimals than the submitted manager's, with no configured decimals", async () => {
+    // H1 of the PR 95 review: the config has no tokenDecimals, and the service answered the
+    // decimals read (getTokenDecimals) with 10 for a manager that has 8. The caller scaled the
+    // amount with 10; the transfer then reads the real manager.
+    const { tokenDecimals: _unset, ...withoutDecimals } =
+      contractsOf("burning").ntt;
+    const ledgerOf = () => holdingsLedger(SANDBOX.burnTransfer.holdings);
+    const nttWith = (
+      ledger: ReturnType<typeof holdingsLedger>,
+      flowSource = recordedFlowSource()
+    ) =>
+      CantonNtt.withOptions<"Devnet", "Canton">(
+        "Devnet",
+        "Canton",
+        new CantonLedgerClient({
+          baseUrl: "http://participant.test",
+          fetch: ledger.fetchFunction,
+        }),
+        { coreBridge: SETUP.guardianGovernance, ntt: withoutDecimals },
+        { flowSource, rebuildDelayMs: 0 }
+      );
+
+    // A service that lies about the decimals on every read is caught by layer 2.
+    const lying = copy(SANDBOX.managers);
+    for (const entry of lying.managers)
+      if (entry.managerAddress === SETUP.burning.managerAddress)
+        entry.tokenDecimals = 10;
+    const first = ledgerOf();
+    const deceived = nttWith(first, recordedFlowSource(lying));
+    expect(await deceived.getTokenDecimals()).toBe(10);
+    await expect(
+      collect(
+        deceived.transfer(USER, 10_000_000_000n, ETHEREUM_RECIPIENT, {
+          queue: false,
+          tokenDecimals: 10,
+        })
+      )
+    ).rejects.toThrow(
+      /layer 2: \/v1\/managers has tokenDecimals 10, the NttManager 8/
+    );
+    expect(first.requests).toHaveLength(0);
+
+    // A service that lied on the decimals read only (the transfer sees a consistent answer) is
+    // caught by the caller's decimals.
+    const second = ledgerOf();
+    await expect(
+      collect(
+        nttWith(second).transfer(USER, 10_000_000_000n, ETHEREUM_RECIPIENT, {
+          queue: false,
+          tokenDecimals: 10,
+        })
+      )
+    ).rejects.toThrow(
+      /the NttManager has tokenDecimals 8, the amount was scaled with 10; nothing has been submitted/
+    );
+    expect(second.requests).toHaveLength(0);
+
+    // The manager's own decimals pass.
+    const [built] = await collect(
+      nttWith(ledgerOf()).transfer(USER, 100_000_000n, ETHEREUM_RECIPIENT, {
+        queue: false,
+        tokenDecimals: 8,
+      })
+    );
+    expect(built).toBeDefined();
+  });
+
   it("reads the message id from the committed Transfer, as the guardians do", async () => {
     const locking = nttOf("locking");
     const transaction = SANDBOX.lockTransfer.transaction as never;

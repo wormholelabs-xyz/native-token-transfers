@@ -226,7 +226,7 @@ async function runSend(sendArguments: SendArguments): Promise<void> {
     );
     const result = await cantonSend(
       buildCantonClients(registry),
-      { ...sendParameters, transferNonce },
+      { ...sendParameters, transferNonce, tokenDecimals: source.decimals },
       options
     );
     if (result)

@@ -243,10 +243,13 @@ describe("Manual route with a Canton leg", () => {
     expect(sender.toString()).toBe(ALICE);
     expect(units).toBe(150_000_000n);
     expect(destinationAddress).toBe(to);
+    // tokenDecimals: the decimals the route scaled the amount with, which the Canton transfer
+    // compares with the NttManager it submits against.
     expect(options).toEqual({
       queue: false,
       automatic: false,
       wrapNative: false,
+      tokenDecimals: 8,
     });
     // The Canton Ntt got the Canton settings with its contracts.
     expect(source.contracts.at(-1)).toMatchObject({

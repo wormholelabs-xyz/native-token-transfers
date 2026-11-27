@@ -86,7 +86,7 @@ The root `package.json` has an `overrides` entry and a `devDependencies` entry f
 | Build tools            | Node.js 26.13.1, npm 12.2.3                                                                | The same                                                                                   |
 
 Each package has no `install`, `preinstall`, `postinstall` or `prepare` script.
-The source commit is on a branch that is not merged. The `Vendor provenance` workflow does not build these two tarballs.
+The source commit is on a branch that is not merged. The `Vendor provenance` workflow checks their sha256 against this table. It does not rebuild these two tarballs.
 
 ### Rebuild procedure
 

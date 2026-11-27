@@ -247,11 +247,18 @@ export class NttManualRoute<N extends Network>
     const ntt = await fromChain.getProtocol("Ntt", {
       ntt: params.normalizedParams.sourceContracts,
     });
+    // A Canton manager's decimals come from an unauthenticated read (checkCantonLegs), so the
+    // transfer compares the scale of this amount with the manager it submits against.
     const initXfer = ntt.transfer(
       sender,
       amount.units(params.normalizedParams.amount),
       to,
-      params.normalizedParams.options
+      NttRoute.isCanton(fromChain.chain)
+        ? {
+            ...params.normalizedParams.options,
+            tokenDecimals: params.normalizedParams.amount.decimals,
+          }
+        : params.normalizedParams.options
     );
     const txids = await signSendWait(fromChain, initXfer, signer);
 

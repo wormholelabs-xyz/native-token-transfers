@@ -67,6 +67,12 @@ func (peers *nttPeerMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Bounds of a peer entry: a Wormhole chain id is a uint16, the decimals of a peer token a uint8.
+const (
+	maxWormholeChainID = 1<<16 - 1
+	maxPeerDecimals    = 1<<8 - 1
+)
+
 // add decodes one chain id and peer. Two entries for one chain id are an error.
 func (peers nttPeerMap) add(rawChainID, rawPeer json.RawMessage) error {
 	var chainIDNumber json.Number
@@ -76,6 +82,10 @@ func (peers nttPeerMap) add(rawChainID, rawPeer json.RawMessage) error {
 	chainID, err := strconv.ParseInt(chainIDNumber.String(), 10, 64)
 	if err != nil {
 		return fmt.Errorf("peers: chain id %q is not an integer", truncateForError(chainIDNumber.String()))
+	}
+	// A Wormhole chain id is a uint16 (Daml: the key of NttManager.peers).
+	if chainID < 0 || chainID > maxWormholeChainID {
+		return fmt.Errorf("peers: chain id %d is not in [0, %d]", chainID, maxWormholeChainID)
 	}
 	key := strconv.FormatInt(chainID, 10)
 	if _, duplicate := peers[key]; duplicate {
@@ -91,6 +101,10 @@ func (peers nttPeerMap) add(rawChainID, rawPeer json.RawMessage) error {
 	decimals, err := strconv.ParseInt(peer.Decimals.String(), 10, 64)
 	if err != nil {
 		return fmt.Errorf("peers: chain id %s: decimals %q is not an integer", key, truncateForError(peer.Decimals.String()))
+	}
+	// The decimals of a peer token are a uint8.
+	if decimals < 0 || decimals > maxPeerDecimals {
+		return fmt.Errorf("peers: chain id %s: decimals %d is not in [0, %d]", key, decimals, maxPeerDecimals)
 	}
 	peers[key] = managerPeer{
 		ManagerAddress:     peer.ManagerAddress.nttManagerAddressHexText,
