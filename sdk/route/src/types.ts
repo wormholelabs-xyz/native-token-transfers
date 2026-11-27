@@ -15,6 +15,7 @@ import {
   TransferReceipt as _TransferReceipt,
   amount,
   canonicalAddress,
+  chainToPlatform,
   isAttested,
   isCompleted,
   isDestinationQueued,
@@ -57,7 +58,31 @@ export namespace NttRoute {
     };
     /** Estimated time of arrival in milliseconds. When specified, this value is used in quotes instead of the dynamic calculation. */
     eta?: number;
+    /**
+     * Settings of a Canton leg (CantonNttSettings of @wormhole-foundation/sdk-canton-ntt). A
+     * Canton transfer needs at least `reserveCustodian`; the flow service URL and the pinned
+     * package ids are needed on a network the SDK has no defaults for.
+     */
+    canton?: CantonSettings;
   };
+
+  /** Pinned Daml package ids: the current one, and a retiring one during an upgrade */
+  export type CantonPackageIds = { current: string; retiring?: string };
+
+  /** The Canton settings of a token config; they travel to the Canton Ntt as contracts.ntt.canton */
+  export type CantonSettings = {
+    /** The party that holds the lock/unlock reserve (the admin, or nttCustody under a gg admin) */
+    reserveCustodian?: string;
+    /** Base URL of the NTT flow service */
+    flowServiceUrl?: string;
+    nttPackageIds?: CantonPackageIds;
+    corePackageIds?: CantonPackageIds;
+    /** The deployment's mode; every flow must agree */
+    mode?: Ntt.Mode;
+  };
+
+  /** Ntt.Contracts with the Canton settings of a Canton leg */
+  export type Contracts = Ntt.Contracts & { canton?: CantonSettings };
 
   export type Config = {
     // Token Name => Config
@@ -77,8 +102,13 @@ export namespace NttRoute {
   export type NormalizedParams = {
     amount: amount.Amount;
     options: Ntt.TransferOptions;
-    sourceContracts: Ntt.Contracts;
-    destinationContracts: Ntt.Contracts;
+    sourceContracts: Contracts;
+    destinationContracts: Contracts;
+    /**
+     * The recipient as a native address, recorded by initiate for a Canton destination: the VAA
+     * holds only the hash of the recipient party, and the Canton redeem needs the party.
+     */
+    recipient?: string;
   };
 
   export interface ValidatedParams
@@ -168,7 +198,7 @@ export namespace NttRoute {
     config: Config,
     srcToken: TokenId,
     dstToken: TokenId
-  ): { srcContracts: Ntt.Contracts; dstContracts: Ntt.Contracts } {
+  ): { srcContracts: Contracts; dstContracts: Contracts } {
     const cfg = Object.values(config.tokens);
     const srcAddress = canonicalAddress(srcToken);
     const dstAddress = canonicalAddress(dstToken);
@@ -202,6 +232,7 @@ export namespace NttRoute {
               },
               svmShims: srcFound.svmShims,
               eta: srcFound.eta,
+              ...(srcFound.canton ? { canton: srcFound.canton } : {}),
               peers: {
                 [dstFound.chain]: {
                   manager: dstFound.manager,
@@ -219,6 +250,7 @@ export namespace NttRoute {
                 )!.address,
               },
               svmShims: dstFound.svmShims,
+              ...(dstFound.canton ? { canton: dstFound.canton } : {}),
               peers: {
                 [srcFound.chain]: {
                   manager: srcFound.manager,
@@ -238,7 +270,7 @@ export namespace NttRoute {
     config: Config,
     srcManager: ChainAddress<C>,
     dstChain: Chain
-  ): Ntt.Contracts {
+  ): Contracts {
     const cfg = Object.values(config.tokens);
     const address = canonicalAddress(srcManager);
     for (const tokens of cfg) {
@@ -263,6 +295,7 @@ export namespace NttRoute {
               .address,
           },
           svmShims: remote.svmShims,
+          ...(remote.canton ? { canton: remote.canton } : {}),
           peers: {
             [found.chain]: {
               manager: found.manager,
@@ -273,6 +306,89 @@ export namespace NttRoute {
       }
     }
     throw new Error("Cannot find Ntt contracts in config for: " + address);
+  }
+
+  /** True for a chain of the Canton platform */
+  export function isCanton(chain: Chain): boolean {
+    return chainToPlatform(chain) === "Canton";
+  }
+
+  /**
+   * A Canton amount is in units of the NttManager's tokenDecimals, but a Canton instrument keeps
+   * no decimals on the ledger: the platform answers getDecimals from
+   * CantonPlatformOptions.instrumentDecimals, else with the 10 decimals of a Daml Decimal. A
+   * request built with other decimals than the manager's would move a multiple of the amount it
+   * shows. Returns the error for a Canton leg whose request decimals differ from `decimals`.
+   */
+  export function cantonDecimalsError(
+    leg: "source" | "destination",
+    token: TokenId,
+    requestDecimals: number,
+    decimals: number
+  ): Error | undefined {
+    if (!isCanton(token.chain) || requestDecimals === decimals)
+      return undefined;
+    const instrument = canonicalAddress(token);
+    return new Error(
+      `The Canton ${leg} token ${instrument} has ${decimals} decimals, the transfer request ${requestDecimals}. ` +
+        `Set CantonPlatformOptions.instrumentDecimals["${instrument}"] = ${decimals} on the Canton platform ` +
+        `(without it an instrument has 10), or pass ${leg}Decimals: ${decimals} to RouteTransferRequest.create`
+    );
+  }
+
+  /**
+   * Checks the request decimals of the Canton legs against the route config's tokenDecimals,
+   * without a network call. A leg with no configured tokenDecimals is left to checkCantonLegs.
+   */
+  export function checkCantonConfigDecimals<N extends Network>(
+    request: routes.RouteTransferRequest<N>,
+    srcContracts: Ntt.Contracts,
+    dstContracts: Ntt.Contracts
+  ): Error | undefined {
+    for (const [leg, details, contracts] of [
+      ["source", request.source, srcContracts],
+      ["destination", request.destination, dstContracts],
+    ] as const) {
+      if (contracts.tokenDecimals === undefined) continue;
+      const error = cantonDecimalsError(
+        leg,
+        details.id,
+        details.decimals,
+        contracts.tokenDecimals
+      );
+      if (error) return error;
+    }
+    return undefined;
+  }
+
+  /**
+   * Checks the request decimals of each Canton leg against its NttManager's tokenDecimals (read
+   * through the Canton Ntt, which also compares them with the configured ones). Throws on a
+   * mismatch; does nothing for a request with no Canton leg.
+   */
+  export async function checkCantonLegs<N extends Network>(
+    request: routes.RouteTransferRequest<N>,
+    params: NormalizedParams
+  ): Promise<void> {
+    for (const [leg, chain, details, contracts] of [
+      ["source", request.fromChain, request.source, params.sourceContracts],
+      [
+        "destination",
+        request.toChain,
+        request.destination,
+        params.destinationContracts,
+      ],
+    ] as const) {
+      if (!isCanton(chain.chain)) continue;
+      const ntt = await chain.getProtocol("Ntt", { ntt: contracts });
+      const error = cantonDecimalsError(
+        leg,
+        details.id,
+        details.decimals,
+        await ntt.getTokenDecimals()
+      );
+      if (error) throw error;
+    }
   }
 
   // returns true if the amount is greater than 95% of the capacity
@@ -368,10 +484,14 @@ export namespace MultiTokenNttRoute {
   }
 
   // Helper function to get the destination TokenId
-  export async function getDestinationTokenId<N extends Network>(
+  export async function getDestinationTokenId<
+    N extends Network,
+    FC extends Chain = Chain,
+    TC extends Chain = Chain,
+  >(
     sourceToken: TokenId,
-    fromChain: ChainContext<N>,
-    toChain: ChainContext<N>,
+    fromChain: ChainContext<N, FC>,
+    toChain: ChainContext<N, TC>,
     contracts: MultiTokenNtt.Contracts[],
     originalToken?: MultiTokenNtt.OriginalTokenId
   ): Promise<TokenId> {
@@ -713,8 +833,7 @@ export namespace MultiTokenNttRoute {
     const destinationTokenId = await MultiTokenNttRoute.getDestinationTokenId(
       sourceTokenId,
       fromChain,
-      // The published sdk-connect ChainContext declaration expands Chain without the vendored Canton chain.
-      wh.getChain(payload.toChain) as ChainContext<N>,
+      wh.getChain(payload.toChain),
       contracts,
       originalTokenId
     );

@@ -80,6 +80,20 @@ describe("validateRegistry", () => {
       (r: any) => (r.deployments.canburn.chains.Canton.decimals = 19),
     ],
     [
+      "Canton decimals 11 (a Daml Decimal has 10)",
+      (r: any) => (r.deployments.canburn.chains.Canton.decimals = 11),
+    ],
+    [
+      "Canton leg without guardianGovernance",
+      (r: any) => delete r.deployments.canburn.chains.Canton.guardianGovernance,
+    ],
+    [
+      "bare guardianGovernance hint",
+      (r: any) =>
+        (r.deployments.canburn.chains.Canton.guardianGovernance =
+          "guardianGovernance"),
+    ],
+    [
       "decimals -1",
       (r: any) => (r.deployments.canburn.chains.Ethereum.decimals = -1),
     ],

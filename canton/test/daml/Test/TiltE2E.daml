@@ -1,0 +1,289 @@
+-- | Canton side of the Canton <-> Ethereum NTT end-to-end test that runs on
+-- Tilt (`Tiltfile.canton-evm`, driven by `canton/e2e/run.sh`).
+--
+-- Unlike the rest of this package, these scripts run against a live ledger
+-- that a real guardian watches, and they consume VAAs that guardian signed.
+-- Each entry point takes a JSON input and returns a JSON output, so the shell
+-- driver passes party ids and addresses between steps instead of contract ids:
+-- every step re-resolves the live contracts it needs, as the run's
+-- @guardianGovernance@ (gg), which signs every contract the steps look up.
+--
+-- Byte values cross the JSON boundary as plain lowercase hex 'Text' (no @0x@),
+-- not as the core's typed byte values ('NttManagerAddress', 'EmitterAddress',
+-- ...), whose JSON form is a record. The scripts convert at the boundary with
+-- 'parseHexTextOrAbort' and 'hexTextOf', as 'Test.TestNtt.integrationNttReceiveMatch'
+-- does.
+--
+-- The deployment is burn/mint (the canonical gg-administered 'CoinFactory'),
+-- with 8 token decimals. Every party carries a per-run label, so a rerun
+-- against the same sandbox (or a sandbox the core bootstrap already populated)
+-- never collides on a party hint. That label is why the setup below creates
+-- the core and the NTT root itself instead of calling 'Test.TestCore.setup'
+-- and 'Test.TestNtt.createNttGovernanceRoot', which use fixed party hints.
+--
+-- None of these are run by `dpm test` (they take arguments); they are only
+-- compiled.
+module Test.TiltE2E where
+
+import Daml.Script hiding (AnyContractId)
+import DA.Assert ((===))
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..), Holding)
+import Wormhole.Core.Bytes (hexTextOf, parseHexTextOrAbort)
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.Setup
+  ( RegistryParties (..), mkInitialClaimedRootsNode, mkInitialCoreState, mkInitialEmitterRegistry
+  , mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract )
+import Wormhole.Core.State (Emitter(..), CoreState)
+import Wormhole.Core.VAA (parseVAA)
+import Wormhole.Ntt.Deposit
+import Wormhole.Ntt.Governance
+import Wormhole.Ntt.Manager
+import Test.TestCore (devnetGenesisGuardianSet)
+import Test.TestNtt
+  ( claimedRootsNodeForRegistration, coreRegistries, coinsOwnedBy, nttCoinFactorySetup
+  , resolveEmitter, testNttGovernanceRootIdentity )
+import Test.TestReplay (coveringDisclosure)
+
+-- | Canton's Wormhole chain id (sdk/vaa ChainIDCanton), which the guardian
+-- signs as the emitter chain of every Canton message.
+cantonWormholeChainId : Int
+cantonWormholeChainId = 75
+
+-- | The parties of one run. Every later step takes these back as input.
+data E2eParties = E2eParties with
+    guardianGovernance : Party
+    admin              : Party
+    recipient          : Party
+  deriving (Eq, Show)
+
+data E2eSetupInput = E2eSetupInput with
+    runLabel       : Text     -- appended to every party hint; [A-Za-z0-9-_] only
+    peerChainId    : Int      -- the EVM chain's Wormhole chain id (2 on eth-devnet)
+    peerManager    : Text     -- left-padded EVM NttManager address, 32 bytes of lowercase hex
+    peerTransceiver: Text     -- left-padded EVM WormholeTransceiver address, 32 bytes of lowercase hex
+    peerDecimals   : Int      -- the EVM token's decimals
+  deriving (Eq, Show)
+
+data E2eSetupOutput = E2eSetupOutput with
+    parties            : E2eParties
+    managerAddress     : Text  -- lowercase hex; register on EVM with setPeer
+    transceiverAddress : Text  -- lowercase hex; register on EVM with setWormholePeer; the VAA emitter
+    recipientAddress   : Text  -- lowercase hex of partyAddressFor recipient; the EVM send's recipient
+  deriving (Eq, Show)
+
+-- | Stand up a fresh core (devnet guardian, guardian set 0), the NTT
+-- governance root, a burn/mint deployment, the recipient's deposit
+-- pre-approval, and the EVM peer.
+tiltE2eSetup : E2eSetupInput -> Script E2eSetupOutput
+tiltE2eSetup input = do
+  let hint name = name <> "-" <> input.runLabel
+  gg <- allocateParty (hint "TiltE2EGuardianGovernance")
+  feeCustody <- allocateParty (hint "TiltE2EFeeCustody")
+  feeInstrumentAdmin <- allocateParty (hint "TiltE2EFeeInstrumentAdmin")
+  onboardingFeeAdmin <- allocateParty (hint "TiltE2EOnboardingFeeAdmin")
+  nttCustody <- allocateParty (hint "TiltE2ENttCustody")
+  admin <- allocateParty (hint "TiltE2EAdmin")
+  recipient <- allocateParty (hint "TiltE2ERecipient")
+
+  -- Core, as 'Test.TestCore.setupWithInstrument' builds it (message fee 0,
+  -- zero-fee registries, the claimed-roots tree).
+  let registryParties = RegistryParties with guardianGovernance = gg, onboardingFeeAdmin
+  csId <- submit (actAs gg <> actAs feeCustody) do
+    createCmd (mkInitialCoreState gg solanaGovernanceChainId
+                 defaultGovernanceContract
+                 devnetGenesisGuardianSet
+                 (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
+  _ <- submit gg do createCmd (mkInitialEmitterRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialClaimedRootsNode gg)
+
+  -- NTT governance root, as 'Test.TestNtt.createNttGovernanceRoot' builds it.
+  govCid <- submit (actAs gg <> actAs nttCustody) do
+    createCmd NttGovernance with
+      guardianGovernance = gg
+      nttCustody
+      nextId = 0
+      rootIdentity = testNttGovernanceRootIdentity
+      consumedGovernance = Map.empty
+      evictedGovernanceMaxTimestampSeconds = None
+
+  -- RegisterManager (burn/mint, 8 decimals) through the governance root, as
+  -- the BurnMint branch of 'Test.TestNtt.deploy' does it, but on Canton's
+  -- real Wormhole chain id: the test helpers use 'Test.TestNtt.cantonChainId' (72).
+  let instrumentId = InstrumentId with admin = gg, id = nttInstrumentIdFor admin 0
+  factoryCid <- toInterfaceContractId @BurnMintFactory <$> nttCoinFactorySetup gg
+  govDisc <- fromSome <$> queryDisclosure gg govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
+  csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid instrumentId admin
+  (_, registeredMgrCid, emitterCid, _, _) <-
+    submit (actAs admin <> actAs gg <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc
+              <> disclose csDisc <> disclose claimedRootsNodeDisc) do
+      exerciseCmd govCid RegisterManager with
+        admin
+        chainId = cantonWormholeChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
+        instrumentId
+        instrumentNonce = 0
+        tokenConfig = BurnMint
+        tokenDecimals = 8
+        factory = BurnMintFactoryCid factoryCid
+        coreStateCid = csId
+        consistencyLevel = 0
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+        feeAllocation = None
+
+  -- The EVM peer. RegisterManager returns the live post-registration transceiver.
+  (mgrCid, _) <- submit (actAs admin <> readAs gg) do
+    exerciseCmd registeredMgrCid SetPeer with
+      chainId = input.peerChainId
+      peer = Peer with
+        managerAddress = parseHexTextOrAbort input.peerManager
+        transceiverAddress = parseHexTextOrAbort input.peerTransceiver
+        decimals = input.peerDecimals
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
+
+  -- The recipient opts in to mints once, up front.
+  _ <- submit recipient do
+    createCmd DepositPreapproval with owner = recipient, instrumentId
+
+  Some mgr <- queryContractId gg mgrCid
+  emitter <- snd . fromSome <$> queryEmitter gg mgr.transceiverEmitterId
+  pure E2eSetupOutput with
+    parties = E2eParties with guardianGovernance = gg, admin, recipient
+    managerAddress = hexTextOf mgr.managerAddress
+    transceiverAddress = hexTextOf emitter.emitterAddress
+    recipientAddress = hexTextOf (partyAddressFor recipient)
+
+data E2eReceiveInput = E2eReceiveInput with
+    parties        : E2eParties
+    vaaBytes       : Text     -- the guardian-signed VAA, lowercase hex
+    expectedAmount : Decimal  -- the recipient's total Coin balance after the mint
+  deriving (Eq, Show)
+
+-- | Relay an inbound transfer VAA through 'NttManager.Mint' with the
+-- recipient as executor, check the minted balance, then check that relaying
+-- the same VAA again is rejected as a replay.
+tiltE2eReceive : E2eReceiveInput -> Script Decimal
+tiltE2eReceive input = do
+  let p = input.parties
+      gg = p.guardianGovernance
+      vaaBytes = parseHexTextOrAbort input.vaaBytes
+      -- The executor needs no authority beyond its own; it only needs to see
+      -- the referenced contracts, which a production relayer gets through
+      -- disclosures.
+      asExecutor = actAs p.recipient <> readAs gg <> readAs p.admin
+  (mgrCid, mgr) <- liveManager gg
+  csId <- liveCoreState gg
+  [(preCid, _)] <- query @DepositPreapproval p.recipient
+  let digest = (parseVAA vaaBytes).hash
+      mintWith nodeCid = exerciseCmd mgrCid Mint with
+        executor = p.recipient
+        coreStateCid = csId
+        replayNodeCid = nodeCid
+        vaaBytes
+        recipient = p.recipient
+        depositPreapprovalCid = preCid
+        extraArgs = emptyExtraArgs
+
+  (nodeCid, _) <- coveringDisclosure gg gg mgr.namespace digest
+  _ <- submit asExecutor do mintWith nodeCid
+
+  balance <- coinBalance gg p.recipient
+  balance === input.expectedAmount
+
+  (freshNodeCid, _) <- coveringDisclosure gg gg mgr.namespace digest
+  submitMustFail asExecutor do mintWith freshNodeCid
+  pure balance
+
+data E2eSendInput = E2eSendInput with
+    parties          : E2eParties
+    recipientChain   : Int
+    recipientAddress : Text     -- left-padded EVM address, 32 bytes of lowercase hex
+    rawAmount        : Int      -- integer units at the Canton token's 8 decimals
+  deriving (Eq, Show)
+
+data E2eSendOutput = E2eSendOutput with
+    emitterAddress   : Text     -- lowercase hex; the VAA emitter (the transceiver address)
+    sequence         : Int      -- the VAA sequence
+    payload          : Text     -- lowercase hex of the published WormholeTransceiverMessage, for debugging
+    remainingBalance : Decimal  -- the recipient's Coin balance after the burn
+  deriving (Eq, Show)
+
+-- | Burn @rawAmount@ of the recipient's Coins and publish an outbound
+-- transfer to @recipientChain@.
+tiltE2eSend : E2eSendInput -> Script E2eSendOutput
+tiltE2eSend input = do
+  let p = input.parties
+      gg = p.guardianGovernance
+  (mgrCid, mgr) <- liveManager gg
+  csId <- liveCoreState gg
+  emitterCid <- resolveEmitter gg mgr.transceiverEmitterId
+  coins <- coinsOwnedBy gg p.recipient
+  before <- coinBalance gg p.recipient
+  msg <- submit (actAs p.recipient <> readAs gg <> readAs p.admin) do
+    exerciseCmd mgrCid Transfer with
+      user = p.recipient
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      ledgerCid = None
+      recipientChain = input.recipientChain
+      recipientAddress = parseHexTextOrAbort input.recipientAddress
+      rawAmount = input.rawAmount
+      nonce = 0
+      consistencyLevel = 0
+      inputHoldingCids = map (toInterfaceContractId @Holding . fst) coins
+      feeAllocation = None
+      extraArgs = emptyExtraArgs
+      expectedManagerAddress = mgr.managerAddress
+  after <- coinBalance gg p.recipient
+  after === before - intToDecimal input.rawAmount / 100000000.0
+  emitter <- snd . fromSome <$> queryEmitter gg mgr.transceiverEmitterId
+  pure E2eSendOutput with
+    emitterAddress = hexTextOf emitter.emitterAddress
+    sequence = msg.sequence
+    payload = hexTextOf msg.payload
+    remainingBalance = after
+
+----------------------------------------------------------------------
+-- Lookups
+----------------------------------------------------------------------
+
+-- | The run's only 'NttManager' (each run has its own gg).
+liveManager : Party -> Script (ContractId NttManager, NttManager)
+liveManager gg = do
+  mgrs <- query @NttManager gg
+  case mgrs of
+    [m] -> pure m
+    _ -> abort ("expected exactly one NttManager for the guardianGovernance, got: " <> show (length mgrs))
+
+-- | The run's only 'CoreState' (each run has its own gg).
+liveCoreState : Party -> Script (ContractId CoreState)
+liveCoreState gg = do
+  states <- query @CoreState gg
+  case states of
+    [(cid, _)] -> pure cid
+    _ -> abort ("expected exactly one CoreState for the guardianGovernance, got: " <> show (length states))
+
+queryEmitter : Party -> Int -> Script (Optional (ContractId Emitter, Emitter))
+queryEmitter owner eid = do
+  ems <- query @Emitter owner
+  pure $ case [ e | e@(_, em) <- ems, em.emitterId == eid ] of
+    [e] -> Some e
+    _ -> None
+
+coinBalance : Party -> Party -> Script Decimal
+coinBalance gg owner = do
+  coins <- coinsOwnedBy gg owner
+  pure (sum [ coin.amount | (_, coin) <- coins ])

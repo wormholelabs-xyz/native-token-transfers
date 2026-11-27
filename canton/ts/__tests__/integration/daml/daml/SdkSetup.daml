@@ -1,0 +1,199 @@
+-- | Ledger setup of the Canton NTT SDK integration test (canton/ts/__tests__/integration).
+--
+-- Stands up, under fresh parties: a core (devnet guardian, guardian set 0, fee 0), the NTT
+-- governance root, the canonical CoinFactory, and two deployments on Canton's Wormhole chain id
+-- (75) with a peer on chain @peerChainId@:
+--
+--   * burning: a burn/mint deployment with 8 token decimals, its instrument bound to its admin;
+--   * locking: a lock/unlock deployment with 10 token decimals over a gg-administered Coin, the
+--     CoinFactory as its committed transfer factory. Its admin hands the role to gg after the peer
+--     is set (TransferAdmin), so the reserve custodian is nttCustody: the flow service reads
+--     custody pots as nttCustody, and cannot serve the pot of a third-party admin custodian.
+--   * owned: a second lock/unlock deployment over its own gg-administered Coin, whose admin stays
+--     a third party. Nothing is ever locked in it, so its LockedLedger names no custody pot and
+--     the flow service serves everything an admin transfer needs (the SDK's admin tests).
+--
+-- The user gets Coins of the locking instrument, a TransferPreapproval for it (a release to a
+-- third party settles only with one) and a DepositPreapproval for the burning instrument (a mint
+-- needs one). The locking custodian (nttCustody) gets a TransferPreapproval too (a lock into
+-- custody needs it).
+--
+-- Byte values cross the JSON boundary as lowercase hex Text, as in Test.TiltE2E.
+module SdkSetup where
+
+import Daml.Script
+import DA.Optional (fromSome)
+
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.TransferInstructionV1 qualified as TIV1
+import Token.CIP0056.CoinTransfer (TransferPreapproval(..))
+import Wormhole.Core.Bytes (hexTextOf, parseHexTextOrAbort)
+import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.Setup
+  ( RegistryParties (..), mkInitialClaimedRootsNode, mkInitialCoreState, mkInitialEmitterRegistry
+  , mkInitialReplayRootRegistry, solanaGovernanceChainId, defaultGovernanceContract )
+import Wormhole.Core.State (Emitter(..), CoreState)
+import Wormhole.Ntt.Deposit
+import Wormhole.Ntt.Governance
+import Wormhole.Ntt.Ledger (LockedLedger(..))
+import Wormhole.Ntt.Manager
+import Test.TestCore (devnetGenesisGuardianSet)
+import Test.TestNtt
+  ( claimedRootsNodeForRegistration, coreRegistries, mintCoin, nttCoinFactorySetup
+  , testNttGovernanceRootIdentity )
+
+-- | Canton's Wormhole chain id.
+cantonWormholeChainId : Int
+cantonWormholeChainId = 75
+
+data SetupInput = SetupInput with
+    runLabel        : Text     -- appended to every party hint; [A-Za-z0-9-_] only
+    peerChainId     : Int
+    peerManager     : Text     -- 32 bytes of lowercase hex
+    peerTransceiver : Text     -- 32 bytes of lowercase hex
+    peerDecimals    : Int
+    userCoins       : Decimal  -- Coins of the locking instrument minted to the user
+  deriving (Eq, Show)
+
+data DeploymentOutput = DeploymentOutput with
+    managerAddress     : Text  -- lowercase hex
+    transceiverAddress : Text  -- lowercase hex
+    admin              : Party
+    reserveCustodian   : Party
+    instrumentAdmin    : Party
+    instrumentId       : Text
+    tokenDecimals      : Int
+  deriving (Eq, Show)
+
+data SetupOutput = SetupOutput with
+    guardianGovernance : Party
+    nttCustody         : Party
+    user               : Party  -- holds locking Coins; preapproved for both instruments
+    other              : Party  -- has no preapproval
+    burning            : DeploymentOutput
+    locking            : DeploymentOutput
+    owned              : DeploymentOutput
+  deriving (Eq, Show)
+
+sdkSetup : SetupInput -> Script SetupOutput
+sdkSetup input = do
+  let hint name = name <> "-" <> input.runLabel
+  gg <- allocateParty (hint "SdkGuardianGovernance")
+  feeCustody <- allocateParty (hint "SdkFeeCustody")
+  feeInstrumentAdmin <- allocateParty (hint "SdkFeeInstrumentAdmin")
+  onboardingFeeAdmin <- allocateParty (hint "SdkOnboardingFeeAdmin")
+  nttCustody <- allocateParty (hint "SdkNttCustody")
+  burnAdmin <- allocateParty (hint "SdkBurnAdmin")
+  lockAdmin <- allocateParty (hint "SdkLockAdmin")
+  ownedAdmin <- allocateParty (hint "SdkOwnedAdmin")
+  user <- allocateParty (hint "SdkUser")
+  other <- allocateParty (hint "SdkOther")
+
+  let registryParties = RegistryParties with guardianGovernance = gg, onboardingFeeAdmin
+  csId <- submit (actAs gg <> actAs feeCustody) do
+    createCmd (mkInitialCoreState gg solanaGovernanceChainId
+                 defaultGovernanceContract
+                 devnetGenesisGuardianSet
+                 (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody)
+  _ <- submit gg do createCmd (mkInitialEmitterRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  _ <- submit gg do createCmd (mkInitialClaimedRootsNode gg)
+  _ <- submit (actAs gg <> actAs nttCustody) do
+    createCmd NttGovernance with
+      guardianGovernance = gg
+      nttCustody
+      nextId = 0
+      rootIdentity = testNttGovernanceRootIdentity
+      consumedGovernance = mempty
+      evictedGovernanceMaxTimestampSeconds = None
+
+  coinFactoryCid <- nttCoinFactorySetup gg
+  let burnInstrument = InstrumentId with admin = gg, id = nttInstrumentIdFor burnAdmin 0
+      lockInstrument = InstrumentId with admin = gg, id = "sdk-lock-" <> input.runLabel
+      ownedInstrument = InstrumentId with admin = gg, id = "sdk-owned-" <> input.runLabel
+      transferFactory = TransferFactoryCid (toInterfaceContractId @TIV1.TransferFactory coinFactoryCid)
+  burning <- register gg csId burnAdmin BurnMint burnInstrument
+    (BurnMintFactoryCid (toInterfaceContractId @BurnMintFactory coinFactoryCid)) 8 True input
+  locking <- register gg csId lockAdmin LockUnlock lockInstrument transferFactory 10 True input
+  owned <- register gg csId ownedAdmin LockUnlock ownedInstrument transferFactory 10 False input
+
+  _ <- submit nttCustody do createCmd TransferPreapproval with owner = nttCustody, instrumentId = lockInstrument
+  _ <- submit user do createCmd TransferPreapproval with owner = user, instrumentId = lockInstrument
+  _ <- submit user do createCmd DepositPreapproval with owner = user, instrumentId = burnInstrument
+  _ <- mintCoin (toInterfaceContractId @BurnMintFactory coinFactoryCid) gg lockInstrument user input.userCoins
+  pure SetupOutput with guardianGovernance = gg, nttCustody, user, other, burning, locking, owned
+
+-- | @toGgCustody@: a lock/unlock deployment hands its admin role to gg once its peer is set.
+register
+  : Party -> ContractId CoreState -> Party -> NttTokenConfig -> InstrumentId -> NttFactory -> Int
+  -> Bool -> SetupInput -> Script DeploymentOutput
+register gg csId admin config instrumentId factory tokenDecimals toGgCustody input = do
+  [(govCid, _)] <- query @NttGovernance gg
+  govDisc <- fromSome <$> queryDisclosure gg govCid
+  (emReg, emRegDisc, rrReg, rrRegDisc) <- coreRegistries gg
+  csDisc <- fromSome <$> queryDisclosure gg csId
+  (claimedRootsNodeCid, claimedRootsNodeDisc) <- claimedRootsNodeForRegistration gg govCid instrumentId admin
+  -- Burn/mint registration is co-signed by gg, the only minter; lock/unlock is admin-only.
+  let ggActAs = case config of
+        BurnMint -> actAs gg
+        LockUnlock -> mempty
+  (_, registeredMgrCid, emitterCid, _, _) <-
+    submit (actAs admin <> ggActAs <> disclose govDisc <> disclose emRegDisc <> disclose rrRegDisc
+              <> disclose csDisc <> disclose claimedRootsNodeDisc) do
+      exerciseCmd govCid RegisterManager with
+        admin
+        chainId = cantonWormholeChainId
+        emitterRegistryCid = emReg
+        replayRootRegistryCid = rrReg
+        claimedRootsNodeCid
+        instrumentId
+        instrumentNonce = 0
+        tokenConfig = config
+        tokenDecimals
+        factory
+        coreStateCid = csId
+        consistencyLevel = 0
+        emitterFeeAllocation = None
+        claimFeeAllocation = None
+        feeAllocation = None
+  Some registered <- queryContractId gg registeredMgrCid
+  let registeredAddress = registered.managerAddress
+  (mgrCid, _) <- submit (actAs admin <> readAs gg) do
+    exerciseCmd registeredMgrCid SetPeer with
+      chainId = input.peerChainId
+      peer = Peer with
+        managerAddress = parseHexTextOrAbort input.peerManager
+        transceiverAddress = parseHexTextOrAbort input.peerTransceiver
+        decimals = input.peerDecimals
+      transceiverEmitterCid = emitterCid
+      coreStateCid = csId
+      consistencyLevel = 0
+      payer = admin
+      feeAllocation = None
+  -- A lock/unlock deployment goes to gg custody: its reserve custodian becomes nttCustody.
+  finalMgrCid <- case config of
+    LockUnlock | toGgCustody -> do
+      [(ledgerCid, _)] <- filter (\(_, l) -> l.managerAddress == registeredAddress) <$> query @LockedLedger gg
+      (cid, _) <- submit (actAs admin <> actAs gg) do
+        exerciseCmd mgrCid TransferAdmin with
+          newAdmin = gg
+          ledgerCid = Some ledgerCid
+          vettedFactory = factory
+          extraArgs = emptyExtraArgs
+      pure cid
+    _ -> pure mgrCid
+  Some mgr <- queryContractId gg finalMgrCid
+  emitters <- query @Emitter gg
+  let transceivers = [ em | (_, em) <- emitters, em.emitterId == mgr.transceiverEmitterId ]
+  transceiver <- case transceivers of
+    [em] -> pure em
+    _ -> abort ("expected one transceiver Emitter, got " <> show (length transceivers))
+  pure DeploymentOutput with
+    managerAddress = hexTextOf mgr.managerAddress
+    transceiverAddress = hexTextOf transceiver.emitterAddress
+    admin = mgr.admin
+    reserveCustodian = mgr.reserveCustodian
+    instrumentAdmin = instrumentId.admin
+    instrumentId = instrumentId.id
+    tokenDecimals

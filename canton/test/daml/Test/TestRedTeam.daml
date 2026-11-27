@@ -12,7 +12,7 @@ import Daml.Script hiding (AnyContractId)
 import DA.Assert ((===))
 import DA.Action (when)
 import DA.Foldable (forA_)
-import DA.Optional (catOptionals, fromSome)
+import DA.Optional (catOptionals, fromOptional, fromSome)
 import DA.Map qualified as Map
 import DA.Text qualified as T
 import DA.TextMap qualified as TextMap
@@ -289,11 +289,12 @@ wireUnitsPerToken = 100000000.0
 ----------------------------------------------------------------------
 
 data OutboundTransfer = OutboundTransfer with
-    rawAmount        : Int
-    recipientAddress : UniversalAddress
-    nonce            : Int
-    consistencyLevel : Int
-    inputHoldingCids : [ContractId Holding]
+    rawAmount              : Int
+    recipientAddress       : UniversalAddress
+    nonce                  : Int
+    consistencyLevel       : Int
+    inputHoldingCids       : [ContractId Holding]
+    expectedManagerAddress : Optional NttManagerAddress  -- None: the manager's own address
 
 outboundTransferOf : Int -> [ContractId Holding] -> OutboundTransfer
 outboundTransferOf rawAmount inputHoldingCids = OutboundTransfer with
@@ -301,6 +302,7 @@ outboundTransferOf rawAmount inputHoldingCids = OutboundTransfer with
   recipientAddress = b32 "ee"
   nonce = 0
   consistencyLevel = 0
+  expectedManagerAddress = None
 
 transferAttempt
   : RedTeamEnv -> Party -> ContractId NttManager -> OutboundTransfer
@@ -326,6 +328,7 @@ transferAttempt env user mgrCid outbound = do
       inputHoldingCids = outbound.inputHoldingCids
       feeAllocation = None
       extraArgs = receiverPreapprovalArgs custodianPreapprovalCid
+      expectedManagerAddress = fromOptional mgr.managerAddress outbound.expectedManagerAddress
 
 -- | @user@ locks freshly minted issuer coins worth @rawAmount@ wire units.
 lockFrom : RedTeamEnv -> Party -> ContractId NttManager -> Int -> Script ()
@@ -379,7 +382,7 @@ signInboundTransfer key inbound = signVaa key VaaSpec with
         decimals = inbound.wireDecimals
         amount = inbound.wireAmount
         sourceToken = b32 "dd"
-        recipientAddress = recipientAddressFor inbound.recipient
+        recipientAddress = partyAddressFor inbound.recipient
         recipientChain = inbound.recipientChain
         additionalPayload = mempty
     transceiverPayload = mempty
@@ -1766,13 +1769,16 @@ testRedTeamRegistryMisreportedHoldingsRejected = do
     ]
 
 -- | 'Transfer' wire-field bounds: each out-of-range value is rejected by its
--- own check, and each boundary value is accepted.
+-- own check, and each boundary value is accepted. The caller's pinned
+-- manager address is checked too: another deployment's address is rejected.
 testRedTeamTransferWireFieldBounds : Script ()
 testRedTeamTransferWireFieldBounds = do
   env <- redTeamSetup
   admin <- allocateParty "RtBoundsAdmin"
+  otherAdmin <- allocateParty "RtBoundsOtherAdmin"
   alice <- allocateParty "RtBoundsAlice"
   lockA <- deployLockUnlock env admin
+  otherManager <- deployLockUnlock env otherAdmin >>= managerOf env
   let attemptWith overrideTransfer = do
         coinCid <- mintIssuerCoin env alice 1.0
         transferAttempt env alice lockA (overrideTransfer (outboundTransferOf 100000000 [coinCid]))
@@ -1785,6 +1791,8 @@ testRedTeamTransferWireFieldBounds = do
     , rejectedWith "nonce -1" "nonce must be a uint32" \outbound -> outbound with nonce = -1
     , rejectedWith "zero recipient address" "recipient address must be non-zero" \outbound ->
         outbound with recipientAddress = b32 "00"
+    , rejectedWith "another deployment's manager address" "manager address does not match the caller's expected manager" \outbound ->
+        outbound with expectedManagerAddress = Some otherManager.managerAddress
     ]
   attemptWith (\outbound -> outbound with consistencyLevel = 255) >>= expectAccepted "consistency level 255"
   attemptWith (\outbound -> outbound with nonce = 4294967295) >>= expectAccepted "nonce 2^32 - 1"

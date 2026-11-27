@@ -6,7 +6,7 @@
 // is allocated fresh each run. The live two-step harness:
 //
 //  1. integrationNttReceiveMatchSetup allocates the recipient and returns
-//     recipientAddressFor(recipient), computed on-ledger.
+//     partyAddressFor(recipient), computed on-ledger.
 //  2. Sign a fresh VAA against that hash here, with the devnet guardian test key.
 //  3. integrationNttReceiveMatch relays it against the same sandbox (state
 //     persists); its assertions (mint lands; replay rejected) fail the script.
@@ -176,7 +176,7 @@ func TestCantonNttReceiveMatchIntegration(t *testing.T) {
 	_ = conn.Close()
 
 	// Step 1: allocate the recipient (and everything else Mint needs) and
-	// get its ACTUAL, on-ledger-computed recipientAddressFor hash.
+	// get its ACTUAL, on-ledger-computed partyAddressFor hash.
 	setupFile := filepath.Join(sandboxDir, "setup.json")
 	out, err := exec.Command(dpm, "script", "--dar", dar, "--upload-dar", "yes",
 		"--script-name", "Test.TestNtt:integrationNttReceiveMatchSetup",
@@ -194,7 +194,7 @@ func TestCantonNttReceiveMatchIntegration(t *testing.T) {
 
 	recipientAddrBytes, err := hex.DecodeString(strings.TrimPrefix(setup.RecipientAddress, "0x"))
 	require.NoError(t, err)
-	require.Len(t, recipientAddrBytes, 32, "recipientAddressFor must be 32 bytes")
+	require.Len(t, recipientAddrBytes, 32, "partyAddressFor must be 32 bytes")
 	var recipientAddr32 [32]byte
 	copy(recipientAddr32[:], recipientAddrBytes)
 

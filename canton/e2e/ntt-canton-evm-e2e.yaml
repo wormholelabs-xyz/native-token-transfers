@@ -1,0 +1,31 @@
+# The Canton <-> Ethereum NTT end-to-end test (Tiltfile.canton-evm). run.sh waits for
+# eth-devnet, the guardian and Canton itself, so the Job needs no init container.
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: ntt-canton-evm-e2e
+spec:
+  # Every run deploys fresh contracts and parties, but a failure is easier to read
+  # without a retry's logs on top.
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      # No <SERVICE>_HOST/_PORT variables: the canton Service's CANTON_PORT=tcp://... would
+      # look like configuration to run.sh.
+      enableServiceLinks: false
+      containers:
+        - name: ntt-canton-evm-e2e
+          image: ntt-canton-evm-e2e
+          command:
+            - /bin/bash
+            - -c
+            - /ntt/canton/e2e/run.sh && touch /success
+          readinessProbe:
+            exec:
+              command:
+                - test
+                - -e
+                - /success
+            initialDelaySeconds: 5
+            periodSeconds: 5

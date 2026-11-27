@@ -61,6 +61,19 @@ func (address *nttManagerAddressValue) UnmarshalJSON(data []byte) error {
 
 func (address nttManagerAddressValue) String() string { return address.nttManagerAddressHexText }
 
+// emitterAddressValue is an EmitterAddress (wormhole-core Wormhole.Core.Bytes): 64 lowercase hex
+// characters.
+type emitterAddressValue struct{ hex string }
+
+func (address *emitterAddressValue) UnmarshalJSON(data []byte) error {
+	hexText, err := decodeDamlByteValue(data, "EmitterAddress", 64, 64)
+	if err != nil {
+		return err
+	}
+	address.hex = hexText
+	return nil
+}
+
 // digestNibblePrefixValue is a DigestNibblePrefix: 0 to 63 lowercase hex characters.
 type digestNibblePrefixValue struct{ digestNibblePrefixHexText string }
 

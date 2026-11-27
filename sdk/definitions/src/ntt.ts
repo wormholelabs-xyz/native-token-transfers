@@ -88,6 +88,21 @@ export namespace Ntt {
     automatic?: boolean;
     /** Whether or not the token needs to be wrapped, only relevant for gas token transfers */
     wrapNative?: boolean;
+    /**
+     * The token decimals the caller scaled the amount with. A platform whose manager is read from
+     * an untrusted source (Canton: the flow service) refuses the transfer when the manager it
+     * submits against has other decimals. Other platforms ignore it.
+     */
+    tokenDecimals?: number;
+  };
+
+  export type RedeemOptions = {
+    /**
+     * The recipient as a native address, for a platform whose attestation holds only a hash of it
+     * (Canton: the recipient party). Platforms that read the recipient from the attestation
+     * ignore it.
+     */
+    recipient?: string;
   };
 
   // TODO: what are the set of attestation types for Ntt?
@@ -267,12 +282,14 @@ export interface Ntt<N extends Network, C extends Chain> {
   /**
    * redeem redeems a set of Attestations to the corresponding transceivers on the destination chain
    * @param attestations The attestations to redeem, the length should be equal to the number of transceivers
+   * @param options Options of a platform that needs more than the attestation (Canton: the recipient)
    *
    * TODO: replace with Map<transceiver type, Attestation>
    */
   redeem(
     attestations: Ntt.Attestation[],
-    payer?: AccountAddress<C>
+    payer?: AccountAddress<C>,
+    options?: Ntt.RedeemOptions
   ): AsyncGenerator<UnsignedTransaction<N, C>>;
 
   /** Get the address for the account that custodies locked tokens  */

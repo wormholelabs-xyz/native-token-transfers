@@ -149,7 +149,7 @@ func TestNttManagerIDMarshalsAsDecimalString(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t,
 				`{"managerAddress":"","contractId":"","chainId":0,"managerId":"`+tc.wantManagerIDDecimal+
-					`","tokenConfig":"","instrumentId":{"admin":"","id":""},"reserveCustodian":"","paused":false}`,
+					`","tokenConfig":"","instrumentId":{"admin":"","id":""},"reserveCustodian":"","paused":false,"admin":""}`,
 				string(managerJSON))
 		})
 	}

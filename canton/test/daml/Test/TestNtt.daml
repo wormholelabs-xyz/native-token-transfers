@@ -342,13 +342,16 @@ testNttCodec = do
   untrimToDecimal (TrimmedAmount with decimals = 8, amount = 99) 6 === 0.0
   pure ()
 
--- | Pins the recipient-binding formula against fixed text.
-testRecipientAddressForVector : Script ()
-testRecipientAddressForVector = do
-  recipientAddressFromText "vector-recipient::1220deadbeef"
-    === hexValue "dbd2d1b09ea5715be3e45d0e38e5c5c0f6fcd0f181d45a9620dfb20f8ae3a4d9"
-  assert (recipientAddressFromText "vector-recipient::1220deadbeef"
-            /= recipientAddressFromText "vector-recipient::1220cafebabe")
+-- | Pins the party-address formula (recipient and sender) against fixed text.
+-- The expected value was computed off-ledger; the CLI's party-address.test.ts pins
+-- the same formula.
+testPartyAddressForVector : Script ()
+testPartyAddressForVector = do
+  partyAddressTag === "wormhole:v1"
+  partyAddressFromText "vector-recipient::1220deadbeef"
+    === hexValue "4c3feac3d35c3b4bcd02a9b3faa309c8ed0b33163e2161908f691980319f7947"
+  assert (partyAddressFromText "vector-recipient::1220deadbeef"
+            /= partyAddressFromText "vector-recipient::1220cafebabe")
 
 -- | The burn/mint instrument-id binding: fixed prefix, and distinct per admin
 -- and per nonce (so one admin can run several deployments, and no admin can
@@ -452,12 +455,13 @@ nttSetupFee = do
 -- successor of its own bundled 'TransceiverInit' broadcast directly, so no
 -- re-resolve is needed here.
 data Deployment = Deployment with
-    mgrCid       : ContractId NttManager
-    emitterCid   : ContractId Emitter
-    factory      : NttFactory
-    instrumentId : InstrumentId
-    ledgerCid    : Optional (ContractId LockedLedger)  -- lock/unlock only
-    initMsg      : WormholeMessage  -- the TransceiverInit broadcast at registration
+    mgrCid         : ContractId NttManager
+    emitterCid     : ContractId Emitter
+    factory        : NttFactory
+    instrumentId   : InstrumentId
+    ledgerCid      : Optional (ContractId LockedLedger)  -- lock/unlock only
+    initMsg        : WormholeMessage  -- the TransceiverInit broadcast at registration
+    managerAddress : NttManagerAddress  -- stable across manager churn; 'Transfer's expectedManagerAddress
   deriving (Eq, Show)
 
 -- | Re-resolve @owner@'s live 'Emitter' by its stable @emitterId@ after a
@@ -550,7 +554,8 @@ deploy gg admin config csId = do
         emitterFeeAllocation = None
         claimFeeAllocation = None
         feeAllocation = None
-  pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid, initMsg
+  Some registered <- queryContractId gg mgrCid
+  pure Deployment with mgrCid, emitterCid, factory, instrumentId, ledgerCid, initMsg, managerAddress = registered.managerAddress
 
 -- | Two deployments get distinct managers with sequential ids and owner-bound
 -- addresses; a lock/unlock deployment gets a zero-balance ledger.
@@ -614,6 +619,7 @@ testTransceiverIsDeploymentBound = do
       inputHoldingCids = [holdingCid]
       feeAllocation = None
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = dA.managerAddress
   expectAbort "transceiver emitter is not this deployment's" res
 
 -- | Burn/mint registration rejects an instrument id that is not bound to the
@@ -1451,6 +1457,7 @@ sendTransfer user d csId holdings =
     inputHoldingCids = holdings
     feeAllocation = None
     extraArgs = emptyExtraArgs
+    expectedManagerAddress = d.managerAddress
 
 -- | A lock moves the sender's holding into the custodian's reserve — the
 -- deployment admin's, before promotion — and credits the deployment's
@@ -1502,6 +1509,7 @@ testTransferLockAccounting = do
       inputHoldingCids = [holdingCid2]
       feeAllocation = None
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = d.managerAddress
 
   [(_, ledger2)] <- query @LockedLedger gg
   ledger2.balance === 0.015
@@ -1555,6 +1563,7 @@ testTransferTrimsToPeerDecimals = do
           inputHoldingCids = [holding]
           feeAllocation = None
           extraArgs = emptyExtraArgs
+          expectedManagerAddress = d'.managerAddress
 
   -- 0.00158434 at 8 decimals cannot be represented at 3 decimals: rejected.
   dustHolding <- mkHolding gg alice d.instrumentId 0.00158434
@@ -1762,6 +1771,7 @@ testTransferLockRejectsForgedCustodyPot = do
       inputHoldingCids = [depositCid]
       feeAllocation = None
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = d.managerAddress
   expectAbort "ntt: custody holding not signed by the instrument admin" res
 
 -- | A lock against a registry that answers Pending moves nothing, so the
@@ -1792,6 +1802,7 @@ testLockPendingSettlementRejected = do
       inputHoldingCids = [holdingCid]
       feeAllocation = None
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = d.managerAddress
   expectAbort "did not settle synchronously" res
 
 -- | A registry that deducts its fee from the delivered amount (instead of
@@ -1931,6 +1942,7 @@ testTransferAdminToGg = do
       inputHoldingCids = [holdingCid2]
       feeAllocation = None
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = d.managerAddress
 
   [(_, ledger2)] <- query @LockedLedger gg
   ledger2.balance === 0.015
@@ -2291,7 +2303,40 @@ testTransferArgumentChecks = do
       inputHoldingCids = [holdingCid]
       feeAllocation = None
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = d.managerAddress
   expectAbort "zero after trimming" res
+
+-- | The caller pins the deployment it means to use: 'Transfer' aborts unless
+-- @expectedManagerAddress@ is this manager's address. Here the caller trusts
+-- bob's deployment but is handed alice's manager (as a wrong or hostile
+-- disclosure service could). The pin is checked right after the pause check,
+-- before every argument check and before any token moves, so a send that
+-- would also fail a later check (no ledger cid) reports the pin. With the
+-- right address the same send goes through.
+testTransferRejectsUnexpectedManager : Script ()
+testTransferRejectsUnexpectedManager = do
+  (gg, csId) <- nttSetup
+  alice <- allocateParty "PinAlice"
+  bob <- allocateParty "PinBob"
+  (d, discs) <- sendScaffold gg alice LockUnlock csId
+  other <- deploy gg bob LockUnlock csId
+  assert (other.managerAddress /= d.managerAddress)
+  holdingCid <- mkHolding gg alice d.instrumentId 0.01
+
+  res <- trySubmitWithDiscs alice discs do
+    sendTransfer alice (d with managerAddress = other.managerAddress) csId [holdingCid]
+  expectAbort "ntt: manager address does not match the caller's expected manager" res
+
+  res <- trySubmitWithDiscs alice discs do
+    sendTransfer alice (d with managerAddress = other.managerAddress, ledgerCid = None) csId [holdingCid]
+  expectAbort "manager address does not match the caller's expected manager" res
+
+  Some ledgerBefore <- queryContractId gg (fromSome d.ledgerCid)
+  ledgerBefore.balance === 0.0
+
+  _ <- submitWithDiscs alice discs do sendTransfer alice d csId [holdingCid]
+  ledgers <- query @LockedLedger gg
+  [ ledger.balance | (_, ledger) <- ledgers, ledger.managerAddress == d.managerAddress ] === [0.01]
 
 -- | Under-burn: inputs sum to less than the burn amount; the cover check
 -- rejects it before anything is published.
@@ -2459,6 +2504,7 @@ testNttSend = do
         inputHoldingCids = [holdingCid]
         feeAllocation = feeAlloc
         extraArgs = emptyExtraArgs
+        expectedManagerAddress = d'.managerAddress
 
   -- Fee due but none attached: rejected.
   res <- trySubmitWithDiscs alice discs do doTransfer None
@@ -2475,7 +2521,7 @@ testNttSend = do
       mm = decodeNttManagerMessage wm.managerPayload
       ntt = decodeNativeTokenTransfer mm.payload
   ntt.sourceToken === mgr.tokenAddress
-  mm.sender === recipientAddressFor alice
+  mm.sender === partyAddressFor alice
   assert (hexBytesOf mm.sender /= hexBytesOf mgr.managerAddress)
 
   [(_, em)] <- query @Emitter gg
@@ -2556,6 +2602,7 @@ testNttTransferByDifferentUser = do
       inputHoldingCids = [holdingCid]
       feeAllocation = Some feePay
       extraArgs = emptyExtraArgs
+      expectedManagerAddress = d'.managerAddress
 
   [(_, em)] <- query @Emitter gg
   em.sequence === 3   -- deploy's TransceiverInit (0), SetPeer's registration (1), this Transfer (2)
@@ -2608,6 +2655,7 @@ testNttTransferRequiresUserAuthority = do
         inputHoldingCids = []
         feeAllocation = None
         extraArgs = emptyExtraArgs
+        expectedManagerAddress = d.managerAddress
 
   submitMustFail admin do doTransfer
   submitMustFail bob do doTransfer
@@ -2892,7 +2940,7 @@ testReleaseRejectsForeignLedger = do
 -- No static VAA can match a nondeterministic Party's hash, so the matching-
 -- recipient mint path is a two-step, Go-orchestrated live-sandbox flow
 -- (ntt_recipient_match_integration_test.go): step 1 returns the on-ledger
--- 'recipientAddressFor recipient'; Go signs a fresh VAA against it; step 2
+-- 'partyAddressFor recipient'; Go signs a fresh VAA against it; step 2
 -- relays it through 'NttManager.Mint'. These are NOT run by `dpm test`
 -- (argument-taking), only compiled — except the nullary setup, which runs.
 
@@ -2929,7 +2977,7 @@ integrationNttReceiveMatchSetup = do
     recipient
     coreStateCid = csId
     replayNodeCid = nodeCid
-    recipientAddress = hexTextOf (recipientAddressFor recipient)
+    recipientAddress = hexTextOf (partyAddressFor recipient)
     depositPreapprovalCid
     factoryCid = theBurnMintFactory factory
 

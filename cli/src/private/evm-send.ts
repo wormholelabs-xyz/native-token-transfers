@@ -9,7 +9,7 @@ import type {
   PrivateRegistry,
 } from "./config.js";
 import { chainLegIdentity } from "./transfer-route.js";
-import { bytesToHex } from "./binding.js";
+import { bytesToHex } from "./hex.js";
 import {
   parseHex32,
   type EvmAddress,

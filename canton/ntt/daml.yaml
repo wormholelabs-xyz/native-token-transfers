@@ -13,10 +13,10 @@
 # an interface implementer.
 sdk-version: 3.7.3
 name: ntt
-version: 0.6.2
+version: 0.7.0
 source: daml
-# 0.6.x is not upgrade-compatible with 0.5.x: template fields and choice signatures
-# changed (README "Versions and upgrades").
+# 0.7.x is not upgrade-compatible with 0.6.x: the Transfer choice signature and the
+# party address tag changed (README "Versions and upgrades").
 dependencies:
   - daml-prim
   - daml-stdlib

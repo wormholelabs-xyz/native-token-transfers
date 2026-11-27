@@ -79,11 +79,11 @@ Add these custom rules for the hostname. Set the action to Block. Each rule
 has a name and an expression.
 
 ```
-# Methods other than GET on /v1
-http.host eq "canton-disclosure.example.com" && starts_with(http.request.uri.path, "/v1") && http.request.method ne "GET"
+# Methods other than GET and OPTIONS on /v1
+http.host eq "canton-disclosure.example.com" && starts_with(http.request.uri.path, "/v1") && !(http.request.method in {"GET" "OPTIONS"})
 
-# Methods other than GET and POST on /registry/
-http.host eq "canton-disclosure.example.com" && starts_with(http.request.uri.path, "/registry/") && !(http.request.method in {"GET" "POST"})
+# Methods other than GET, POST and OPTIONS on /registry/
+http.host eq "canton-disclosure.example.com" && starts_with(http.request.uri.path, "/registry/") && !(http.request.method in {"GET" "POST" "OPTIONS"})
 
 # Paths outside /v1 and /registry/
 http.host eq "canton-disclosure.example.com" && !starts_with(http.request.uri.path, "/v1") && !starts_with(http.request.uri.path, "/registry/")
@@ -104,6 +104,19 @@ route with the other method. It serves paths under `/v1` and
 `/registry/` only. It rejects a query string that is longer than 1024 bytes.
 For `/v1/flows/register`, the limit is 3897 bytes.
 It rejects a registry request body that is larger than 64 KiB.
+
+The two method rules let `OPTIONS` through. A browser sends an `OPTIONS`
+preflight before some cross-origin GET requests. The service answers a
+preflight on `/v1` and on the GET registry metadata routes with 204 and the
+CORS headers. It returns 404 for `OPTIONS` on the other routes. A
+preflight does not call the participant. If no browser client calls the
+service, keep `OPTIONS` blocked: use `http.request.method ne "GET"` on `/v1`
+and `{"GET" "POST"}` on `/registry/`.
+
+The service sets `Access-Control-Allow-Origin: *` itself. Do not add a CORS
+header with a Transform Rule or a Worker. A response with two
+`Access-Control-Allow-Origin` headers fails in the browser. Do not let the
+edge answer `OPTIONS` itself.
 
 NOTE: The "Large request bodies" rule uses the field
 `http.request.body.size`. We did not confirm that each Cloudflare plan has
@@ -146,3 +159,10 @@ participant.
 11. From a host outside the operator network, try to connect to port 7599 of
     the gateway host.
 12. Make sure that the connection fails.
+13. Run `curl -i -X OPTIONS -H 'Origin: https://dapp.example' -H 'Access-Control-Request-Method: GET' https://canton-disclosure.example.com/v1/managers`.
+14. Make sure that the status is 204, and that the response has one
+    `Access-Control-Allow-Origin: *` header and
+    `Access-Control-Allow-Methods: GET`.
+15. Run `curl -i https://canton-disclosure.example.com/v1/managers`.
+16. Make sure that the response has one `Access-Control-Allow-Origin: *`
+    header.

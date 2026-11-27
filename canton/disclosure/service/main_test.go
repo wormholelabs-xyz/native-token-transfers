@@ -1720,8 +1720,11 @@ func TestHandleFlows_OtherFlowsOmitRegisterClaimFields(t *testing.T) {
 	srv := newFlowTestServer(t, fixtures)
 	rr := requestFlow(t, srv, "consolidate", "manager="+b.managerAddr)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.NotContains(t, rr.Body.String(), "claimNamespace")
-	assert.NotContains(t, rr.Body.String(), "managerId")
+	// The createArgument of the NttManager entry has its own managerId, so check the top level only.
+	var topLevelFields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &topLevelFields))
+	assert.NotContains(t, topLevelFields, "claimNamespace")
+	assert.NotContains(t, topLevelFields, "managerId")
 }
 
 // ---------------------------------------------------------------------------

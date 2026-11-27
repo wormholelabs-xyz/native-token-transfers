@@ -108,11 +108,61 @@ var pathsOutsideInboundCap = map[string]bool{
 	"/v1/readyz":  true,
 }
 
+// corsGETPatterns are the mux patterns of the public GET routes. Each response on them, success
+// or error, carries Access-Control-Allow-Origin: *. An OPTIONS request to them is a CORS
+// preflight. The registry POST routes are not in the set.
+var corsGETPatterns = map[string]bool{
+	"/v1":                                   true,
+	"/v1/healthz":                           true,
+	"/v1/readyz":                            true,
+	"/v1/managers":                          true,
+	"/v1/flows/{flow}":                      true,
+	"GET /registry/metadata/v1/info":        true,
+	"GET /registry/metadata/v1/instruments": true,
+	"GET /registry/metadata/v1/instruments/{instrumentId}": true,
+}
+
+// CORS values. The routes are public and take no credentials, so the origin is "*" and the
+// service never sends Access-Control-Allow-Credentials.
+const (
+	corsAllowedMethods       = "GET"
+	corsAllowedHeaders       = "Accept, Content-Type"
+	corsExposedHeaders       = "X-Request-Id"
+	corsPreflightMaxAgeValue = "600"
+)
+
+// isCORSGETRoute reports whether a GET to r's path reaches one of corsGETPatterns.
+func (s *server) isCORSGETRoute(r *http.Request) bool {
+	probe := r.WithContext(r.Context())
+	probe.Method = http.MethodGet
+	_, pattern := s.mux.Handler(probe)
+	return corsGETPatterns[pattern]
+}
+
+// writeCORSPreflight answers OPTIONS on a public GET route with 204. It reads no body, calls no
+// upstream, and has a constant cost, so it runs outside the inbound cap like the probes.
+func writeCORSPreflight(w http.ResponseWriter) {
+	header := w.Header()
+	header.Set("Access-Control-Allow-Methods", corsAllowedMethods)
+	header.Set("Access-Control-Allow-Headers", corsAllowedHeaders)
+	header.Set("Access-Control-Max-Age", corsPreflightMaxAgeValue)
+	header.Set("Allow", "GET, OPTIONS")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ServeHTTP sheds a request past maxConcurrentInboundRequests with a 503 and bounds each request
 // by inboundRequestDeadline. The per-client rate limit belongs to the edge proxy.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if s.isCORSGETRoute(r) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Expose-Headers", corsExposedHeaders)
+		if r.Method == http.MethodOptions {
+			writeCORSPreflight(w)
+			return
+		}
+	}
 	if pathsOutsideInboundCap[r.URL.Path] {
 		s.mux.ServeHTTP(w, r)
 		return
@@ -170,8 +220,8 @@ var flowIndexEndpoints = []map[string]any{
 	{"method": "GET", "path": "/v1", "about": "this index"},
 	{"method": "GET", "path": "/v1/healthz", "about": "liveness: 200 while the process serves HTTP"},
 	{"method": "GET", "path": "/v1/readyz", "about": "readiness: 200 when the upstream answers, else 503"},
-	{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments; read managerAddress here for the flow endpoints' manager param"},
-	{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies", "flows": map[string][]string{
+	{"method": "GET", "path": "/v1/managers", "about": "visible NTT deployments with tokenDecimals, admin and peers; read managerAddress here for the flow endpoints' manager param"},
+	{"method": "GET", "path": "/v1/flows/{flow}", "about": "one flow's assembled disclosure set, role-labeled, plus a missing list the client supplies; each entry carries the contract's createArgument (JSON Ledger API encoding) when the upstream returned one", "flows": map[string][]string{
 		"release":      {"manager", "digest", "recipient (optional)"},
 		"mint":         {"manager", "digest", "recipient"},
 		"set-peer":     {"manager", "digest"},

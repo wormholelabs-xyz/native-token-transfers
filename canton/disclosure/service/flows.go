@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -166,12 +167,18 @@ type daCoinFactory struct {
 // --- Wire response ---
 
 // flowDisclosureEntry is one served, role-labeled contract, over the wire.
+//
+// CreateArgument is the contract's createArgument as the participant's JSON Ledger API returned
+// it (verbose, with field labels). The service passes it through as raw JSON and does not
+// re-encode it; only insignificant whitespace can differ. It is absent when the upstream read
+// returned none.
 type flowDisclosureEntry struct {
-	Role             string `json:"role"`
-	TemplateID       string `json:"templateId"`
-	ContractID       string `json:"contractId"`
-	CreatedEventBlob string `json:"createdEventBlob"`
-	SynchronizerID   string `json:"synchronizerId,omitempty"`
+	Role             string          `json:"role"`
+	TemplateID       string          `json:"templateId"`
+	ContractID       string          `json:"contractId"`
+	CreatedEventBlob string          `json:"createdEventBlob"`
+	SynchronizerID   string          `json:"synchronizerId,omitempty"`
+	CreateArgument   json.RawMessage `json:"createArgument,omitempty"`
 }
 
 // flowMissingEntry names a set member no reader party can see; the client supplies it.
@@ -196,7 +203,18 @@ func discloseAs(role string, entry acsEntry) flowDisclosureEntry {
 		ContractID:       entry.ContractID,
 		CreatedEventBlob: entry.CreatedEventBlob,
 		SynchronizerID:   entry.SynchronizerID,
+		CreateArgument:   servedCreateArgument(entry.CreateArgument),
 	}
+}
+
+// servedCreateArgument returns createArgument unchanged, or nil for an absent or null value, so
+// the entry omits the field.
+func servedCreateArgument(createArgument json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(createArgument)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return createArgument
 }
 
 func missingEntry(role string) flowMissingEntry {
@@ -1169,7 +1187,23 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		s.writeFlowError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	s.writeFlowResponse(w, r, resp)
+}
+
+// writeFlowResponse encodes resp in full before it sends the status line, so an encode failure is
+// still a 500. HTML escaping is off: each createArgument string keeps the bytes the participant
+// sent. The Content-Type is application/json, and each response has X-Content-Type-Options: nosniff.
+func (s *server) writeFlowResponse(w http.ResponseWriter, r *http.Request, resp *flowResponse) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(resp); err != nil {
+		s.writePublicError(w, r, http.StatusInternalServerError, fmt.Errorf("encode flow %s response: %w", resp.Flow, err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded.Bytes())
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -1180,7 +1214,8 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 // ---------------------------------------------------------------------------
 
-// managerEntry is one visible NTT deployment, over the wire.
+// managerEntry is one visible NTT deployment, over the wire. tokenDecimals and peers are absent
+// when the NttManager payload has no such field.
 type managerEntry struct {
 	ManagerAddress   string         `json:"managerAddress"`
 	ContractID       string         `json:"contractId"`
@@ -1190,6 +1225,9 @@ type managerEntry struct {
 	InstrumentId     daInstrumentId `json:"instrumentId"`
 	ReserveCustodian partyID        `json:"reserveCustodian"`
 	Paused           bool           `json:"paused"`
+	TokenDecimals    json.Number    `json:"tokenDecimals,omitempty"`
+	Admin            partyID        `json:"admin"`
+	Peers            *nttPeerMap    `json:"peers,omitempty"`
 }
 
 // handleManagers serves GET /v1/managers: every NttManager the gg reader party sees. Clients
@@ -1222,6 +1260,11 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 			s.writeFlowError(w, r, err)
 			return
 		}
+		var peers daNttManagerPeers
+		if err := json.Unmarshal(manager.entry.CreateArgument, &peers); err != nil {
+			s.writeFlowError(w, r, newFlowError(http.StatusInternalServerError, "decode NttManager peers for contract %s: %v", manager.entry.ContractID, err))
+			return
+		}
 		out = append(out, managerEntry{
 			ManagerAddress:   manager.value.ManagerAddress.nttManagerAddressHexText,
 			ContractID:       manager.entry.ContractID,
@@ -1231,6 +1274,9 @@ func (s *server) handleManagers(w http.ResponseWriter, r *http.Request) {
 			InstrumentId:     manager.value.InstrumentId,
 			ReserveCustodian: manager.value.ReserveCustodian,
 			Paused:           manager.value.Paused,
+			TokenDecimals:    manager.value.TokenDecimals,
+			Admin:            manager.value.Admin,
+			Peers:            peers.Peers,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ManagerAddress < out[j].ManagerAddress })

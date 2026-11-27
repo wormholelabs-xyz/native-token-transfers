@@ -17,12 +17,27 @@
         "@types/node": "^20.12.2",
         "@wormhole-foundation/sdk": "6.1.6",
         "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz",
+        "@wormhole-foundation/sdk-canton": "file:./vendor/wormhole-foundation-sdk-canton-6.1.6.tgz",
+        "@wormhole-foundation/sdk-canton-core": "file:./vendor/wormhole-foundation-sdk-canton-core-6.1.6.tgz",
         "@wormhole-foundation/wormchain-sdk": "^0.0.1",
         "ethers": "^6.5.1",
         "prettier": "3.6.2",
         "ts-jest": "^29.1.2",
         "tsx": "^4.7.2",
         "typescript": "^5.1.1",
+      },
+    },
+    "canton/ts": {
+      "name": "@wormhole-foundation/sdk-canton-ntt",
+      "version": "1.0.0",
+      "dependencies": {
+        "@wormhole-foundation/sdk-definitions-ntt": "1.0.0",
+      },
+      "peerDependencies": {
+        "@wormhole-foundation/sdk-base": "6.1.6",
+        "@wormhole-foundation/sdk-canton": "6.1.6",
+        "@wormhole-foundation/sdk-canton-core": "6.1.6",
+        "@wormhole-foundation/sdk-definitions": "6.1.6",
       },
     },
     "cli": {
@@ -78,6 +93,7 @@
       "version": "1.0.0",
       "dependencies": {
         "@wormhole-foundation/sdk": "6.1.6",
+        "@wormhole-foundation/sdk-canton-ntt": "1.0.0",
         "@wormhole-foundation/sdk-definitions-ntt": "1.0.0",
         "@wormhole-foundation/sdk-evm-ntt": "1.0.0",
         "@wormhole-foundation/sdk-route-ntt": "1.0.0",
@@ -165,6 +181,8 @@
   "overrides": {
     "@types/jest": "^29.5.12",
     "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz",
+    "@wormhole-foundation/sdk-canton": "file:./vendor/wormhole-foundation-sdk-canton-6.1.6.tgz",
+    "@wormhole-foundation/sdk-canton-core": "file:./vendor/wormhole-foundation-sdk-canton-core-6.1.6.tgz",
     "@wormhole-foundation/sdk-sui": "6.1.6",
     "@wormhole-foundation/sdk-sui-core": "6.1.6",
   },
@@ -718,6 +736,12 @@
     "@wormhole-foundation/sdk-base": ["@wormhole-foundation/sdk-base@./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz", { "dependencies": { "@scure/base": "^1.1.3", "binary-layout": "^1.0.3" } }, "sha512-2OSen8GRRN9Yi6yvroiRqKxLoaqY4d8eDwMoT4s8bRUnzQDsf2q/uC6jgqLZwudFPA1rJNG2p4HG5U9U6b549g=="],
 
     "@wormhole-foundation/sdk-btc": ["@wormhole-foundation/sdk-btc@6.1.6", "", { "dependencies": { "@wormhole-foundation/sdk-connect": "6.1.6" } }, "sha512-M3n1Av9YAq+F3J/zo/08wufswZuUT9WY5AiZW8ONRxDEXkw17NZNDaHtQ25cVI138Pm9BIw8fzM3IoAktTzaPw=="],
+
+    "@wormhole-foundation/sdk-canton": ["@wormhole-foundation/sdk-canton@./vendor/wormhole-foundation-sdk-canton-6.1.6.tgz", { "dependencies": { "@wormhole-foundation/sdk-connect": "6.1.6" } }, "sha512-13qdAv0KcWC57eUuElPIZlbQ3PCj1/WMls/Uvurc/coB2y1fFNkIzLgZnplcV5Qhf+VNVa7lEKKlOQCBVHio9A=="],
+
+    "@wormhole-foundation/sdk-canton-core": ["@wormhole-foundation/sdk-canton-core@./vendor/wormhole-foundation-sdk-canton-core-6.1.6.tgz", { "dependencies": { "@wormhole-foundation/sdk-canton": "6.1.6", "@wormhole-foundation/sdk-connect": "6.1.6" } }, "sha512-SoEP8viR+lgMOBomjIYSI71sN51i4hCuyD3xVFIpU/3C3YDYe//Bf6EtPovQlWFh/c/5loNgxBtQJafY7STYjw=="],
+
+    "@wormhole-foundation/sdk-canton-ntt": ["@wormhole-foundation/sdk-canton-ntt@workspace:canton/ts"],
 
     "@wormhole-foundation/sdk-connect": ["@wormhole-foundation/sdk-connect@6.1.6", "", { "dependencies": { "@wormhole-foundation/sdk-base": "6.1.6", "@wormhole-foundation/sdk-definitions": "6.1.6", "axios": "^1.4.0" } }, "sha512-oQHUwt8TERUYunYb5ggMBJsPCX7bUSI4V/QPKoWKcKsebWgpPYbVlAfRXTjhv7iUjIgow2E8YXmvU9hP3LDJFw=="],
 

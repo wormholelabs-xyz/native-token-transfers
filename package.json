@@ -8,6 +8,7 @@
     "rebuild": "bun run --filter '*' rebuild",
     "build:solana": "bun run --filter '@wormhole-foundation/sdk-definitions-ntt' build && bun run --filter '@wormhole-foundation/sdk-solana-ntt' build",
     "build:evm": "bun run --filter '@wormhole-foundation/sdk-definitions-ntt' build && bun run --filter '@wormhole-foundation/sdk-evm-ntt' build",
+    "build:canton": "bun run --filter '@wormhole-foundation/sdk-definitions-ntt' build && bun run --filter '@wormhole-foundation/sdk-canton-ntt' build",
     "build:sui": "bun run --filter '@wormhole-foundation/sdk-definitions-ntt' build && bun run --filter '@wormhole-foundation/sdk-sui-ntt' build",
     "typecheck:cli": "bun run --filter '@wormhole-foundation/ntt-cli' typecheck",
     "generate": "bun run --filter '*' generate",
@@ -34,7 +35,9 @@
     "prettier": "3.6.2",
     "ts-jest": "^29.1.2",
     "tsx": "^4.7.2",
-    "typescript": "^5.1.1"
+    "typescript": "^5.1.1",
+    "@wormhole-foundation/sdk-canton": "file:./vendor/wormhole-foundation-sdk-canton-6.1.6.tgz",
+    "@wormhole-foundation/sdk-canton-core": "file:./vendor/wormhole-foundation-sdk-canton-core-6.1.6.tgz"
   },
   "workspaces": [
     "sdk/definitions",
@@ -42,6 +45,7 @@
     "solana",
     "sui/ts",
     "xrpl/ts",
+    "canton/ts",
     "sdk/route",
     "sdk/examples",
     "cli"
@@ -50,7 +54,9 @@
     "@types/jest": "^29.5.12",
     "@wormhole-foundation/sdk-sui": "6.1.6",
     "@wormhole-foundation/sdk-sui-core": "6.1.6",
-    "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz"
+    "@wormhole-foundation/sdk-base": "file:./vendor/wormhole-foundation-sdk-base-6.1.6-canton.tgz",
+    "@wormhole-foundation/sdk-canton": "file:./vendor/wormhole-foundation-sdk-canton-6.1.6.tgz",
+    "@wormhole-foundation/sdk-canton-core": "file:./vendor/wormhole-foundation-sdk-canton-core-6.1.6.tgz"
   },
   "dependencies": {
     "@wormhole-foundation/sdk-sui": "6.1.6",

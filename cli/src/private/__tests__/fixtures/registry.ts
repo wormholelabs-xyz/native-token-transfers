@@ -4,7 +4,7 @@ export const RETIRED_CANTON_NAMESPACE =
   "122085bf64156420a95663eb8b8cce516858de1d531d95850debe9ec8d15e3f6263e";
 
 export const TEST_NTT_PACKAGE_ID =
-  "3aa43a1c498bd8c13467a8d9438d568c1a325bc948119395195bc2fbcb427093";
+  "43e1b2060c420d9bbd78ebeaeca1c30b58ee967fd40b5aacd58088d6f239a63d";
 export const TEST_CORE_PACKAGE_ID =
   "32abbcd2a6b5ebc2530f8e2cfc3fd1b853ed496443c6a0125fd2cea617b33371";
 
@@ -38,6 +38,7 @@ export function retiredCanburnRegistryJson(): any {
               id: "wormhole-ntt:d8740ea9950b48eb490f6aa9bd91e5ccb4066971482e476a6bb98cbff10a4e7d",
             },
             reserveCustodian: `nttCustody::${RETIRED_CANTON_NAMESPACE}`,
+            guardianGovernance: `guardianGovernance::${RETIRED_CANTON_NAMESPACE}`,
             vettedPackageIds: {
               ntt: TEST_NTT_PACKAGE_ID,
               core: TEST_CORE_PACKAGE_ID,

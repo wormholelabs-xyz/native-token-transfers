@@ -39,6 +39,25 @@ type Q = routes.Quote<Op, Vp>;
 
 type R = NttRoute.ManualTransferReceipt;
 
+/**
+ * The VAA of a source transaction. For Canton the message id is read from the update on the
+ * participant (the Canton core's parseTransaction, which reads the update as any party), not
+ * looked up by transaction id on Wormholescan.
+ */
+async function transferVaa<N extends Network>(
+  wh: Wormhole<N>,
+  chain: Chain,
+  txid: string,
+  timeout?: number
+) {
+  if (!NttRoute.isCanton(chain))
+    return wh.getVaa(txid, "Ntt:WormholeTransfer", timeout);
+  const [msg] = await wh.getChain(chain).parseTransaction(txid);
+  if (!msg)
+    throw new Error(`No Wormhole message found in Canton update ${txid}`);
+  return wh.getVaa(msg, "Ntt:WormholeTransfer", timeout);
+}
+
 export function nttManualRoute(config: NttRoute.Config) {
   class NttRouteImpl<N extends Network> extends NttManualRoute<N> {
     static override config = config;
@@ -119,6 +138,13 @@ export class NttManualRoute<N extends Network>
       request.destination.id
     );
 
+    const decimalsError = NttRoute.checkCantonConfigDecimals(
+      request,
+      srcContracts,
+      dstContracts
+    );
+    if (decimalsError) return { valid: false, error: decimalsError, params };
+
     const validatedParams: Vp = {
       amount: params.amount,
       normalizedParams: {
@@ -144,6 +170,12 @@ export class NttManualRoute<N extends Network>
       params.normalizedParams.amount,
       request.destination.decimals
     );
+
+    try {
+      await NttRoute.checkCantonLegs(request, params.normalizedParams);
+    } catch (err) {
+      return { success: false, error: err as Error };
+    }
 
     const result: QR = {
       success: true,
@@ -195,18 +227,38 @@ export class NttManualRoute<N extends Network>
     quote: Q,
     to: ChainAddress
   ): Promise<R> {
-    const { params } = quote;
     const { fromChain } = request;
     const sender = Wormhole.parseAddress(signer.chain(), signer.address());
+
+    // A Canton amount is in units of its manager's decimals; check them again before sending.
+    await NttRoute.checkCantonLegs(request, quote.params.normalizedParams);
+    // A Canton recipient is a party ("<hint>::<namespace>"); the VAA will hold only its hash.
+    const recipient = NttRoute.isCanton(to.chain)
+      ? canonicalAddress(to)
+      : undefined;
+    const params: Vp =
+      recipient !== undefined && recipient.includes("::")
+        ? {
+            ...quote.params,
+            normalizedParams: { ...quote.params.normalizedParams, recipient },
+          }
+        : quote.params;
 
     const ntt = await fromChain.getProtocol("Ntt", {
       ntt: params.normalizedParams.sourceContracts,
     });
+    // A Canton manager's decimals come from an unauthenticated read (checkCantonLegs), so the
+    // transfer compares the scale of this amount with the manager it submits against.
     const initXfer = ntt.transfer(
       sender,
       amount.units(params.normalizedParams.amount),
       to,
-      params.normalizedParams.options
+      NttRoute.isCanton(fromChain.chain)
+        ? {
+            ...params.normalizedParams.options,
+            tokenDecimals: params.normalizedParams.amount.decimals,
+          }
+        : params.normalizedParams.options
     );
     const txids = await signSendWait(fromChain, initXfer, signer);
 
@@ -232,7 +284,16 @@ export class NttManualRoute<N extends Network>
       ntt: receipt.params.normalizedParams.destinationContracts,
     });
     const sender = Wormhole.parseAddress(signer.chain(), signer.address());
-    const completeXfer = ntt.redeem([receipt.attestation.attestation], sender);
+    // A Canton redeem needs the recipient party when the signer is not the recipient; the VAA
+    // holds only its hash. Other platforms read the recipient from the VAA.
+    const { recipient } = receipt.params.normalizedParams;
+    const completeXfer = ntt.redeem(
+      [receipt.attestation.attestation],
+      sender,
+      NttRoute.isCanton(receipt.to) && recipient !== undefined
+        ? { recipient }
+        : undefined
+    );
 
     const txids = await signSendWait(toChain, completeXfer, signer);
     return {
@@ -243,7 +304,7 @@ export class NttManualRoute<N extends Network>
   }
 
   async resume(tx: TransactionId): Promise<R> {
-    const vaa = await this.wh.getVaa(tx.txid, "Ntt:WormholeTransfer");
+    const vaa = await transferVaa(this.wh, tx.chain, tx.txid);
     if (!vaa) throw new Error("No VAA found for transaction: " + tx.txid);
 
     const msgId: WormholeMessageId = {
@@ -351,7 +412,7 @@ export class NttManualRoute<N extends Network>
   public override async *track(receipt: R, timeout?: number) {
     if (isSourceInitiated(receipt) || isSourceFinalized(receipt)) {
       const { txid } = receipt.originTxs[receipt.originTxs.length - 1]!;
-      const vaa = await this.wh.getVaa(txid, "Ntt:WormholeTransfer", timeout);
+      const vaa = await transferVaa(this.wh, receipt.from, txid, timeout);
       if (!vaa) throw new Error("No VAA found for transaction: " + txid);
 
       const msgId: WormholeMessageId = {

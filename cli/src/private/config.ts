@@ -34,6 +34,8 @@ import {
 export const REGISTRY_SCHEMA_VERSION = 2;
 export const REGISTRY_FILE_BYTES_MAX = 1024 * 1024;
 export const DEPLOYMENT_COUNT_MAX = 64;
+/** A Canton amount is a Daml Decimal: 10 fractional digits */
+export const CANTON_TOKEN_DECIMALS_MAX = 10;
 
 export const CHAIN_NAMES = ["Canton", "Ethereum", "Solana"] as const;
 export type ChainName = (typeof CHAIN_NAMES)[number];
@@ -57,6 +59,8 @@ export interface CantonChainConfig {
   emitter: Hex32;
   instrument: CantonInstrumentId;
   reserveCustodian: CantonPartyId;
+  /** The core's guardianGovernance party: it signs every NTT manager (the SDK's contracts.coreBridge) */
+  guardianGovernance: CantonPartyId;
   vettedPackageIds: CantonVettedPackageIds;
 }
 
@@ -138,6 +142,7 @@ function readCantonChain(value: unknown, context: string): CantonChainConfig {
       "emitter",
       "instrument",
       "reserveCustodian",
+      "guardianGovernance",
       "vettedPackageIds",
     ],
     context
@@ -153,13 +158,19 @@ function readCantonChain(value: unknown, context: string): CantonChainConfig {
     ["ntt", "core"],
     `${context}.vettedPackageIds`
   );
+  const decimals = readWithParser(
+    chain.decimals,
+    `${context}.decimals`,
+    parseTokenDecimals
+  );
+  if (decimals > CANTON_TOKEN_DECIMALS_MAX)
+    failRegistryField(
+      `${context}.decimals`,
+      `a Canton amount is a Daml Decimal with at most ${CANTON_TOKEN_DECIMALS_MAX} decimals, got ${decimals}`
+    );
   return {
     mode: readTokenMode(chain.mode, `${context}.mode`),
-    decimals: readWithParser(
-      chain.decimals,
-      `${context}.decimals`,
-      parseTokenDecimals
-    ),
+    decimals,
     manager: readWithParser(chain.manager, `${context}.manager`, parseHex32),
     emitter: readWithParser(chain.emitter, `${context}.emitter`, parseHex32),
     instrument: {
@@ -173,6 +184,14 @@ function readCantonChain(value: unknown, context: string): CantonChainConfig {
     reserveCustodian: readWithParser(
       chain.reserveCustodian,
       `${context}.reserveCustodian`,
+      parseCantonPartyId
+    ),
+    guardianGovernance: readWithParser(
+      readNonEmptyString(
+        chain.guardianGovernance,
+        `${context}.guardianGovernance`
+      ),
+      `${context}.guardianGovernance`,
       parseCantonPartyId
     ),
     vettedPackageIds: {
